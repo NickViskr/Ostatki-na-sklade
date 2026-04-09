@@ -1,0 +1,123 @@
+import React, { useMemo } from 'react';
+import { 
+  Search, 
+  Plus, 
+  Trash2, 
+  Edit3,
+  Package
+} from 'lucide-react';
+import { motion } from 'motion/react';
+import { useWarehouseStore } from '../store/useWarehouseStore';
+import { useUIStore } from '../store/useUIStore';
+
+export const SkusTab: React.FC = () => {
+  const skus = useWarehouseStore((state) => state.skus);
+  const handleDeleteSku = useWarehouseStore((state) => state.handleDeleteSku);
+  
+  const skuSearch = useUIStore((state) => state.skuSearch);
+  const setSkuSearch = useUIStore((state) => state.setSkuSearch);
+  const setShowSkuModal = useUIStore((state) => state.setShowSkuModal);
+  const setEditingSku = useUIStore((state) => state.setEditingSku);
+  const setSkuForm = useUIStore((state) => state.setSkuForm);
+
+  const filteredSkus = useMemo(() => {
+    return skus.filter(s => {
+      const skuStr = s.sku || (s as any).article || '';
+      return skuStr.toLowerCase().includes(skuSearch.toLowerCase());
+    });
+  }, [skus, skuSearch]);
+
+  return (
+    <motion.div 
+      key="skus"
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -10 }}
+      className="space-y-6"
+    >
+      <div className="flex justify-between items-end">
+        <div>
+          <h2 className="text-3xl font-bold">Справочник SKU</h2>
+          <p className="text-slate-500">Управление номенклатурой товаров</p>
+        </div>
+        <button 
+          onClick={() => {
+            setEditingSku(null);
+            setSkuForm({ sku: '', price: 0, minStock: 10, pcsPerBox: 1 });
+            setShowSkuModal(true);
+          }}
+          className="flex items-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200"
+        >
+          <Plus size={20} /> Добавить SKU
+        </button>
+      </div>
+
+      {/* Search */}
+      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+        <div className="relative max-w-md">
+          <input 
+            type="text"
+            placeholder="Поиск по артикулу..."
+            value={skuSearch}
+            onChange={(e) => setSkuSearch(e.target.value)}
+            className="w-full pl-10 pr-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
+        </div>
+      </div>
+
+      <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="bg-slate-50/50 border-b border-slate-200">
+              <th className="px-6 py-4 font-semibold text-slate-600">Артикул</th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Шт/Кор</th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Мин. остаток</th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Действия</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredSkus.map((s, index) => (
+              <tr key={`${s.sku}-${index}`} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
+                <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium">{s.sku}</td>
+                <td className="px-6 py-4 text-right font-bold text-slate-900">{s.pcsPerBox}</td>
+                <td className="px-6 py-4 text-right">
+                  <span className="px-2 py-1 bg-amber-50 text-amber-600 rounded-md font-bold text-xs">
+                    {s.minStock} шт
+                  </span>
+                </td>
+                <td className="px-6 py-4 text-right">
+                  <div className="flex justify-end gap-2">
+                    <button 
+                      onClick={() => {
+                        setEditingSku(s);
+                        setSkuForm({ ...s });
+                        setShowSkuModal(true);
+                      }}
+                      className="p-2 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all"
+                    >
+                      <Edit3 size={16} />
+                    </button>
+                    <button 
+                      onClick={() => handleDeleteSku(s.sku)}
+                      className="p-2 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-all"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        
+        {filteredSkus.length === 0 && (
+          <div className="p-20 text-center">
+            <Package className="mx-auto text-slate-200 mb-4" size={48} />
+            <p className="text-slate-400 font-medium">SKU не найдены</p>
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+};

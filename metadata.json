@@ -1,0 +1,5 @@
+{
+  "name": "Складской Mercurius AI",
+  "description": "Система складского учета с интеллектуальным распознаванием накладных через Gemini API",
+  "requestFramePermissions": []
+}
