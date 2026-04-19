@@ -18,6 +18,7 @@ export const ConfirmModal: React.FC = () => {
   
   const parsedItems = useUIStore((state) => state.parsedItems);
   const setParsedItems = useUIStore((state) => state.setParsedItems);
+  const updateParsedItem = useUIStore((state) => state.updateParsedItem);
   const opType = useUIStore((state) => state.opType);
   const uploadDestination = useUIStore((state) => state.uploadDestination);
   const aiFeedback = useUIStore((state) => state.aiFeedback);
@@ -33,6 +34,8 @@ export const ConfirmModal: React.FC = () => {
   
   const [otherCost, setOtherCost] = useState<number | ''>('');
   const [otherDist, setOtherDist] = useState<'batch' | 'unit'>('batch');
+
+  const [deliveryDate, setDeliveryDate] = useState<string>('');
 
   const finalItems = useMemo(() => {
     if (!parsedItems) return [];
@@ -65,7 +68,7 @@ export const ConfirmModal: React.FC = () => {
   const isConfirmDisabled = isProcessing || finalItems.length === 0 || finalItems.some(item => item.status === 'error');
 
   const handleConfirm = async () => {
-    const success = await commitTransaction(finalItems, opType, uploadDestination);
+    const success = await commitTransaction(finalItems, opType, uploadDestination, deliveryDate);
     if (success) {
       setShowConfirmModal(false);
       setParsedItems(null);
@@ -172,6 +175,18 @@ export const ConfirmModal: React.FC = () => {
               <div className="text-xs text-indigo-400 mt-2 px-2">
                 Эти суммы будут прибавлены к себестоимости каждого отгружаемого товара согласно выбранному методу распределения.
               </div>
+
+              <div className="mt-4 pt-4 border-t border-indigo-100">
+                <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm w-full md:w-1/3">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2">Дата поставки на маркетплейс</label>
+                  <input 
+                    type="date"
+                    value={deliveryDate}
+                    onChange={(e) => setDeliveryDate(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+                  />
+                </div>
+              </div>
             </div>
           )}
 
@@ -202,9 +217,40 @@ export const ConfirmModal: React.FC = () => {
                         </div>
                       )}
                     </td>
-                    <td className="px-6 py-4 font-mono text-sm font-bold text-indigo-600">{item.article}</td>
-                    <td className="px-6 py-4 text-right font-bold">{item.quantity}</td>
-                    <td className="px-6 py-4 text-right font-medium whitespace-nowrap">{item.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</td>
+                    <td className="px-6 py-4 font-mono text-sm font-bold text-indigo-600">
+                      <input 
+                        type="text"
+                        value={item.article}
+                        onChange={(e) => updateParsedItem(idx, { article: e.target.value })}
+                        className="w-full bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                      />
+                    </td>
+                    <td className="px-6 py-4 text-right font-bold">
+                      <input 
+                        type="number"
+                        min="1"
+                        value={item.quantity === 0 ? '' : item.quantity}
+                        onChange={(e) => updateParsedItem(idx, { quantity: Number(e.target.value) || 0 })}
+                        className="w-24 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                      />
+                    </td>
+                    <td className="px-6 py-4 text-right font-medium whitespace-nowrap">
+                      {opType === 'Приход' ? (
+                        <div className="flex items-center justify-end gap-1">
+                          <input 
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={item.price === 0 ? '' : item.price}
+                            onChange={(e) => updateParsedItem(idx, { price: Number(e.target.value) || 0 })}
+                            className="w-28 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                          />
+                          <span>₽</span>
+                        </div>
+                      ) : (
+                        <span>{item.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</span>
+                      )}
+                    </td>
                     <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{(item.quantity * item.price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</td>
                   </tr>
                 ))}

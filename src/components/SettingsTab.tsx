@@ -15,11 +15,10 @@ import { useSettingsStore } from '../store/useSettingsStore';
 export const SettingsTab: React.FC = () => {
   const isSyncing = useWarehouseStore((state) => state.isSyncing);
   const handleSetupDatabase = useWarehouseStore((state) => state.handleSetupDatabase);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
   
   const gasUrl = useSettingsStore((state) => state.gasUrl);
   const setGasUrl = useSettingsStore((state) => state.setGasUrl);
-  const gasToken = useSettingsStore((state) => state.gasToken);
-  const setGasToken = useSettingsStore((state) => state.setGasToken);
   const geminiModel = useSettingsStore((state) => state.geminiModel);
   const setGeminiModel = useSettingsStore((state) => state.setGeminiModel);
   const geminiKey = useSettingsStore((state) => state.geminiKey);
@@ -62,20 +61,6 @@ export const SettingsTab: React.FC = () => {
                 <Settings className="absolute left-3 top-3.5 text-slate-400" size={18} />
               </div>
             </div>
-            
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-500 uppercase">API Token (опционально)</label>
-              <div className="relative">
-                <input 
-                  type="password"
-                  value={gasToken}
-                  onChange={(e) => setGasToken(e.target.value)}
-                  placeholder="Ваш секретный токен..."
-                  className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <Key className="absolute left-3 top-3.5 text-slate-400" size={18} />
-              </div>
-            </div>
 
             <button 
               onClick={handleSetupDatabase}
@@ -108,20 +93,36 @@ export const SettingsTab: React.FC = () => {
               </select>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-500 uppercase">Gemini API Key</label>
-              <div className="relative">
-                <input 
-                  type="password"
-                  value={geminiKey}
-                  onChange={(e) => setGeminiKey(e.target.value)}
-                  placeholder="Ваш API ключ Gemini..."
-                  className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <Key className="absolute left-3 top-3.5 text-slate-400" size={18} />
+            {currentUser?.role === 'admin' ? (
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-500 uppercase">Gemini API Key</label>
+                <div className="relative">
+                  <input 
+                    type="password"
+                    value={geminiKey}
+                    onChange={(e) => setGeminiKey(e.target.value)}
+                    placeholder="Ваш API ключ Gemini..."
+                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <Key className="absolute left-3 top-3.5 text-slate-400" size={18} />
+                </div>
+                <p className="text-[10px] text-emerald-600 font-medium">Безопасное хранение активно. Ключ надежно сохранен.</p>
               </div>
-              <p className="text-[10px] text-slate-400">Ключ сохраняется локально в вашем браузере</p>
-            </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-500 uppercase">Gemini API Key</label>
+                <div className="relative">
+                  <input 
+                    type="password"
+                    value="••••••••••••••••"
+                    disabled
+                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-100 text-slate-400 outline-none cursor-not-allowed"
+                  />
+                  <Key className="absolute left-3 top-3.5 text-slate-400" size={18} />
+                </div>
+                <p className="text-[10px] text-amber-600 font-medium">Изменять ключ может только администратор.</p>
+              </div>
+            )}
 
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-500 uppercase">Email для уведомлений</label>

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { Transaction, SKUItem, ParsedItem } from '../types';
 
-type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'skus' | 'settings';
+type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'skus' | 'settings' | 'users' | 'deleted';
 
 interface UIState {
   activeTab: TabType;
@@ -44,6 +44,7 @@ interface UIState {
   setUploadDestination: (dest: string) => void;
   parsedItems: ParsedItem[] | null;
   setParsedItems: (items: ParsedItem[] | null) => void;
+  updateParsedItem: (index: number, updates: Partial<ParsedItem>) => void;
   aiFeedback: string;
   setAiFeedback: (feedback: string) => void;
 
@@ -66,6 +67,7 @@ interface UIState {
     quantity: number | string;
     destination: string;
     price: number | string;
+    deliveryDate: string;
   };
   setManualForm: (form: any) => void;
   
@@ -124,6 +126,12 @@ export const useUIStore = create<UIState>((set) => ({
   setUploadDestination: (uploadDestination) => set({ uploadDestination }),
   parsedItems: null,
   setParsedItems: (parsedItems) => set({ parsedItems }),
+  updateParsedItem: (index, updates) => set((state) => {
+    if (!state.parsedItems) return state;
+    const newItems = [...state.parsedItems];
+    newItems[index] = { ...newItems[index], ...updates };
+    return { parsedItems: newItems };
+  }),
   aiFeedback: '',
   setAiFeedback: (aiFeedback) => set({ aiFeedback }),
 
@@ -143,7 +151,8 @@ export const useUIStore = create<UIState>((set) => ({
     type: 'Списание - Брак',
     quantity: '',
     destination: 'Ozon',
-    price: ''
+    price: '',
+    deliveryDate: ''
   },
   setManualForm: (manualForm) => set({ manualForm }),
 

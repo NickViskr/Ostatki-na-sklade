@@ -84,6 +84,18 @@ export const EditTransModal: React.FC = () => {
               className="w-full h-32 p-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none resize-none"
             />
           </div>
+
+          {editingTrans.type === 'Расход' && (
+            <div className="space-y-2">
+              <label className="text-sm font-bold text-slate-500 uppercase">Дата поставки на маркетплейс</label>
+              <input 
+                type="date"
+                value={editingTrans.deliveryDate || ''}
+                onChange={(e) => setEditingTrans({...editingTrans, deliveryDate: e.target.value})}
+                className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+          )}
         </div>
 
         <div className="p-8 bg-slate-50 border-t border-slate-100 flex gap-4">

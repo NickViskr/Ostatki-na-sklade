@@ -67,14 +67,15 @@ export const ManualTab: React.FC = () => {
       quantity: Number(manualForm.quantity) || 0,
       price: Number(finalPrice) || 0,
       status: 'ok'
-    }], opType, manualForm.destination || manualForm.type);
+    }], opType, manualForm.destination || manualForm.type, manualForm.deliveryDate);
 
     if (success) {
       setManualForm({
         ...manualForm,
         article: '',
         quantity: '',
-        price: ''
+        price: '',
+        deliveryDate: ''
       });
     }
   };
@@ -194,6 +195,18 @@ export const ManualTab: React.FC = () => {
             </div>
           )}
         </div>
+
+        {manualForm.type.includes('Списание') && (
+          <div className="space-y-2">
+            <label className="text-sm font-bold text-slate-500 uppercase">Дата поставки на маркетплейс</label>
+            <input 
+              type="date"
+              value={manualForm.deliveryDate}
+              onChange={(e) => setManualForm({...manualForm, deliveryDate: e.target.value})}
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+        )}
 
         <button 
           onClick={handleManualSubmit}

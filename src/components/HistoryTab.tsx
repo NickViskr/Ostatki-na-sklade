@@ -7,12 +7,14 @@ import {
   Edit3,
   MapPin,
   ChevronDown,
-  Check
+  Check,
+  Download
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
+import { ConfirmDialog } from './ConfirmDialog';
 
 export const HistoryTab: React.FC = () => {
   const transactions = useWarehouseStore((state) => state.transactions);
@@ -44,6 +46,11 @@ export const HistoryTab: React.FC = () => {
   const setHistDestFilter = useUIStore((state) => state.setHistDestFilter);
   const setEditingTrans = useUIStore((state) => state.setEditingTrans);
   const setShowEditTransModal = useUIStore((state) => state.setShowEditTransModal);
+
+  const [transToDelete, setTransToDelete] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
+  const handleDeleteMultipleTransactions = useWarehouseStore((state) => state.handleDeleteMultipleTransactions);
 
   const destinations = useSettingsStore((state) => state.destinations);
 
@@ -86,6 +93,73 @@ export const HistoryTab: React.FC = () => {
     });
   }, [transactions, histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter]);
 
+  const displayedHistory = useMemo(() => filteredHistory.slice(0, 100), [filteredHistory]);
+
+  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.checked) {
+      setSelectedIds(new Set(displayedHistory.map(t => t.id)));
+    } else {
+      setSelectedIds(new Set());
+    }
+  };
+
+  const toggleSelect = (id: string) => {
+    const newSet = new Set(selectedIds);
+    if (newSet.has(id)) {
+      newSet.delete(id);
+    } else {
+      newSet.add(id);
+    }
+    setSelectedIds(newSet);
+  };
+
+  const currentSelectionCount = selectedIds.size;
+  const isAllSelected = displayedHistory.length > 0 && currentSelectionCount === displayedHistory.length;
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    const success = await handleDeleteMultipleTransactions(Array.from(selectedIds));
+    if (success) {
+      setSelectedIds(new Set());
+    }
+    setBulkDeleteConfirm(false);
+  };
+
+  const handleExportCSV = () => {
+    const headers = ['ДАТА', 'ТИП', 'АРТИКУЛ', 'КОЛ-ВО', 'ЦЕНА', 'СУММА', 'ОБЪЕКТ', 'ПОСТАВКА'];
+    
+    const formatCurrency = (val: number) => {
+      // Имитируем toLocaleString('ru-RU') с заменой неразрывных пробелов на обычные (или оставляем как есть),
+      // чтобы в CSV выглядело так же, как в интерфейсе
+      const str = val.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return `${str} ₽`;
+    };
+
+    const rows = filteredHistory.map(t => [
+      formatDate(t.date),
+      t.type.toUpperCase(),
+      t.article,
+      t.quantity.toString(),
+      formatCurrency(t.price),
+      formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost),
+      t.destination || '',
+      t.deliveryDate ? formatDate(t.deliveryDate) : '-'
+    ]);
+
+    const csvContent = [headers, ...rows]
+      .map(e => e.map(item => `"${String(item).replace(/"/g, '""')}"`).join(';'))
+      .join('\n');
+
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `history_export_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
     <motion.div 
       key="history"
@@ -94,10 +168,28 @@ export const HistoryTab: React.FC = () => {
       exit={{ opacity: 0, y: -10 }}
       className="space-y-6"
     >
-      <div className="flex justify-between items-end">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end gap-4">
         <div>
           <h2 className="text-3xl font-bold">История операций</h2>
           <p className="text-slate-500">Все движения товаров по складу</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {currentSelectionCount > 0 && (
+            <button
+              onClick={() => setBulkDeleteConfirm(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors font-medium border border-red-100 whitespace-nowrap"
+            >
+              <Trash2 size={18} />
+              Удалить выбранные ({currentSelectionCount})
+            </button>
+          )}
+          <button
+            onClick={handleExportCSV}
+            className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 rounded-xl hover:bg-slate-50 transition-colors font-medium border border-slate-200 shadow-sm whitespace-nowrap"
+          >
+            <Download size={18} />
+            CSV экспорт
+          </button>
         </div>
       </div>
 
@@ -197,51 +289,75 @@ export const HistoryTab: React.FC = () => {
       <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="bg-slate-50/50 border-b border-slate-200">
-              <th className="px-6 py-4 font-semibold text-slate-600">Дата</th>
-              <th className="px-6 py-4 font-semibold text-slate-600">Тип</th>
-              <th className="px-6 py-4 font-semibold text-slate-600">Артикул</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Кол-во</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Сумма</th>
-              <th className="px-6 py-4 font-semibold text-slate-600">Объект</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Действия</th>
+            <tr className="bg-slate-50/50 border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
+              <th className="px-3 py-3 w-10 text-center">
+                <input 
+                  type="checkbox" 
+                  checked={isAllSelected}
+                  onChange={handleSelectAll}
+                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4"
+                />
+              </th>
+              <th className="px-3 py-3 font-bold">Дата</th>
+              <th className="px-3 py-3 font-bold">Тип</th>
+              <th className="px-3 py-3 font-bold">Артикул</th>
+              <th className="px-3 py-3 font-bold text-right">Кол-во</th>
+              <th className="px-3 py-3 font-bold text-right">Цена</th>
+              <th className="px-3 py-3 font-bold text-right">Сумма</th>
+              <th className="px-3 py-3 font-bold">Объект</th>
+              <th className="px-3 py-3 font-bold">Поставка</th>
+              <th className="px-3 py-3 font-bold text-right">Действия</th>
             </tr>
           </thead>
           <tbody>
-            {filteredHistory.slice(0, 100).map((t, index) => (
-              <tr key={`${t.id}-${index}`} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
-                <td className="px-6 py-4 text-xs font-medium text-slate-500 whitespace-nowrap">
+            {displayedHistory.map((t, index) => (
+              <tr key={`${t.id}-${index}`} className={`border-b border-slate-100 hover:bg-slate-50/50 transition-colors ${selectedIds.has(t.id) ? 'bg-indigo-50/30' : ''}`}>
+                <td className="px-3 py-3 text-center">
+                  <input 
+                    type="checkbox" 
+                    checked={selectedIds.has(t.id)}
+                    onChange={() => toggleSelect(t.id)}
+                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                  />
+                </td>
+                <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
                   {formatDate(t.date)}
                 </td>
-                <td className="px-6 py-4">
-                  <span className={`flex items-center gap-1 w-fit px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                <td className="px-3 py-3">
+                  <span className={`flex items-center justify-center gap-1 w-fit px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                     t.type === 'Приход' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
                   }`}>
                     {t.type}
                   </span>
                 </td>
-                <td className="px-6 py-4">
+                <td className="px-3 py-3">
                   <div className="text-sm font-bold text-indigo-600 font-mono">{t.article}</div>
                 </td>
-                <td className="px-6 py-4 text-right font-bold whitespace-nowrap">{t.quantity}</td>
-                <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">
+                <td className="px-3 py-3 text-right font-bold whitespace-nowrap">{t.quantity}</td>
+                <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
+                  {t.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽
+                </td>
+                <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
                   {t.type === 'Приход' ? t.total.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : t.writeOffCost.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽
                 </td>
-                <td className="px-6 py-4 text-xs text-slate-500 max-w-[200px] truncate">{t.destination}</td>
-                <td className="px-6 py-4 text-right">
-                  <div className="flex justify-end gap-2">
+                <td className="px-3 py-3 text-xs text-slate-500 max-w-[150px] truncate">{t.destination}</td>
+                <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
+                  {t.deliveryDate ? formatDate(t.deliveryDate) : '-'}
+                </td>
+                <td className="px-3 py-3 text-right">
+                  <div className="flex justify-end gap-1">
                     <button 
                       onClick={() => {
                         setEditingTrans(t);
                         setShowEditTransModal(true);
                       }}
-                      className="p-2 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all"
+                      className="p-1.5 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all"
                     >
                       <Edit3 size={16} />
                     </button>
                     <button 
-                      onClick={() => handleDeleteTransaction(t.id)}
-                      className="p-2 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-all"
+                      onClick={() => setTransToDelete(t.id)}
+                      className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-all"
                     >
                       <Trash2 size={16} />
                     </button>
@@ -267,6 +383,24 @@ export const HistoryTab: React.FC = () => {
           </div>
         )}
       </div>
+
+      <ConfirmDialog 
+        show={transToDelete !== null}
+        title="Удаление операции"
+        message="Вы действительно хотите удалить эту операцию из истории? Действие нельзя отменить, и остатки товара могут измениться."
+        onConfirm={() => {
+          if (transToDelete) handleDeleteTransaction(transToDelete);
+        }}
+        onCancel={() => setTransToDelete(null)}
+      />
+
+      <ConfirmDialog 
+        show={bulkDeleteConfirm}
+        title="Оптовое удаление операций"
+        message={`Вы действительно хотите удалить ${currentSelectionCount} строк из истории? Действие нельзя отменить. Остатки товаров затронуты не будут или будут обновлены (зависит от логики сервера).`}
+        onConfirm={handleBulkDelete}
+        onCancel={() => setBulkDeleteConfirm(false)}
+      />
     </motion.div>
   );
 };

@@ -16,6 +16,9 @@ import { HistoryTab } from './components/HistoryTab';
 import { SkusTab } from './components/SkusTab';
 import { SettingsTab } from './components/SettingsTab';
 import { ShipmentCostTab } from './components/ShipmentCostTab';
+import { LoginScreen } from './components/LoginScreen';
+import { UsersTab } from './components/UsersTab';
+import { DeletedItemsTab } from './components/DeletedItemsTab';
 
 // Modals
 import { ConfirmModal } from './components/ConfirmModal';
@@ -35,6 +38,9 @@ export default function App() {
   const setConfirmDialog = useUIStore((state) => state.setConfirmDialog);
   
   const fetchStock = useWarehouseStore((state) => state.fetchStock);
+  const fetchArchivedItems = useWarehouseStore((state) => state.fetchArchivedItems);
+  const checkSession = useWarehouseStore((state) => state.checkSession);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
   const gasUrl = useSettingsStore((state) => state.gasUrl);
 
   const showConfirmModal = useUIStore((state) => state.showConfirmModal);
@@ -43,12 +49,36 @@ export default function App() {
 
   useEffect(() => {
     if (gasUrl && gasUrl.startsWith('http')) {
-      fetchStock();
+      checkSession();
     }
-  }, [gasUrl, fetchStock]);
+  }, [gasUrl, checkSession]);
+
+  useEffect(() => {
+    if (gasUrl && gasUrl.startsWith('http') && currentUser) {
+      fetchStock();
+      if (currentUser.role === 'admin') {
+        fetchArchivedItems();
+      }
+    }
+  }, [gasUrl, fetchStock, fetchArchivedItems, currentUser]);
+
+  useEffect(() => {
+    if ((activeTab === 'settings' || activeTab === 'users' || activeTab === 'deleted') && currentUser?.role !== 'admin') {
+      setActiveTab('dashboard');
+    }
+  }, [activeTab, currentUser, setActiveTab]);
+
+  if (!currentUser) {
+    return (
+      <>
+        <LoginScreen />
+        <Toaster position="top-right" richColors closeButton />
+      </>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex font-sans text-slate-900">
+    <div className="h-screen bg-slate-50 flex font-sans text-slate-900 overflow-hidden">
       {/* Sidebar */}
       <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
 
@@ -61,7 +91,9 @@ export default function App() {
           {activeTab === 'shipment' && <ShipmentCostTab key="shipment" />}
           {activeTab === 'history' && <HistoryTab key="history" />}
           {activeTab === 'skus' && <SkusTab key="skus" />}
-          {activeTab === 'settings' && <SettingsTab key="settings" />}
+          {activeTab === 'users' && currentUser.role === 'admin' && <UsersTab key="users" />}
+          {activeTab === 'deleted' && currentUser.role === 'admin' && <DeletedItemsTab key="deleted" />}
+          {activeTab === 'settings' && currentUser.role === 'admin' && <SettingsTab key="settings" />}
         </AnimatePresence>
       </main>
 

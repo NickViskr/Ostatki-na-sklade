@@ -17,6 +17,7 @@ export interface Transaction {
   writeOffCost: number;
   total: number;
   destination: string;
+  deliveryDate?: string;
 }
 
 export interface ParsedItem {
@@ -32,4 +33,18 @@ export interface SKUItem {
   price: number;
   minStock: number;
   pcsPerBox: number;
+}
+
+export interface User {
+  username: string;
+  role: 'admin' | 'user';
+  password?: string;
+}
+
+export interface ArchivedItem {
+  archiveId: string;
+  type: string;
+  deletedAt: number;
+  dataJSON: string;
+  deletedBy?: string;
 }

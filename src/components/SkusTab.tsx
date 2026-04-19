@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { 
   Search, 
   Plus, 
@@ -9,6 +9,7 @@ import {
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
+import { ConfirmDialog } from './ConfirmDialog';
 
 export const SkusTab: React.FC = () => {
   const skus = useWarehouseStore((state) => state.skus);
@@ -19,6 +20,8 @@ export const SkusTab: React.FC = () => {
   const setShowSkuModal = useUIStore((state) => state.setShowSkuModal);
   const setEditingSku = useUIStore((state) => state.setEditingSku);
   const setSkuForm = useUIStore((state) => state.setSkuForm);
+
+  const [skuToDelete, setSkuToDelete] = useState<string | null>(null);
 
   const filteredSkus = useMemo(() => {
     return skus.filter(s => {
@@ -99,7 +102,7 @@ export const SkusTab: React.FC = () => {
                       <Edit3 size={16} />
                     </button>
                     <button 
-                      onClick={() => handleDeleteSku(s.sku)}
+                      onClick={() => setSkuToDelete(s.sku)}
                       className="p-2 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-all"
                     >
                       <Trash2 size={16} />
@@ -118,6 +121,16 @@ export const SkusTab: React.FC = () => {
           </div>
         )}
       </div>
+
+      <ConfirmDialog 
+        show={skuToDelete !== null}
+        title="Подтверждение удаления"
+        message={`Вы действительно хотите удалить SKU ${skuToDelete}? Это действие нельзя отменить.`}
+        onConfirm={() => {
+          if (skuToDelete) handleDeleteSku(skuToDelete);
+        }}
+        onCancel={() => setSkuToDelete(null)}
+      />
     </motion.div>
   );
 };

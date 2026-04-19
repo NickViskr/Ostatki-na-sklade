@@ -3,14 +3,12 @@ import { persist } from 'zustand/middleware';
 
 interface SettingsState {
   gasUrl: string;
-  gasToken: string;
   geminiModel: string;
   geminiKey: string;
   notificationEmail: string;
   destinations: string[];
   customPrompt: string;
   setGasUrl: (url: string) => void;
-  setGasToken: (token: string) => void;
   setGeminiModel: (model: string) => void;
   setGeminiKey: (key: string) => void;
   setNotificationEmail: (email: string) => void;
@@ -21,8 +19,7 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
-      gasUrl: '',
-      gasToken: '',
+      gasUrl: 'https://script.google.com/macros/s/AKfycbxRb4HXyqUsqqk1x5ScRgL44O1YUOlmpemCn0AAcIB50Rh5kXKeaNxAWMU2NDZTU4F3/exec',
       geminiModel: 'gemini-3-flash-preview',
       geminiKey: '',
       notificationEmail: '',
@@ -40,7 +37,6 @@ export const useSettingsStore = create<SettingsState>()(
 
 Верни строгий JSON массив объектов.`,
       setGasUrl: (gasUrl) => set({ gasUrl }),
-      setGasToken: (gasToken) => set({ gasToken }),
       setGeminiModel: (geminiModel) => set({ geminiModel }),
       setGeminiKey: (geminiKey) => set({ geminiKey }),
       setNotificationEmail: (notificationEmail) => set({ notificationEmail }),
@@ -52,6 +48,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'warehouse-settings',
+      partialize: (state) => ({ ...state }),
     }
   )
 );

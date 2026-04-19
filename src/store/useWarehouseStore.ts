@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { StockItem, Transaction, SKUItem, ParsedItem } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User } from '../types';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
@@ -9,6 +9,10 @@ interface WarehouseState {
   stock: StockItem[];
   transactions: Transaction[];
   skus: SKUItem[];
+  usersList: User[];
+  archivedItems: ArchivedItem[];
+  currentUser: User | null;
+  sessionToken: string | null;
   isSyncing: boolean;
   isProcessing: boolean;
   isAddingSku: boolean;
@@ -16,6 +20,9 @@ interface WarehouseState {
   setStock: (stock: StockItem[]) => void;
   setTransactions: (transactions: Transaction[]) => void;
   setSkus: (skus: SKUItem[]) => void;
+  setUsersList: (users: User[]) => void;
+  setCurrentUser: (user: User | null) => void;
+  setSessionToken: (token: string | null) => void;
   setIsSyncing: (isSyncing: boolean) => void;
   setIsProcessing: (isProcessing: boolean) => void;
   
@@ -24,16 +31,32 @@ interface WarehouseState {
   handleSetupDatabase: () => Promise<boolean>;
   handleSaveSku: (skuForm: SKUItem, editingSku: SKUItem | null) => Promise<boolean>;
   handleDeleteSku: (sku: string) => Promise<boolean>;
-  commitTransaction: (items: ParsedItem[], type: string, destination: string) => Promise<boolean>;
+  commitTransaction: (items: ParsedItem[], type: string, destination: string, deliveryDate?: string) => Promise<boolean>;
   handleDeleteTransaction: (id: string) => Promise<boolean>;
+  handleDeleteMultipleTransactions: (ids: string[]) => Promise<boolean>;
   handleUpdateTransaction: (id: string, data: Transaction) => Promise<boolean>;
   handleProcessInvoice: (feedback?: any) => Promise<void>;
+  
+  checkSession: () => Promise<void>;
+  handleLogin: (username: string, password: string) => Promise<boolean>;
+  handleLogout: () => void;
+  fetchUsersList: () => Promise<void>;
+  handleAddUser: (username: string, password: string, role: 'admin' | 'user') => Promise<boolean>;
+  handleDeleteUser: (username: string) => Promise<boolean>;
+  fetchArchivedItems: () => Promise<void>;
+  handleRestoreArchivedItem: (archiveId: string) => Promise<boolean>;
+  handleRestoreMultipleArchivedItems: (archiveIds: string[]) => Promise<boolean>;
+  handleHardDeleteArchivedItems: (archiveIds: string[]) => Promise<boolean>;
 }
 
 export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   stock: [],
   transactions: [],
   skus: [],
+  usersList: [],
+  archivedItems: [],
+  currentUser: null,
+  sessionToken: null,
   isSyncing: false,
   isProcessing: false,
   isAddingSku: false,
@@ -41,18 +64,22 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   setStock: (stock) => set({ stock }),
   setTransactions: (transactions) => set({ transactions }),
   setSkus: (skus) => set({ skus }),
+  setUsersList: (usersList) => set({ usersList }),
+  setCurrentUser: (currentUser) => set({ currentUser }),
+  setSessionToken: (sessionToken) => set({ sessionToken }),
   setIsSyncing: (isSyncing) => set({ isSyncing }),
   setIsProcessing: (isProcessing) => set({ isProcessing }),
 
   fetchGas: async (action, extraPayload = {}) => {
-    const { gasUrl, gasToken } = useSettingsStore.getState();
+    const { gasUrl } = useSettingsStore.getState();
+    const sessionToken = get().sessionToken;
     if (!gasUrl) return { status: 'error', message: 'URL не задан' };
     
     try {
       const response = await fetch(gasUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action, token: gasToken, ...extraPayload })
+        body: JSON.stringify({ action, sessionToken, ...extraPayload })
       });
       
       if (!response.ok) {
@@ -87,12 +114,25 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
 
       if (stockResult.status === 'success') {
         set({ stock: stockResult.data });
+      } else {
+        toast.error("Ошибка загрузки остатков: " + stockResult.message);
       }
+      
       if (skuResult.status === 'success') {
         set({ skus: skuResult.data });
+      } else {
+        toast.error("Ошибка загрузки SKU: " + skuResult.message);
       }
+      
       if (transResult.status === 'success') {
-        set({ transactions: transResult.data });
+        const tData = transResult.data;
+        const rows = Array.isArray(tData) ? tData : (tData.rows || []);
+        set({ transactions: rows });
+        if (rows.length === 0) {
+          toast.info("История загружена, но она пуста (0 записей).");
+        }
+      } else {
+        toast.error("Ошибка загрузки истории: " + transResult.message);
       }
     } catch (error) {
       console.error("Fetch Error:", error);
@@ -180,14 +220,36 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
     }
   },
 
-  commitTransaction: async (items, type, destination) => {
+  commitTransaction: async (items, type, destination, deliveryDate = '') => {
     const { notificationEmail } = useSettingsStore.getState();
+    
+    if (type === 'Расход') {
+      const currentStock = get().stock;
+      const requiredQtys: Record<string, number> = {};
+      
+      for (const item of items) {
+        if (!item.article) continue;
+        requiredQtys[item.article] = (requiredQtys[item.article] || 0) + (Number(item.quantity) || 0);
+      }
+
+      for (const [article, reqQty] of Object.entries(requiredQtys)) {
+        const stockItem = currentStock.find(s => s.article === article);
+        const availableQty = stockItem ? Number(stockItem.quantity) : 0;
+        
+        if (reqQty > availableQty) {
+          toast.error(`Недостаточно товара "${article}". Доступно: ${availableQty}, требуется: ${reqQty}`);
+          return false;
+        }
+      }
+    }
+
     set({ isProcessing: true });
     try {
       const result = await get().fetchGas('commit', {
         data: items, 
         type, 
         destination,
+        deliveryDate,
         notificationEmail 
       });
       
@@ -195,10 +257,17 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
         set({ stock: result.data });
         toast.success('Операция успешно записана в Google Таблицу!');
         
-        // Fetch transactions in background so UI doesn't block
-        get().fetchGas('getTransactions').then(transResult => {
+        // Fetch transactions and skus in background so UI doesn't block
+        Promise.all([
+          get().fetchGas('getTransactions'),
+          get().fetchGas('getSkus')
+        ]).then(([transResult, skuResult]) => {
           if (transResult.status === 'success') {
-            set({ transactions: transResult.data });
+            const tData = transResult.data;
+            set({ transactions: Array.isArray(tData) ? tData : (tData.rows || []) });
+          }
+          if (skuResult.status === 'success') {
+            set({ skus: skuResult.data });
           }
         }).catch(console.error);
         
@@ -221,7 +290,9 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
     try {
       const result = await get().fetchGas('deleteTransaction', { id });
       if (result.status === 'success') {
-        set({ stock: result.data.stock, transactions: result.data.transactions });
+        const txData = result.data.transactions;
+        const txRows = Array.isArray(txData) ? txData : (txData.rows || []);
+        set({ stock: result.data.stock, transactions: txRows });
         toast.success('Операция удалена');
         return true;
       } else {
@@ -237,6 +308,36 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
     }
   },
 
+  handleDeleteMultipleTransactions: async (ids) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('deleteMultipleTransactions', { ids });
+      if (result.status === 'success' || result.data?.partial) {
+        const payloadData = result.status === 'success' ? result.data : result.data;
+        const txData = payloadData.transactions;
+        const txRows = Array.isArray(txData) ? txData : (txData.rows || []);
+        
+        set({ stock: payloadData.stock, transactions: txRows });
+        
+        if (payloadData.partial && payloadData.message) {
+           toast.warning(payloadData.message);
+        } else {
+           toast.success(`Удалено операций: ${ids.length}`);
+        }
+        return true;
+      } else {
+        toast.error('Ошибка: ' + result.message);
+        return false;
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Ошибка сети при удалении операций');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
   handleUpdateTransaction: async (id, data) => {
     set({ isProcessing: true });
     try {
@@ -245,10 +346,17 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
         set({ stock: result.data });
         toast.success('Операция обновлена');
         
-        // Fetch transactions in background
-        get().fetchGas('getTransactions').then(transResult => {
+        // Fetch transactions and skus in background
+        Promise.all([
+          get().fetchGas('getTransactions'),
+          get().fetchGas('getSkus')
+        ]).then(([transResult, skuResult]) => {
           if (transResult.status === 'success') {
-            set({ transactions: transResult.data });
+            const tData = transResult.data;
+            set({ transactions: Array.isArray(tData) ? tData : (tData.rows || []) });
+          }
+          if (skuResult.status === 'success') {
+            set({ skus: skuResult.data });
           }
         }).catch(console.error);
         
@@ -268,7 +376,7 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
 
   handleProcessInvoice: async (feedback = "") => {
     const { rawText, opType, setParsedItems, setShowConfirmModal, aiFeedback } = useUIStore.getState();
-    const { geminiKey, geminiModel, customPrompt } = useSettingsStore.getState();
+    const { geminiModel, geminiKey, customPrompt } = useSettingsStore.getState();
     const { stock, skus } = get();
 
     if (!rawText.trim()) return;
@@ -324,4 +432,225 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
       set({ isProcessing: false });
     }
   },
+
+  checkSession: async () => {
+    const token = localStorage.getItem('sessionToken');
+    if (!token) return;
+    
+    set({ sessionToken: token });
+    try {
+      const result = await get().fetchGas('verifySession');
+      if (result.status === 'success') {
+        const normalizedUser = {
+          ...result.data,
+          role: result.data.role?.trim().toLowerCase()
+        };
+        set({ currentUser: normalizedUser });
+      } else {
+        localStorage.removeItem('sessionToken');
+        set({ sessionToken: null });
+      }
+    } catch (e) {
+      console.error('Session verification failed', e);
+    }
+  },
+
+  handleLogin: async (username, password) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('login', { username, password });
+      if (result.status === 'success') {
+        const userData = result.data.user || result.data; // Handle both formats just in case
+        const normalizedUser = {
+          ...userData,
+          role: userData.role?.trim().toLowerCase()
+        };
+        
+        if (result.data.sessionToken) {
+          localStorage.setItem('sessionToken', result.data.sessionToken);
+        }
+        
+        set({ 
+          currentUser: normalizedUser,
+          sessionToken: result.data.sessionToken || null
+        });
+        toast.success('Успешный вход');
+        return true;
+      } else {
+        toast.error('Ошибка входа: ' + result.message);
+        return false;
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Ошибка сети при входе');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  handleLogout: () => {
+    const token = get().sessionToken;
+    if (token) {
+      get().fetchGas('logout').catch(() => {});
+    }
+    localStorage.removeItem('sessionToken');
+    set({ currentUser: null, sessionToken: null, stock: [], transactions: [], skus: [], usersList: [] });
+    useUIStore.getState().setActiveTab('dashboard');
+  },
+
+  fetchUsersList: async () => {
+    set({ isSyncing: true });
+    try {
+      const result = await get().fetchGas('getUsers');
+      if (result.status === 'success') {
+        const normalizedUsers = result.data.map((u: User) => ({
+          ...u,
+          role: u.role?.trim().toLowerCase()
+        }));
+        set({ usersList: normalizedUsers });
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      set({ isSyncing: false });
+    }
+  },
+
+  handleAddUser: async (username, password, role) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('addUser', { data: { username, password, role } });
+      if (result.status === 'success') {
+        set({ usersList: result.data });
+        toast.success('Пользователь добавлен');
+        return true;
+      } else {
+        toast.error('Ошибка: ' + result.message);
+        return false;
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Ошибка сети при добавлении пользователя');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  handleDeleteUser: async (username) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('deleteUser', { username });
+      if (result.status === 'success') {
+        set({ usersList: result.data });
+        toast.success('Пользователь удален');
+        return true;
+      } else {
+        toast.error('Ошибка: ' + result.message);
+        return false;
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Ошибка сети при удалении пользователя');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  fetchArchivedItems: async () => {
+    set({ isSyncing: true });
+    try {
+      const result = await get().fetchGas('getArchivedItems');
+      if (result.status === 'success') {
+        set({ archivedItems: result.data });
+      } else {
+        toast.error(result.message || 'Ошибка загрузки архива');
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Ошибка сервера');
+    } finally {
+      set({ isSyncing: false });
+    }
+  },
+
+  handleRestoreArchivedItem: async (archiveId: string) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('restoreArchivedItem', { archiveId });
+      if (result.status === 'success') {
+        toast.success('Элемент успешно восстановлен');
+        await get().fetchStock();
+        await get().fetchArchivedItems();
+        if (get().currentUser?.role === 'admin') {
+          get().fetchUsersList();
+        }
+        return true;
+      } else {
+        toast.error(result.message || 'Ошибка восстановления');
+        return false;
+      }
+    } catch (error) {
+      console.error(error);
+      toast.error('Ошибка сервера');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  handleRestoreMultipleArchivedItems: async (archiveIds) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('restoreMultipleArchivedItems', { archiveIds });
+      if (result.status === 'success' || result.data?.partial) {
+        const payloadData = result.status === 'success' ? result.data : result.data;
+        
+        if (payloadData.partial && payloadData.message) {
+          toast.warning(payloadData.message);
+        } else {
+          toast.success(`Успешно восстановлено: ${archiveIds.length}`);
+        }
+        
+        await get().fetchStock();
+        await get().fetchArchivedItems();
+        if (get().currentUser?.role === 'admin') {
+          get().fetchUsersList();
+        }
+        return true;
+      } else {
+        toast.error(result.message || 'Ошибка восстановления');
+        return false;
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Ошибка сервера');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  handleHardDeleteArchivedItems: async (archiveIds) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('hardDeleteArchivedItems', { archiveIds });
+      if (result.status === 'success') {
+        toast.success(`Удалено из архива безвозвратно: ${archiveIds.length}`);
+        set({ archivedItems: result.data });
+        return true;
+      } else {
+        toast.error(result.message || 'Ошибка окончательного удаления');
+        return false;
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Ошибка сервера');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  }
 }));
