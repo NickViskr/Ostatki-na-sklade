@@ -22,7 +22,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const handleLogout = useWarehouseStore((state) => state.handleLogout);
 
-  const isCurrentUserAdmin = currentUser?.role === 'admin';
+  const isCurrentUserAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
+    ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
   const archivedItems = useWarehouseStore((state) => state.archivedItems);
 
   const menuItems = [

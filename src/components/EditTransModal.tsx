@@ -8,6 +8,8 @@ import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 
+import { toast } from 'sonner';
+
 export const EditTransModal: React.FC = () => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const handleUpdateTransaction = useWarehouseStore((state) => state.handleUpdateTransaction);
@@ -19,6 +21,19 @@ export const EditTransModal: React.FC = () => {
   if (!editingTrans) return null;
 
   const handleSave = async () => {
+    if (Number(editingTrans.quantity) < 0) {
+      toast.error('Количество не может быть отрицательным');
+      return;
+    }
+    if (editingTrans.type === 'Приход' && Number(editingTrans.price) < 0) {
+      toast.error('Цена не может быть отрицательной');
+      return;
+    }
+    if (editingTrans.type === 'Расход' && Number(editingTrans.writeOffCost) < 0) {
+      toast.error('Себестоимость не может быть отрицательной');
+      return;
+    }
+
     const success = await handleUpdateTransaction(editingTrans.id, editingTrans);
     if (success) {
       setShowEditTransModal(false);
@@ -53,6 +68,7 @@ export const EditTransModal: React.FC = () => {
             <label className="text-sm font-bold text-slate-500 uppercase">Количество</label>
             <input 
               type="number"
+              min="0"
               value={editingTrans.quantity}
               onChange={(e) => setEditingTrans({...editingTrans, quantity: e.target.value === '' ? '' : parseInt(e.target.value)})}
               className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
@@ -63,9 +79,11 @@ export const EditTransModal: React.FC = () => {
             <label className="text-sm font-bold text-slate-500 uppercase">Цена / Себестоимость</label>
             <input 
               type="number"
+              min="0"
+              step="0.01"
               value={editingTrans.type === 'Приход' ? editingTrans.price : editingTrans.writeOffCost}
               onChange={(e) => {
-                const val = e.target.value === '' ? '' : parseInt(e.target.value);
+                const val = e.target.value === '' ? '' : parseFloat(e.target.value);
                 if (editingTrans.type === 'Приход') {
                   setEditingTrans({...editingTrans, price: val, total: val === '' ? 0 : val * (Number(editingTrans.quantity) || 0)});
                 } else {

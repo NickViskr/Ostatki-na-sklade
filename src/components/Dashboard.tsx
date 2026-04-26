@@ -7,7 +7,10 @@ import {
   Search,
   Settings,
   ChevronDown,
-  Check
+  Check,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -60,6 +63,49 @@ export const Dashboard: React.FC = () => {
       return matchesSku;
     });
   }, [stock, dashTableSelectedSkus, dashStockFilter, lowStockThreshold]);
+
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>({ key: 'article', direction: 'asc' });
+
+  const sortedStock = useMemo(() => {
+    let sortableItems = [...filteredStock];
+    if (sortConfig !== null) {
+      sortableItems.sort((a, b) => {
+        let aValue: any = a[sortConfig.key as keyof typeof a];
+        let bValue: any = b[sortConfig.key as keyof typeof b];
+
+        if (typeof aValue === 'string') {
+          aValue = aValue.toLowerCase();
+          bValue = bValue.toLowerCase();
+        }
+
+        if (aValue < bValue) {
+          return sortConfig.direction === 'asc' ? -1 : 1;
+        }
+        if (aValue > bValue) {
+          return sortConfig.direction === 'asc' ? 1 : -1;
+        }
+        return 0;
+      });
+    }
+    return sortableItems;
+  }, [filteredStock, sortConfig]);
+
+  const requestSort = (key: string) => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const getSortIcon = (columnKey: string) => {
+    if (!sortConfig || sortConfig.key !== columnKey) {
+      return <ArrowUpDown size={14} className="inline opacity-30 group-hover:opacity-100 ml-1" />;
+    }
+    return sortConfig.direction === 'asc' ? 
+      <ArrowUp size={14} className="inline text-indigo-600 ml-1" /> : 
+      <ArrowDown size={14} className="inline text-indigo-600 ml-1" />;
+  };
 
   const dashboardStock = useMemo(() => {
     if (dashSelectedSkus.length === 0) return stock;
@@ -225,15 +271,25 @@ export const Dashboard: React.FC = () => {
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-50/50 border-b border-slate-200">
-              <th className="px-6 py-4 font-semibold text-slate-600">Артикул</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Кол-во</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Себест. (сред.)</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Капитализация</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-center">Оборач. (дни)</th>
+              <th className="px-6 py-4 font-semibold text-slate-600 cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('article')}>
+                Артикул {getSortIcon('article')}
+              </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('quantity')}>
+                Кол-во {getSortIcon('quantity')}
+              </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('avgCost')}>
+                Себест. (сред.) {getSortIcon('avgCost')}
+              </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('capitalization')}>
+                Капитализация {getSortIcon('capitalization')}
+              </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('turnover')}>
+                Оборач. (дни) {getSortIcon('turnover')}
+              </th>
             </tr>
           </thead>
           <tbody>
-            {filteredStock.slice(0, 100).map((item, index) => (
+            {sortedStock.slice(0, 100).map((item, index) => (
               <tr key={`${item.article}-${index}`} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
                 <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium">{item.article}</td>
                 <td className="px-6 py-4 text-right">

@@ -230,7 +230,10 @@ export const ConfirmModal: React.FC = () => {
                         type="number"
                         min="1"
                         value={item.quantity === 0 ? '' : item.quantity}
-                        onChange={(e) => updateParsedItem(idx, { quantity: Number(e.target.value) || 0 })}
+                        onChange={(e) => {
+                          const val = Number(e.target.value) || 0;
+                          updateParsedItem(idx, { quantity: val < 0 ? 0 : val });
+                        }}
                         className="w-24 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
                       />
                     </td>
@@ -242,7 +245,10 @@ export const ConfirmModal: React.FC = () => {
                             min="0"
                             step="0.01"
                             value={item.price === 0 ? '' : item.price}
-                            onChange={(e) => updateParsedItem(idx, { price: Number(e.target.value) || 0 })}
+                            onChange={(e) => {
+                              const val = Number(e.target.value) || 0;
+                              updateParsedItem(idx, { price: val < 0 ? 0 : val });
+                            }}
                             className="w-28 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
                           />
                           <span>₽</span>

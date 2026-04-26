@@ -41,32 +41,32 @@ export default function App() {
   const fetchArchivedItems = useWarehouseStore((state) => state.fetchArchivedItems);
   const checkSession = useWarehouseStore((state) => state.checkSession);
   const currentUser = useWarehouseStore((state) => state.currentUser);
-  const gasUrl = useSettingsStore((state) => state.gasUrl);
 
   const showConfirmModal = useUIStore((state) => state.showConfirmModal);
   const showEditTransModal = useUIStore((state) => state.showEditTransModal);
   const showSkuModal = useUIStore((state) => state.showSkuModal);
 
   useEffect(() => {
-    if (gasUrl && gasUrl.startsWith('http')) {
-      checkSession();
-    }
-  }, [gasUrl, checkSession]);
+    checkSession();
+  }, [checkSession]);
+
+  const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
+    ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
 
   useEffect(() => {
-    if (gasUrl && gasUrl.startsWith('http') && currentUser) {
+    if (currentUser) {
       fetchStock();
-      if (currentUser.role === 'admin') {
+      if (isAdmin) {
         fetchArchivedItems();
       }
     }
-  }, [gasUrl, fetchStock, fetchArchivedItems, currentUser]);
+  }, [fetchStock, fetchArchivedItems, currentUser, isAdmin]);
 
   useEffect(() => {
-    if ((activeTab === 'settings' || activeTab === 'users' || activeTab === 'deleted') && currentUser?.role !== 'admin') {
+    if ((activeTab === 'settings' || activeTab === 'users' || activeTab === 'deleted') && !isAdmin) {
       setActiveTab('dashboard');
     }
-  }, [activeTab, currentUser, setActiveTab]);
+  }, [activeTab, isAdmin, setActiveTab]);
 
   if (!currentUser) {
     return (
@@ -91,9 +91,9 @@ export default function App() {
           {activeTab === 'shipment' && <ShipmentCostTab key="shipment" />}
           {activeTab === 'history' && <HistoryTab key="history" />}
           {activeTab === 'skus' && <SkusTab key="skus" />}
-          {activeTab === 'users' && currentUser.role === 'admin' && <UsersTab key="users" />}
-          {activeTab === 'deleted' && currentUser.role === 'admin' && <DeletedItemsTab key="deleted" />}
-          {activeTab === 'settings' && currentUser.role === 'admin' && <SettingsTab key="settings" />}
+          {activeTab === 'users' && isAdmin && <UsersTab key="users" />}
+          {activeTab === 'deleted' && isAdmin && <DeletedItemsTab key="deleted" />}
+          {activeTab === 'settings' && isAdmin && <SettingsTab key="settings" />}
         </AnimatePresence>
       </main>
 

@@ -4,7 +4,10 @@ import {
   Plus, 
   Trash2, 
   Edit3,
-  Package
+  Package,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -23,12 +26,55 @@ export const SkusTab: React.FC = () => {
 
   const [skuToDelete, setSkuToDelete] = useState<string | null>(null);
 
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>({ key: 'sku', direction: 'asc' });
+
   const filteredSkus = useMemo(() => {
     return skus.filter(s => {
       const skuStr = s.sku || (s as any).article || '';
       return skuStr.toLowerCase().includes(skuSearch.toLowerCase());
     });
   }, [skus, skuSearch]);
+
+  const sortedSkus = useMemo(() => {
+    let sortableItems = [...filteredSkus];
+    if (sortConfig !== null) {
+      sortableItems.sort((a, b) => {
+        let aValue: any = a[sortConfig.key as keyof typeof a];
+        let bValue: any = b[sortConfig.key as keyof typeof b];
+
+        if (typeof aValue === 'string') {
+          aValue = aValue.toLowerCase();
+          bValue = bValue.toLowerCase();
+        }
+
+        if (aValue < bValue) {
+          return sortConfig.direction === 'asc' ? -1 : 1;
+        }
+        if (aValue > bValue) {
+          return sortConfig.direction === 'asc' ? 1 : -1;
+        }
+        return 0;
+      });
+    }
+    return sortableItems;
+  }, [filteredSkus, sortConfig]);
+
+  const requestSort = (key: string) => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const getSortIcon = (columnKey: string) => {
+    if (!sortConfig || sortConfig.key !== columnKey) {
+      return <ArrowUpDown size={14} className="inline opacity-30 group-hover:opacity-100 ml-1" />;
+    }
+    return sortConfig.direction === 'asc' ? 
+      <ArrowUp size={14} className="inline text-indigo-600 ml-1" /> : 
+      <ArrowDown size={14} className="inline text-indigo-600 ml-1" />;
+  };
 
   return (
     <motion.div 
@@ -73,14 +119,20 @@ export const SkusTab: React.FC = () => {
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-50/50 border-b border-slate-200">
-              <th className="px-6 py-4 font-semibold text-slate-600">Артикул</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Шт/Кор</th>
-              <th className="px-6 py-4 font-semibold text-slate-600 text-right">Мин. остаток</th>
+              <th className="px-6 py-4 font-semibold text-slate-600 cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('sku')}>
+                Артикул {getSortIcon('sku')}
+              </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('pcsPerBox')}>
+                Шт/Кор {getSortIcon('pcsPerBox')}
+              </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('minStock')}>
+                Мин. остаток {getSortIcon('minStock')}
+              </th>
               <th className="px-6 py-4 font-semibold text-slate-600 text-right">Действия</th>
             </tr>
           </thead>
           <tbody>
-            {filteredSkus.map((s, index) => (
+            {sortedSkus.map((s, index) => (
               <tr key={`${s.sku}-${index}`} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
                 <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium">{s.sku}</td>
                 <td className="px-6 py-4 text-right font-bold text-slate-900">{s.pcsPerBox}</td>

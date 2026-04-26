@@ -71,14 +71,12 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   setIsProcessing: (isProcessing) => set({ isProcessing }),
 
   fetchGas: async (action, extraPayload = {}) => {
-    const { gasUrl } = useSettingsStore.getState();
     const sessionToken = get().sessionToken;
-    if (!gasUrl) return { status: 'error', message: 'URL не задан' };
     
     try {
-      const response = await fetch(gasUrl, {
+      const response = await fetch('/api/gas', {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, sessionToken, ...extraPayload })
       });
       
@@ -101,9 +99,6 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   },
 
   fetchStock: async () => {
-    const { gasUrl } = useSettingsStore.getState();
-    if (!gasUrl) return;
-    
     set({ isSyncing: true });
     try {
       const [stockResult, skuResult, transResult] = await Promise.all([
@@ -142,12 +137,6 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   },
 
   handleSetupDatabase: async () => {
-    const { gasUrl } = useSettingsStore.getState();
-    if (!gasUrl) {
-      toast.error('Пожалуйста, укажите URL Google Apps Script в настройках.');
-      return false;
-    }
-    
     set({ isSyncing: true });
     try {
       const result = await get().fetchGas('setup');
@@ -389,7 +378,7 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
       const articles = Array.from(articleSet);
       
       const feedbackStr = (typeof feedback === 'string' && feedback) ? feedback : aiFeedback;
-      const result = await parseInvoiceWithGemini(rawText, articles, geminiModel, feedbackStr, geminiKey, customPrompt);
+      const result = await parseInvoiceWithGemini(rawText, articles, geminiModel, feedbackStr, customPrompt);
       
       if (!Array.isArray(result) || result.length === 0) {
         toast.error("ИИ не смог распознать товары в этом тексте. Попробуйте другой файл или уточните запрос.");
@@ -446,6 +435,14 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
           role: result.data.role?.trim().toLowerCase()
         };
         set({ currentUser: normalizedUser });
+        
+        // Fetch global settings
+        get().fetchGas('getGlobalSettings').then(res => {
+          if (res.status === 'success') {
+            useSettingsStore.getState().setGeminiKey(res.data.geminiKey || '');
+            useSettingsStore.getState().setGeminiModel(res.data.geminiModel || 'gemini-1.5-flash');
+          }
+        });
       } else {
         localStorage.removeItem('sessionToken');
         set({ sessionToken: null });
@@ -474,6 +471,15 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
           currentUser: normalizedUser,
           sessionToken: result.data.sessionToken || null
         });
+        
+        // Fetch global settings
+        get().fetchGas('getGlobalSettings').then(res => {
+          if (res.status === 'success') {
+            useSettingsStore.getState().setGeminiKey(res.data.geminiKey || '');
+            useSettingsStore.getState().setGeminiModel(res.data.geminiModel || 'gemini-1.5-flash');
+          }
+        });
+        
         toast.success('Успешный вход');
         return true;
       } else {
@@ -584,7 +590,9 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
         toast.success('Элемент успешно восстановлен');
         await get().fetchStock();
         await get().fetchArchivedItems();
-        if (get().currentUser?.role === 'admin') {
+        const isAdmin = get().currentUser?.role?.toLowerCase() === 'admin' || 
+          ['admin', 'админ', 'администратор'].includes(get().currentUser?.username?.toLowerCase() || '');
+        if (isAdmin) {
           get().fetchUsersList();
         }
         return true;
@@ -616,7 +624,9 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
         
         await get().fetchStock();
         await get().fetchArchivedItems();
-        if (get().currentUser?.role === 'admin') {
+        const isAdmin = get().currentUser?.role?.toLowerCase() === 'admin' || 
+          ['admin', 'админ', 'администратор'].includes(get().currentUser?.username?.toLowerCase() || '');
+        if (isAdmin) {
           get().fetchUsersList();
         }
         return true;

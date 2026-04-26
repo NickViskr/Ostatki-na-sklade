@@ -66,8 +66,9 @@ export const SkuModal: React.FC = () => {
               <label className="text-sm font-bold text-slate-500 uppercase">Шт в коробке</label>
               <input 
                 type="number"
+                min="1"
                 value={skuForm.pcsPerBox}
-                onChange={(e) => setSkuForm({...skuForm, pcsPerBox: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                onChange={(e) => setSkuForm({...skuForm, pcsPerBox: Math.max(1, e.target.value === '' ? 1 : parseInt(e.target.value))})}
                 className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
@@ -75,8 +76,9 @@ export const SkuModal: React.FC = () => {
               <label className="text-sm font-bold text-slate-500 uppercase">Мин. остаток</label>
               <input 
                 type="number"
+                min="0"
                 value={skuForm.minStock}
-                onChange={(e) => setSkuForm({...skuForm, minStock: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                onChange={(e) => setSkuForm({...skuForm, minStock: Math.max(0, e.target.value === '' ? 0 : parseInt(e.target.value))})}
                 className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>

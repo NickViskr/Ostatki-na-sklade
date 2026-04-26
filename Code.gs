@@ -1,17 +1,67 @@
+function verifyServerSignature(payloadForCheck, signature) {
+  const secret = PropertiesService.getScriptProperties().getProperty('server_secret');
+  if (!secret || !signature) return false;
+
+  if (Math.abs(Date.now() - Number(payloadForCheck.timestamp)) > 300000) {
+    Logger.log('Replay attack blocked');
+    return false;
+  }
+
+  const expected = Utilities.computeHmacSha256Signature(
+    JSON.stringify(payloadForCheck), secret
+  );
+  const expectedHex = expected
+    .map(b => ('0' + (b & 0xFF).toString(16)).slice(-2))
+    .join('');
+
+  return expectedHex === signature;
+}
+
 function doPost(e) {
-  const lock = LockService.getScriptLock();
+  let lock;
   try {
-    // Ждем до 10 секунд получения блокировки
-    lock.waitLock(10000);
-    
     const payload = JSON.parse(e.postData.contents);
     const action = payload.action;
+    
+    if (action === 'getGeminiKey') {
+      const payloadForCheck = {
+        action: payload.action,
+        timestamp: payload.timestamp
+      };
+
+      if (!verifyServerSignature(payloadForCheck, payload.signature)) {
+        return ContentService
+          .createTextOutput(JSON.stringify({
+            status: 'error',
+            message: 'Invalid server signature'
+          }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const key = PropertiesService.getScriptProperties().getProperty('global_geminiKey');
+      if (!key) {
+        return ContentService
+          .createTextOutput(JSON.stringify({
+            status: 'error',
+            message: 'Gemini key not configured'
+          }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'success', data: { geminiKey: key } }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
     const data = payload.data;
     const sessionToken = payload.sessionToken;
     
     // Verify session for protected actions
     const publicActions = ['login'];
     let currentUser = null;
+    
+    // Some session caches don't need lock strictly? 
+    // Actually verifySession is just reading properties mostly.
     
     if (!publicActions.includes(action)) {
       currentUser = verifySession(sessionToken);
@@ -21,6 +71,18 @@ function doPost(e) {
     }
     
     let result = {};
+    
+    if (action === 'archiveTransactions') {
+       if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+       const monthsToKeep = payload.data && payload.data.monthsToKeep ? payload.data.monthsToKeep : 6;
+       PropertiesService.getScriptProperties().setProperty('archive_monthsToKeep', String(monthsToKeep));
+       ScriptApp.newTrigger('runArchiveOldTransactionsAsBackground').timeBased().after(100).create();
+       return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: { async: true, message: 'Процесс запущен в фоновом режиме. Это займет около минуты.' } })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    // For other actions, acquire the script lock
+    lock = LockService.getScriptLock();
+    lock.waitLock(10000);
     
     switch (action) {
       case 'verifySession':
@@ -34,19 +96,19 @@ function doPost(e) {
         result = logoutUser(sessionToken);
         break;
       case 'getUsers':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = getUsers();
         break;
       case 'addUser':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = addUser(data.username, data.password, data.role);
         break;
       case 'deleteUser':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = deleteUser(payload.username, currentUser.username);
         break;
       case 'setup':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = setupDatabase();
         break;
       case 'getStock':
@@ -54,10 +116,6 @@ function doPost(e) {
         break;
       case 'getTransactions':
         result = getTransactions(payload.data);
-        break;
-      case 'archiveTransactions':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
-        result = archiveOldTransactions(payload.data && payload.data.monthsToKeep ? payload.data.monthsToKeep : 6);
         break;
       case 'deleteTransaction':
         result = deleteTransaction(payload.id, currentUser.username);
@@ -83,20 +141,30 @@ function doPost(e) {
       case 'commit':
         result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate);
         break;
+      case 'getGlobalSettings':
+        if (sessionToken && !currentUser) {
+          currentUser = verifySession(sessionToken);
+        }
+        result = getGlobalSettings(currentUser ? currentUser.role : null);
+        break;
+      case 'saveGlobalSettings':
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        result = saveGlobalSettings(data, currentUser.role);
+        break;
       case 'getArchivedItems':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = getArchivedItems();
         break;
       case 'restoreArchivedItem':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = restoreArchivedItem(payload.archiveId);
         break;
       case 'restoreMultipleArchivedItems':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = restoreMultipleArchivedItems(payload.archiveIds);
         break;
       case 'hardDeleteArchivedItems':
-        if (currentUser.role !== 'admin') throw new Error('Forbidden: Требуются права администратора');
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
         result = hardDeleteArchivedItems(payload.archiveIds);
         break;
       default:
@@ -111,7 +179,7 @@ function doPost(e) {
       .setMimeType(ContentService.MimeType.JSON);
   } finally {
     // Освобождаем блокировку
-    lock.releaseLock();
+    if (lock) lock.releaseLock();
   }
 }
 
@@ -254,7 +322,7 @@ function setupDatabase() {
     usersSheet.appendRow(['Username', 'Password', 'Role']);
     usersSheet.getRange('A1:C1').setFontWeight('bold');
     // Add default admin
-    usersSheet.appendRow(['Админ', 'Admin_9x$K2mP', 'admin']);
+    usersSheet.appendRow(['Админ', hashPassword('Admin_9x$K2mP'), 'admin']);
   }
   
   // Sheet: Сессии
@@ -413,6 +481,7 @@ function getTransactions(params) {
 
     const row = data[i];
     if (row.join('').trim() === '') continue;
+    if (!row[0] || String(row[0]).trim() === '') continue;
 
     let rowMs = 0;
     if (row[1] instanceof Date) {
@@ -541,7 +610,32 @@ function setupArchiveTrigger() {
 }
 
 function monthlyArchive() {
-  archiveOldTransactions(6);
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000); // 30 sec lock
+    archiveOldTransactions(6);
+  } catch(err) {
+    console.error('Ошибка ежемесячной архивации:', err);
+  }
+}
+
+function runArchiveOldTransactionsAsBackground(e) {
+  if (e && e.triggerUid) {
+    ScriptApp.getProjectTriggers().forEach(t => {
+      if (t.getUniqueId() === e.triggerUid) ScriptApp.deleteTrigger(t);
+    });
+  }
+  const props = PropertiesService.getScriptProperties();
+  const monthsStr = props.getProperty('archive_monthsToKeep');
+  const monthsToKeep = monthsStr ? Number(monthsStr) : 6;
+  
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000); // Wait up to 30s
+    archiveOldTransactions(monthsToKeep);
+  } catch(err) {
+    console.error('Ошибка фоновой архивации:', err);
+  }
 }
 
 function getSkus() {
@@ -643,7 +737,7 @@ function deleteSku(sku, deletedBy) {
   return getSkus();
 }
 
-function deleteTransaction(id, deletedBy) {
+function deleteTransaction(id, deletedBy, isUpdate = false) {
   const ss = getSpreadsheet();
   const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
   const transSheet2 = getSheetByNameRobust(ss, 'История');
@@ -699,7 +793,7 @@ function deleteTransaction(id, deletedBy) {
     archiveItem('Transaction', {
       id: String(transData[0]),
       date: dateStr,
-      type: type,
+      type: isUpdate ? 'UpdatedVersion' : type,
       article: article,
       quantity: qty,
       price: price,
@@ -720,6 +814,9 @@ function deleteTransaction(id, deletedBy) {
       
       if (type === 'Приход') {
         newQty -= qty;
+        if (newQty < 0) {
+          throw new Error(`Удаление этого прихода приведёт к отрицательному остатку товара "${article}". Доступно: ${newQty + qty}, нужно удалить: ${qty}. Сначала отмените расходы, ссылающиеся на этот товар.`);
+        }
         newCap -= total;
         newAvgCost = newQty > 0 ? newCap / newQty : 0;
       } else if (type === 'Расход') {
@@ -733,11 +830,12 @@ function deleteTransaction(id, deletedBy) {
   }
   
   transSheet.deleteRow(rowIndex);
+  SpreadsheetApp.flush();
   return { stock: getStock(), transactions: getTransactions().rows };
 }
 
 function updateTransaction(id, newData, deletedBy) {
-  deleteTransaction(id, deletedBy);
+  deleteTransaction(id, deletedBy, true);
   return commitTransaction([newData], newData.type, newData.destination, newData.deliveryDate);
 }
 
@@ -878,12 +976,21 @@ function verifySession(token) {
         return null;
       }
       return {
-        username: String(data[i][1]),
-        role: String(data[i][2])
+        username: String(data[i][1]).trim(),
+        role: String(data[i][2]).trim().toLowerCase()
       };
     }
   }
   return null;
+}
+
+function hashPassword(password) {
+  const bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    password,
+    Utilities.Charset.UTF_8
+  );
+  return bytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
 }
 
 function loginUser(username, password) {
@@ -904,46 +1011,25 @@ function loginUser(username, password) {
       sheet.clear();
       sheet.appendRow(['Username', 'Password', 'Role']);
     }
-    sheet.appendRow(['Админ', 'Admin_9x$K2mP', 'admin']);
+    sheet.appendRow(['Админ', hashPassword('Admin_9x$K2mP'), 'admin']);
     data = sheet.getDataRange().getValues();
   }
   
   let user = null;
   const inputUser = String(username).trim().toLowerCase();
   const inputPass = String(password).trim();
+  const hashedInputPass = hashPassword(inputPass);
   
-  // Hardcoded fallback for the requested admin to prevent lockouts
-  if (inputUser === 'админ' && inputPass === 'Admin_9x$K2mP') {
-    user = { username: 'Админ', role: 'admin' };
+  for (let i = 1; i < data.length; i++) {
+    const rowUser = String(data[i][0]).trim().toLowerCase();
+    const rowPass = String(data[i][1]).trim();
     
-    // Ensure this user exists in the sheet
-    let exists = false;
-    for (let i = 1; i < data.length; i++) {
-      if (String(data[i][0]).trim().toLowerCase() === 'админ') {
-        exists = true;
-        // Update password if it was changed
-        if (String(data[i][1]).trim() !== 'Admin_9x$K2mP') {
-          sheet.getRange(i + 1, 2).setValue('Admin_9x$K2mP');
-          sheet.getRange(i + 1, 3).setValue('admin');
-        }
-        break;
-      }
-    }
-    if (!exists) {
-      sheet.appendRow(['Админ', 'Admin_9x$K2mP', 'admin']);
-    }
-  } else {
-    for (let i = 1; i < data.length; i++) {
-      const rowUser = String(data[i][0]).trim().toLowerCase();
-      const rowPass = String(data[i][1]).trim();
-      
-      if (rowUser === inputUser && rowPass === inputPass) {
-        user = {
-          username: String(data[i][0]).trim(),
-          role: String(data[i][2]).trim()
-        };
-        break;
-      }
+    if (rowUser === inputUser && rowPass === hashedInputPass) {
+      user = {
+        username: String(data[i][0]).trim(),
+        role: String(data[i][2]).trim().toLowerCase()
+      };
+      break;
     }
   }
   
@@ -1010,7 +1096,7 @@ function addUser(username, password, role) {
     }
   }
   
-  sheet.appendRow([username, password, role]);
+  sheet.appendRow([username, hashPassword(password), role]);
   return getUsers();
 }
 
@@ -1068,8 +1154,10 @@ function cleanOldArchivedItems(sheet) {
   
   const data = sheet.getDataRange().getValues();
   for (let i = data.length - 1; i >= 1; i--) {
-    const deletedAt = Number(data[i][2]);
-    if (now - deletedAt > sixtyDaysMs) {
+    const rawVal = data[i][2];
+    if (rawVal === undefined || rawVal === null || rawVal === '') continue; // Skip empty
+    const deletedAt = Number(rawVal);
+    if (!isNaN(deletedAt) && deletedAt > 0 && (now - deletedAt > sixtyDaysMs)) {
       sheet.deleteRow(i + 1);
     }
   }
@@ -1089,6 +1177,7 @@ function getArchivedItems() {
   for (let i = data.length - 1; i >= 1; i--) {
     const row = data[i];
     if (row.join('').trim() === '') continue;
+    if (!row[0] || String(row[0]).trim() === '') continue;
     rows.push({
       archiveId: String(row[0]),
       type: String(row[1]),
@@ -1108,9 +1197,12 @@ function restoreArchivedItem(archiveId) {
   const data = sheet.getDataRange().getValues();
   let rowIndex = -1;
   let archiveRecord = null;
+  const targetId = String(archiveId).trim();
   
   for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(archiveId)) {
+    const rowId = String(data[i][0]).trim();
+    if (!rowId) continue;
+    if (rowId === targetId) {
       rowIndex = i + 1;
       archiveRecord = {
         type: String(data[i][1]),
@@ -1120,7 +1212,7 @@ function restoreArchivedItem(archiveId) {
     }
   }
   
-  if (!archiveRecord) throw new Error('Запись не найдена в архиве');
+  if (!archiveRecord) throw new Error('Нет данных в архиве');
   
   const { type, payload } = archiveRecord;
   
@@ -1190,6 +1282,9 @@ function restoreTransaction(payload) {
         newAvgCost = newQty > 0 ? newCap / newQty : 0;
       } else if (type === 'Расход') {
         newQty -= qty;
+        if (newQty < 0) {
+          throw new Error(`Недостаточно товара "${article}" на складе. Доступно: ${newQty + qty}, откат расхода: ${qty}`);
+        }
         newCap -= writeOffCost;
         newSales += qty;
       }
@@ -1333,6 +1428,9 @@ function deleteMultipleTransactions(ids, deletedBy) {
     const change = stockChanges[sku];
     if (change.qtyDiff !== 0 || change.capDiff !== 0) {
       change.currentQty += change.qtyDiff;
+      if (change.currentQty < 0) {
+        throw new Error(`Массовое удаление приведёт к отрицательному остатку товара "${sku}". Отмените связанные расходы.`);
+      }
       change.currentCap += change.capDiff;
       const newAvgCost = change.currentQty > 0 ? change.currentCap / change.currentQty : 0;
       
@@ -1378,10 +1476,18 @@ function deleteMultipleTransactions(ids, deletedBy) {
        }
     }
     if (apiDelErrors > 0) {
-      return { stock: getStock(), transactions: getTransactions().rows, partial: true, message: `Ошибок удаления: ${apiDelErrors}.` };
+      SpreadsheetApp.flush();
+      return { stock: getStock(), transactions: getTransactions().rows, partial: true, message: `Удалено с ошибками: ${apiDelErrors}.` };
     }
   }
 
+  const notFoundCount = ids.length - rowsToDelete.length;
+  if (notFoundCount > 0) {
+    SpreadsheetApp.flush();
+    return { stock: getStock(), transactions: getTransactions().rows, partial: true, message: `Внимание! Удалено: ${rowsToDelete.length}. Не найдено в базе: ${notFoundCount}.` };
+  }
+
+  SpreadsheetApp.flush();
   return { stock: getStock(), transactions: getTransactions().rows };
 }
 
@@ -1400,6 +1506,7 @@ function restoreMultipleArchivedItems(archiveIds) {
   const idsSet = new Set(archiveIds);
   let rowsToDeleteFromArchive = [];
   let transactionsToRestore = [];
+  let duplicatesCount = 0;
   
   // 1. Ищем строки в архиве
   for (let i = 1; i < archiveDataAll.length; i++) {
@@ -1445,7 +1552,6 @@ function restoreMultipleArchivedItems(archiveIds) {
     }
     
     let filteredToRestore = [];
-    let duplicatesCount = 0;
     
     for (let i = 0; i < transactionsToRestore.length; i++) {
         const tId = String(transactionsToRestore[i][0]);
@@ -1665,9 +1771,21 @@ function recalculateDailyAnalytics() {
   Logger.log('recalculateDailyAnalytics completed successfully');
 }
 
+function cleanExpiredSessions() {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('Сессии');
+  if (!sheet) return;
+  const data = sheet.getDataRange().getValues();
+  const now = new Date().getTime();
+  // Удаляем с конца чтобы не сбивать индексы
+  for (let i = data.length - 1; i >= 1; i--) {
+    if (Number(data[i][3]) < now) sheet.deleteRow(i + 1);
+  }
+}
+
 function setupDailyAnalyticsTrigger() {
   ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'recalculateDailyAnalytics')
+    .filter(t => t.getHandlerFunction() === 'recalculateDailyAnalytics' || t.getHandlerFunction() === 'cleanExpiredSessions')
     .forEach(t => ScriptApp.deleteTrigger(t));
 
   ScriptApp.newTrigger('recalculateDailyAnalytics')
@@ -1676,5 +1794,34 @@ function setupDailyAnalyticsTrigger() {
     .atHour(4)
     .create();
 
-  Logger.log('Ежедневная аналитика установлена');
+  ScriptApp.newTrigger('cleanExpiredSessions')
+    .timeBased()
+    .everyDays(1)
+    .atHour(3)
+    .create();
+
+  Logger.log('Ежедневная аналитика и очистка сессий установлены');
+}
+
+function getGlobalSettings(role) {
+  const props = PropertiesService.getScriptProperties();
+  const settings = {
+    geminiModel: props.getProperty('global_geminiModel') || 'gemini-1.5-flash'
+  };
+  // Ключ — только администратору
+  if (role === 'admin') {
+    settings.geminiKey = props.getProperty('global_geminiKey') || '';
+  }
+  return settings;
+}
+
+function saveGlobalSettings(data, role) {
+  const props = PropertiesService.getScriptProperties();
+  if (data.geminiKey !== undefined) {
+    props.setProperty('global_geminiKey', data.geminiKey);
+  }
+  if (data.geminiModel !== undefined) {
+    props.setProperty('global_geminiModel', data.geminiModel);
+  }
+  return getGlobalSettings(role);
 }

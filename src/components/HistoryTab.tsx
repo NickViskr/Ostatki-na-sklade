@@ -8,7 +8,12 @@ import {
   MapPin,
   ChevronDown,
   Check,
-  Download
+  Download,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -20,6 +25,10 @@ export const HistoryTab: React.FC = () => {
   const transactions = useWarehouseStore((state) => state.transactions);
   const skus = useWarehouseStore((state) => state.skus);
   const handleDeleteTransaction = useWarehouseStore((state) => state.handleDeleteTransaction);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
+  
+  const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
+    ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
   
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -74,7 +83,19 @@ export const HistoryTab: React.FC = () => {
       
       let matchesDate = true;
       if (histStartDate || histEndDate) {
-        const tDate = new Date(t.date);
+        // Parse t.date safely since it could be "DD.MM.YYYY, HH:MM:SS" or ISO
+        let tDate: Date;
+        if (t.date.includes('.')) {
+          const parts = t.date.split(',')[0].trim().split('.');
+          if (parts.length === 3) {
+            tDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T12:00:00Z`);
+          } else {
+            tDate = new Date(t.date);
+          }
+        } else {
+          tDate = new Date(t.date);
+        }
+
         if (histStartDate) {
           const sDate = new Date(histStartDate);
           sDate.setHours(0, 0, 0, 0);
@@ -93,7 +114,70 @@ export const HistoryTab: React.FC = () => {
     });
   }, [transactions, histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter]);
 
-  const displayedHistory = useMemo(() => filteredHistory.slice(0, 100), [filteredHistory]);
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>({ key: 'date', direction: 'desc' });
+
+  const sortedHistory = useMemo(() => {
+    let sortableItems = [...filteredHistory];
+    if (sortConfig !== null) {
+      sortableItems.sort((a, b) => {
+        let aValue: any = a[sortConfig.key as keyof typeof a];
+        let bValue: any = b[sortConfig.key as keyof typeof b];
+
+        if (sortConfig.key === 'date') {
+          // Parse date properly for sorting
+           const parseDate = (dstr: string) => {
+            if (dstr.includes('.')) {
+              const parts = dstr.split(',')[0].trim().split('.');
+              if (parts.length === 3) return new Date(`${parts[2]}-${parts[1]}-${parts[0]}T12:00:00Z`).getTime();
+            }
+            return new Date(dstr).getTime();
+          };
+          aValue = parseDate(a.date);
+          bValue = parseDate(b.date);
+        }
+
+        if (aValue < bValue) {
+          return sortConfig.direction === 'asc' ? -1 : 1;
+        }
+        if (aValue > bValue) {
+          return sortConfig.direction === 'asc' ? 1 : -1;
+        }
+        return 0;
+      });
+    }
+    return sortableItems;
+  }, [filteredHistory, sortConfig]);
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter]);
+
+  const totalPages = Math.ceil(sortedHistory.length / pageSize) || 1;
+
+  const displayedHistory = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return sortedHistory.slice(start, start + pageSize);
+  }, [sortedHistory, currentPage, pageSize]);
+
+  const requestSort = (key: string) => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const getSortIcon = (columnKey: string) => {
+    if (!sortConfig || sortConfig.key !== columnKey) {
+      return <ArrowUpDown size={14} className="inline opacity-30 group-hover:opacity-100 ml-1" />;
+    }
+    return sortConfig.direction === 'asc' ? 
+      <ArrowUp size={14} className="inline text-indigo-600 ml-1" /> : 
+      <ArrowDown size={14} className="inline text-indigo-600 ml-1" />;
+  };
 
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.checked) {
@@ -298,14 +382,30 @@ export const HistoryTab: React.FC = () => {
                   className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4"
                 />
               </th>
-              <th className="px-3 py-3 font-bold">Дата</th>
-              <th className="px-3 py-3 font-bold">Тип</th>
-              <th className="px-3 py-3 font-bold">Артикул</th>
-              <th className="px-3 py-3 font-bold text-right">Кол-во</th>
-              <th className="px-3 py-3 font-bold text-right">Цена</th>
-              <th className="px-3 py-3 font-bold text-right">Сумма</th>
-              <th className="px-3 py-3 font-bold">Объект</th>
-              <th className="px-3 py-3 font-bold">Поставка</th>
+              <th className="px-3 py-3 font-bold cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('date')}>
+                Дата {getSortIcon('date')}
+              </th>
+              <th className="px-3 py-3 font-bold cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('type')}>
+                Тип {getSortIcon('type')}
+              </th>
+              <th className="px-3 py-3 font-bold cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('article')}>
+                Артикул {getSortIcon('article')}
+              </th>
+              <th className="px-3 py-3 font-bold text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('quantity')}>
+                Кол-во {getSortIcon('quantity')}
+              </th>
+              <th className="px-3 py-3 font-bold text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('price')}>
+                Цена {getSortIcon('price')}
+              </th>
+              <th className="px-3 py-3 font-bold text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('total')}>
+                Сумма {getSortIcon('total')}
+              </th>
+              <th className="px-3 py-3 font-bold cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('destination')}>
+                Объект {getSortIcon('destination')}
+              </th>
+              <th className="px-3 py-3 font-bold cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('deliveryDate')}>
+                Поставка {getSortIcon('deliveryDate')}
+              </th>
               <th className="px-3 py-3 font-bold text-right">Действия</th>
             </tr>
           </thead>
@@ -375,11 +475,46 @@ export const HistoryTab: React.FC = () => {
           </div>
         )}
         
-        {filteredHistory.length > 100 && (
-          <div className="p-4 text-center border-t border-slate-100 bg-slate-50/50">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-              Показаны первые 100 из {filteredHistory.length} операций
-            </p>
+        {filteredHistory.length > 0 && (
+          <div className="flex items-center justify-between p-4 border-t border-slate-200 bg-slate-50 rounded-b-2xl">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-500">Показывать по:</span>
+              <select 
+                value={pageSize} 
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                className="text-sm border border-slate-200 rounded-lg px-2 py-1 bg-white outline-none focus:ring-2 focus:ring-indigo-500 font-medium text-slate-700"
+              >
+                <option value={30}>30</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={150}>150</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="p-1 rounded-md hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                title="Предыдущая страница"
+              >
+                <ChevronLeft size={20} />
+              </button>
+              <span className="text-sm font-medium text-slate-600 px-2 min-w-[100px] text-center">
+                Стр. {currentPage} из {totalPages}
+              </span>
+              <button 
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="p-1 rounded-md hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                title="Следующая страница"
+              >
+                <ChevronRight size={20} />
+              </button>
+            </div>
           </div>
         )}
       </div>

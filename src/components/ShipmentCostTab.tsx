@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
-import { Package, Truck, TrendingDown, Calendar, Filter, Edit3, Trash2 } from 'lucide-react';
+import { Package, Truck, TrendingDown, Calendar, Filter, Edit3, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 
 export const ShipmentCostTab: React.FC = () => {
@@ -142,6 +142,20 @@ export const ShipmentCostTab: React.FC = () => {
   const totalShipmentCost = useMemo(() => {
     return shipmentTransactions.reduce((sum, t) => sum + t.total, 0);
   }, [shipmentTransactions]);
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
+
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [dateFrom, dateTo, destinationFilter]);
+
+  const totalPages = Math.ceil(groupedShipments.length / pageSize) || 1;
+
+  const displayedGroups = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return groupedShipments.slice(start, start + pageSize);
+  }, [groupedShipments, currentPage, pageSize]);
 
   const handleSelectAllGroup = (groupItems: typeof shipmentTransactions, checked: boolean) => {
     const newSet = new Set(selectedIds);
@@ -283,7 +297,7 @@ export const ShipmentCostTab: React.FC = () => {
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
-            {groupedShipments.map((group) => (
+            {displayedGroups.map((group) => (
               <div key={group.id} className="p-6 hover:bg-slate-50/50 transition-colors">
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4">
                   <div className="flex items-center gap-4">
@@ -370,6 +384,49 @@ export const ShipmentCostTab: React.FC = () => {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        
+        {groupedShipments.length > 0 && (
+          <div className="flex items-center justify-between p-4 border-t border-slate-200 bg-slate-50 rounded-b-3xl">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-500">Показывать по:</span>
+              <select 
+                value={pageSize} 
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                className="text-sm border border-slate-200 rounded-lg px-2 py-1 bg-white outline-none focus:ring-2 focus:ring-indigo-500 font-medium text-slate-700"
+              >
+                <option value={30}>30</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={150}>150</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="p-1 rounded-md hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                title="Предыдущая страница"
+              >
+                <ChevronLeft size={20} />
+              </button>
+              <span className="text-sm font-medium text-slate-600 px-2 min-w-[100px] text-center">
+                Стр. {currentPage} из {totalPages}
+              </span>
+              <button 
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="p-1 rounded-md hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                title="Следующая страница"
+              >
+                <ChevronRight size={20} />
+              </button>
+            </div>
           </div>
         )}
       </div>

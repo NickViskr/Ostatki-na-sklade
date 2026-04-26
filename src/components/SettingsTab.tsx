@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Settings, 
   Database, 
@@ -6,18 +6,20 @@ import {
   Key, 
   Cpu, 
   CheckCircle2, 
-  Loader2
+  Loader2,
+  Save
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
+import { toast } from 'sonner';
 
 export const SettingsTab: React.FC = () => {
   const isSyncing = useWarehouseStore((state) => state.isSyncing);
   const handleSetupDatabase = useWarehouseStore((state) => state.handleSetupDatabase);
+  const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   
-  const gasUrl = useSettingsStore((state) => state.gasUrl);
   const setGasUrl = useSettingsStore((state) => state.setGasUrl);
   const geminiModel = useSettingsStore((state) => state.geminiModel);
   const setGeminiModel = useSettingsStore((state) => state.setGeminiModel);
@@ -25,6 +27,56 @@ export const SettingsTab: React.FC = () => {
   const setGeminiKey = useSettingsStore((state) => state.setGeminiKey);
   const notificationEmail = useSettingsStore((state) => state.notificationEmail);
   const setNotificationEmail = useSettingsStore((state) => state.setNotificationEmail);
+
+  const [availableModels, setAvailableModels] = useState<string[]>(['gemini-1.5-flash']);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [isSavingGlobal, setIsSavingGlobal] = useState(false);
+
+  const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
+    ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
+
+  // Fetch models when opened/on mount
+  useEffect(() => {
+    if (!isAdmin) return;
+    
+    const timeoutId = setTimeout(async () => {
+      setIsLoadingModels(true);
+      try {
+        const res = await fetch("/api/models", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey: geminiKey || undefined })
+        });
+        const result = await res.json();
+        if (result.status === "success" && result.data?.length > 0) {
+          setAvailableModels(result.data);
+          // If current model isn't in the new list, pick the first
+          if (!result.data.includes(geminiModel)) {
+            setGeminiModel(result.data[0]);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load models", err);
+      } finally {
+        setIsLoadingModels(false);
+      }
+    }, 800); // 800ms debounce
+    
+    return () => clearTimeout(timeoutId);
+  }, [geminiKey, currentUser?.role]);
+
+  const handleSaveGlobalAi = async () => {
+    setIsSavingGlobal(true);
+    try {
+      const res = await fetchGas('saveGlobalSettings', { data: { geminiKey, geminiModel } });
+      if (res?.status === 'success') toast.success('Настройки AI применены для всех пользователей');
+      else toast.error(res?.message || 'Ошибка сохранения глобальных настроек');
+    } catch (e) {
+      toast.error('Сбой сети при сохранении настроек');
+    } finally {
+      setIsSavingGlobal(false);
+    }
+  };
 
   return (
     <motion.div 
@@ -48,23 +100,9 @@ export const SettingsTab: React.FC = () => {
           </div>
           
           <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-500 uppercase">GAS Web App URL</label>
-              <div className="relative">
-                <input 
-                  type="text"
-                  value={gasUrl}
-                  onChange={(e) => setGasUrl(e.target.value)}
-                  placeholder="https://script.google.com/macros/s/..."
-                  className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <Settings className="absolute left-3 top-3.5 text-slate-400" size={18} />
-              </div>
-            </div>
-
             <button 
               onClick={handleSetupDatabase}
-              disabled={isSyncing || !gasUrl}
+              disabled={isSyncing}
               className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
             >
               {isSyncing ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={20} />}
@@ -82,18 +120,26 @@ export const SettingsTab: React.FC = () => {
 
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-500 uppercase">Модель Gemini</label>
+              <label className="text-sm font-bold text-slate-500 uppercase flex justify-between items-center">
+                <span>Модель Gemini (Глобальная)</span>
+                {isLoadingModels && <Loader2 size={14} className="animate-spin text-amber-500" />}
+              </label>
               <select 
                 value={geminiModel}
                 onChange={(e) => setGeminiModel(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+                disabled={!isAdmin}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-70 disabled:cursor-not-allowed"
               >
-                <option value="gemini-3-flash-preview">Gemini 3 Flash (Быстрая)</option>
-                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Мощная)</option>
+                {!availableModels.includes(geminiModel) && geminiModel !== '' && (
+                   <option value={geminiModel}>{geminiModel}</option>
+                )}
+                {availableModels.map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
               </select>
             </div>
 
-            {currentUser?.role === 'admin' ? (
+            {isAdmin ? (
               <div className="space-y-2">
                 <label className="text-sm font-bold text-slate-500 uppercase">Gemini API Key</label>
                 <div className="relative">
@@ -102,11 +148,19 @@ export const SettingsTab: React.FC = () => {
                     value={geminiKey}
                     onChange={(e) => setGeminiKey(e.target.value)}
                     placeholder="Ваш API ключ Gemini..."
-                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-amber-500"
                   />
                   <Key className="absolute left-3 top-3.5 text-slate-400" size={18} />
                 </div>
-                <p className="text-[10px] text-emerald-600 font-medium">Безопасное хранение активно. Ключ надежно сохранен.</p>
+                
+                <button
+                  onClick={handleSaveGlobalAi}
+                  disabled={isSavingGlobal || !geminiKey}
+                  className="w-full mt-2 bg-amber-500 text-white py-3 rounded-xl font-bold hover:bg-amber-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                >
+                  {isSavingGlobal ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+                  Применить для всех
+                </button>
               </div>
             ) : (
               <div className="space-y-2">
@@ -120,7 +174,7 @@ export const SettingsTab: React.FC = () => {
                   />
                   <Key className="absolute left-3 top-3.5 text-slate-400" size={18} />
                 </div>
-                <p className="text-[10px] text-amber-600 font-medium">Изменять ключ может только администратор.</p>
+                <p className="text-[10px] text-amber-600 font-medium">Изменять ключ и модель может только администратор.</p>
               </div>
             )}
 

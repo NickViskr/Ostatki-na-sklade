@@ -59,6 +59,16 @@ export const ManualTab: React.FC = () => {
     const item = allArticles.find(s => s.article === manualForm.article);
     if (!item) return;
 
+    if (Number(manualForm.quantity) < 0) {
+      toast.error('Количество не может быть отрицательным');
+      return;
+    }
+    
+    if (Number(manualForm.price) < 0 && manualForm.type.includes('Оприходование')) {
+      toast.error('Цена не может быть отрицательной');
+      return;
+    }
+
     const opType = manualForm.type.includes('Списание') ? 'Расход' : 'Приход';
     const finalPrice = opType === 'Приход' ? manualForm.price : item.avgCost;
 
@@ -130,6 +140,7 @@ export const ManualTab: React.FC = () => {
             <label className="text-sm font-bold text-slate-500 uppercase">Количество</label>
             <input 
               type="number"
+              min="0"
               value={manualForm.quantity}
               onChange={(e) => setManualForm({...manualForm, quantity: e.target.value === '' ? '' : parseInt(e.target.value)})}
               className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none"
@@ -141,6 +152,8 @@ export const ManualTab: React.FC = () => {
               <label className="text-sm font-bold text-slate-500 uppercase">Цена за единицу (₽)</label>
               <input 
                 type="number"
+                min="0"
+                step="0.01"
                 value={manualForm.price}
                 onChange={(e) => setManualForm({...manualForm, price: e.target.value === '' ? '' : parseFloat(e.target.value)})}
                 className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none"
