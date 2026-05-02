@@ -2,8 +2,9 @@ import React, { useState, useMemo } from 'react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
-import { Package, Truck, TrendingDown, Calendar, Filter, Edit3, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Package, Truck, TrendingDown, Calendar, Filter, Edit3, Trash2, ChevronLeft, ChevronRight, Download } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
+import { formatCurrency } from '../lib/utils';
 
 export const ShipmentCostTab: React.FC = () => {
   const transactions = useWarehouseStore((state) => state.transactions);
@@ -74,70 +75,93 @@ export const ShipmentCostTab: React.FC = () => {
       });
   }, [transactions, dateFrom, dateTo, destinationFilter]);
 
+  const formatDateStr = (dateRaw?: string, fallback = '') => {
+    if (!dateRaw) return fallback;
+    if (dateRaw.includes('.')) {
+      return dateRaw.split(',')[0].trim().replace(/\./g, '-');
+    } else {
+      const d = new Date(dateRaw);
+      if (!isNaN(d.getTime())) {
+        const day = String(d.getDate()).padStart(2, '0');
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const year = d.getFullYear();
+        return `${day}-${month}-${year}`;
+      } else {
+        return dateRaw.split('T')[0];
+      }
+    }
+  };
+
   // Group by date and destination to show shipments as batches
   const groupedShipments = useMemo(() => {
     const groups: Record<string, typeof shipmentTransactions> = {};
     
     shipmentTransactions.forEach(t => {
-      // Group by date (DD-MM-YYYY) and destination
-      let dateStr = '';
-      if (t.date) {
-        if (t.date.includes('.')) {
-          dateStr = t.date.split(',')[0].trim().replace(/\./g, '-');
-        } else {
-          const d = new Date(t.date);
-          if (!isNaN(d.getTime())) {
-            const day = String(d.getDate()).padStart(2, '0');
-            const month = String(d.getMonth() + 1).padStart(2, '0');
-            const year = d.getFullYear();
-            dateStr = `${day}-${month}-${year}`;
-          } else {
-            dateStr = t.date.split('T')[0];
-          }
-        }
-      }
+      const dateStr = formatDateStr(t.date, 'no-date');
+      const deliveryDateStr = formatDateStr(t.deliveryDate, 'no-date');
       
-      const key = `${dateStr}_${t.destination}`;
+      const key = `${dateStr}_${deliveryDateStr}_${t.destination}`;
       if (!groups[key]) groups[key] = [];
       groups[key].push(t);
     });
 
     return Object.entries(groups).map(([key, items]) => {
-      const dateStr = key.split('_')[0];
-      const destination = key.split('_')[1];
+      const firstItem = items[0];
+      const dateStr = formatDateStr(firstItem.date, 'no-date');
+      const deliveryDateStr = formatDateStr(firstItem.deliveryDate, 'no-date');
+      const destination = firstItem.destination || '';
+      
       const totalCost = items.reduce((sum, item) => sum + item.total, 0);
       const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
       
-      const deliveryDateRaw = items.find(i => i.deliveryDate)?.deliveryDate;
-      let deliveryDateStr = '';
-      if (deliveryDateRaw) {
-        if (deliveryDateRaw.includes('.')) {
-          deliveryDateStr = deliveryDateRaw.split(',')[0].trim().replace(/\./g, '-');
-        } else {
-          const d = new Date(deliveryDateRaw);
-          if (!isNaN(d.getTime())) {
-            const day = String(d.getDate()).padStart(2, '0');
-            const month = String(d.getMonth() + 1).padStart(2, '0');
-            const year = d.getFullYear();
-            deliveryDateStr = `${day}-${month}-${year}`;
-          } else {
-            deliveryDateStr = deliveryDateRaw.split('T')[0];
-          }
-        }
-      }
-      
       return {
         id: key,
-        date: items[0].date,
-        dateStr,
+        date: firstItem.date,
+        dateStr: dateStr === 'no-date' ? '' : dateStr,
         destination,
         totalCost,
         totalItems,
-        deliveryDateStr,
+        deliveryDateStr: deliveryDateStr === 'no-date' ? '' : deliveryDateStr,
         items
       };
     }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [shipmentTransactions]);
+
+  const exportToCSV = () => {
+    if (shipmentTransactions.length === 0) return;
+    
+    const headers = ['Дата заведения', 'Дата поставки', 'Объект (Куда)', 'Артикул', 'Количество', 'Себестоимость ед.', 'Итого', 'Комментарий'];
+    
+    const csvContent = [
+      headers.join(';'),
+      ...shipmentTransactions.map(t => {
+        return [
+          formatDateStr(t.date),
+          formatDateStr(t.deliveryDate),
+          `"${(t.destination || '').replace(/"/g, '""')}"`,
+          `"${(t.article || '').replace(/"/g, '""')}"`,
+          t.quantity,
+          (t.price || 0).toFixed(2).replace('.', ','),
+          (t.total || 0).toFixed(2).replace('.', ','),
+          `"${(t.comment || '').replace(/"/g, '""')}"`
+        ].join(';');
+      })
+    ].join('\n');
+    
+    // Add BOM for Excel compatibility with UTF-8
+    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    
+    const timestamp = new Date().toISOString().split('T')[0];
+    link.download = `shipments_${timestamp}.csv`;
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const totalShipmentCost = useMemo(() => {
     return shipmentTransactions.reduce((sum, t) => sum + t.total, 0);
@@ -208,6 +232,17 @@ export const ShipmentCostTab: React.FC = () => {
               Удалить выбранные ({currentSelectionCount})
             </button>
           )}
+
+          <button
+            onClick={exportToCSV}
+            disabled={shipmentTransactions.length === 0}
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-100 transition-colors font-medium border border-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Выгрузить отфильтрованные данные в CSV"
+          >
+            <Download size={18} />
+            <span className="hidden sm:inline">Экспорт CSV</span>
+          </button>
+
           <div className="flex flex-wrap items-center gap-2 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 w-full md:w-auto">
           <div className="flex items-center gap-2 px-2 border-r border-slate-100 text-slate-400">
             <Filter size={16} />
@@ -259,7 +294,7 @@ export const ShipmentCostTab: React.FC = () => {
           </div>
           <div>
             <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">Общая себестоимость</div>
-            <div className="text-2xl font-bold text-slate-900">{totalShipmentCost.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</div>
+            <div className="text-2xl font-bold text-slate-900">{formatCurrency(totalShipmentCost)} ₽</div>
           </div>
         </div>
         <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex items-center gap-4">
@@ -317,7 +352,7 @@ export const ShipmentCostTab: React.FC = () => {
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-2xl font-bold text-slate-900">{group.totalCost.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</div>
+                    <div className="text-2xl font-bold text-slate-900">{formatCurrency(group.totalCost)} ₽</div>
                     <div className="text-sm text-slate-500">{group.totalItems} шт.</div>
                   </div>
                 </div>
@@ -354,8 +389,8 @@ export const ShipmentCostTab: React.FC = () => {
                           </td>
                           <td className="py-2 font-mono text-indigo-600 font-bold">{item.article}</td>
                           <td className="py-2 text-right font-medium">{item.quantity}</td>
-                          <td className="py-2 text-right text-slate-600 whitespace-nowrap">{item.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</td>
-                          <td className="py-2 text-right font-bold text-slate-900 whitespace-nowrap">{item.total.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</td>
+                          <td className="py-2 text-right text-slate-600 whitespace-nowrap">{formatCurrency(item.price)} ₽</td>
+                          <td className="py-2 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.total)} ₽</td>
                           <td className="py-2 text-right">
                             <div className="flex justify-end gap-1 border-l pl-2 border-slate-100">
                               <button 

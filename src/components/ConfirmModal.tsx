@@ -10,6 +10,7 @@ import {
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
+import { formatCurrency } from '../lib/utils';
 
 export const ConfirmModal: React.FC = () => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
@@ -254,10 +255,10 @@ export const ConfirmModal: React.FC = () => {
                           <span>₽</span>
                         </div>
                       ) : (
-                        <span>{item.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</span>
+                        <span>{formatCurrency(item.price)} ₽</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{(item.quantity * item.price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</td>
+                    <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.quantity * item.price)} ₽</td>
                   </tr>
                 ))}
               </tbody>
@@ -299,7 +300,7 @@ export const ConfirmModal: React.FC = () => {
             <div>
               <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Общая сумма</div>
               <div className="text-2xl font-bold text-indigo-600">
-                {finalItems.reduce((acc, item) => acc + (item.quantity * item.price), 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽
+                {formatCurrency(finalItems.reduce((acc, item) => acc + (item.quantity * item.price), 0))} ₽
               </div>
             </div>
           </div>

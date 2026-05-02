@@ -404,6 +404,10 @@ function parseNumber(val) {
   return isNaN(num) ? 0 : num;
 }
 
+function roundToTwo(num) {
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
 function parseTransactionRow(row) {
   let dateStr = '';
   if (row[1] instanceof Date) {
@@ -817,11 +821,11 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
         if (newQty < 0) {
           throw new Error(`Удаление этого прихода приведёт к отрицательному остатку товара "${article}". Доступно: ${newQty + qty}, нужно удалить: ${qty}. Сначала отмените расходы, ссылающиеся на этот товар.`);
         }
-        newCap -= total;
-        newAvgCost = newQty > 0 ? newCap / newQty : 0;
+        newCap = roundToTwo(newCap - total);
+        newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
       } else if (type === 'Расход') {
         newQty += qty;
-        newCap += writeOffCost;
+        newCap = roundToTwo(newCap + writeOffCost);
       }
       
       stockSheet.getRange(i + 1, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
@@ -893,8 +897,8 @@ function commitTransaction(items, type, destination, deliveryDate = '') {
     
     const article = item.article;
     const qty = Number(item.quantity);
-    const price = Number(item.price);
-    const total = qty * price;
+    const price = roundToTwo(Number(item.price));
+    const total = roundToTwo(qty * price);
     
     let writeOffCost = 0;
     
@@ -903,8 +907,8 @@ function commitTransaction(items, type, destination, deliveryDate = '') {
       if (stockMap[article]) {
         const curr = stockMap[article];
         const newQty = curr.quantity + qty;
-        const newCap = curr.capitalization + total;
-        const newAvgCost = newQty > 0 ? newCap / newQty : 0;
+        const newCap = roundToTwo(curr.capitalization + total);
+        const newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
         
         stockMap[article].quantity = newQty;
         stockMap[article].capitalization = newCap;
@@ -925,10 +929,10 @@ function commitTransaction(items, type, destination, deliveryDate = '') {
     } else if (type === 'Расход') {
       if (stockMap[article]) {
         const curr = stockMap[article];
-        writeOffCost = curr.avgCost * qty;
+        writeOffCost = roundToTwo(curr.avgCost * qty);
         
         const newQty = curr.quantity - qty;
-        const newCap = curr.capitalization - writeOffCost;
+        const newCap = roundToTwo(curr.capitalization - writeOffCost);
         const newSales = curr.sales120 + qty;
         
         stockMap[article].quantity = newQty;
@@ -1689,10 +1693,10 @@ function recalculateStockFully(ss) {
     if (stockMap[sku]) {
       if (type === 'Приход') {
         stockMap[sku].qty += qty;
-        stockMap[sku].cap += total;
+        stockMap[sku].cap = roundToTwo(stockMap[sku].cap + total);
       } else if (type === 'Расход') {
         stockMap[sku].qty -= qty;
-        stockMap[sku].cap -= writeOff;
+        stockMap[sku].cap = roundToTwo(stockMap[sku].cap - writeOff);
       }
     }
   }
@@ -1700,8 +1704,8 @@ function recalculateStockFully(ss) {
   for(let sku in stockMap) {
     const item = stockMap[sku];
     stockData[item.rowIndex][1] = item.qty;
-    stockData[item.rowIndex][2] = item.qty > 0 ? item.cap / item.qty : 0;
-    stockData[item.rowIndex][3] = item.cap;
+    stockData[item.rowIndex][2] = item.qty > 0 ? roundToTwo(item.cap / item.qty) : 0;
+    stockData[item.rowIndex][3] = roundToTwo(item.cap);
     // We don't touch [4] (sales) and [5] (turnover)
   }
   

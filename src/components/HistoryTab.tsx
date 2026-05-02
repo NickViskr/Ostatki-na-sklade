@@ -18,6 +18,7 @@ import {
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
+import { formatCurrency } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -212,20 +213,13 @@ export const HistoryTab: React.FC = () => {
   const handleExportCSV = () => {
     const headers = ['ДАТА', 'ТИП', 'АРТИКУЛ', 'КОЛ-ВО', 'ЦЕНА', 'СУММА', 'ОБЪЕКТ', 'ПОСТАВКА'];
     
-    const formatCurrency = (val: number) => {
-      // Имитируем toLocaleString('ru-RU') с заменой неразрывных пробелов на обычные (или оставляем как есть),
-      // чтобы в CSV выглядело так же, как в интерфейсе
-      const str = val.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      return `${str} ₽`;
-    };
-
     const rows = filteredHistory.map(t => [
       formatDate(t.date),
       t.type.toUpperCase(),
       t.article,
       t.quantity.toString(),
-      formatCurrency(t.price),
-      formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost),
+      formatCurrency(t.price).replace(/\s/g, ''),
+      formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost).replace(/\s/g, ''),
       t.destination || '',
       t.deliveryDate ? formatDate(t.deliveryDate) : '-'
     ]);
@@ -435,10 +429,10 @@ export const HistoryTab: React.FC = () => {
                 </td>
                 <td className="px-3 py-3 text-right font-bold whitespace-nowrap">{t.quantity}</td>
                 <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
-                  {t.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽
+                  {formatCurrency(t.price)} ₽
                 </td>
                 <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
-                  {t.type === 'Приход' ? t.total.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : t.writeOffCost.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽
+                  {formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost)} ₽
                 </td>
                 <td className="px-3 py-3 text-xs text-slate-500 max-w-[150px] truncate">{t.destination}</td>
                 <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">

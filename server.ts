@@ -82,6 +82,42 @@ async function startServer() {
     }
   }
 
+  // ── Кэш Gemini API ключа ──────────────────────────────────────────────────────
+  let cachedApiKey: { value: string; expiresAt: number } | null = null;
+  const API_KEY_TTL_MS = 60 * 60 * 1000; // 1 час
+
+  async function getApiKey(): Promise<string | null> {
+    if (cachedApiKey && Date.now() < cachedApiKey.expiresAt) {
+      return cachedApiKey.value;
+    }
+
+    // Приоритет 1: Ключ из GAS (настройки из UI)
+    const orgKey = await fetchOrgApiKey();
+    if (orgKey) {
+      cachedApiKey = { value: orgKey, expiresAt: Date.now() + API_KEY_TTL_MS };
+      return orgKey;
+    }
+
+    // Приоритет 2: Переменные окружения (.env.local)
+    const envKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (envKey) {
+      cachedApiKey = { value: envKey, expiresAt: Date.now() + API_KEY_TTL_MS };
+      return envKey;
+    }
+
+    return null;
+  }
+
+  // Эндпоинт для принудительного сброса кэша извне (опционально)
+  app.post("/api/invalidate-key-cache", (req, res) => {
+    const secret = req.headers["x-invalidate-secret"];
+    if (secret !== process.env.SERVER_SECRET) {
+      return res.status(403).json({ status: "error", message: "Forbidden" });
+    }
+    cachedApiKey = null;
+    return res.json({ status: "success", message: "Key cache cleared" });
+  });
+
   // Helper to fetch custom org API key from GAS (Server-to-Server)
   async function fetchOrgApiKey(): Promise<string | null> {
     const gasUrl = process.env.GAS_URL;
@@ -156,6 +192,12 @@ async function startServer() {
       if (data.status === "success") {
         if (token) cacheToken(token);
         if (isPublic && data.data?.sessionToken) cacheToken(data.data.sessionToken);
+
+        // Инвалидируем кэш ключа, если настройки были сохранены
+        if (action === "saveGlobalSettings") {
+          cachedApiKey = null;
+          console.log("Кэш API ключа сброшен после сохранения настроек");
+        }
       }
 
       return res.json(data);
@@ -169,8 +211,8 @@ async function startServer() {
   app.post("/api/models", async (req, res) => {
     try {
       const { apiKey: clientApiKey } = req.body;
-      const orgKey = await fetchOrgApiKey();
-      const apiKey = clientApiKey || orgKey || process.env.GEMINI_API_KEY || process.env.API_KEY;
+      const apiKey = clientApiKey || await getApiKey();
+      
       if (!apiKey) {
         return res.status(400).json({ status: "error", message: "API Key required on server" });
       }
@@ -197,8 +239,8 @@ async function startServer() {
     try {
       const { text, referenceArticles, modelName, feedback, customPrompt } = req.body;
       
-      const orgKey = await fetchOrgApiKey();
-      const apiKey = orgKey || process.env.GEMINI_API_KEY || process.env.API_KEY;
+      const apiKey = await getApiKey();
+      
       if (!apiKey) {
         return res.status(500).json({ 
           status: "error", 
@@ -284,6 +326,12 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  console.log("Прогрев API ключа...");
+  getApiKey().then(key => {
+    if (key) console.log("API ключ загружен в кэш");
+    else console.warn("API ключ не найден — проверьте .env или настройки GAS");
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);

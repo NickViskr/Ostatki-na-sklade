@@ -16,6 +16,7 @@ import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { DashSettingsModal } from './DashSettingsModal';
+import { formatCurrency } from '../lib/utils';
 
 export const Dashboard: React.FC = () => {
   const stock = useWarehouseStore((state) => state.stock);
@@ -180,7 +181,7 @@ export const Dashboard: React.FC = () => {
           <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm min-w-0">
             <div className="text-xs font-bold text-slate-400 uppercase mb-1 truncate" title="Сумма товарного остатка">Сумма товарного остатка</div>
             <div className="text-2xl font-bold text-indigo-600 truncate">
-              {Math.round(dashboardStock.reduce((acc, s) => acc + s.capitalization, 0)).toLocaleString()} ₽
+              {formatCurrency(dashboardStock.reduce((acc, s) => acc + s.capitalization, 0))} ₽
             </div>
             <div className="text-[10px] text-slate-400 mt-2 italic truncate">Общая капитализация склада</div>
           </div>
@@ -297,8 +298,8 @@ export const Dashboard: React.FC = () => {
                     {item.quantity}
                   </span>
                 </td>
-                <td className="px-6 py-4 text-right font-medium whitespace-nowrap">{item.avgCost.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</td>
-                <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{item.capitalization.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ₽</td>
+                <td className="px-6 py-4 text-right font-medium whitespace-nowrap">{formatCurrency(item.avgCost)} ₽</td>
+                <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.capitalization)} ₽</td>
                 <td className="px-6 py-4 text-center">
                   <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden max-w-[80px] mx-auto">
                     <div className="bg-indigo-500 h-full" style={{ width: `${Math.min(item.turnover, 100)}%` }}></div>
