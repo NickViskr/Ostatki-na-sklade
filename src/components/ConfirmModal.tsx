@@ -28,10 +28,7 @@ export const ConfirmModal: React.FC = () => {
 
   // Additional costs state for 'Расход'
   const [packagingCost, setPackagingCost] = useState<number | ''>('');
-  const [packagingDist, setPackagingDist] = useState<'batch' | 'unit'>('batch');
-  
-  const [transportCost, setTransportCost] = useState<number | ''>('');
-  const [transportDist, setTransportDist] = useState<'batch' | 'unit'>('batch');
+  const [packagingDist, setPackagingDist] = useState<'batch' | 'unit'>('unit');
   
   const [otherCost, setOtherCost] = useState<number | ''>('');
   const [otherDist, setOtherDist] = useState<'batch' | 'unit'>('batch');
@@ -40,14 +37,14 @@ export const ConfirmModal: React.FC = () => {
 
   const services = useWarehouseStore((state) => state.services);
   const activeServices = useMemo(() => services.filter(s => s.isActive), [services]);
-  const [selectedServices, setSelectedServices] = useState<Record<string, boolean>>({});
+  const [selectedServices, setSelectedServices] = useState<Record<string, number>>({});
 
   const finalItems = useMemo(() => {
     if (!parsedItems) return [];
     
     // Подсчитываем общую стоимость выбранных услуг
-    const selectedActiveServices = activeServices.filter(s => selectedServices[s.id]);
-    const totalServicesCost = selectedActiveServices.reduce((sum, s) => sum + s.cost, 0);
+    const selectedActiveServices = activeServices.filter(s => (selectedServices[s.id] || 0) > 0);
+    const totalServicesCost = selectedActiveServices.reduce((sum, s) => sum + (s.cost * (selectedServices[s.id] || 0)), 0);
     
     const totalBaseValue = parsedItems.reduce((sum, item) => sum + (item.quantity * item.price), 0);
     
@@ -74,26 +71,24 @@ export const ConfirmModal: React.FC = () => {
     if (opType !== 'Расход') return parsedItems;
 
     const pack = Number(packagingCost) || 0;
-    const trans = Number(transportCost) || 0;
     const other = Number(otherCost) || 0;
 
-    if (pack === 0 && trans === 0 && other === 0 && totalServicesCost === 0) return parsedItems;
+    if (pack === 0 && other === 0 && totalServicesCost === 0) return parsedItems;
 
     const totalQuantity = parsedItems.reduce((acc, item) => acc + item.quantity, 0);
 
     return parsedItems.map(item => {
       const packPerUnit = packagingDist === 'unit' ? pack : (totalQuantity > 0 ? pack / totalQuantity : 0);
-      const transPerUnit = transportDist === 'unit' ? trans : (totalQuantity > 0 ? trans / totalQuantity : 0);
       const otherPerUnit = otherDist === 'unit' ? other : (totalQuantity > 0 ? other / totalQuantity : 0);
       
-      const extraPerUnit = packPerUnit + transPerUnit + otherPerUnit + getServicesExtraPerUnit(item);
+      const extraPerUnit = packPerUnit + otherPerUnit + getServicesExtraPerUnit(item);
       
       return {
         ...item,
         price: item.price + extraPerUnit
       };
     });
-  }, [parsedItems, opType, packagingCost, packagingDist, transportCost, transportDist, otherCost, otherDist, activeServices, selectedServices]);
+  }, [parsedItems, opType, packagingCost, packagingDist, otherCost, otherDist, activeServices, selectedServices]);
 
   if (!parsedItems) return null;
 
@@ -101,9 +96,9 @@ export const ConfirmModal: React.FC = () => {
 
   const handleConfirm = async () => {
     let finalDestination = uploadDestination;
-    const selectedActiveServices = activeServices.filter(s => selectedServices[s.id]);
+    const selectedActiveServices = activeServices.filter(s => (selectedServices[s.id] || 0) > 0);
     if (selectedActiveServices.length > 0) {
-      const servicesText = selectedActiveServices.map(s => `${s.name} (${s.cost}₽)`).join(', ');
+      const servicesText = selectedActiveServices.map(s => `${s.name} x${selectedServices[s.id]} (${s.cost * selectedServices[s.id]}₽)`).join(', ');
       finalDestination = finalDestination ? `${finalDestination} [Услуги: ${servicesText}]` : `[Услуги: ${servicesText}]`;
     }
     
@@ -152,20 +147,31 @@ export const ConfirmModal: React.FC = () => {
                 <div className="text-xs font-bold text-indigo-500 uppercase tracking-widest bg-indigo-100 px-3 py-1 rounded-full">Увеличивают себестоимость</div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {activeServices.map(service => (
-                  <label key={service.id} className="flex items-center gap-4 p-4 bg-white rounded-2xl border border-indigo-50 shadow-sm cursor-pointer hover:border-indigo-200 transition-colors group">
-                    <input 
-                      type="checkbox"
-                      checked={!!selectedServices[service.id]}
-                      onChange={(e) => setSelectedServices(prev => ({ ...prev, [service.id]: e.target.checked }))}
-                      className="w-5 h-5 text-indigo-600 rounded-lg border-slate-300 focus:ring-indigo-500"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-bold text-slate-800 truncate group-hover:text-indigo-700 transition-colors">{service.name}</div>
-                      <div className="text-sm font-medium text-indigo-600">{formatCurrency(service.cost)} ₽</div>
+                {activeServices.map(service => {
+                  const quantity = selectedServices[service.id] || 0;
+                  return (
+                    <div key={service.id} className="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-indigo-50 shadow-sm hover:border-indigo-200 transition-colors">
+                      <div className="flex-1 min-w-0 flex items-center justify-between">
+                        <div className="font-bold text-slate-800 truncate">{service.name}</div>
+                        <div className="text-sm font-medium text-indigo-600">{formatCurrency(service.cost)} ₽/шт.</div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Количество:</label>
+                        <input 
+                          type="number"
+                          min="0"
+                          value={quantity === 0 ? '' : quantity}
+                          placeholder="0"
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value, 10);
+                            setSelectedServices(prev => ({ ...prev, [service.id]: isNaN(val) || val < 0 ? 0 : val }));
+                          }}
+                          className="w-full px-3 py-2 bg-slate-50 border border-indigo-100 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium text-right"
+                        />
+                      </div>
                     </div>
-                  </label>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -177,7 +183,7 @@ export const ConfirmModal: React.FC = () => {
                 Дополнительные расходы на отгрузку
               </div>
               
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="space-y-4 md:space-y-0 md:flex md:gap-4 md:*:flex-1">
                 <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
                   <div className="flex justify-between items-center mb-2">
                     <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Стоимость упаковки</label>
@@ -194,26 +200,6 @@ export const ConfirmModal: React.FC = () => {
                     type="number"
                     value={packagingCost}
                     onChange={(e) => setPackagingCost(e.target.value === '' ? '' : Number(e.target.value))}
-                    placeholder="0 ₽"
-                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
-                  />
-                </div>
-                <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Транспортные расходы</label>
-                    <select 
-                      value={transportDist}
-                      onChange={(e) => setTransportDist(e.target.value as 'batch' | 'unit')}
-                      className="text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded-lg px-2 py-1 outline-none cursor-pointer hover:bg-indigo-100 transition-colors"
-                    >
-                      <option value="batch">На партию</option>
-                      <option value="unit">На единицу</option>
-                    </select>
-                  </div>
-                  <input 
-                    type="number"
-                    value={transportCost}
-                    onChange={(e) => setTransportCost(e.target.value === '' ? '' : Number(e.target.value))}
                     placeholder="0 ₽"
                     className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
                   />

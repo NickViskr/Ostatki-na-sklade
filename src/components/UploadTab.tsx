@@ -166,44 +166,29 @@ export const UploadTab: React.FC = () => {
           )}
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-bold text-slate-500 uppercase">Текст накладной</label>
-              <label className="cursor-pointer flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-bold text-sm">
-                <Upload size={16} />
-                Загрузить Excel/PDF
-                <input type="file" className="hidden" accept=".xlsx,.xls,.csv,.pdf" multiple onChange={handleFileUpload} />
-              </label>
-            </div>
-            <textarea 
-              value={rawText}
-              onChange={(e) => setRawText(e.target.value)}
-              className="w-full h-80 p-6 rounded-3xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 transition-all resize-none font-mono text-sm"
-              placeholder="Вставьте текст накладной или перетащите файл сюда..."
-            />
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-bold text-slate-500 uppercase">Текст накладной</label>
+            <label className="cursor-pointer flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-bold text-sm">
+              <Upload size={16} />
+              Загрузить Excel/PDF
+              <input type="file" className="hidden" accept=".xlsx,.xls,.csv,.pdf" multiple onChange={handleFileUpload} />
+            </label>
           </div>
-
-          <div className="flex flex-col justify-center space-y-6 bg-slate-50/50 p-8 rounded-3xl border border-dashed border-slate-200">
-            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
-              <FileText className="text-indigo-500 mb-2" size={32} />
-              <h4 className="font-bold">Как это работает?</h4>
-              <p className="text-sm text-slate-500 mt-1">Вставьте текст из накладной, и Gemini автоматически определит артикулы, количество и цены.</p>
-            </div>
-            
-            <button 
-              onClick={() => handleProcessInvoice()}
-              disabled={isProcessing || !rawText.trim()}
-              className="w-full bg-slate-900 text-white py-5 rounded-2xl font-bold text-lg hover:bg-slate-800 disabled:opacity-50 transition-all shadow-lg flex items-center justify-center gap-3"
-            >
-              {isProcessing ? <Loader2 className="animate-spin" /> : <Zap size={24} className="text-amber-400 fill-amber-400" />}
-              {isProcessing ? 'Распознавание...' : 'Распознать через Gemini'}
-            </button>
-            
-            <p className="text-[10px] text-center text-slate-400 uppercase font-bold tracking-widest">
-              Powered by Google Gemini Pro
-            </p>
-          </div>
+          <textarea 
+            value={rawText}
+            onChange={(e) => setRawText(e.target.value)}
+            className="w-full h-32 p-4 rounded-3xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 transition-all resize-none font-mono text-sm"
+            placeholder="Вставьте текст накладной или перетащите файл сюда..."
+          />
+          <button 
+            onClick={() => handleProcessInvoice()}
+            disabled={isProcessing || !rawText.trim()}
+            className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold text-lg hover:bg-slate-800 disabled:opacity-50 transition-all shadow-lg flex items-center justify-center gap-3"
+          >
+            {isProcessing ? <Loader2 className="animate-spin" /> : <Zap size={24} className="text-amber-400 fill-amber-400" />}
+            {isProcessing ? 'Распознавание...' : 'Распознать через ИИ'}
+          </button>
         </div>
 
         {/* Expandable Prompts Section */}

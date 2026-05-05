@@ -120,7 +120,7 @@ export const useUIStore = create<UIState>((set) => ({
 
   rawText: '',
   setRawText: (rawText) => set({ rawText }),
-  opType: 'Приход',
+  opType: 'Расход',
   setOpType: (opType) => set({ opType }),
   uploadDestination: 'Ozon',
   setUploadDestination: (uploadDestination) => set({ uploadDestination }),

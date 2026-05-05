@@ -244,7 +244,7 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   handleUpdateService: async (id, name, cost, isActive) => {
     set({ isSyncing: true });
     try {
-      const result = await get().fetchGas('updateService', { payload: { id }, data: { name, cost, isActive } });
+      const result = await get().fetchGas('updateService', { id, data: { name, cost, isActive } });
       if (result.status === 'success') {
         set({ services: result.data });
         toast.success('Услуга обновлена');
@@ -266,7 +266,7 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
     try {
       const service = get().services.find(s => s.id === id);
       if (!service) return false;
-      const result = await get().fetchGas('deleteService', { payload: { id }, data: { name: service.name, cost: service.cost } });
+      const result = await get().fetchGas('deleteService', { id, data: { name: service.name, cost: service.cost } });
       if (result.status === 'success') {
         set({ services: result.data });
         toast.success('Услуга удалена');
