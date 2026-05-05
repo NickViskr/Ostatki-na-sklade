@@ -222,24 +222,41 @@ export const Dashboard: React.FC = () => {
               {skus.length === 0 ? (
                 <div className="px-4 py-2 text-sm text-slate-500 italic text-center">Нет доступных артикулов</div>
               ) : (
-                skus.map(sku => (
+                <>
                   <div 
-                    key={sku.sku}
                     onClick={() => {
-                      if (dashTableSelectedSkus.includes(sku.sku)) {
-                        setDashTableSelectedSkus(dashTableSelectedSkus.filter(s => s !== sku.sku));
+                      if (dashTableSelectedSkus.length === skus.length && skus.length > 0) {
+                        setDashTableSelectedSkus([]);
                       } else {
-                        setDashTableSelectedSkus([...dashTableSelectedSkus, sku.sku]);
+                        setDashTableSelectedSkus(skus.map(s => s.sku));
                       }
                     }}
-                    className="flex items-center gap-3 px-4 py-2 hover:bg-slate-50 cursor-pointer transition-colors"
+                    className="flex items-center gap-3 px-4 py-2 hover:bg-slate-50 cursor-pointer transition-colors border-b border-slate-100 sticky top-0 bg-white z-10"
                   >
-                    <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${dashTableSelectedSkus.includes(sku.sku) ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
-                      {dashTableSelectedSkus.includes(sku.sku) && <Check size={12} strokeWidth={3} />}
+                    <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${dashTableSelectedSkus.length === skus.length && skus.length > 0 ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
+                      {dashTableSelectedSkus.length === skus.length && skus.length > 0 && <Check size={12} strokeWidth={3} />}
                     </div>
-                    <span className="text-sm font-medium text-slate-700 truncate">{sku.sku}</span>
+                    <span className="text-sm font-bold text-slate-700 truncate">Выбрать все</span>
                   </div>
-                ))
+                  {skus.map(sku => (
+                    <div 
+                      key={sku.sku}
+                      onClick={() => {
+                        if (dashTableSelectedSkus.includes(sku.sku)) {
+                          setDashTableSelectedSkus(dashTableSelectedSkus.filter(s => s !== sku.sku));
+                        } else {
+                          setDashTableSelectedSkus([...dashTableSelectedSkus, sku.sku]);
+                        }
+                      }}
+                      className="flex items-center gap-3 px-4 py-2 hover:bg-slate-50 cursor-pointer transition-colors"
+                    >
+                      <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${dashTableSelectedSkus.includes(sku.sku) ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
+                        {dashTableSelectedSkus.includes(sku.sku) && <Check size={12} strokeWidth={3} />}
+                      </div>
+                      <span className="text-sm font-medium text-slate-700 truncate">{sku.sku}</span>
+                    </div>
+                  ))}
+                </>
               )}
             </div>
           )}

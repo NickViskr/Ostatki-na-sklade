@@ -4,6 +4,7 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { Book, Plus, Edit2, Trash2, Check, X, ShieldAlert } from 'lucide-react';
 import { formatCurrency } from '../lib/utils';
 import { toast } from 'sonner';
+import { ConfirmDialog } from './ConfirmDialog';
 
 export const DirectoryTab: React.FC = () => {
   const services = useWarehouseStore((state) => state.services);
@@ -19,6 +20,7 @@ export const DirectoryTab: React.FC = () => {
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({ name: '', cost: '' });
+  const [confirmDeleteService, setConfirmDeleteService] = useState<{id: string, name: string} | null>(null);
 
   const resetForm = () => {
     setForm({ name: '', cost: '' });
@@ -218,9 +220,7 @@ export const DirectoryTab: React.FC = () => {
                           </button>
                           <button 
                             onClick={() => {
-                              if(window.confirm(`Удалить услугу "${service.name}"?`)) {
-                                handleDeleteService(service.id);
-                              }
+                              setConfirmDeleteService({ id: service.id, name: service.name });
                             }} 
                             className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors"
                             title="Удалить"
@@ -237,6 +237,19 @@ export const DirectoryTab: React.FC = () => {
           </table>
         </div>
       </div>
+      
+      <ConfirmDialog
+        show={!!confirmDeleteService}
+        title="Удаление услуги"
+        message={`Для услуги "${confirmDeleteService?.name}" будет установлен статус "неактивно". Продолжить?`}
+        onConfirm={() => {
+          if (confirmDeleteService) {
+            handleDeleteService(confirmDeleteService.id);
+            setConfirmDeleteService(null);
+          }
+        }}
+        onCancel={() => setConfirmDeleteService(null)}
+      />
     </motion.div>
   );
 };
