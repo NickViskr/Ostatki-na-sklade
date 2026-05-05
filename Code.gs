@@ -126,6 +126,21 @@ function doPost(e) {
       case 'updateTransaction':
         result = updateTransaction(payload.id, data, currentUser.username);
         break;
+      case 'getServices':
+        result = getServices();
+        break;
+      case 'addService':
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        result = addService(data.name, data.cost);
+        break;
+      case 'updateService':
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        result = updateService(payload.id, data.name, data.cost, data.isActive);
+        break;
+      case 'deleteService':
+        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        result = updateService(payload.id, data.name, data.cost, false);
+        break;
       case 'getSkus':
         result = getSkus();
         break;
@@ -345,6 +360,15 @@ function setupDatabase() {
     if (headers[4] !== 'DeletedBy') {
       deletedSheet.getRange('A1:E1').setValues([['ArchiveID', 'Type', 'DeletedAt', 'DataJSON', 'DeletedBy']]);
     }
+  }
+  
+  // Sheet: Услуги
+  let servicesSheet = ss.getSheetByName('Услуги');
+  if (!servicesSheet) {
+    servicesSheet = ss.insertSheet('Услуги');
+    servicesSheet.appendRow(['ID', 'Название', 'Стоимость', 'Активна']);
+    servicesSheet.getRange('A1:D1').setFontWeight('bold');
+    servicesSheet.setFrozenRows(1);
   }
   
   return true;
@@ -1828,4 +1852,71 @@ function saveGlobalSettings(data, role) {
     props.setProperty('global_geminiModel', data.geminiModel);
   }
   return getGlobalSettings(role);
+}
+
+// --- Services (Услуги) ---
+
+function getServices() {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('Услуги');
+  if (!sheet) return [];
+  
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  
+  return data.slice(1).map(row => ({
+    id: String(row[0]),
+    name: String(row[1]),
+    cost: Number(row[2]) || 0,
+    isActive: row[3] !== false && row[3] !== 'false' && row[3] !== 0 && String(row[3]).toLowerCase() !== 'false'
+  }));
+}
+
+function addService(name, cost) {
+  if (!name) throw new Error('Название услуги не может быть пустым');
+  if (cost < 0) throw new Error('Стоимость не может быть отрицательной');
+  
+  const ss = getSpreadsheet();
+  let sheet = ss.getSheetByName('Услуги');
+  if (!sheet) {
+    setupDatabase();
+    sheet = ss.getSheetByName('Услуги');
+  }
+  
+  const services = getServices();
+  if (services.find(s => s.name.toLowerCase() === name.toLowerCase() && s.isActive)) {
+    throw new Error('Активная услуга с таким названием уже существует');
+  }
+  
+  const id = Utilities.getUuid();
+  sheet.appendRow([id, name, cost, true]);
+  
+  return getServices();
+}
+
+function updateService(id, name, cost, isActive) {
+  if (!name) throw new Error('Название услуги не может быть пустым');
+  if (cost < 0) throw new Error('Стоимость не может быть отрицательной');
+  
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('Услуги');
+  if (!sheet) throw new Error('Лист Услуги не найден');
+  
+  const data = sheet.getDataRange().getValues();
+  let found = false;
+  
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === id) {
+      const services = getServices();
+      const duplicate = services.find(s => s.id !== id && s.name.toLowerCase() === name.toLowerCase() && s.isActive);
+      if (duplicate && isActive) throw new Error('Активная услуга с таким названием уже существует');
+      
+      sheet.getRange(i + 1, 2, 1, 3).setValues([[name, cost, isActive]]);
+      found = true;
+      break;
+    }
+  }
+  
+  if (!found) throw new Error('Услуга не найдена');
+  return getServices();
 }

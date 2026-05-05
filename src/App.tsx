@@ -19,6 +19,7 @@ import { ShipmentCostTab } from './components/ShipmentCostTab';
 import { LoginScreen } from './components/LoginScreen';
 import { UsersTab } from './components/UsersTab';
 import { DeletedItemsTab } from './components/DeletedItemsTab';
+import { DirectoryTab } from './components/DirectoryTab';
 
 // Modals
 import { ConfirmModal } from './components/ConfirmModal';
@@ -91,6 +92,7 @@ export default function App() {
           {activeTab === 'shipment' && <ShipmentCostTab key="shipment" />}
           {activeTab === 'history' && <HistoryTab key="history" />}
           {activeTab === 'skus' && <SkusTab key="skus" />}
+          {activeTab === 'directory' && <DirectoryTab key="directory" />}
           {activeTab === 'users' && isAdmin && <UsersTab key="users" />}
           {activeTab === 'deleted' && isAdmin && <DeletedItemsTab key="deleted" />}
           {activeTab === 'settings' && isAdmin && <SettingsTab key="settings" />}

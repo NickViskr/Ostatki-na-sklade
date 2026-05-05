@@ -48,3 +48,10 @@ export interface ArchivedItem {
   dataJSON: string;
   deletedBy?: string;
 }
+
+export interface ServiceItem {
+  id: string;
+  name: string;
+  cost: number;
+  isActive: boolean;
+}

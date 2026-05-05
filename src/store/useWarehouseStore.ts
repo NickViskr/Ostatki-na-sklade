@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { StockItem, Transaction, SKUItem, ParsedItem, User } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem } from '../types';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
@@ -9,6 +9,7 @@ interface WarehouseState {
   stock: StockItem[];
   transactions: Transaction[];
   skus: SKUItem[];
+  services: ServiceItem[];
   usersList: User[];
   archivedItems: ArchivedItem[];
   currentUser: User | null;
@@ -20,6 +21,7 @@ interface WarehouseState {
   setStock: (stock: StockItem[]) => void;
   setTransactions: (transactions: Transaction[]) => void;
   setSkus: (skus: SKUItem[]) => void;
+  setServices: (services: ServiceItem[]) => void;
   setUsersList: (users: User[]) => void;
   setCurrentUser: (user: User | null) => void;
   setSessionToken: (token: string | null) => void;
@@ -31,6 +33,9 @@ interface WarehouseState {
   handleSetupDatabase: () => Promise<boolean>;
   handleSaveSku: (skuForm: SKUItem, editingSku: SKUItem | null) => Promise<boolean>;
   handleDeleteSku: (sku: string) => Promise<boolean>;
+  handleAddService: (name: string, cost: number) => Promise<boolean>;
+  handleUpdateService: (id: string, name: string, cost: number, isActive: boolean) => Promise<boolean>;
+  handleDeleteService: (id: string) => Promise<boolean>;
   commitTransaction: (items: ParsedItem[], type: string, destination: string, deliveryDate?: string) => Promise<boolean>;
   handleDeleteTransaction: (id: string) => Promise<boolean>;
   handleDeleteMultipleTransactions: (ids: string[]) => Promise<boolean>;
@@ -53,6 +58,7 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   stock: [],
   transactions: [],
   skus: [],
+  services: [],
   usersList: [],
   archivedItems: [],
   currentUser: null,
@@ -64,6 +70,7 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   setStock: (stock) => set({ stock }),
   setTransactions: (transactions) => set({ transactions }),
   setSkus: (skus) => set({ skus }),
+  setServices: (services) => set({ services }),
   setUsersList: (usersList) => set({ usersList }),
   setCurrentUser: (currentUser) => set({ currentUser }),
   setSessionToken: (sessionToken) => set({ sessionToken }),
@@ -101,10 +108,11 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
   fetchStock: async () => {
     set({ isSyncing: true });
     try {
-      const [stockResult, skuResult, transResult] = await Promise.all([
+      const [stockResult, skuResult, transResult, servicesResult] = await Promise.all([
         get().fetchGas('getStock'),
         get().fetchGas('getSkus'),
-        get().fetchGas('getTransactions')
+        get().fetchGas('getTransactions'),
+        get().fetchGas('getServices')
       ]);
 
       if (stockResult.status === 'success') {
@@ -117,6 +125,10 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
         set({ skus: skuResult.data });
       } else {
         toast.error("Ошибка загрузки SKU: " + skuResult.message);
+      }
+
+      if (servicesResult.status === 'success') {
+        set({ services: servicesResult.data });
       }
       
       if (transResult.status === 'success') {
@@ -203,6 +215,68 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
     } catch (error) {
       console.error("Delete SKU Error:", error);
       toast.error('Ошибка сети при удалении SKU.');
+      return false;
+    } finally {
+      set({ isSyncing: false });
+    }
+  },
+
+  handleAddService: async (name, cost) => {
+    set({ isSyncing: true });
+    try {
+      const result = await get().fetchGas('addService', { data: { name, cost } });
+      if (result.status === 'success') {
+        set({ services: result.data });
+        toast.success('Услуга добавлена');
+        return true;
+      } else {
+        toast.error('Ошибка: ' + result.message);
+        return false;
+      }
+    } catch (error) {
+      toast.error('Ошибка сети при добавлении услуги.');
+      return false;
+    } finally {
+      set({ isSyncing: false });
+    }
+  },
+
+  handleUpdateService: async (id, name, cost, isActive) => {
+    set({ isSyncing: true });
+    try {
+      const result = await get().fetchGas('updateService', { payload: { id }, data: { name, cost, isActive } });
+      if (result.status === 'success') {
+        set({ services: result.data });
+        toast.success('Услуга обновлена');
+        return true;
+      } else {
+        toast.error('Ошибка: ' + result.message);
+        return false;
+      }
+    } catch (error) {
+      toast.error('Ошибка сети при обновлении услуги.');
+      return false;
+    } finally {
+      set({ isSyncing: false });
+    }
+  },
+
+  handleDeleteService: async (id) => {
+    set({ isSyncing: true });
+    try {
+      const service = get().services.find(s => s.id === id);
+      if (!service) return false;
+      const result = await get().fetchGas('deleteService', { payload: { id }, data: { name: service.name, cost: service.cost } });
+      if (result.status === 'success') {
+        set({ services: result.data });
+        toast.success('Услуга удалена');
+        return true;
+      } else {
+        toast.error('Ошибка: ' + result.message);
+        return false;
+      }
+    } catch (error) {
+      toast.error('Ошибка сети при удалении услуги.');
       return false;
     } finally {
       set({ isSyncing: false });

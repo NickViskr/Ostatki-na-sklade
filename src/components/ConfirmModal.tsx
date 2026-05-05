@@ -38,15 +38,46 @@ export const ConfirmModal: React.FC = () => {
 
   const [deliveryDate, setDeliveryDate] = useState<string>('');
 
+  const services = useWarehouseStore((state) => state.services);
+  const activeServices = useMemo(() => services.filter(s => s.isActive), [services]);
+  const [selectedServices, setSelectedServices] = useState<Record<string, boolean>>({});
+
   const finalItems = useMemo(() => {
     if (!parsedItems) return [];
+    
+    // Подсчитываем общую стоимость выбранных услуг
+    const selectedActiveServices = activeServices.filter(s => selectedServices[s.id]);
+    const totalServicesCost = selectedActiveServices.reduce((sum, s) => sum + s.cost, 0);
+    
+    const totalBaseValue = parsedItems.reduce((sum, item) => sum + (item.quantity * item.price), 0);
+    
+    // Вспомогательная функция для расчета доли услуги на единицу товара
+    const getServicesExtraPerUnit = (item: typeof parsedItems[0]) => {
+      if (totalServicesCost === 0 || totalBaseValue === 0) return 0;
+      const itemBaseValue = item.quantity * item.price;
+      const shareRatio = itemBaseValue / totalBaseValue;
+      const extraCostForLine = totalServicesCost * shareRatio;
+      return item.quantity > 0 ? extraCostForLine / item.quantity : 0;
+    };
+
+    if (opType === 'Приход') {
+      if (totalServicesCost === 0) return parsedItems;
+      
+      return parsedItems.map(item => {
+        return {
+          ...item,
+          price: item.price + getServicesExtraPerUnit(item)
+        };
+      });
+    }
+
     if (opType !== 'Расход') return parsedItems;
 
     const pack = Number(packagingCost) || 0;
     const trans = Number(transportCost) || 0;
     const other = Number(otherCost) || 0;
 
-    if (pack === 0 && trans === 0 && other === 0) return parsedItems;
+    if (pack === 0 && trans === 0 && other === 0 && totalServicesCost === 0) return parsedItems;
 
     const totalQuantity = parsedItems.reduce((acc, item) => acc + item.quantity, 0);
 
@@ -55,21 +86,28 @@ export const ConfirmModal: React.FC = () => {
       const transPerUnit = transportDist === 'unit' ? trans : (totalQuantity > 0 ? trans / totalQuantity : 0);
       const otherPerUnit = otherDist === 'unit' ? other : (totalQuantity > 0 ? other / totalQuantity : 0);
       
-      const extraPerUnit = packPerUnit + transPerUnit + otherPerUnit;
+      const extraPerUnit = packPerUnit + transPerUnit + otherPerUnit + getServicesExtraPerUnit(item);
       
       return {
         ...item,
         price: item.price + extraPerUnit
       };
     });
-  }, [parsedItems, opType, packagingCost, packagingDist, transportCost, transportDist, otherCost, otherDist]);
+  }, [parsedItems, opType, packagingCost, packagingDist, transportCost, transportDist, otherCost, otherDist, activeServices, selectedServices]);
 
   if (!parsedItems) return null;
 
   const isConfirmDisabled = isProcessing || finalItems.length === 0 || finalItems.some(item => item.status === 'error');
 
   const handleConfirm = async () => {
-    const success = await commitTransaction(finalItems, opType, uploadDestination, deliveryDate);
+    let finalDestination = uploadDestination;
+    const selectedActiveServices = activeServices.filter(s => selectedServices[s.id]);
+    if (selectedActiveServices.length > 0) {
+      const servicesText = selectedActiveServices.map(s => `${s.name} (${s.cost}₽)`).join(', ');
+      finalDestination = finalDestination ? `${finalDestination} [Услуги: ${servicesText}]` : `[Услуги: ${servicesText}]`;
+    }
+    
+    const success = await commitTransaction(finalItems, opType, finalDestination, deliveryDate);
     if (success) {
       setShowConfirmModal(false);
       setParsedItems(null);
@@ -104,6 +142,34 @@ export const ConfirmModal: React.FC = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto p-8 space-y-8">
+          {(opType === 'Приход' || opType === 'Расход') && activeServices.length > 0 && (
+            <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 space-y-4">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2 text-indigo-600 font-bold">
+                  <Calculator size={20} />
+                  Дополнительные услуги подрядчиков
+                </div>
+                <div className="text-xs font-bold text-indigo-500 uppercase tracking-widest bg-indigo-100 px-3 py-1 rounded-full">Увеличивают себестоимость</div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {activeServices.map(service => (
+                  <label key={service.id} className="flex items-center gap-4 p-4 bg-white rounded-2xl border border-indigo-50 shadow-sm cursor-pointer hover:border-indigo-200 transition-colors group">
+                    <input 
+                      type="checkbox"
+                      checked={!!selectedServices[service.id]}
+                      onChange={(e) => setSelectedServices(prev => ({ ...prev, [service.id]: e.target.checked }))}
+                      className="w-5 h-5 text-indigo-600 rounded-lg border-slate-300 focus:ring-indigo-500"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-slate-800 truncate group-hover:text-indigo-700 transition-colors">{service.name}</div>
+                      <div className="text-sm font-medium text-indigo-600">{formatCurrency(service.cost)} ₽</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
           {opType === 'Расход' && (
             <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 space-y-4">
               <div className="flex items-center gap-2 text-indigo-600 font-bold mb-4">
@@ -240,22 +306,36 @@ export const ConfirmModal: React.FC = () => {
                     </td>
                     <td className="px-6 py-4 text-right font-medium whitespace-nowrap">
                       {opType === 'Приход' ? (
-                        <div className="flex items-center justify-end gap-1">
-                          <input 
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={item.price === 0 ? '' : item.price}
-                            onChange={(e) => {
-                              const val = Number(e.target.value) || 0;
-                              updateParsedItem(idx, { price: val < 0 ? 0 : val });
-                            }}
-                            className="w-28 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
-                          />
-                          <span>₽</span>
+                        <div className="flex flex-col items-end gap-1">
+                          <div className="flex items-center justify-end gap-1">
+                            <input 
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={parsedItems[idx].price === 0 ? '' : parsedItems[idx].price}
+                              onChange={(e) => {
+                                const val = Number(e.target.value) || 0;
+                                updateParsedItem(idx, { price: val < 0 ? 0 : val });
+                              }}
+                              className="w-28 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                            />
+                            <span>₽</span>
+                          </div>
+                          {item.price > parsedItems[idx].price && (
+                            <div className="text-[10px] text-indigo-500 font-bold" title="Цена с учетом услуг подрядчиков">
+                              Итог: {formatCurrency(item.price)} ₽
+                            </div>
+                          )}
                         </div>
                       ) : (
-                        <span>{formatCurrency(item.price)} ₽</span>
+                        <div className="flex flex-col items-end gap-1">
+                          <span>{formatCurrency(parsedItems[idx].price)} ₽</span>
+                          {item.price > parsedItems[idx].price && (
+                            <div className="text-[10px] text-indigo-500 font-bold" title="Цена с учетом дополнительных расходов (услуги, упаковка)">
+                              Итог: {formatCurrency(item.price)} ₽
+                            </div>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.quantity * item.price)} ₽</td>

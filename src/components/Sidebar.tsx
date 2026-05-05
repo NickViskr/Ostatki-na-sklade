@@ -9,7 +9,8 @@ import {
   Truck,
   Users,
   LogOut,
-  Trash2
+  Trash2,
+  Book
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 
@@ -33,6 +34,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: 'shipment', label: 'Отгрузка', icon: Truck },
     { id: 'history', label: 'История', icon: History },
     { id: 'skus', label: 'SKU База', icon: BookOpen },
+    { id: 'directory', label: 'Справочник', icon: Book },
     ...(isCurrentUserAdmin ? [
       { id: 'users', label: 'Пользователи', icon: Users },
       { id: 'deleted', label: 'Удаленное', icon: Trash2 },
