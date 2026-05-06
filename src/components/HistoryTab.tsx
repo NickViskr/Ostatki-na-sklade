@@ -451,7 +451,55 @@ export const HistoryTab: React.FC = () => {
                 <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
                   {formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost)} ₽
                 </td>
-                <td className="px-3 py-3 text-xs text-slate-500 max-w-[150px] truncate">{t.destination}</td>
+                <td className="px-3 py-3 text-[11px] text-slate-500 max-w-[240px] whitespace-normal">
+                  {(() => {
+                    if (!t.destination) return <span className="text-slate-400">-</span>;
+                    
+                    const bracketMatch = t.destination.match(/(.*?)\[(.*?)\]$/);
+                    const stringMatch = t.destination.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
+
+                    let main = '';
+                    let tags: string[] = [];
+
+                    if (bracketMatch) {
+                      main = bracketMatch[1].trim();
+                      tags = bracketMatch[2].split('|').map(s => s.trim());
+                    } else if (stringMatch) {
+                      main = stringMatch[1].trim();
+                      if (stringMatch[2]) tags = [stringMatch[2].trim()];
+                    } else {
+                      main = t.destination.trim();
+                    }
+
+                    if (tags.length === 0) {
+                      return <span className="font-medium text-slate-700">{main}</span>;
+                    }
+
+                    return (
+                      <div className="flex flex-col gap-1.5 w-full">
+                        {main && <span className="font-medium text-slate-700">{main}</span>}
+                        <div className="flex flex-col gap-1">
+                          {tags.map((tag, idx) => {
+                            const isServices = tag.toLowerCase().startsWith('услуги') || tag.toLowerCase().startsWith('доп');
+                            const isPack = tag.toLowerCase().startsWith('упаковка');
+                            const isOther = tag.toLowerCase().startsWith('прочее');
+                            
+                            let bgClass = "bg-slate-50 text-slate-500 border border-slate-100";
+                            if (isServices) bgClass = "bg-indigo-50 text-indigo-600 border border-indigo-100";
+                            if (isPack) bgClass = "bg-emerald-50 text-emerald-600 border border-emerald-100";
+                            if (isOther) bgClass = "bg-rose-50 text-rose-600 border border-rose-100";
+
+                            return (
+                              <span key={idx} className={`text-[10px] px-2 py-1 rounded w-fit leading-normal ${bgClass}`}>
+                                {tag.replace(/^(Доп\. услуги:|Услуги:)\s*/, 'Услуги: ')}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </td>
                 <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
                   {t.deliveryDate ? formatDate(t.deliveryDate) : '-'}
                 </td>

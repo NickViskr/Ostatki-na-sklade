@@ -7,13 +7,21 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 export const DashSettingsModal: React.FC = () => {
   const showDashSettingsModal = useUIStore((state) => state.showDashSettingsModal);
   const setShowDashSettingsModal = useUIStore((state) => state.setShowDashSettingsModal);
-  const dashSelectedSkus = useUIStore((state) => state.dashSelectedSkus);
-  const setDashSelectedSkus = useUIStore((state) => state.setDashSelectedSkus);
+  const dashSelectedSkus = useUIStore((state) => state.dashTableSelectedSkus);
+  const setDashSelectedSkus = useUIStore((state) => state.setDashTableSelectedSkus);
   const dashTurnoverDays = useUIStore((state) => state.dashTurnoverDays);
   const setDashTurnoverDays = useUIStore((state) => state.setDashTurnoverDays);
   
   const skus = useWarehouseStore((state) => state.skus);
+  const stock = useWarehouseStore((state) => state.stock);
   
+  const uniqueSkus = useMemo(() => {
+    return Array.from(new Set([
+      ...skus.map(s => s.sku),
+      ...stock.map(s => s.article)
+    ])).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  }, [skus, stock]);
+
   const handleToggleSku = (sku: string) => {
     if (dashSelectedSkus.includes(sku)) {
       setDashSelectedSkus(dashSelectedSkus.filter(s => s !== sku));
@@ -23,10 +31,10 @@ export const DashSettingsModal: React.FC = () => {
   };
 
   const handleSelectAll = () => {
-    if (dashSelectedSkus.length === skus.length) {
+    if (dashSelectedSkus.length === uniqueSkus.length) {
       setDashSelectedSkus([]);
     } else {
-      setDashSelectedSkus(skus.map(s => s.sku));
+      setDashSelectedSkus(uniqueSkus);
     }
   };
 
@@ -77,7 +85,7 @@ export const DashSettingsModal: React.FC = () => {
                   onClick={handleSelectAll}
                   className="text-xs font-medium text-indigo-600 hover:text-indigo-700"
                 >
-                  {dashSelectedSkus.length === skus.length ? 'Снять все' : 'Выбрать все'}
+                  {dashSelectedSkus.length === uniqueSkus.length && uniqueSkus.length > 0 ? 'Снять все' : 'Выбрать все'}
                 </button>
               </div>
               <p className="text-xs text-slate-500 mb-3">
@@ -85,22 +93,22 @@ export const DashSettingsModal: React.FC = () => {
               </p>
               
               <div className="border border-slate-200 rounded-xl overflow-hidden max-h-60 overflow-y-auto">
-                {skus.length === 0 ? (
+                {uniqueSkus.length === 0 ? (
                   <div className="p-4 text-center text-sm text-slate-500 italic">
                     Список SKU пуст
                   </div>
                 ) : (
                   <div className="divide-y divide-slate-100">
-                    {skus.map((sku) => (
+                    {uniqueSkus.map((sku) => (
                       <div 
-                        key={sku.sku} 
-                        onClick={() => handleToggleSku(sku.sku)}
+                        key={sku} 
+                        onClick={() => handleToggleSku(sku)}
                         className="flex items-center gap-3 p-3 hover:bg-slate-50 cursor-pointer transition-colors"
                       >
-                        <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${dashSelectedSkus.includes(sku.sku) ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
-                          {dashSelectedSkus.includes(sku.sku) && <Check size={14} strokeWidth={3} />}
+                        <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${dashSelectedSkus.includes(sku) ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
+                          {dashSelectedSkus.includes(sku) && <Check size={14} strokeWidth={3} />}
                         </div>
-                        <span className="text-sm font-medium text-slate-700">{sku.sku}</span>
+                        <span className="text-sm font-medium text-slate-700">{sku}</span>
                       </div>
                     ))}
                   </div>

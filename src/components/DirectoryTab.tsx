@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { Book, Plus, Edit2, Trash2, Check, X, ShieldAlert } from 'lucide-react';
+import { useSettingsStore } from '../store/useSettingsStore';
+import { Book, Plus, Edit2, Trash2, Check, X, ShieldAlert, ArrowUp, ArrowDown } from 'lucide-react';
 import { formatCurrency } from '../lib/utils';
 import { toast } from 'sonner';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -13,6 +14,9 @@ export const DirectoryTab: React.FC = () => {
   const handleAddService = useWarehouseStore((state) => state.handleAddService);
   const handleUpdateService = useWarehouseStore((state) => state.handleUpdateService);
   const handleDeleteService = useWarehouseStore((state) => state.handleDeleteService);
+  
+  const serviceOrderIds = useSettingsStore(state => state.serviceOrderIds);
+  const setServiceOrderIds = useSettingsStore(state => state.setServiceOrderIds);
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
@@ -39,7 +43,9 @@ export const DirectoryTab: React.FC = () => {
       return;
     }
     const success = await handleAddService(form.name.trim(), cost);
-    if (success) resetForm();
+    if (success) {
+      resetForm();
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -57,7 +63,40 @@ export const DirectoryTab: React.FC = () => {
     if (success) resetForm();
   };
 
-  const activeServices = services.filter(s => s.isActive);
+  const activeServices = React.useMemo(() => {
+    let active = services.filter(s => s.isActive);
+    if (serviceOrderIds && serviceOrderIds.length > 0) {
+      active.sort((a, b) => {
+        const indexA = serviceOrderIds.indexOf(a.id);
+        const indexB = serviceOrderIds.indexOf(b.id);
+        if (indexA === -1 && indexB === -1) return 0;
+        if (indexA === -1) return 1;
+        if (indexB === -1) return -1;
+        return indexA - indexB;
+      });
+    }
+    return active;
+  }, [services, serviceOrderIds]);
+
+  const moveService = (index: number, direction: 'up' | 'down') => {
+    const newActive = [...activeServices];
+    if (direction === 'up' && index > 0) {
+      [newActive[index - 1], newActive[index]] = [newActive[index], newActive[index - 1]];
+    } else if (direction === 'down' && index < newActive.length - 1) {
+      [newActive[index], newActive[index + 1]] = [newActive[index + 1], newActive[index]];
+    } else {
+      return;
+    }
+    
+    const newOrderIds = newActive.map(s => s.id);
+    setServiceOrderIds(newOrderIds);
+    
+    // Save to global settings
+    const currentModel = useSettingsStore.getState().geminiModel;
+    const modelStrToSave = `${currentModel}|order=${JSON.stringify(newOrderIds)}`;
+    const geminiKey = useSettingsStore.getState().geminiKey;
+    useWarehouseStore.getState().fetchGas('saveGlobalSettings', { data: { geminiKey, geminiModel: modelStrToSave } });
+  };
 
   return (
     <motion.div 
@@ -206,7 +245,24 @@ export const DirectoryTab: React.FC = () => {
                     </td>
                     {isAdmin && (
                       <td className="px-6 py-4 text-right">
-                        <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex justify-end gap-1 opacity-100 transition-opacity">
+                          <button 
+                            onClick={() => moveService(activeServices.indexOf(service), 'up')} 
+                            disabled={activeServices.indexOf(service) === 0}
+                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors disabled:opacity-30 disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                            title="Поднять"
+                          >
+                            <ArrowUp className="w-4 h-4" />
+                          </button>
+                          <button 
+                            onClick={() => moveService(activeServices.indexOf(service), 'down')} 
+                            disabled={activeServices.indexOf(service) === activeServices.length - 1}
+                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors disabled:opacity-30 disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                            title="Опустить"
+                          >
+                            <ArrowDown className="w-4 h-4" />
+                          </button>
+                          <div className="w-4"></div> {/* Separator */}
                           <button 
                             onClick={() => {
                               setEditingId(service.id);

@@ -1,93 +1,119 @@
-import React, { useState, useMemo } from 'react';
-import { motion } from 'motion/react';
-import { useWarehouseStore } from '../store/useWarehouseStore';
-import { useUIStore } from '../store/useUIStore';
-import { Package, Truck, TrendingDown, Calendar, Filter, Edit3, Trash2, ChevronLeft, ChevronRight, Download } from 'lucide-react';
-import { ConfirmDialog } from './ConfirmDialog';
-import { formatCurrency } from '../lib/utils';
+import React, { useState, useMemo } from "react";
+import { motion } from "motion/react";
+import { useWarehouseStore } from "../store/useWarehouseStore";
+import { useUIStore } from "../store/useUIStore";
+import {
+  Package,
+  Truck,
+  TrendingDown,
+  Calendar,
+  Filter,
+  Edit3,
+  Trash2,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+} from "lucide-react";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { formatCurrency } from "../lib/utils";
 
 export const ShipmentCostTab: React.FC = () => {
   const transactions = useWarehouseStore((state) => state.transactions);
-  const handleDeleteTransaction = useWarehouseStore((state) => state.handleDeleteTransaction);
-  
+  const handleDeleteTransaction = useWarehouseStore(
+    (state) => state.handleDeleteTransaction,
+  );
+
   const setEditingTrans = useUIStore((state) => state.setEditingTrans);
-  const setShowEditTransModal = useUIStore((state) => state.setShowEditTransModal);
-  
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [destinationFilter, setDestinationFilter] = useState('');
-  
+  const setShowEditTransModal = useUIStore(
+    (state) => state.setShowEditTransModal,
+  );
+
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [destinationFilter, setDestinationFilter] = useState("");
+
   const [transToDelete, setTransToDelete] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
-  const handleDeleteMultipleTransactions = useWarehouseStore((state) => state.handleDeleteMultipleTransactions);
+  const handleDeleteMultipleTransactions = useWarehouseStore(
+    (state) => state.handleDeleteMultipleTransactions,
+  );
 
   const uniqueDestinations = useMemo(() => {
-    return Array.from(new Set(transactions.filter(t => t.type === 'Расход').map(t => t.destination))).filter(Boolean).sort();
+    return Array.from(
+      new Set(
+        transactions
+          .filter((t) => t.type === "Расход")
+          .map((t) => t.destination),
+      ),
+    )
+      .filter(Boolean)
+      .sort();
   }, [transactions]);
 
   // We only care about 'Расход' transactions for shipment costs
   const shipmentTransactions = useMemo(() => {
     return transactions
-      .filter(t => t.type === 'Расход')
-      .filter(t => {
-        if (destinationFilter && t.destination !== destinationFilter) return false;
-        
+      .filter((t) => t.type === "Расход")
+      .filter((t) => {
+        if (destinationFilter && t.destination !== destinationFilter)
+          return false;
+
         if (!dateFrom && !dateTo) return true;
-        
+
         let tDate = new Date(t.date);
-        if (isNaN(tDate.getTime()) && t.date.includes('.')) {
-          const parts = t.date.split(',')[0].trim().split('.');
+        if (isNaN(tDate.getTime()) && t.date.includes(".")) {
+          const parts = t.date.split(",")[0].trim().split(".");
           if (parts.length === 3) {
             tDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00`);
           }
         }
-        
+
         if (isNaN(tDate.getTime())) return true;
-        
+
         const timestamp = tDate.getTime();
-        
+
         if (dateFrom) {
           const fromTimestamp = new Date(dateFrom).getTime();
           if (timestamp < fromTimestamp) return false;
         }
-        
+
         if (dateTo) {
           const toDate = new Date(dateTo);
           toDate.setHours(23, 59, 59, 999);
           if (timestamp > toDate.getTime()) return false;
         }
-        
+
         return true;
       })
       .sort((a, b) => {
         let aDate = new Date(a.date);
-        if (isNaN(aDate.getTime()) && a.date.includes('.')) {
-          const parts = a.date.split(',')[0].trim().split('.');
+        if (isNaN(aDate.getTime()) && a.date.includes(".")) {
+          const parts = a.date.split(",")[0].trim().split(".");
           aDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00`);
         }
         let bDate = new Date(b.date);
-        if (isNaN(bDate.getTime()) && b.date.includes('.')) {
-          const parts = b.date.split(',')[0].trim().split('.');
+        if (isNaN(bDate.getTime()) && b.date.includes(".")) {
+          const parts = b.date.split(",")[0].trim().split(".");
           bDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00`);
         }
         return bDate.getTime() - aDate.getTime();
       });
   }, [transactions, dateFrom, dateTo, destinationFilter]);
 
-  const formatDateStr = (dateRaw?: string, fallback = '') => {
+  const formatDateStr = (dateRaw?: string, fallback = "") => {
     if (!dateRaw) return fallback;
-    if (dateRaw.includes('.')) {
-      return dateRaw.split(',')[0].trim().replace(/\./g, '-');
+    if (dateRaw.includes(".")) {
+      return dateRaw.split(",")[0].trim().replace(/\./g, "-");
     } else {
       const d = new Date(dateRaw);
       if (!isNaN(d.getTime())) {
-        const day = String(d.getDate()).padStart(2, '0');
-        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, "0");
+        const month = String(d.getMonth() + 1).padStart(2, "0");
         const year = d.getFullYear();
         return `${day}-${month}-${year}`;
       } else {
-        return dateRaw.split('T')[0];
+        return dateRaw.split("T")[0];
       }
     }
   };
@@ -95,68 +121,84 @@ export const ShipmentCostTab: React.FC = () => {
   // Group by date and destination to show shipments as batches
   const groupedShipments = useMemo(() => {
     const groups: Record<string, typeof shipmentTransactions> = {};
-    
-    shipmentTransactions.forEach(t => {
-      const dateStr = formatDateStr(t.date, 'no-date');
-      const deliveryDateStr = formatDateStr(t.deliveryDate, 'no-date');
-      
+
+    shipmentTransactions.forEach((t) => {
+      const dateStr = formatDateStr(t.date, "no-date");
+      const deliveryDateStr = formatDateStr(t.deliveryDate, "no-date");
+
       const key = `${dateStr}_${deliveryDateStr}_${t.destination}`;
       if (!groups[key]) groups[key] = [];
       groups[key].push(t);
     });
 
-    return Object.entries(groups).map(([key, items]) => {
-      const firstItem = items[0];
-      const dateStr = formatDateStr(firstItem.date, 'no-date');
-      const deliveryDateStr = formatDateStr(firstItem.deliveryDate, 'no-date');
-      const destination = firstItem.destination || '';
-      
-      const totalCost = items.reduce((sum, item) => sum + item.total, 0);
-      const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
-      
-      return {
-        id: key,
-        date: firstItem.date,
-        dateStr: dateStr === 'no-date' ? '' : dateStr,
-        destination,
-        totalCost,
-        totalItems,
-        deliveryDateStr: deliveryDateStr === 'no-date' ? '' : deliveryDateStr,
-        items
-      };
-    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return Object.entries(groups)
+      .map(([key, items]) => {
+        const firstItem = items[0];
+        const dateStr = formatDateStr(firstItem.date, "no-date");
+        const deliveryDateStr = formatDateStr(
+          firstItem.deliveryDate,
+          "no-date",
+        );
+        const destination = firstItem.destination || "";
+
+        const totalCost = items.reduce((sum, item) => sum + item.total, 0);
+        const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
+
+        return {
+          id: key,
+          date: firstItem.date,
+          dateStr: dateStr === "no-date" ? "" : dateStr,
+          destination,
+          totalCost,
+          totalItems,
+          deliveryDateStr: deliveryDateStr === "no-date" ? "" : deliveryDateStr,
+          items,
+        };
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [shipmentTransactions]);
 
   const exportToCSV = () => {
     if (shipmentTransactions.length === 0) return;
-    
-    const headers = ['Дата заведения', 'Дата поставки', 'Объект (Куда)', 'Артикул', 'Количество', 'Себестоимость ед.', 'Итого', 'Комментарий'];
-    
+
+    const headers = [
+      "Дата заведения",
+      "Дата поставки",
+      "Объект (Куда)",
+      "Артикул",
+      "Количество",
+      "Себестоимость ед.",
+      "Итого",
+      "Комментарий",
+    ];
+
     const csvContent = [
-      headers.join(';'),
-      ...shipmentTransactions.map(t => {
+      headers.join(";"),
+      ...shipmentTransactions.map((t) => {
         return [
           formatDateStr(t.date),
           formatDateStr(t.deliveryDate),
-          `"${(t.destination || '').replace(/"/g, '""')}"`,
-          `"${(t.article || '').replace(/"/g, '""')}"`,
+          `"${(t.destination || "").replace(/"/g, '""')}"`,
+          `"${(t.article || "").replace(/"/g, '""')}"`,
           t.quantity,
-          (t.price || 0).toFixed(2).replace('.', ','),
-          (t.total || 0).toFixed(2).replace('.', ','),
-          `"${(t.comment || '').replace(/"/g, '""')}"`
-        ].join(';');
-      })
-    ].join('\n');
-    
+          (t.price || 0).toFixed(2).replace(".", ","),
+          (t.total || 0).toFixed(2).replace(".", ","),
+          `"${(t.comment || "").replace(/"/g, '""')}"`,
+        ].join(";");
+      }),
+    ].join("\n");
+
     // Add BOM for Excel compatibility with UTF-8
-    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(["\ufeff" + csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    const link = document.createElement("a");
     link.href = url;
-    
-    const timestamp = new Date().toISOString().split('T')[0];
+
+    const timestamp = new Date().toISOString().split("T")[0];
     link.download = `shipments_${timestamp}.csv`;
-    
+
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -181,9 +223,12 @@ export const ShipmentCostTab: React.FC = () => {
     return groupedShipments.slice(start, start + pageSize);
   }, [groupedShipments, currentPage, pageSize]);
 
-  const handleSelectAllGroup = (groupItems: typeof shipmentTransactions, checked: boolean) => {
+  const handleSelectAllGroup = (
+    groupItems: typeof shipmentTransactions,
+    checked: boolean,
+  ) => {
     const newSet = new Set(selectedIds);
-    groupItems.forEach(t => {
+    groupItems.forEach((t) => {
       if (checked) newSet.add(t.id);
       else newSet.delete(t.id);
     });
@@ -201,7 +246,9 @@ export const ShipmentCostTab: React.FC = () => {
 
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return;
-    const success = await handleDeleteMultipleTransactions(Array.from(selectedIds));
+    const success = await handleDeleteMultipleTransactions(
+      Array.from(selectedIds),
+    );
     if (success) {
       setSelectedIds(new Set());
     }
@@ -209,7 +256,7 @@ export const ShipmentCostTab: React.FC = () => {
   };
 
   return (
-    <motion.div 
+    <motion.div
       key="shipment-cost"
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
@@ -219,9 +266,11 @@ export const ShipmentCostTab: React.FC = () => {
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div className="space-y-2">
           <h2 className="text-3xl font-bold">Себестоимость отгрузки</h2>
-          <p className="text-slate-500">Анализ себестоимости отгруженных товаров с учетом доп. расходов</p>
+          <p className="text-slate-500">
+            Анализ себестоимости отгруженных товаров с учетом доп. расходов
+          </p>
         </div>
-        
+
         <div className="flex flex-wrap items-center gap-4">
           {currentSelectionCount > 0 && (
             <button
@@ -244,45 +293,53 @@ export const ShipmentCostTab: React.FC = () => {
           </button>
 
           <div className="flex flex-wrap items-center gap-2 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 w-full md:w-auto">
-          <div className="flex items-center gap-2 px-2 border-r border-slate-100 text-slate-400">
-            <Filter size={16} />
-            <span className="text-sm font-medium hidden sm:inline">Фильтр:</span>
-          </div>
-          
-          <select
-            value={destinationFilter}
-            onChange={(e) => setDestinationFilter(e.target.value)}
-            className="px-2 py-1 outline-none text-sm bg-transparent font-medium border-r border-slate-100 w-[160px] truncate text-slate-600 focus:text-slate-900"
-          >
-            <option value="">Все объекты</option>
-            {uniqueDestinations.map(d => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
+            <div className="flex items-center gap-2 px-2 border-r border-slate-100 text-slate-400">
+              <Filter size={16} />
+              <span className="text-sm font-medium hidden sm:inline">
+                Фильтр:
+              </span>
+            </div>
 
-          <input 
-            type="date" 
-            value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
-            className="px-2 py-1 outline-none text-sm bg-transparent font-medium"
-            title="С даты"
-          />
-          <span className="text-slate-300">-</span>
-          <input 
-            type="date" 
-            value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
-            className="px-2 py-1 outline-none text-sm bg-transparent font-medium"
-            title="По дату"
-          />
-          {(dateFrom || dateTo || destinationFilter) && (
-            <button 
-              onClick={() => { setDateFrom(''); setDateTo(''); setDestinationFilter(''); }}
-              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-bold transition-colors ml-1 whitespace-nowrap"
+            <select
+              value={destinationFilter}
+              onChange={(e) => setDestinationFilter(e.target.value)}
+              className="px-2 py-1 outline-none text-sm bg-transparent font-medium border-r border-slate-100 w-[160px] truncate text-slate-600 focus:text-slate-900"
             >
-              Сбросить
-            </button>
-          )}
+              <option value="">Все объекты</option>
+              {uniqueDestinations.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="px-2 py-1 outline-none text-sm bg-transparent font-medium"
+              title="С даты"
+            />
+            <span className="text-slate-300">-</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="px-2 py-1 outline-none text-sm bg-transparent font-medium"
+              title="По дату"
+            />
+            {(dateFrom || dateTo || destinationFilter) && (
+              <button
+                onClick={() => {
+                  setDateFrom("");
+                  setDateTo("");
+                  setDestinationFilter("");
+                }}
+                className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-bold transition-colors ml-1 whitespace-nowrap"
+              >
+                Сбросить
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -293,8 +350,12 @@ export const ShipmentCostTab: React.FC = () => {
             <TrendingDown size={28} />
           </div>
           <div>
-            <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">Общая себестоимость</div>
-            <div className="text-2xl font-bold text-slate-900">{formatCurrency(totalShipmentCost)} ₽</div>
+            <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">
+              Общая себестоимость
+            </div>
+            <div className="text-2xl font-bold text-slate-900">
+              {formatCurrency(totalShipmentCost)} ₽
+            </div>
           </div>
         </div>
         <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex items-center gap-4">
@@ -302,9 +363,14 @@ export const ShipmentCostTab: React.FC = () => {
             <Package size={28} />
           </div>
           <div>
-            <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">Отгружено товаров</div>
+            <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">
+              Отгружено товаров
+            </div>
             <div className="text-2xl font-bold text-slate-900">
-              {shipmentTransactions.reduce((sum, t) => sum + t.quantity, 0).toLocaleString()} шт
+              {shipmentTransactions
+                .reduce((sum, t) => sum + t.quantity, 0)
+                .toLocaleString()}{" "}
+              шт
             </div>
           </div>
         </div>
@@ -313,8 +379,12 @@ export const ShipmentCostTab: React.FC = () => {
             <Truck size={28} />
           </div>
           <div>
-            <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">Всего отгрузок</div>
-            <div className="text-2xl font-bold text-slate-900">{groupedShipments.length}</div>
+            <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">
+              Всего отгрузок
+            </div>
+            <div className="text-2xl font-bold text-slate-900">
+              {groupedShipments.length}
+            </div>
           </div>
         </div>
       </div>
@@ -323,17 +393,22 @@ export const ShipmentCostTab: React.FC = () => {
         <div className="p-6 border-b border-slate-100 bg-slate-50/50">
           <h3 className="text-lg font-bold">История отгрузок</h3>
         </div>
-        
+
         {groupedShipments.length === 0 ? (
           <div className="p-12 text-center text-slate-500">
             <Package size={48} className="mx-auto mb-4 opacity-20" />
             <p className="text-lg font-medium">Нет данных об отгрузках</p>
-            <p className="text-sm">Оформите расход товара, чтобы увидеть расчет себестоимости.</p>
+            <p className="text-sm">
+              Оформите расход товара, чтобы увидеть расчет себестоимости.
+            </p>
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
             {displayedGroups.map((group) => (
-              <div key={group.id} className="p-6 hover:bg-slate-50/50 transition-colors">
+              <div
+                key={group.id}
+                className="p-6 hover:bg-slate-50/50 transition-colors"
+              >
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4">
                   <div className="flex items-center gap-4">
                     <div className="w-12 h-12 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600">
@@ -346,54 +421,131 @@ export const ShipmentCostTab: React.FC = () => {
                           Поставка: {group.deliveryDateStr}
                         </div>
                       )}
-                      <div className="text-sm text-slate-500 flex items-center gap-2">
-                        <Truck size={14} /> {group.destination}
+                      <div className="text-[13px] text-slate-600 flex items-start gap-2 max-w-full">
+                        <Truck size={16} className="mt-0.5 min-w-[16px] text-slate-400" />
+                        {(() => {
+                          if (!group.destination) return <span>-</span>;
+                          
+                          // Handle new bracket format block [Part1 | Part2] or old formats
+                          const bracketMatch = group.destination.match(/(.*?)\[(.*?)\]$/);
+                          const stringMatch = group.destination.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
+
+                          let main = '';
+                          let tags: string[] = [];
+
+                          if (bracketMatch) {
+                            main = bracketMatch[1].trim();
+                            tags = bracketMatch[2].split('|').map(s => s.trim());
+                          } else if (stringMatch) {
+                            main = stringMatch[1].trim();
+                            if (stringMatch[2]) tags = [stringMatch[2].trim()];
+                          } else {
+                            main = group.destination.trim();
+                          }
+
+                          if (tags.length === 0) {
+                            return <span className="whitespace-normal break-words font-medium">{main}</span>;
+                          }
+
+                          return (
+                            <div className="flex flex-col gap-1.5 w-full">
+                              {main && <span className="font-medium text-slate-800 text-sm">{main}</span>}
+                              <div className="flex flex-col gap-1.5">
+                                {tags.map((tag, idx) => {
+                                  const isServices = tag.toLowerCase().startsWith('услуги') || tag.toLowerCase().startsWith('доп');
+                                  const isPack = tag.toLowerCase().startsWith('упаковка');
+                                  const isOther = tag.toLowerCase().startsWith('прочее');
+                                  
+                                  let bgClass = "bg-slate-50 text-slate-500 border border-slate-100";
+                                  if (isServices) bgClass = "bg-indigo-50 text-indigo-700 border border-indigo-100";
+                                  if (isPack) bgClass = "bg-emerald-50 text-emerald-700 border border-emerald-100";
+                                  if (isOther) bgClass = "bg-rose-50 text-rose-700 border border-rose-100";
+
+                                  return (
+                                    <span key={idx} className={`text-xs px-2 py-1.5 rounded-lg w-fit leading-normal shadow-sm font-medium ${bgClass}`}>
+                                      {tag.replace(/^(Доп\. услуги:|Услуги:)\s*/, 'Услуги: ')}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-2xl font-bold text-slate-900">{formatCurrency(group.totalCost)} ₽</div>
-                    <div className="text-sm text-slate-500">{group.totalItems} шт.</div>
+                    <div className="text-2xl font-bold text-slate-900">
+                      {formatCurrency(group.totalCost)} ₽
+                    </div>
+                    <div className="text-sm text-slate-500">
+                      {group.totalItems} шт.
+                    </div>
                   </div>
                 </div>
-                
+
                 <div className="mt-4 bg-slate-50 rounded-2xl p-4 border border-slate-100">
                   <table className="w-full text-left text-sm">
                     <thead>
                       <tr className="text-slate-400 uppercase text-[10px] tracking-widest">
                         <th className="pb-2 w-8 text-center">
-                          <input 
+                          <input
                             type="checkbox"
-                            checked={group.items.length > 0 && group.items.every(t => selectedIds.has(t.id))}
-                            onChange={(e) => handleSelectAllGroup(group.items, e.target.checked)}
+                            checked={
+                              group.items.length > 0 &&
+                              group.items.every((t) => selectedIds.has(t.id))
+                            }
+                            onChange={(e) =>
+                              handleSelectAllGroup(
+                                group.items,
+                                e.target.checked,
+                              )
+                            }
                             className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
                           />
                         </th>
                         <th className="pb-2 font-bold">Артикул</th>
                         <th className="pb-2 font-bold text-right">Кол-во</th>
-                        <th className="pb-2 font-bold text-right">Себест. ед.</th>
+                        <th className="pb-2 font-bold text-right">
+                          Себест. ед.
+                        </th>
                         <th className="pb-2 font-bold text-right">Итого</th>
-                        <th className="pb-2 font-bold text-right w-20">Действия</th>
+                        <th className="pb-2 font-bold text-right w-20">
+                          Действия
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100/50">
-                      {group.items.map(item => (
-                        <tr key={item.id} className={selectedIds.has(item.id) ? 'bg-indigo-50/50' : ''}>
+                      {group.items.map((item) => (
+                        <tr
+                          key={item.id}
+                          className={
+                            selectedIds.has(item.id) ? "bg-indigo-50/50" : ""
+                          }
+                        >
                           <td className="py-2 text-center">
-                            <input 
+                            <input
                               type="checkbox"
                               checked={selectedIds.has(item.id)}
                               onChange={() => toggleSelect(item.id)}
                               className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
                             />
                           </td>
-                          <td className="py-2 font-mono text-indigo-600 font-bold">{item.article}</td>
-                          <td className="py-2 text-right font-medium">{item.quantity}</td>
-                          <td className="py-2 text-right text-slate-600 whitespace-nowrap">{formatCurrency(item.price)} ₽</td>
-                          <td className="py-2 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.total)} ₽</td>
+                          <td className="py-2 font-mono text-indigo-600 font-bold">
+                            {item.article}
+                          </td>
+                          <td className="py-2 text-right font-medium">
+                            {item.quantity}
+                          </td>
+                          <td className="py-2 text-right text-slate-600 whitespace-nowrap">
+                            {formatCurrency(item.price)} ₽
+                          </td>
+                          <td className="py-2 text-right font-bold text-slate-900 whitespace-nowrap">
+                            {formatCurrency(item.total)} ₽
+                          </td>
                           <td className="py-2 text-right">
                             <div className="flex justify-end gap-1 border-l pl-2 border-slate-100">
-                              <button 
+                              <button
                                 onClick={() => {
                                   setEditingTrans(item);
                                   setShowEditTransModal(true);
@@ -403,7 +555,7 @@ export const ShipmentCostTab: React.FC = () => {
                               >
                                 <Edit3 size={14} />
                               </button>
-                              <button 
+                              <button
                                 onClick={() => setTransToDelete(item.id)}
                                 className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-all"
                                 title="Удалить"
@@ -421,13 +573,13 @@ export const ShipmentCostTab: React.FC = () => {
             ))}
           </div>
         )}
-        
+
         {groupedShipments.length > 0 && (
           <div className="flex items-center justify-between p-4 border-t border-slate-200 bg-slate-50 rounded-b-3xl">
             <div className="flex items-center gap-2">
               <span className="text-sm text-slate-500">Показывать по:</span>
-              <select 
-                value={pageSize} 
+              <select
+                value={pageSize}
                 onChange={(e) => {
                   setPageSize(Number(e.target.value));
                   setCurrentPage(1);
@@ -440,10 +592,10 @@ export const ShipmentCostTab: React.FC = () => {
                 <option value={150}>150</option>
               </select>
             </div>
-            
+
             <div className="flex items-center gap-2">
-              <button 
-                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                 disabled={currentPage === 1}
                 className="p-1 rounded-md hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
                 title="Предыдущая страница"
@@ -453,8 +605,10 @@ export const ShipmentCostTab: React.FC = () => {
               <span className="text-sm font-medium text-slate-600 px-2 min-w-[100px] text-center">
                 Стр. {currentPage} из {totalPages}
               </span>
-              <button 
-                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+              <button
+                onClick={() =>
+                  setCurrentPage((p) => Math.min(totalPages, p + 1))
+                }
                 disabled={currentPage === totalPages}
                 className="p-1 rounded-md hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
                 title="Следующая страница"
@@ -466,7 +620,7 @@ export const ShipmentCostTab: React.FC = () => {
         )}
       </div>
 
-      <ConfirmDialog 
+      <ConfirmDialog
         show={transToDelete !== null}
         title="Удаление отгрузки"
         message="Вы действительно хотите удалить эту позицию отгрузки? Действие нельзя отменить."
@@ -476,7 +630,7 @@ export const ShipmentCostTab: React.FC = () => {
         onCancel={() => setTransToDelete(null)}
       />
 
-      <ConfirmDialog 
+      <ConfirmDialog
         show={bulkDeleteConfirm}
         title="Удаление выбранных отгрузок"
         message={`Вы действительно хотите удалить ${currentSelectionCount} строк отгрузки из истории? Действие нельзя отменить. Товары будут соответственно удалены из истории.`}

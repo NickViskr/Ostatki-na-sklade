@@ -33,6 +33,8 @@ export interface SKUItem {
   price: number;
   minStock: number;
   pcsPerBox: number;
+  ozonBarcode?: string;
+  wbBarcode?: string;
 }
 
 export interface User {

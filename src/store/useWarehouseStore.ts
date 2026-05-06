@@ -446,20 +446,22 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
     
     set({ isProcessing: true });
     try {
-      const articleSet = new Set<string>();
-      stock.forEach(s => articleSet.add(s.article));
-      skus.forEach(s => articleSet.add(s.sku));
-      const articles = Array.from(articleSet);
+      const skuMap = new Map();
+      stock.forEach(s => skuMap.set(s.article, { sku: s.article, ozonBarcode: '', wbBarcode: '' }));
+      skus.forEach(s => skuMap.set(s.sku, { sku: s.sku, ozonBarcode: s.ozonBarcode || '', wbBarcode: s.wbBarcode || '' }));
+      const skuMapping = Array.from(skuMap.values());
       
       const feedbackStr = (typeof feedback === 'string' && feedback) ? feedback : aiFeedback;
-      const result = await parseInvoiceWithGemini(rawText, articles, geminiModel, feedbackStr, customPrompt);
+      const result = await parseInvoiceWithGemini(rawText, skuMapping, opType, geminiModel, feedbackStr, customPrompt);
+      const items = result.items || [];
+      const detectedMarketplace = result.detectedMarketplace || 'unknown';
       
-      if (!Array.isArray(result) || result.length === 0) {
+      if (!Array.isArray(items) || items.length === 0) {
         toast.error("ИИ не смог распознать товары в этом тексте. Попробуйте другой файл или уточните запрос.");
         return;
       }
 
-      const validated = result.map((item: any) => {
+      const validated = items.map((item: any) => {
         const stockItem = stock.find(s => s.article === item.article);
         let status: 'ok' | 'unknown' | 'error' = 'ok';
         let errorMsg = '';
@@ -487,7 +489,14 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
       });
 
       setParsedItems(validated);
-      setShowConfirmModal(true);
+      
+      const { uploadDestination, setShowMismatchModal, setMismatchData } = useUIStore.getState();
+      if (detectedMarketplace !== "unknown" && opType === 'Расход' && detectedMarketplace !== uploadDestination) {
+        setMismatchData({ detected: detectedMarketplace, selected: uploadDestination });
+        setShowMismatchModal(true);
+      } else {
+        setShowConfirmModal(true);
+      }
     } catch (e) {
       console.error(e);
       toast.error('Ошибка при обработке Gemini: ' + (e as Error).message);
@@ -514,7 +523,16 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
         get().fetchGas('getGlobalSettings').then(res => {
           if (res.status === 'success') {
             useSettingsStore.getState().setGeminiKey(res.data.geminiKey || '');
-            useSettingsStore.getState().setGeminiModel(res.data.geminiModel || 'gemini-1.5-flash');
+            const modelStr = res.data.geminiModel || 'gemini-1.5-flash';
+            if (modelStr.includes('|order=')) {
+              const [model, orderStr] = modelStr.split('|order=');
+              useSettingsStore.getState().setGeminiModel(model);
+              try {
+                useSettingsStore.getState().setServiceOrderIds(JSON.parse(orderStr));
+              } catch (e) {}
+            } else {
+              useSettingsStore.getState().setGeminiModel(modelStr);
+            }
           }
         });
       } else {
@@ -550,7 +568,16 @@ export const useWarehouseStore = create<WarehouseState>((set, get) => ({
         get().fetchGas('getGlobalSettings').then(res => {
           if (res.status === 'success') {
             useSettingsStore.getState().setGeminiKey(res.data.geminiKey || '');
-            useSettingsStore.getState().setGeminiModel(res.data.geminiModel || 'gemini-1.5-flash');
+            const modelStr = res.data.geminiModel || 'gemini-1.5-flash';
+            if (modelStr.includes('|order=')) {
+              const [model, orderStr] = modelStr.split('|order=');
+              useSettingsStore.getState().setGeminiModel(model);
+              try {
+                useSettingsStore.getState().setServiceOrderIds(JSON.parse(orderStr));
+              } catch (e) {}
+            } else {
+              useSettingsStore.getState().setGeminiModel(modelStr);
+            }
           }
         });
         

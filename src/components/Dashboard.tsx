@@ -50,6 +50,31 @@ export const Dashboard: React.FC = () => {
   const dashSelectedSkus = useUIStore((state) => state.dashSelectedSkus);
   const dashTurnoverDays = useUIStore((state) => state.dashTurnoverDays);
   const setShowDashSettingsModal = useUIStore((state) => state.setShowDashSettingsModal);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
+
+  useEffect(() => {
+    if (currentUser?.username) {
+      const saved = localStorage.getItem(`dashFilter_${currentUser.username}`);
+      if (saved) {
+        try {
+          setDashTableSelectedSkus(JSON.parse(saved));
+        } catch(e) {}
+      }
+    }
+  }, [currentUser?.username, setDashTableSelectedSkus]);
+
+  useEffect(() => {
+    if (currentUser?.username) {
+      localStorage.setItem(`dashFilter_${currentUser.username}`, JSON.stringify(dashTableSelectedSkus));
+    }
+  }, [dashTableSelectedSkus, currentUser?.username]);
+
+  const uniqueSkus = useMemo(() => {
+    return Array.from(new Set([
+      ...skus.map(s => s.sku),
+      ...stock.map(s => s.article)
+    ])).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  }, [skus, stock]);
 
   const filteredStock = useMemo(() => {
     return stock.filter(item => {
@@ -75,8 +100,8 @@ export const Dashboard: React.FC = () => {
         let bValue: any = b[sortConfig.key as keyof typeof b];
 
         if (typeof aValue === 'string') {
-          aValue = aValue.toLowerCase();
-          bValue = bValue.toLowerCase();
+          aValue = aValue.trim().toLowerCase();
+          bValue = bValue.trim().toLowerCase();
         }
 
         if (aValue < bValue) {
@@ -108,15 +133,11 @@ export const Dashboard: React.FC = () => {
       <ArrowDown size={14} className="inline text-indigo-600 ml-1" />;
   };
 
-  const dashboardStock = useMemo(() => {
-    if (dashSelectedSkus.length === 0) return stock;
-    return stock.filter(s => dashSelectedSkus.includes(s.article));
-  }, [stock, dashSelectedSkus]);
-
   const calculatedTurnover = useMemo(() => {
     const days = Number(dashTurnoverDays) || 1;
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - days);
+    cutoffDate.setHours(0, 0, 0, 0);
     
     let totalSales = 0;
     let totalStock = 0;
@@ -124,19 +145,26 @@ export const Dashboard: React.FC = () => {
     // Pre-calculate sales per article to avoid O(N*M) complexity
     const salesByArticle = new Map<string, number>();
     for (const t of transactions) {
-      if (t.type === 'Расход' && new Date(t.date) >= cutoffDate) {
-        salesByArticle.set(t.article, (salesByArticle.get(t.article) || 0) + t.quantity);
+      if (t.type === 'Расход') {
+        let tDate = new Date(t.date);
+        if (isNaN(tDate.getTime()) && t.date.includes('.')) {
+          const parts = t.date.split(',')[0].trim().split('.');
+          tDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00`);
+        }
+        if (tDate >= cutoffDate) {
+          salesByArticle.set(t.article, (salesByArticle.get(t.article) || 0) + t.quantity);
+        }
       }
     }
 
-    dashboardStock.forEach(s => {
+    filteredStock.forEach(s => {
       totalStock += s.quantity;
       totalSales += (salesByArticle.get(s.article) || 0);
     });
 
     if (totalSales === 0) return 0;
     return Math.round((totalStock / totalSales) * days);
-  }, [dashboardStock, transactions, dashTurnoverDays]);
+  }, [filteredStock, transactions, dashTurnoverDays]);
 
   return (
     <motion.div 
@@ -181,16 +209,16 @@ export const Dashboard: React.FC = () => {
           <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm min-w-0">
             <div className="text-xs font-bold text-slate-400 uppercase mb-1 truncate" title="Сумма товарного остатка">Сумма товарного остатка</div>
             <div className="text-2xl font-bold text-indigo-600 truncate">
-              {formatCurrency(dashboardStock.reduce((acc, s) => acc + s.capitalization, 0))} ₽
+              {Math.round(filteredStock.reduce((acc, s) => acc + s.capitalization, 0)).toLocaleString('ru-RU')} ₽
             </div>
-            <div className="text-[10px] text-slate-400 mt-2 italic truncate">Общая капитализация склада</div>
+            <div className="text-[10px] text-slate-400 mt-2 italic truncate">Общая капитализация выбранных</div>
           </div>
           <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm min-w-0">
             <div className="text-xs font-bold text-slate-400 uppercase mb-1 truncate" title="Общее количество товаров">Общее количество товаров</div>
             <div className="text-2xl font-bold text-slate-900 truncate">
-              {dashboardStock.reduce((acc, s) => acc + s.quantity, 0).toLocaleString()} ед.
+              {filteredStock.reduce((acc, s) => acc + s.quantity, 0).toLocaleString('ru-RU')} ед.
             </div>
-            <div className="text-[10px] text-slate-400 mt-2 italic truncate">Всего единиц на складе</div>
+            <div className="text-[10px] text-slate-400 mt-2 italic truncate">Всего единиц в выборке</div>
           </div>
           <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm min-w-0">
             <div className="text-xs font-bold text-slate-400 uppercase mb-1 truncate" title="Оборачиваемость">Оборачиваемость</div>
@@ -219,41 +247,41 @@ export const Dashboard: React.FC = () => {
 
           {isDropdownOpen && (
             <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-xl z-20 max-h-60 overflow-y-auto py-2">
-              {skus.length === 0 ? (
+              {uniqueSkus.length === 0 ? (
                 <div className="px-4 py-2 text-sm text-slate-500 italic text-center">Нет доступных артикулов</div>
               ) : (
                 <>
                   <div 
                     onClick={() => {
-                      if (dashTableSelectedSkus.length === skus.length && skus.length > 0) {
+                      if (dashTableSelectedSkus.length === uniqueSkus.length && uniqueSkus.length > 0) {
                         setDashTableSelectedSkus([]);
                       } else {
-                        setDashTableSelectedSkus(skus.map(s => s.sku));
+                        setDashTableSelectedSkus(uniqueSkus);
                       }
                     }}
                     className="flex items-center gap-3 px-4 py-2 hover:bg-slate-50 cursor-pointer transition-colors border-b border-slate-100 sticky top-0 bg-white z-10"
                   >
-                    <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${dashTableSelectedSkus.length === skus.length && skus.length > 0 ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
-                      {dashTableSelectedSkus.length === skus.length && skus.length > 0 && <Check size={12} strokeWidth={3} />}
+                    <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${dashTableSelectedSkus.length === uniqueSkus.length && uniqueSkus.length > 0 ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
+                      {dashTableSelectedSkus.length === uniqueSkus.length && uniqueSkus.length > 0 && <Check size={12} strokeWidth={3} />}
                     </div>
                     <span className="text-sm font-bold text-slate-700 truncate">Выбрать все</span>
                   </div>
-                  {skus.map(sku => (
+                  {uniqueSkus.map(sku => (
                     <div 
-                      key={sku.sku}
+                      key={sku}
                       onClick={() => {
-                        if (dashTableSelectedSkus.includes(sku.sku)) {
-                          setDashTableSelectedSkus(dashTableSelectedSkus.filter(s => s !== sku.sku));
+                        if (dashTableSelectedSkus.includes(sku)) {
+                          setDashTableSelectedSkus(dashTableSelectedSkus.filter(s => s !== sku));
                         } else {
-                          setDashTableSelectedSkus([...dashTableSelectedSkus, sku.sku]);
+                          setDashTableSelectedSkus([...dashTableSelectedSkus, sku]);
                         }
                       }}
                       className="flex items-center gap-3 px-4 py-2 hover:bg-slate-50 cursor-pointer transition-colors"
                     >
-                      <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${dashTableSelectedSkus.includes(sku.sku) ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
-                        {dashTableSelectedSkus.includes(sku.sku) && <Check size={12} strokeWidth={3} />}
+                      <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${dashTableSelectedSkus.includes(sku) ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'}`}>
+                        {dashTableSelectedSkus.includes(sku) && <Check size={12} strokeWidth={3} />}
                       </div>
-                      <span className="text-sm font-medium text-slate-700 truncate">{sku.sku}</span>
+                      <span className="text-sm font-medium text-slate-700 truncate">{sku}</span>
                     </div>
                   ))}
                 </>

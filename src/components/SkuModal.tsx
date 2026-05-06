@@ -84,6 +84,33 @@ export const SkuModal: React.FC = () => {
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="text-sm font-bold text-slate-500 uppercase">ШК товара (Ozon)</label>
+              <input 
+                type="text"
+                pattern="[\d-]*"
+                maxLength={20}
+                value={skuForm.ozonBarcode || ''}
+                onChange={(e) => setSkuForm({...skuForm, ozonBarcode: e.target.value})}
+                className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="Например: 1234567890"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-bold text-slate-500 uppercase">Баркод товара (Wildberries)</label>
+              <input 
+                type="text"
+                pattern="[\d-]*"
+                maxLength={20}
+                value={skuForm.wbBarcode || ''}
+                onChange={(e) => setSkuForm({...skuForm, wbBarcode: e.target.value})}
+                className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+                 placeholder="Например: 4607184654321"
+              />
+            </div>
+          </div>
+
           <div className="p-8 bg-slate-50 -mx-8 -mb-8 border-t border-slate-100 flex gap-4">
             <button 
               type="button"

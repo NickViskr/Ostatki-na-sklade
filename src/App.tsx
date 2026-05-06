@@ -26,6 +26,7 @@ import { ConfirmModal } from './components/ConfirmModal';
 import { EditTransModal } from './components/EditTransModal';
 import { SkuModal } from './components/SkuModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { MarketplaceMismatchModal } from './components/MarketplaceMismatchModal';
 
 // Stores
 import { useUIStore } from './store/useUIStore';
@@ -101,6 +102,7 @@ export default function App() {
 
       {/* Modals */}
       <AnimatePresence>
+        <MarketplaceMismatchModal key="mismatchModal" />
         {showConfirmModal && <ConfirmModal key="confirmModal" />}
         {showEditTransModal && <EditTransModal key="editTransModal" />}
         {showSkuModal && <SkuModal key="skuModal" />}

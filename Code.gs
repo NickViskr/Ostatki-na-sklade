@@ -320,13 +320,46 @@ function setupDatabase() {
   let skuSheet = ss.getSheetByName('SKU');
   if (!skuSheet) {
     skuSheet = ss.insertSheet('SKU');
-    skuSheet.appendRow(['SKU', 'ШТ/КОР', 'Упаковка', 'Коробка', 'Мин. остаток']);
+    skuSheet.appendRow(['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB']);
     skuSheet.getRange('A1:E1').setFontWeight('bold');
   } else {
-    const headers = skuSheet.getRange('A1:E1').getValues()[0];
-    if (headers[0] !== 'SKU') {
-      skuSheet.getRange('A1:E1').setValues([['SKU', 'ШТ/КОР', 'Упаковка', 'Коробка', 'Мин. остаток']]);
-      skuSheet.getRange('A1:E1').setFontWeight('bold');
+    const data = skuSheet.getDataRange().getValues();
+    if (data.length > 0) {
+      const headers = data[0].map(h => String(h).trim());
+      const expectedHeaders = ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB'];
+      const isPerfectMatch = expectedHeaders.every((h, i) => headers[i] === h);
+
+      if (!isPerfectMatch) {
+        const skuIdx = 0; // SKU is always 0
+        const pcsIdx = headers.findIndex(h => h === 'ШТ/КОР') !== -1 ? headers.findIndex(h => h === 'ШТ/КОР') : 1;
+        const minStockIdx = headers.findIndex(h => h === 'Мин. остаток') !== -1 ? headers.findIndex(h => h === 'Мин. остаток') : 4;
+        
+        // Find existing ozon and wb barcodes (could be 'ozonBarcode', 'ШК Ozon', or just column 5)
+        const ozonIdx = headers.findIndex(h => h === 'ozonBarcode' || h === 'ШК Ozon') !== -1 
+                        ? headers.findIndex(h => h === 'ozonBarcode' || h === 'ШК Ozon') 
+                        : (headers.length > 5 ? 5 : -1);
+        const wbIdx = headers.findIndex(h => h === 'wbBarcode' || h === 'Баркод WB') !== -1 
+                      ? headers.findIndex(h => h === 'wbBarcode' || h === 'Баркод WB') 
+                      : (headers.length > 6 ? 6 : -1);
+
+        const newData = [expectedHeaders];
+        for (let i = 1; i < data.length; i++) {
+          const row = data[i];
+          if (row.join('').trim() === '') continue;
+          
+          const sku = String(row[skuIdx] || '');
+          const pcs = parseNumber(row[pcsIdx]);
+          const minStock = parseNumber(row[minStockIdx]);
+          const ozon = ozonIdx !== -1 && row[ozonIdx] ? String(row[ozonIdx]) : '';
+          const wb = wbIdx !== -1 && row[wbIdx] ? String(row[wbIdx]) : '';
+          
+          newData.push([sku, pcs, minStock, ozon, wb]);
+        }
+        
+        skuSheet.clear();
+        skuSheet.getRange(1, 1, newData.length, 5).setValues(newData);
+        skuSheet.getRange('A1:E1').setFontWeight('bold');
+      }
     }
   }
   
@@ -679,9 +712,9 @@ function getSkus() {
   return rows.map(row => ({
     sku: row[0] ? String(row[0]) : '',
     pcsPerBox: Number(row[1]) || 1,
-    packagingCost: Number(row[2]) || 0,
-    boxCost: Number(row[3]) || 0,
-    minStock: Number(row[4]) || 0
+    minStock: Number(row[2]) || 0,
+    ozonBarcode: row[3] ? String(row[3]) : '',
+    wbBarcode: row[4] ? String(row[4]) : ''
   }));
 }
 
@@ -690,12 +723,22 @@ function addSku(skuData) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден. Выполните инициализацию.');
   
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (skuData.ozonBarcode && String(data[i][3]) === String(skuData.ozonBarcode)) {
+      throw new Error(`ШК ${skuData.ozonBarcode} уже привязан к артикулу ${data[i][0]}`);
+    }
+    if (skuData.wbBarcode && String(data[i][4]) === String(skuData.wbBarcode)) {
+      throw new Error(`Баркод ${skuData.wbBarcode} уже привязан к артикулу ${data[i][0]}`);
+    }
+  }
+  
   sheet.appendRow([
     skuData.sku,
     skuData.pcsPerBox,
-    skuData.packagingCost,
-    skuData.boxCost,
-    skuData.minStock
+    skuData.minStock,
+    skuData.ozonBarcode || '',
+    skuData.wbBarcode || ''
   ]);
   
   return getSkus();
@@ -708,13 +751,24 @@ function updateSku(skuData, oldSku) {
   
   const data = sheet.getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) !== String(oldSku)) {
+      if (skuData.ozonBarcode && String(data[i][3]) === String(skuData.ozonBarcode)) {
+        throw new Error(`ШК ${skuData.ozonBarcode} уже привязан к артикулу ${data[i][0]}`);
+      }
+      if (skuData.wbBarcode && String(data[i][4]) === String(skuData.wbBarcode)) {
+        throw new Error(`Баркод ${skuData.wbBarcode} уже привязан к артикулу ${data[i][0]}`);
+      }
+    }
+  }
+
+  for (let i = 1; i < data.length; i++) {
     if (String(data[i][0]) === String(oldSku)) {
       sheet.getRange(i + 1, 1, 1, 5).setValues([[
         skuData.sku,
         skuData.pcsPerBox,
-        skuData.packagingCost,
-        skuData.boxCost,
-        skuData.minStock
+        skuData.minStock,
+        skuData.ozonBarcode || '',
+        skuData.wbBarcode || ''
       ]]);
       
       const stockSheet = ss.getSheetByName('Остатки');
@@ -756,7 +810,7 @@ function deleteSku(sku, deletedBy) {
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][0]) === String(sku)) {
       const rowData = data[i];
-      if (typeof archiveItem === 'function') archiveItem('SKU', { sku: rowData[0], pcsPerBox: rowData[1], packagingCost: rowData[2], boxCost: rowData[3], minStock: rowData[4] }, deletedBy);
+      if (typeof archiveItem === 'function') archiveItem('SKU', { sku: rowData[0], pcsPerBox: rowData[1], minStock: rowData[2], ozonBarcode: rowData[3], wbBarcode: rowData[4] }, deletedBy);
       sheet.deleteRow(i + 1);
       break;
     }

@@ -122,6 +122,12 @@ export const SkusTab: React.FC = () => {
               <th className="px-6 py-4 font-semibold text-slate-600 cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('sku')}>
                 Артикул {getSortIcon('sku')}
               </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('ozonBarcode')}>
+                ШК (Ozon) {getSortIcon('ozonBarcode')}
+              </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('wbBarcode')}>
+                Баркод (WB) {getSortIcon('wbBarcode')}
+              </th>
               <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('pcsPerBox')}>
                 Шт/Кор {getSortIcon('pcsPerBox')}
               </th>
@@ -135,6 +141,8 @@ export const SkusTab: React.FC = () => {
             {sortedSkus.map((s, index) => (
               <tr key={`${s.sku}-${index}`} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
                 <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium">{s.sku}</td>
+                <td className="px-6 py-4 font-mono text-sm text-slate-600">{s.ozonBarcode || '-'}</td>
+                <td className="px-6 py-4 font-mono text-sm text-slate-600">{s.wbBarcode || '-'}</td>
                 <td className="px-6 py-4 text-right font-bold text-slate-900">{s.pcsPerBox}</td>
                 <td className="px-6 py-4 text-right">
                   <span className="px-2 py-1 bg-amber-50 text-amber-600 rounded-md font-bold text-xs">

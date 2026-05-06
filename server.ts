@@ -237,7 +237,10 @@ async function startServer() {
   // API Endpoint for Gemini Invoice Parsing
   app.post("/api/parse-invoice", async (req, res) => {
     try {
-      const { text, referenceArticles, modelName, feedback, customPrompt } = req.body;
+      // Receive full SKU list to build mapping dictionary and table
+      const { text, skus, opType, modelName, feedback, customPrompt } = req.body;
+      
+      console.log('Received skus:', JSON.stringify(skus?.slice(0, 3)));
       
       const apiKey = await getApiKey();
       
@@ -251,57 +254,231 @@ async function startServer() {
       const ai = new GoogleGenAI({ apiKey });
       const model = modelName || "gemini-1.5-flash";
 
-      let prompt = customPrompt || `
-        Извлеки номенклатуру из текста накладной. 
-        ГЛАВНОЕ: Сопоставь извлеченные товары с эталонным списком артикулов: {{REFERENCE_ARTICLES}}.
-        Если в тексте указан артикул напрямую, используй его.
-        Если артикула нет, но название похоже на товар из списка, выбери наиболее подходящий артикул. 
-        Если совпадений нет совсем, укажи "UNKNOWN".
-        
-        Для каждого товара извлеки:
-        1. Артикул (из списка или UNKNOWN)
-        2. Количество (число, если не указано, используй 1)
-        3. Цена (число, если указана, иначе 0)
-        4. Суммируй колличество товара с одинаковым артикулом
+      // Build mapping dictionaries to embed in the prompt
+      const ozonBarcodeMap: Record<string, string> = {};
+      const wbBarcodeMap: Record<string, string> = {};
+      const referenceArticles = new Set<string>();
 
-        Верни строгий JSON массив объектов.
-      `;
+      if (Array.isArray(skus)) {
+        skus.forEach((sku: any) => {
+          const article = String(sku.sku || '').trim();
+          if (!article) return;
+          referenceArticles.add(article);
 
-      if (prompt.includes("{{REFERENCE_ARTICLES}}")) {
-        prompt = prompt.replace(/\{\{REFERENCE_ARTICLES\}\}/g, referenceArticles.join(", "));
-      } else {
-        prompt += `\n\nЭТАЛОННЫЙ СПИСОК АРТИКУЛОВ ДЛЯ СОПОСТАВЛЕНИЯ: ${referenceArticles.join(", ")}`;
+          // Normalize barcodes: remove spaces, convert to string
+          const ozon = String(sku.ozonBarcode || '').replace(/\s/g, '').trim();
+          const wb = String(sku.wbBarcode || '').replace(/\s/g, '').trim();
+
+          if (ozon) ozonBarcodeMap[ozon] = article;
+          if (wb) wbBarcodeMap[wb] = article;
+        });
       }
 
-      prompt += `
-        
-        ${feedback ? `ДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ ОТ ПОЛЬЗОВАТЕЛЯ: ${feedback}` : ""}
+      const ozonDictStr = JSON.stringify(ozonBarcodeMap, null, 2);
+      const wbDictStr = JSON.stringify(wbBarcodeMap, null, 2);
 
-        Текст накладной:
-        ${text}
-      `;
+      const mappingDictionariesText = `СЛОВАРЬ БАРКОДОВ OZON (баркод → артикул):
+${ozonDictStr}
 
-      const result = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                article: { type: Type.STRING, description: "Артикул из эталонного списка или UNKNOWN" },
-                quantity: { type: Type.NUMBER, description: "Количество" },
-                price: { type: Type.NUMBER, description: "Цена за единицу (только для прихода, иначе 0)" }
-              },
-              required: ["article", "quantity", "price"]
+СЛОВАРЬ БАРКОДОВ WILDBERRIES (баркод → артикул):
+${wbDictStr}`;
+
+      let prompt = customPrompt || `Ты — система распознавания накладных для складского учёта.
+Твоя единственная задача: извлечь товары из текста и вернуть строгий JSON.
+
+════════════════════════════════════════
+СПРАВОЧНЫЕ ДАННЫЕ
+════════════════════════════════════════
+
+{{MAPPING_DICTIONARIES}}
+
+ПОЛНЫЙ СПИСОК АРТИКУЛОВ:
+{{REFERENCE_ARTICLES}}
+
+════════════════════════════════════════
+ПРАВИЛО 1 — ОПРЕДЕЛЕНИЕ АРТИКУЛА
+════════════════════════════════════════
+
+Для каждого товара в тексте определи артикул строго по следующему
+приоритету (переходи к следующему шагу только если предыдущий не дал результата):
+
+ШАГ 1. Прямое совпадение.
+  Если в строке товара есть значение, которое точно совпадает
+  с одним из артикулов в ПОЛНОМ СПИСКЕ → используй этот артикул.
+
+ШАГ 2. Поиск по словарям баркодов.
+  Найди в строке товара любое числовое значение (последовательность
+  от 8 до 20 цифр, без учёта пробелов и дефисов).
+  - Проверь это значение в СЛОВАРЕ БАРКОДОВ OZON.
+  - Проверь это значение в СЛОВАРЕ БАРКОДОВ WILDBERRIES.
+  - Если найдено совпадение → используй соответствующий артикул.
+  ВАЖНО: Не ищи баркоды в значениях: количество (обычно 1–9999),
+  цена (обычно содержит точку/запятую или меньше 7 цифр),
+  номер строки/порядковый номер (обычно 1–3 цифры).
+
+ШАГ 3. Сопоставление по названию.
+  Если название товара в тексте однозначно соответствует
+  одному из артикулов в ПОЛНОМ СПИСКЕ → используй этот артикул.
+  "Однозначно" означает: совпадение без сомнений, не угадывание.
+
+ШАГ 4. Ничего не подошло.
+  Верни артикул "UNKNOWN".
+
+В итоговом ответе ВСЕГДА указывай только артикул из ПОЛНОГО СПИСКА
+или "UNKNOWN". Никогда не возвращай баркод, ШК или название товара
+в поле article.
+
+════════════════════════════════════════
+ПРАВИЛО 2 — ОПРЕДЕЛЕНИЕ МАРКЕТПЛЕЙСА
+════════════════════════════════════════
+
+Определи маркетплейс строго по приоритету:
+
+ПРИОРИТЕТ 1. Заголовки колонок (самый надёжный признак).
+  - В тексте есть колонка "ШК товара" или "ШК" → "Ozon"
+  - В тексте есть колонка "Баркод товара" или "Баркод" → "Wildberries"
+
+ПРИОРИТЕТ 2. Совпадения баркодов в словарях (если заголовков нет).
+  - Нашёл числовой код из текста в СЛОВАРЕ БАРКОДОВ OZON → "Ozon"
+  - Нашёл числовой код из текста в СЛОВАРЕ БАРКОДОВ WILDBERRIES → "Wildberries"
+  При конфликте (нашёл в обоих словарях) → вернуть "unknown".
+
+ПРИОРИТЕТ 3. Явные текстовые маркеры.
+  - В тексте есть слова "Ozon", "OZON", "Озон" → "Ozon"
+  - В тексте есть слова "Wildberries", "WB", "ВБ", "Вайлдберриз" → "Wildberries"
+
+Если ни один из трёх приоритетов не дал однозначного ответа → "unknown".
+
+════════════════════════════════════════
+ПРАВИЛО 3 — СУММИРОВАНИЕ
+════════════════════════════════════════
+
+Если один и тот же артикул встречается в тексте несколько раз —
+сложи все количества в одну строку.
+Пример: АРТ-001 × 5 и АРТ-001 × 3 → одна запись АРТ-001, quantity: 8.
+
+════════════════════════════════════════
+ПРАВИЛО 4 — КОЛИЧЕСТВО И ЦЕНА
+════════════════════════════════════════
+
+Количество (quantity):
+  - Извлеки числовое значение количества товара.
+  - Если количество не указано → используй 1.
+  - Количество всегда целое положительное число.
+
+Цена (price):
+  - Извлеки цену за единицу товара если она указана.
+  - Если цена не указана → используй 0.
+  - Цена — число, может быть дробным (например: 199.90).
+
+════════════════════════════════════════
+ТЕКСТ НАКЛАДНОЙ ДЛЯ АНАЛИЗА:
+════════════════════════════════════════
+
+{{TEXT}}
+
+════════════════════════════════════════
+{{FEEDBACK}}
+
+Верни ТОЛЬКО валидный JSON объект без пояснений и markdown-блоков.
+Структура ответа:
+{
+  "items": [
+    { "article": "АРТ-001", "quantity": 10, "price": 199.90 },
+    { "article": "UNKNOWN", "quantity": 2,  "price": 0 }
+  ],
+  "detectedMarketplace": "Ozon"
+}`;
+
+      if (prompt.includes("{{MAPPING_DICTIONARIES}}")) {
+        prompt = prompt.replace(/\{\{MAPPING_DICTIONARIES\}\}/g, mappingDictionariesText);
+      } else {
+        prompt = prompt.replace(/\${mappingTableText}/g, mappingDictionariesText); // For backwards compatibility with old custom prompts
+      }
+
+      const referenceArticlesStr = Array.from(referenceArticles).join(", ");
+      if (prompt.includes("{{REFERENCE_ARTICLES}}")) {
+        prompt = prompt.replace(/\{\{REFERENCE_ARTICLES\}\}/g, referenceArticlesStr);
+      } else {
+        prompt += `\n\nЭТАЛОННЫЙ СПИСОК АРТИКУЛОВ ДЛЯ СОПОСТАВЛЕНИЯ: ${referenceArticlesStr}`;
+      }
+
+      if (prompt.includes("{{OP_TYPE}}")) {
+        prompt = prompt.replace(/\{\{OP_TYPE\}\}/g, opType || 'Неизвестная операция');
+      }
+
+      if (prompt.includes("{{TEXT}}")) {
+        prompt = prompt.replace(/\{\{TEXT\}\}/g, text);
+      } else {
+        prompt += `\n\nТекст накладной:\n${text}`;
+      }
+
+      const feedbackStr = feedback ? `ДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ:\n${feedback}\n════════════════════════════════════════` : '';
+      if (prompt.includes("{{FEEDBACK}}")) {
+        prompt = prompt.replace(/\{\{FEEDBACK\}\}/g, feedbackStr);
+      } else if (feedback) {
+        prompt += `\nДОПОЛНИТЕЛЬНЫЕ ИНСТРУКЦИИ ОТ ПОЛЬЗОВАТЕЛЯ: ${feedback}`;
+      }
+
+      let result: any;
+      let retries = 5;
+      while (retries > 0) {
+        try {
+          result = await ai.models.generateContent({
+            model: model,
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  items: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        article: { type: Type.STRING, description: "Артикул из эталонного списка или UNKNOWN" },
+                        quantity: { type: Type.NUMBER, description: "Количество" },
+                        price: { type: Type.NUMBER, description: "Цена за единицу (только для прихода, иначе 0)" }
+                      },
+                      required: ["article", "quantity", "price"]
+                    }
+                  },
+                  detectedMarketplace: {
+                    type: Type.STRING,
+                    description: "Ozon, Wildberries или unknown"
+                  }
+                },
+                required: ["items", "detectedMarketplace"]
+              }
             }
+          });
+          break; // success
+        } catch (error: any) {
+          retries--;
+          const errorMessage = error?.message || String(error);
+          console.error(`Gemini Error (retries left: ${retries}):`, errorMessage);
+          
+          const isTransient = errorMessage.includes("503") || 
+                              errorMessage.includes("UNAVAILABLE") || 
+                              errorMessage.includes("429") || 
+                              errorMessage.includes("high demand") ||
+                              errorMessage.includes("Too Many Requests");
+                              
+          if (retries === 0 || !isTransient) {
+            throw error;
           }
+          
+          const delayTimeout = 3000 * (5 - retries); // 3s, 6s, 9s, 12s
+          console.log(`Waiting for ${delayTimeout}ms before retrying...`);
+          await new Promise(r => setTimeout(r, delayTimeout));
         }
-      });
+      }
 
-      const parsed = JSON.parse(result.text || "[]");
+      const parsed = JSON.parse(result.text || "{}");
+      if (!parsed.items) {
+        parsed.items = [];
+      }
       res.json({ status: "success", data: parsed });
 
     } catch (error) {

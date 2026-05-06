@@ -1,22 +1,36 @@
-import React, { useState, useMemo } from 'react';
-import { 
-  CheckCircle2, 
-  X, 
-  AlertCircle, 
-  MessageSquare, 
+import React, { useState, useMemo } from "react";
+import {
+  CheckCircle2,
+  X,
+  AlertCircle,
+  MessageSquare,
   Loader2,
-  Calculator
-} from 'lucide-react';
-import { motion } from 'motion/react';
-import { useWarehouseStore } from '../store/useWarehouseStore';
-import { useUIStore } from '../store/useUIStore';
-import { formatCurrency } from '../lib/utils';
+  Calculator,
+  ArrowUp,
+  ArrowDown,
+} from "lucide-react";
+import { motion } from "motion/react";
+import { useWarehouseStore } from "../store/useWarehouseStore";
+import { useUIStore } from "../store/useUIStore";
+import { formatCurrency } from "../lib/utils";
+import { useSettingsStore } from "../store/useSettingsStore";
+import { toast } from "sonner";
 
 export const ConfirmModal: React.FC = () => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
-  const commitTransaction = useWarehouseStore((state) => state.commitTransaction);
-  const handleProcessInvoice = useWarehouseStore((state) => state.handleProcessInvoice);
-  
+  const commitTransaction = useWarehouseStore(
+    (state) => state.commitTransaction,
+  );
+  const handleProcessInvoice = useWarehouseStore(
+    (state) => state.handleProcessInvoice,
+  );
+  const currentUser = useWarehouseStore((state) => state.currentUser);
+  const isAdmin =
+    currentUser?.role?.toLowerCase() === "admin" ||
+    ["admin", "админ", "администратор"].includes(
+      currentUser?.username?.toLowerCase() || "",
+    );
+
   const parsedItems = useUIStore((state) => state.parsedItems);
   const setParsedItems = useUIStore((state) => state.setParsedItems);
   const updateParsedItem = useUIStore((state) => state.updateParsedItem);
@@ -27,29 +41,74 @@ export const ConfirmModal: React.FC = () => {
   const setShowConfirmModal = useUIStore((state) => state.setShowConfirmModal);
 
   // Additional costs state for 'Расход'
-  const [packagingCost, setPackagingCost] = useState<number | ''>('');
-  const [packagingDist, setPackagingDist] = useState<'batch' | 'unit'>('unit');
-  
-  const [otherCost, setOtherCost] = useState<number | ''>('');
-  const [otherDist, setOtherDist] = useState<'batch' | 'unit'>('batch');
+  const [packagingCost, setPackagingCost] = useState<number | "">("");
+  const [packagingDist, setPackagingDist] = useState<"batch" | "unit">("unit");
 
-  const [deliveryDate, setDeliveryDate] = useState<string>('');
+  const [otherCost, setOtherCost] = useState<number | "">("");
+  const [otherDist, setOtherDist] = useState<"batch" | "unit">("batch");
+
+  const [deliveryDate, setDeliveryDate] = useState<string>("");
 
   const services = useWarehouseStore((state) => state.services);
-  const activeServices = useMemo(() => services.filter(s => s.isActive), [services]);
-  const [selectedServices, setSelectedServices] = useState<Record<string, number>>({});
+  const serviceOrderIds = useSettingsStore((state) => state.serviceOrderIds);
+  const setServiceOrderIds = useSettingsStore(
+    (state) => state.setServiceOrderIds,
+  );
+
+  const activeServices = useMemo(() => {
+    let active = services.filter((s) => s.isActive);
+    if (serviceOrderIds && serviceOrderIds.length > 0) {
+      active.sort((a, b) => {
+        const indexA = serviceOrderIds.indexOf(a.id);
+        const indexB = serviceOrderIds.indexOf(b.id);
+        if (indexA === -1 && indexB === -1) return 0;
+        if (indexA === -1) return 1;
+        if (indexB === -1) return -1;
+        return indexA - indexB;
+      });
+    }
+    return active;
+  }, [services, serviceOrderIds]);
+
+  const moveService = (index: number, direction: "up" | "down") => {
+    const newActive = [...activeServices];
+    if (direction === "up" && index > 0) {
+      [newActive[index - 1], newActive[index]] = [
+        newActive[index],
+        newActive[index - 1],
+      ];
+    } else if (direction === "down" && index < newActive.length - 1) {
+      [newActive[index], newActive[index + 1]] = [
+        newActive[index + 1],
+        newActive[index],
+      ];
+    }
+    setServiceOrderIds(newActive.map((s) => s.id));
+  };
+
+  const [selectedServices, setSelectedServices] = useState<
+    Record<string, number>
+  >({});
 
   const finalItems = useMemo(() => {
     if (!parsedItems) return [];
-    
+
     // Подсчитываем общую стоимость выбранных услуг
-    const selectedActiveServices = activeServices.filter(s => (selectedServices[s.id] || 0) > 0);
-    const totalServicesCost = selectedActiveServices.reduce((sum, s) => sum + (s.cost * (selectedServices[s.id] || 0)), 0);
-    
-    const totalBaseValue = parsedItems.reduce((sum, item) => sum + (item.quantity * item.price), 0);
-    
+    const selectedActiveServices = activeServices.filter(
+      (s) => (selectedServices[s.id] || 0) > 0,
+    );
+    const totalServicesCost = selectedActiveServices.reduce(
+      (sum, s) => sum + s.cost * (selectedServices[s.id] || 0),
+      0,
+    );
+
+    const totalBaseValue = parsedItems.reduce(
+      (sum, item) => sum + item.quantity * item.price,
+      0,
+    );
+
     // Вспомогательная функция для расчета доли услуги на единицу товара
-    const getServicesExtraPerUnit = (item: typeof parsedItems[0]) => {
+    const getServicesExtraPerUnit = (item: (typeof parsedItems)[0]) => {
       if (totalServicesCost === 0 || totalBaseValue === 0) return 0;
       const itemBaseValue = item.quantity * item.price;
       const shareRatio = itemBaseValue / totalBaseValue;
@@ -57,67 +116,151 @@ export const ConfirmModal: React.FC = () => {
       return item.quantity > 0 ? extraCostForLine / item.quantity : 0;
     };
 
-    if (opType === 'Приход') {
+    if (opType === "Приход") {
       if (totalServicesCost === 0) return parsedItems;
-      
-      return parsedItems.map(item => {
+
+      return parsedItems.map((item) => {
         return {
           ...item,
-          price: item.price + getServicesExtraPerUnit(item)
+          price: item.price + getServicesExtraPerUnit(item),
         };
       });
     }
 
-    if (opType !== 'Расход') return parsedItems;
+    if (opType !== "Расход") return parsedItems;
 
     const pack = Number(packagingCost) || 0;
     const other = Number(otherCost) || 0;
 
-    if (pack === 0 && other === 0 && totalServicesCost === 0) return parsedItems;
+    if (pack === 0 && other === 0 && totalServicesCost === 0)
+      return parsedItems;
 
-    const totalQuantity = parsedItems.reduce((acc, item) => acc + item.quantity, 0);
+    const totalQuantity = parsedItems.reduce(
+      (acc, item) => acc + item.quantity,
+      0,
+    );
 
-    return parsedItems.map(item => {
-      const packPerUnit = packagingDist === 'unit' ? pack : (totalQuantity > 0 ? pack / totalQuantity : 0);
-      const otherPerUnit = otherDist === 'unit' ? other : (totalQuantity > 0 ? other / totalQuantity : 0);
-      
-      const extraPerUnit = packPerUnit + otherPerUnit + getServicesExtraPerUnit(item);
-      
+    return parsedItems.map((item) => {
+      const packPerUnit =
+        packagingDist === "unit"
+          ? pack
+          : totalQuantity > 0
+            ? pack / totalQuantity
+            : 0;
+      const otherPerUnit =
+        otherDist === "unit"
+          ? other
+          : totalQuantity > 0
+            ? other / totalQuantity
+            : 0;
+
+      const extraPerUnit =
+        packPerUnit + otherPerUnit + getServicesExtraPerUnit(item);
+
       return {
         ...item,
-        price: item.price + extraPerUnit
+        price: item.price + extraPerUnit,
       };
     });
-  }, [parsedItems, opType, packagingCost, packagingDist, otherCost, otherDist, activeServices, selectedServices]);
+  }, [
+    parsedItems,
+    opType,
+    packagingCost,
+    packagingDist,
+    otherCost,
+    otherDist,
+    activeServices,
+    selectedServices,
+  ]);
 
   if (!parsedItems) return null;
 
-  const isConfirmDisabled = isProcessing || finalItems.length === 0 || finalItems.some(item => item.status === 'error');
+  const isConfirmDisabled =
+    isProcessing ||
+    finalItems.length === 0 ||
+    finalItems.some((item) => item.status === "error");
 
   const handleConfirm = async () => {
-    let finalDestination = uploadDestination;
-    const selectedActiveServices = activeServices.filter(s => (selectedServices[s.id] || 0) > 0);
-    if (selectedActiveServices.length > 0) {
-      const servicesText = selectedActiveServices.map(s => `${s.name} x${selectedServices[s.id]} (${s.cost * selectedServices[s.id]}₽)`).join(', ');
-      finalDestination = finalDestination ? `${finalDestination} [Услуги: ${servicesText}]` : `[Услуги: ${servicesText}]`;
+    if (opType === "Расход") {
+      const missingFields = [];
+      if (!deliveryDate) missingFields.push("«Дата поставки на маркетплейс»");
+      if (packagingCost === "") missingFields.push("«Стоимость упаковки»");
+
+      if (missingFields.length > 0) {
+        toast.error(
+          `Необходимо заполнить следующие поля:\n${missingFields.join(", ")}`,
+        );
+        return;
+      }
     }
+
+    let finalDestination = uploadDestination || "";
     
-    const success = await commitTransaction(finalItems, opType, finalDestination, deliveryDate);
+    const extraParts: string[] = [];
+
+    if (opType === "Расход") {
+      const pack = Number(packagingCost) || 0;
+      if (pack > 0) {
+        if (packagingDist === "unit") {
+           const totalQuantity = finalItems.reduce((sum, item) => sum + item.quantity, 0);
+           extraParts.push(`Упаковка: ${totalQuantity} шт. x ${pack}₽ = ${pack * totalQuantity}₽`);
+        } else {
+           extraParts.push(`Упаковка: ${pack}₽`);
+        }
+      }
+      
+      const other = Number(otherCost) || 0;
+      if (other > 0) {
+        if (otherDist === "unit") {
+           const totalQuantity = finalItems.reduce((sum, item) => sum + item.quantity, 0);
+           extraParts.push(`Прочее: ${totalQuantity} шт. x ${other}₽ = ${other * totalQuantity}₽`);
+        } else {
+           extraParts.push(`Прочее: ${other}₽`);
+        }
+      }
+    }
+
+    const selectedActiveServices = activeServices.filter(
+      (s) => (selectedServices[s.id] || 0) > 0,
+    );
+    if (selectedActiveServices.length > 0) {
+      const servicesText = selectedActiveServices
+        .map(
+          (s) =>
+            `${s.name} x${selectedServices[s.id]} (${Math.round(s.cost * selectedServices[s.id])}₽)`,
+        )
+        .join(", ");
+      extraParts.push(`Услуги: ${servicesText}`);
+    }
+
+    if (extraParts.length > 0) {
+      const extrasStr = extraParts.join(' | ');
+      finalDestination = finalDestination
+        ? `${finalDestination} [${extrasStr}]`
+        : `[${extrasStr}]`;
+    }
+
+    const success = await commitTransaction(
+      finalItems,
+      opType,
+      finalDestination,
+      deliveryDate,
+    );
     if (success) {
       setShowConfirmModal(false);
       setParsedItems(null);
-      useUIStore.getState().setRawText('');
+      useUIStore.getState().setRawText("");
     }
   };
 
   return (
-    <motion.div 
+    <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
     >
-      <motion.div 
+      <motion.div
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.95, opacity: 0 }}
@@ -126,9 +269,11 @@ export const ConfirmModal: React.FC = () => {
         <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
           <div>
             <h3 className="text-2xl font-bold">Подтверждение операции</h3>
-            <p className="text-slate-500">Проверьте распознанные данные перед записью</p>
+            <p className="text-slate-500">
+              Проверьте распознанные данные перед записью
+            </p>
           </div>
-          <button 
+          <button
             onClick={() => setShowConfirmModal(false)}
             className="p-3 hover:bg-white rounded-2xl transition-all shadow-sm border border-transparent hover:border-slate-200"
           >
@@ -137,198 +282,321 @@ export const ConfirmModal: React.FC = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto p-8 space-y-8">
-          {(opType === 'Приход' || opType === 'Расход') && activeServices.length > 0 && (
-            <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 space-y-4">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2 text-indigo-600 font-bold">
-                  <Calculator size={20} />
-                  Дополнительные услуги подрядчиков
-                </div>
-                <div className="text-xs font-bold text-indigo-500 uppercase tracking-widest bg-indigo-100 px-3 py-1 rounded-full">Увеличивают себестоимость</div>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {activeServices.map(service => {
-                  const quantity = selectedServices[service.id] || 0;
-                  return (
-                    <div key={service.id} className="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-indigo-50 shadow-sm hover:border-indigo-200 transition-colors">
-                      <div className="flex-1 min-w-0 flex items-center justify-between">
-                        <div className="font-bold text-slate-800 truncate">{service.name}</div>
-                        <div className="text-sm font-medium text-indigo-600">{formatCurrency(service.cost)} ₽/шт.</div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Количество:</label>
-                        <input 
-                          type="number"
-                          min="0"
-                          value={quantity === 0 ? '' : quantity}
-                          placeholder="0"
-                          onChange={(e) => {
-                            const val = parseInt(e.target.value, 10);
-                            setSelectedServices(prev => ({ ...prev, [service.id]: isNaN(val) || val < 0 ? 0 : val }));
-                          }}
-                          className="w-full px-3 py-2 bg-slate-50 border border-indigo-100 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium text-right"
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {opType === 'Расход' && (
-            <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 space-y-4">
-              <div className="flex items-center gap-2 text-indigo-600 font-bold mb-4">
-                <Calculator size={20} />
-                Дополнительные расходы на отгрузку
-              </div>
-              
-              <div className="space-y-4 md:space-y-0 md:flex md:gap-4 md:*:flex-1">
-                <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Стоимость упаковки</label>
-                    <select 
-                      value={packagingDist}
-                      onChange={(e) => setPackagingDist(e.target.value as 'batch' | 'unit')}
-                      className="text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded-lg px-2 py-1 outline-none cursor-pointer hover:bg-indigo-100 transition-colors"
-                    >
-                      <option value="batch">На партию</option>
-                      <option value="unit">На единицу</option>
-                    </select>
-                  </div>
-                  <input 
-                    type="number"
-                    value={packagingCost}
-                    onChange={(e) => setPackagingCost(e.target.value === '' ? '' : Number(e.target.value))}
-                    placeholder="0 ₽"
-                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
-                  />
-                </div>
-                <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Прочее</label>
-                    <select 
-                      value={otherDist}
-                      onChange={(e) => setOtherDist(e.target.value as 'batch' | 'unit')}
-                      className="text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded-lg px-2 py-1 outline-none cursor-pointer hover:bg-indigo-100 transition-colors"
-                    >
-                      <option value="batch">На партию</option>
-                      <option value="unit">На единицу</option>
-                    </select>
-                  </div>
-                  <input 
-                    type="number"
-                    value={otherCost}
-                    onChange={(e) => setOtherCost(e.target.value === '' ? '' : Number(e.target.value))}
-                    placeholder="0 ₽"
-                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
-                  />
-                </div>
-              </div>
-              <div className="text-xs text-indigo-400 mt-2 px-2">
-                Эти суммы будут прибавлены к себестоимости каждого отгружаемого товара согласно выбранному методу распределения.
-              </div>
-
-              <div className="mt-4 pt-4 border-t border-indigo-100">
-                <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm w-full md:w-1/3">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2">Дата поставки на маркетплейс</label>
-                  <input 
-                    type="date"
-                    value={deliveryDate}
-                    onChange={(e) => setDeliveryDate(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
           <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50/50 border-b border-slate-200">
-                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest">Статус</th>
-                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest">Артикул</th>
-                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">Кол-во</th>
-                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">{opType === 'Расход' ? 'Себест.' : 'Цена'}</th>
-                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">Итого</th>
+                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest">
+                    Статус
+                  </th>
+                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest">
+                    Артикул
+                  </th>
+                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">
+                    Кол-во
+                  </th>
+                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">
+                    {opType === "Расход" ? "Себест." : "Цена"}
+                  </th>
+                  <th className="px-6 py-4 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">
+                    Итого
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {finalItems.map((item, idx) => (
-                  <tr key={idx} className="border-b border-slate-100 group hover:bg-slate-50/30 transition-colors">
+                  <tr
+                    key={idx}
+                    className="border-b border-slate-100 group hover:bg-slate-50/30 transition-colors"
+                  >
                     <td className="px-6 py-4">
-                      {item.status === 'ok' ? (
+                      {item.status === "ok" ? (
                         <div className="flex items-center gap-2 text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg w-fit">
                           <CheckCircle2 size={14} />
-                          <span className="text-[10px] font-bold uppercase">{item.errorMsg || 'OK'}</span>
+                          <span className="text-[10px] font-bold uppercase">
+                            {item.errorMsg || "OK"}
+                          </span>
                         </div>
                       ) : (
-                        <div className={`flex items-center gap-2 px-2 py-1 rounded-lg w-fit ${item.status === 'error' ? 'text-red-600 bg-red-50' : 'text-amber-600 bg-amber-50'}`}>
+                        <div
+                          className={`flex items-center gap-2 px-2 py-1 rounded-lg w-fit ${item.status === "error" ? "text-red-600 bg-red-50" : "text-amber-600 bg-amber-50"}`}
+                        >
                           <AlertCircle size={14} />
-                          <span className="text-[10px] font-bold uppercase">{item.errorMsg}</span>
+                          <span className="text-[10px] font-bold uppercase">
+                            {item.errorMsg}
+                          </span>
                         </div>
                       )}
                     </td>
                     <td className="px-6 py-4 font-mono text-sm font-bold text-indigo-600">
-                      <input 
+                      <input
                         type="text"
                         value={item.article}
-                        onChange={(e) => updateParsedItem(idx, { article: e.target.value })}
+                        onChange={(e) =>
+                          updateParsedItem(idx, { article: e.target.value })
+                        }
                         className="w-full bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
                       />
                     </td>
                     <td className="px-6 py-4 text-right font-bold">
-                      <input 
+                      <input
                         type="number"
                         min="1"
-                        value={item.quantity === 0 ? '' : item.quantity}
+                        value={item.quantity === 0 ? "" : item.quantity}
                         onChange={(e) => {
                           const val = Number(e.target.value) || 0;
-                          updateParsedItem(idx, { quantity: val < 0 ? 0 : val });
+                          updateParsedItem(idx, {
+                            quantity: val < 0 ? 0 : val,
+                          });
                         }}
                         className="w-24 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
                       />
                     </td>
                     <td className="px-6 py-4 text-right font-medium whitespace-nowrap">
-                      {opType === 'Приход' ? (
+                      {opType === "Приход" ? (
                         <div className="flex flex-col items-end gap-1">
                           <div className="flex items-center justify-end gap-1">
-                            <input 
+                            <input
                               type="number"
                               min="0"
                               step="0.01"
-                              value={parsedItems[idx].price === 0 ? '' : parsedItems[idx].price}
+                              value={
+                                parsedItems[idx].price === 0
+                                  ? ""
+                                  : parsedItems[idx].price
+                              }
                               onChange={(e) => {
                                 const val = Number(e.target.value) || 0;
-                                updateParsedItem(idx, { price: val < 0 ? 0 : val });
+                                updateParsedItem(idx, {
+                                  price: val < 0 ? 0 : val,
+                                });
                               }}
                               className="w-28 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
                             />
                             <span>₽</span>
                           </div>
                           {item.price > parsedItems[idx].price && (
-                            <div className="text-[10px] text-indigo-500 font-bold" title="Цена с учетом услуг подрядчиков">
+                            <div
+                              className="text-[10px] text-indigo-500 font-bold"
+                              title="Цена с учетом услуг подрядчиков"
+                            >
                               Итог: {formatCurrency(item.price)} ₽
                             </div>
                           )}
                         </div>
                       ) : (
                         <div className="flex flex-col items-end gap-1">
-                          <span>{formatCurrency(parsedItems[idx].price)} ₽</span>
+                          <span>
+                            {formatCurrency(parsedItems[idx].price)} ₽
+                          </span>
                           {item.price > parsedItems[idx].price && (
-                            <div className="text-[10px] text-indigo-500 font-bold" title="Цена с учетом дополнительных расходов (услуги, упаковка)">
+                            <div
+                              className="text-[10px] text-indigo-500 font-bold"
+                              title="Цена с учетом дополнительных расходов (услуги, упаковка)"
+                            >
                               Итог: {formatCurrency(item.price)} ₽
                             </div>
                           )}
                         </div>
                       )}
                     </td>
-                    <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.quantity * item.price)} ₽</td>
+                    <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">
+                      {formatCurrency(item.quantity * item.price)} ₽
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {(opType === "Приход" || opType === "Расход") &&
+            activeServices.length > 0 && (
+              <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 space-y-4">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2 text-indigo-600 font-bold">
+                    <Calculator size={20} />
+                    Дополнительные услуги подрядчиков
+                  </div>
+                  <div className="text-xs font-bold text-indigo-500 uppercase tracking-widest bg-indigo-100 px-3 py-1 rounded-full">
+                    Увеличивают себестоимость
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50/50 border-b border-slate-200">
+                        {isAdmin && (
+                           <th className="px-4 py-3 w-16 text-center font-bold text-slate-400 uppercase text-[10px] tracking-widest">
+                             Сорт.
+                           </th>
+                        )}
+                        <th className="px-6 py-3 font-bold text-slate-400 uppercase text-[10px] tracking-widest">
+                          Услуга
+                        </th>
+                        <th className="px-6 py-3 w-32 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">
+                          Кол-во
+                        </th>
+                        <th className="px-4 py-3 w-28 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">
+                          Цена
+                        </th>
+                        <th className="px-6 py-3 w-36 font-bold text-slate-400 uppercase text-[10px] tracking-widest text-right">
+                          Итого
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {activeServices.map((service, index) => {
+                        const quantity = selectedServices[service.id] || 0;
+                        const totalSum = quantity * service.cost;
+    
+                        return (
+                          <tr
+                            key={service.id}
+                            className="border-b border-slate-100 group hover:bg-slate-50/30 transition-colors"
+                          >
+                            {isAdmin && (
+                              <td className="px-4 py-2">
+                                <div className="flex flex-col gap-1 items-center justify-center opacity-100 transition-opacity">
+                                  <button
+                                    onClick={() => moveService(index, "up")}
+                                    disabled={index === 0}
+                                    className="p-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-30 disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                                  >
+                                    <ArrowUp size={14} />
+                                  </button>
+                                  <button
+                                    onClick={() => moveService(index, "down")}
+                                    disabled={index === activeServices.length - 1}
+                                    className="p-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-30 disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                                  >
+                                    <ArrowDown size={14} />
+                                  </button>
+                                </div>
+                              </td>
+                            )}
+    
+                            <td className="px-6 py-3 font-bold text-slate-800">
+                              {service.name}
+                            </td>
+    
+                            <td className="px-6 py-3 text-right font-bold w-32">
+                              <input
+                                type="number"
+                                min="0"
+                                value={quantity === 0 ? "" : quantity}
+                                placeholder="0"
+                                onChange={(e) => {
+                                  let val = parseInt(e.target.value, 10);
+                                  setSelectedServices((prev) => ({
+                                    ...prev,
+                                    [service.id]: isNaN(val) || val < 0 ? 0 : val,
+                                  }));
+                                }}
+                                className="w-full text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                              />
+                            </td>
+    
+                            <td className="px-4 py-3 text-right font-medium text-slate-500 whitespace-nowrap w-28">
+                              {Math.round(service.cost).toLocaleString('ru-RU')} ₽
+                            </td>
+    
+                            <td className="px-6 py-3 text-right font-bold text-indigo-600 whitespace-nowrap w-36">
+                              {Math.round(totalSum).toLocaleString('ru-RU')} ₽
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+          {opType === "Расход" && (
+            <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 space-y-4">
+              <div className="flex items-center gap-2 text-indigo-600 font-bold mb-4">
+                <Calculator size={20} />
+                Дополнительные расходы на отгрузку
+              </div>
+
+              <div className="space-y-4 md:space-y-0 md:flex md:gap-4 md:*:flex-1">
+                <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      Стоимость упаковки
+                    </label>
+                    <select
+                      value={packagingDist}
+                      onChange={(e) =>
+                        setPackagingDist(e.target.value as "batch" | "unit")
+                      }
+                      className="text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded-lg px-2 py-1 outline-none cursor-pointer hover:bg-indigo-100 transition-colors"
+                    >
+                      <option value="batch">На партию</option>
+                      <option value="unit">На единицу</option>
+                    </select>
+                  </div>
+                  <input
+                    type="number"
+                    value={packagingCost}
+                    onChange={(e) =>
+                      setPackagingCost(
+                        e.target.value === "" ? "" : Number(e.target.value),
+                      )
+                    }
+                    placeholder="0 ₽"
+                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+                  />
+                </div>
+                <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      Прочее
+                    </label>
+                    <select
+                      value={otherDist}
+                      onChange={(e) =>
+                        setOtherDist(e.target.value as "batch" | "unit")
+                      }
+                      className="text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded-lg px-2 py-1 outline-none cursor-pointer hover:bg-indigo-100 transition-colors"
+                    >
+                      <option value="batch">На партию</option>
+                      <option value="unit">На единицу</option>
+                    </select>
+                  </div>
+                  <input
+                    type="number"
+                    value={otherCost}
+                    onChange={(e) =>
+                      setOtherCost(
+                        e.target.value === "" ? "" : Number(e.target.value),
+                      )
+                    }
+                    placeholder="0 ₽"
+                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+                  />
+                </div>
+              </div>
+              <div className="text-xs text-indigo-400 mt-2 px-2">
+                Эти суммы будут прибавлены к себестоимости каждого отгружаемого
+                товара согласно выбранному методу распределения.
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white p-6 rounded-3xl border border-indigo-100 shadow-sm">
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2">
+              Дата поставки на маркетплейс
+            </label>
+            <div className="w-full md:w-1/3">
+              <input
+                type="date"
+                value={deliveryDate}
+                onChange={(e) => setDeliveryDate(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+              />
+            </div>
           </div>
 
           {/* AI Feedback Section */}
@@ -338,19 +606,23 @@ export const ConfirmModal: React.FC = () => {
               Уточнение для ИИ (если есть ошибки)
             </div>
             <div className="flex gap-4">
-              <input 
+              <input
                 type="text"
                 value={aiFeedback}
                 onChange={(e) => setAiFeedback(e.target.value)}
                 placeholder="Например: 'Артикул A001 на самом деле Смартфон X1', 'Пропусти вторую позицию'..."
                 className="flex-1 px-6 py-4 rounded-2xl border border-indigo-100 bg-white outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
               />
-              <button 
+              <button
                 onClick={() => handleProcessInvoice(aiFeedback)}
                 disabled={isProcessing || !aiFeedback.trim()}
                 className="bg-indigo-600 text-white px-8 rounded-2xl font-bold hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-lg shadow-indigo-100 flex items-center gap-2"
               >
-                {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <Zap size={20} />}
+                {isProcessing ? (
+                  <Loader2 className="animate-spin" size={20} />
+                ) : (
+                  <Zap size={20} />
+                )}
                 Пересчитать
               </button>
             </div>
@@ -360,30 +632,46 @@ export const ConfirmModal: React.FC = () => {
         <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
           <div className="flex gap-8">
             <div>
-              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Всего позиций</div>
-              <div className="text-2xl font-bold text-slate-900">{parsedItems.length}</div>
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                Всего позиций
+              </div>
+              <div className="text-2xl font-bold text-slate-900">
+                {parsedItems.length}
+              </div>
             </div>
             <div>
-              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Общая сумма</div>
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                Общая сумма
+              </div>
               <div className="text-2xl font-bold text-indigo-600">
-                {formatCurrency(finalItems.reduce((acc, item) => acc + (item.quantity * item.price), 0))} ₽
+                {formatCurrency(
+                  finalItems.reduce(
+                    (acc, item) => acc + item.quantity * item.price,
+                    0,
+                  ),
+                )}{" "}
+                ₽
               </div>
             </div>
           </div>
-          
+
           <div className="flex gap-4">
-            <button 
+            <button
               onClick={() => setShowConfirmModal(false)}
               className="px-8 py-4 rounded-2xl font-bold text-slate-500 hover:bg-white transition-all"
             >
               Отмена
             </button>
-            <button 
+            <button
               onClick={handleConfirm}
               disabled={isConfirmDisabled}
               className="bg-slate-900 text-white px-12 py-4 rounded-2xl font-bold hover:bg-slate-800 disabled:opacity-50 transition-all shadow-xl flex items-center gap-2"
             >
-              {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <CheckCircle2 size={20} />}
+              {isProcessing ? (
+                <Loader2 className="animate-spin" size={20} />
+              ) : (
+                <CheckCircle2 size={20} />
+              )}
               Подтвердить и записать
             </button>
           </div>
@@ -393,16 +681,16 @@ export const ConfirmModal: React.FC = () => {
   );
 };
 
-const Zap = ({ size, className }: { size?: number, className?: string }) => (
-  <svg 
-    width={size || 24} 
-    height={size || 24} 
-    viewBox="0 0 24 24" 
-    fill="none" 
-    stroke="currentColor" 
-    strokeWidth="2" 
-    strokeLinecap="round" 
-    strokeLinejoin="round" 
+const Zap = ({ size, className }: { size?: number; className?: string }) => (
+  <svg
+    width={size || 24}
+    height={size || 24}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
     className={className}
   >
     <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />

@@ -51,6 +51,10 @@ interface UIState {
   // Modals
   showConfirmModal: boolean;
   setShowConfirmModal: (show: boolean) => void;
+  showMismatchModal: boolean;
+  setShowMismatchModal: (show: boolean) => void;
+  mismatchData: { detected: string; selected: string } | null;
+  setMismatchData: (data: { detected: string; selected: string } | null) => void;
   showEditTransModal: boolean;
   setShowEditTransModal: (show: boolean) => void;
   editingTrans: any;
@@ -137,6 +141,10 @@ export const useUIStore = create<UIState>((set) => ({
 
   showConfirmModal: false,
   setShowConfirmModal: (showConfirmModal) => set({ showConfirmModal }),
+  showMismatchModal: false,
+  setShowMismatchModal: (showMismatchModal) => set({ showMismatchModal }),
+  mismatchData: null,
+  setMismatchData: (mismatchData) => set({ mismatchData }),
   showEditTransModal: false,
   setShowEditTransModal: (showEditTransModal) => set({ showEditTransModal }),
   editingTrans: null,

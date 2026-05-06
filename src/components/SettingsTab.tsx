@@ -68,7 +68,9 @@ export const SettingsTab: React.FC = () => {
   const handleSaveGlobalAi = async () => {
     setIsSavingGlobal(true);
     try {
-      const res = await fetchGas('saveGlobalSettings', { data: { geminiKey, geminiModel } });
+      const currentOrder = useSettingsStore.getState().serviceOrderIds;
+      const modelWithOrder = currentOrder && currentOrder.length > 0 ? `${geminiModel}|order=${JSON.stringify(currentOrder)}` : geminiModel;
+      const res = await fetchGas('saveGlobalSettings', { data: { geminiKey, geminiModel: modelWithOrder } });
       if (res?.status === 'success') toast.success('Настройки AI применены для всех пользователей');
       else toast.error(res?.message || 'Ошибка сохранения глобальных настроек');
     } catch (e) {
