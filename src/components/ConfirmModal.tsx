@@ -83,7 +83,19 @@ export const ConfirmModal: React.FC = () => {
         newActive[index],
       ];
     }
-    setServiceOrderIds(newActive.map((s) => s.id));
+
+    const newOrderIds = newActive.map((s) => s.id);
+    setServiceOrderIds(newOrderIds);
+
+    // Save to global settings
+    const currentModel = useSettingsStore.getState().geminiModel;
+    const modelStrToSave = `${currentModel}|order=${JSON.stringify(newOrderIds)}`;
+    const geminiKey = useSettingsStore.getState().geminiKey;
+    useWarehouseStore
+      .getState()
+      .fetchGas("saveGlobalSettings", {
+        data: { geminiKey, geminiModel: modelStrToSave },
+      });
   };
 
   const [selectedServices, setSelectedServices] = useState<
@@ -195,27 +207,37 @@ export const ConfirmModal: React.FC = () => {
     }
 
     let finalDestination = uploadDestination || "";
-    
+
     const extraParts: string[] = [];
 
     if (opType === "Расход") {
       const pack = Number(packagingCost) || 0;
       if (pack > 0) {
         if (packagingDist === "unit") {
-           const totalQuantity = finalItems.reduce((sum, item) => sum + item.quantity, 0);
-           extraParts.push(`Упаковка: ${totalQuantity} шт. x ${pack}₽ = ${pack * totalQuantity}₽`);
+          const totalQuantity = finalItems.reduce(
+            (sum, item) => sum + item.quantity,
+            0,
+          );
+          extraParts.push(
+            `Упаковка: ${totalQuantity} шт. x ${pack}₽ = ${pack * totalQuantity}₽`,
+          );
         } else {
-           extraParts.push(`Упаковка: ${pack}₽`);
+          extraParts.push(`Упаковка: ${pack}₽`);
         }
       }
-      
+
       const other = Number(otherCost) || 0;
       if (other > 0) {
         if (otherDist === "unit") {
-           const totalQuantity = finalItems.reduce((sum, item) => sum + item.quantity, 0);
-           extraParts.push(`Прочее: ${totalQuantity} шт. x ${other}₽ = ${other * totalQuantity}₽`);
+          const totalQuantity = finalItems.reduce(
+            (sum, item) => sum + item.quantity,
+            0,
+          );
+          extraParts.push(
+            `Прочее: ${totalQuantity} шт. x ${other}₽ = ${other * totalQuantity}₽`,
+          );
         } else {
-           extraParts.push(`Прочее: ${other}₽`);
+          extraParts.push(`Прочее: ${other}₽`);
         }
       }
     }
@@ -234,7 +256,7 @@ export const ConfirmModal: React.FC = () => {
     }
 
     if (extraParts.length > 0) {
-      const extrasStr = extraParts.join(' | ');
+      const extrasStr = extraParts.join(" | ");
       finalDestination = finalDestination
         ? `${finalDestination} [${extrasStr}]`
         : `[${extrasStr}]`;
@@ -421,15 +443,15 @@ export const ConfirmModal: React.FC = () => {
                     Увеличивают себестоимость
                   </div>
                 </div>
-                
+
                 <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="bg-slate-50/50 border-b border-slate-200">
                         {isAdmin && (
-                           <th className="px-4 py-3 w-16 text-center font-bold text-slate-400 uppercase text-[10px] tracking-widest">
-                             Сорт.
-                           </th>
+                          <th className="px-4 py-3 w-16 text-center font-bold text-slate-400 uppercase text-[10px] tracking-widest">
+                            Сорт.
+                          </th>
                         )}
                         <th className="px-6 py-3 font-bold text-slate-400 uppercase text-[10px] tracking-widest">
                           Услуга
@@ -449,7 +471,7 @@ export const ConfirmModal: React.FC = () => {
                       {activeServices.map((service, index) => {
                         const quantity = selectedServices[service.id] || 0;
                         const totalSum = quantity * service.cost;
-    
+
                         return (
                           <tr
                             key={service.id}
@@ -467,7 +489,9 @@ export const ConfirmModal: React.FC = () => {
                                   </button>
                                   <button
                                     onClick={() => moveService(index, "down")}
-                                    disabled={index === activeServices.length - 1}
+                                    disabled={
+                                      index === activeServices.length - 1
+                                    }
                                     className="p-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-30 disabled:hover:text-slate-400 disabled:hover:bg-transparent"
                                   >
                                     <ArrowDown size={14} />
@@ -475,11 +499,11 @@ export const ConfirmModal: React.FC = () => {
                                 </div>
                               </td>
                             )}
-    
+
                             <td className="px-6 py-3 font-bold text-slate-800">
                               {service.name}
                             </td>
-    
+
                             <td className="px-6 py-3 text-right font-bold w-32">
                               <input
                                 type="number"
@@ -490,19 +514,21 @@ export const ConfirmModal: React.FC = () => {
                                   let val = parseInt(e.target.value, 10);
                                   setSelectedServices((prev) => ({
                                     ...prev,
-                                    [service.id]: isNaN(val) || val < 0 ? 0 : val,
+                                    [service.id]:
+                                      isNaN(val) || val < 0 ? 0 : val,
                                   }));
                                 }}
                                 className="w-full text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
                               />
                             </td>
-    
+
                             <td className="px-4 py-3 text-right font-medium text-slate-500 whitespace-nowrap w-28">
-                              {Math.round(service.cost).toLocaleString('ru-RU')} ₽
+                              {Math.round(service.cost).toLocaleString("ru-RU")}{" "}
+                              ₽
                             </td>
-    
+
                             <td className="px-6 py-3 text-right font-bold text-indigo-600 whitespace-nowrap w-36">
-                              {Math.round(totalSum).toLocaleString('ru-RU')} ₽
+                              {Math.round(totalSum).toLocaleString("ru-RU")} ₽
                             </td>
                           </tr>
                         );

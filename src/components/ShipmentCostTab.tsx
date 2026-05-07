@@ -175,10 +175,23 @@ export const ShipmentCostTab: React.FC = () => {
     const csvContent = [
       headers.join(";"),
       ...shipmentTransactions.map((t) => {
+        let dest = t.destination || '';
+        const bracketMatch = dest.match(/(.*?)\[(.*?)\]$/);
+        const stringMatch = dest.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
+        
+        let main = '';
+        if (bracketMatch) {
+          main = bracketMatch[1].trim();
+        } else if (stringMatch) {
+          main = stringMatch[1].trim();
+        } else {
+          main = dest.trim();
+        }
+
         return [
           formatDateStr(t.date),
           formatDateStr(t.deliveryDate),
-          `"${(t.destination || "").replace(/"/g, '""')}"`,
+          `"${main.replace(/"/g, '""')}"`,
           `"${(t.article || "").replace(/"/g, '""')}"`,
           t.quantity,
           (t.price || 0).toFixed(2).replace(".", ","),

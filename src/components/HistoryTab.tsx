@@ -22,6 +22,68 @@ import { formatCurrency } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
+const DestinationCell: React.FC<{ destination: string }> = ({ destination }) => {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (!destination) return <span className="text-slate-400">-</span>;
+  
+  const bracketMatch = destination.match(/(.*?)\[(.*?)\]$/);
+  const stringMatch = destination.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
+
+  let main = '';
+  let tags: string[] = [];
+
+  if (bracketMatch) {
+    main = bracketMatch[1].trim();
+    tags = bracketMatch[2].split('|').map(s => s.trim());
+  } else if (stringMatch) {
+    main = stringMatch[1].trim();
+    if (stringMatch[2]) tags = [stringMatch[2].trim()];
+  } else {
+    main = destination.trim();
+  }
+
+  if (tags.length === 0) {
+    return <span className="font-medium text-slate-700">{main}</span>;
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 w-full">
+      <div className="flex items-center gap-1 justify-between">
+        {main && <span className="font-medium text-slate-700">{main}</span>}
+        <button 
+          onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }}
+          className="text-indigo-500 hover:bg-indigo-50 p-0.5 rounded transition-colors flex-shrink-0"
+          title={isOpen ? "Скрыть доп. услуги" : "Показать доп. услуги"}
+        >
+          <ChevronDown size={14} className={`transform transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        </button>
+      </div>
+      
+      {isOpen && (
+        <div className="flex flex-col gap-1 pt-1 mt-1 border-t border-slate-100">
+          {tags.map((tag, idx) => {
+            const isServices = tag.toLowerCase().startsWith('услуги') || tag.toLowerCase().startsWith('доп');
+            const isPack = tag.toLowerCase().startsWith('упаковка');
+            const isOther = tag.toLowerCase().startsWith('прочее');
+            
+            let bgClass = "bg-slate-50 text-slate-500 border border-slate-100";
+            if (isServices) bgClass = "bg-indigo-50 text-indigo-600 border border-indigo-100";
+            if (isPack) bgClass = "bg-emerald-50 text-emerald-600 border border-emerald-100";
+            if (isOther) bgClass = "bg-rose-50 text-rose-600 border border-rose-100";
+
+            return (
+              <span key={idx} className={`text-[10px] px-2 py-1 rounded w-fit leading-normal shadow-sm ${bgClass}`}>
+                {tag.replace(/^(Доп\. услуги:|Услуги:)\s*/, 'Услуги: ')}
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const HistoryTab: React.FC = () => {
   const transactions = useWarehouseStore((state) => state.transactions);
   const skus = useWarehouseStore((state) => state.skus);
@@ -211,18 +273,80 @@ export const HistoryTab: React.FC = () => {
   };
 
   const handleExportCSV = () => {
-    const headers = ['ДАТА', 'ТИП', 'АРТИКУЛ', 'КОЛ-ВО', 'ЦЕНА', 'СУММА', 'ОБЪЕКТ', 'ПОСТАВКА'];
+    const allServiceColumns = new Set<string>();
     
-    const rows = filteredHistory.map(t => [
-      formatDate(t.date),
-      t.type.toUpperCase(),
-      t.article,
-      t.quantity.toString(),
-      formatCurrency(t.price).replace(/\s/g, ''),
-      formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost).replace(/\s/g, ''),
-      t.destination || '',
-      t.deliveryDate ? formatDate(t.deliveryDate) : '-'
-    ]);
+    const parsedDestinations = filteredHistory.map(t => {
+      const dest = t.destination || '';
+      const bracketMatch = dest.match(/(.*?)\[(.*?)\]$/);
+      const stringMatch = dest.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
+
+      let main = '';
+      const servicesRecord: Record<string, number> = {};
+      let tagStrings: string[] = [];
+
+      if (bracketMatch) {
+        main = bracketMatch[1].trim();
+        tagStrings = bracketMatch[2].split('|').map(s => s.trim());
+      } else if (stringMatch) {
+        main = stringMatch[1].trim();
+        if (stringMatch[2]) tagStrings = [stringMatch[2].trim()];
+      } else {
+        main = dest.trim();
+      }
+
+      for (const tag of tagStrings) {
+        if (tag.startsWith('Упаковка:')) {
+          const match = tag.match(/=\s*(\d+)₽/);
+          if (match) servicesRecord['Упаковка'] = Number(match[1]);
+          else {
+            const m2 = tag.match(/Упаковка:\s*(\d+)₽/);
+            if (m2) servicesRecord['Упаковка'] = Number(m2[1]);
+          }
+        } 
+        else if (tag.startsWith('Прочее:')) {
+          const match = tag.match(/=\s*(\d+)₽/);
+          if (match) servicesRecord['Прочее'] = Number(match[1]);
+          else {
+            const m2 = tag.match(/Прочее:\s*(\d+)₽/);
+            if (m2) servicesRecord['Прочее'] = Number(m2[1]);
+          }
+        }
+        else if (tag.startsWith('Услуги:') || tag.startsWith('Доп. услуги:')) {
+           const servicesStr = tag.replace(/^(Услуги:|Доп\. услуги:)\s*/, '');
+           const individualServices = servicesStr.split(', ');
+           for (const indSer of individualServices) {
+              const m = indSer.match(/(.*) x\d+ \((\d+)₽\)$/);
+              if (m) {
+                 servicesRecord[m[1].trim()] = Number(m[2]);
+              }
+           }
+        }
+      }
+
+      Object.keys(servicesRecord).forEach(k => allServiceColumns.add(k));
+      return { main, servicesRecord };
+    });
+
+    const serviceColumnsArray = Array.from(allServiceColumns).sort();
+    const headers = ['ДАТА', 'ТИП', 'АРТИКУЛ', 'КОЛ-ВО', 'ЦЕНА', 'СУММА', 'ОБЪЕКТ', 'ПОСТАВКА', ...serviceColumnsArray];
+    
+    const rows = filteredHistory.map((t, idx) => {
+      const { main, servicesRecord } = parsedDestinations[idx];
+      const row = [
+        formatDate(t.date),
+        t.type.toUpperCase(),
+        t.article,
+        t.quantity.toString(),
+        formatCurrency(t.price).replace(/\s/g, ''),
+        formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost).replace(/\s/g, ''),
+        main,
+        t.deliveryDate ? formatDate(t.deliveryDate) : '-'
+      ];
+      for (const col of serviceColumnsArray) {
+        row.push(servicesRecord[col] !== undefined ? servicesRecord[col].toString() : '');
+      }
+      return row;
+    });
 
     const csvContent = [headers, ...rows]
       .map(e => e.map(item => `"${String(item).replace(/"/g, '""')}"`).join(';'))
@@ -452,53 +576,7 @@ export const HistoryTab: React.FC = () => {
                   {formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost)} ₽
                 </td>
                 <td className="px-3 py-3 text-[11px] text-slate-500 max-w-[240px] whitespace-normal">
-                  {(() => {
-                    if (!t.destination) return <span className="text-slate-400">-</span>;
-                    
-                    const bracketMatch = t.destination.match(/(.*?)\[(.*?)\]$/);
-                    const stringMatch = t.destination.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
-
-                    let main = '';
-                    let tags: string[] = [];
-
-                    if (bracketMatch) {
-                      main = bracketMatch[1].trim();
-                      tags = bracketMatch[2].split('|').map(s => s.trim());
-                    } else if (stringMatch) {
-                      main = stringMatch[1].trim();
-                      if (stringMatch[2]) tags = [stringMatch[2].trim()];
-                    } else {
-                      main = t.destination.trim();
-                    }
-
-                    if (tags.length === 0) {
-                      return <span className="font-medium text-slate-700">{main}</span>;
-                    }
-
-                    return (
-                      <div className="flex flex-col gap-1.5 w-full">
-                        {main && <span className="font-medium text-slate-700">{main}</span>}
-                        <div className="flex flex-col gap-1">
-                          {tags.map((tag, idx) => {
-                            const isServices = tag.toLowerCase().startsWith('услуги') || tag.toLowerCase().startsWith('доп');
-                            const isPack = tag.toLowerCase().startsWith('упаковка');
-                            const isOther = tag.toLowerCase().startsWith('прочее');
-                            
-                            let bgClass = "bg-slate-50 text-slate-500 border border-slate-100";
-                            if (isServices) bgClass = "bg-indigo-50 text-indigo-600 border border-indigo-100";
-                            if (isPack) bgClass = "bg-emerald-50 text-emerald-600 border border-emerald-100";
-                            if (isOther) bgClass = "bg-rose-50 text-rose-600 border border-rose-100";
-
-                            return (
-                              <span key={idx} className={`text-[10px] px-2 py-1 rounded w-fit leading-normal ${bgClass}`}>
-                                {tag.replace(/^(Доп\. услуги:|Услуги:)\s*/, 'Услуги: ')}
-                              </span>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })()}
+                  <DestinationCell destination={t.destination} />
                 </td>
                 <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
                   {t.deliveryDate ? formatDate(t.deliveryDate) : '-'}

@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Package, Lock, User, Loader2 } from 'lucide-react';
+import { Package, Lock, User, Loader2, Eye, EyeOff } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 
 export const LoginScreen: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   
   const handleLogin = useWarehouseStore((state) => state.handleLogin);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
@@ -29,7 +30,7 @@ export const LoginScreen: React.FC = () => {
             <Package size={40} className="text-white -rotate-3" />
           </div>
           <h1 className="text-3xl font-black text-slate-900 tracking-tight text-center">
-            Складской<br/>Mercurius AI
+            Склад AI Mercurius
           </h1>
           <p className="text-slate-500 mt-3 font-medium">Войдите в систему для продолжения</p>
         </div>
@@ -59,13 +60,22 @@ export const LoginScreen: React.FC = () => {
                 <Lock size={20} />
               </div>
               <input
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full pl-12 pr-4 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all font-medium"
+                className="w-full pl-12 pr-12 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all font-medium"
                 placeholder="Введите пароль"
                 required
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-indigo-600 transition-colors"
+                tabIndex={-1}
+                title={showPassword ? "Скрыть пароль" : "Показать пароль"}
+              >
+                {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+              </button>
             </div>
           </div>
 

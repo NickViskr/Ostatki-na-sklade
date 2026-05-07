@@ -1,1 +1,25 @@
 @import "tailwindcss";
+
+@layer base {
+  input[type="number"] {
+    /* Push text away from the arrows */
+    padding-right: 20px;
+  }
+
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    /* Always show arrows */
+    opacity: 1;
+    /* Increase size */
+    width: 28px;
+    height: 38px;
+    /* Move arrows away from the number */
+    margin-left: 12px;
+    cursor: pointer;
+  }
+
+  /* Keep arrows visible in Firefox (Firefox doesn't support changing their size easily) */
+  input[type="number"] {
+    -moz-appearance: number-input;
+  }
+}

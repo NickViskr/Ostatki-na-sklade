@@ -4,6 +4,8 @@ import { Transaction, SKUItem, ParsedItem } from '../types';
 type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'skus' | 'settings' | 'users' | 'deleted';
 
 interface UIState {
+  isSidebarCollapsed: boolean;
+  setIsSidebarCollapsed: (collapsed: boolean) => void;
   activeTab: TabType;
   setActiveTab: (tab: TabType) => void;
   
@@ -93,6 +95,8 @@ interface UIState {
 }
 
 export const useUIStore = create<UIState>((set) => ({
+  isSidebarCollapsed: false,
+  setIsSidebarCollapsed: (isSidebarCollapsed) => set({ isSidebarCollapsed }),
   activeTab: 'dashboard',
   setActiveTab: (activeTab) => set({ activeTab }),
 
