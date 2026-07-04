@@ -9,6 +9,9 @@ interface SettingsState {
   destinations: string[];
   customPrompt: string;
   serviceOrderIds: string[];
+  storageRatePerLiterDay: number;
+  ozonClientId: string;
+  ozonApiKey: string;
   setGasUrl: (url: string) => void;
   setGeminiModel: (model: string) => void;
   setGeminiKey: (key: string) => void;
@@ -16,6 +19,9 @@ interface SettingsState {
   addDestination: (dest: string) => void;
   setCustomPrompt: (prompt: string) => void;
   setServiceOrderIds: (ids: string[]) => void;
+  setStorageRatePerLiterDay: (rate: number) => void;
+  setOzonClientId: (id: string) => void;
+  setOzonApiKey: (key: string) => void;
 }
 
 const DEFAULT_PROMPT = `Ты — система распознавания накладных для складского учёта.
@@ -128,13 +134,16 @@ const DEFAULT_PROMPT = `Ты — система распознавания на�
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
-      gasUrl: 'https://script.google.com/macros/s/AKfycbxRb4HXyqUsqqk1x5ScRgL44O1YUOlmpemCn0AAcIB50Rh5kXKeaNxAWMU2NDZTU4F3/exec',
-      geminiModel: 'gemini-3-flash-preview',
+      gasUrl: '',
+      geminiModel: 'gemini-2.5-flash',
       geminiKey: '',
       notificationEmail: '',
       destinations: ['Ozon', 'Wildberries'],
       customPrompt: DEFAULT_PROMPT,
       serviceOrderIds: [],
+      storageRatePerLiterDay: 0,
+      ozonClientId: '',
+      ozonApiKey: '',
       setGasUrl: (gasUrl) => set({ gasUrl }),
       setGeminiModel: (geminiModel) => set({ geminiModel }),
       setGeminiKey: (geminiKey) => set({ geminiKey }),
@@ -145,6 +154,9 @@ export const useSettingsStore = create<SettingsState>()(
       }),
       setCustomPrompt: (customPrompt) => set({ customPrompt }),
       setServiceOrderIds: (serviceOrderIds) => set({ serviceOrderIds }),
+      setStorageRatePerLiterDay: (storageRatePerLiterDay) => set({ storageRatePerLiterDay }),
+      setOzonClientId: (ozonClientId) => set({ ozonClientId }),
+      setOzonApiKey: (ozonApiKey) => set({ ozonApiKey }),
     }),
     {
       name: 'warehouse-settings',

@@ -1,6 +1,5 @@
 import React, { useMemo } from 'react';
 import { X, Check } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
 import { useUIStore } from '../store/useUIStore';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 
@@ -41,13 +40,10 @@ export const DashSettingsModal: React.FC = () => {
   if (!showDashSettingsModal) return null;
 
   return (
-    <AnimatePresence>
-      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.95 }}
-          className="bg-white rounded-3xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]"
+    <>
+      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
+        <div 
+          className="bg-white rounded-3xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh] modal-enter"
         >
           <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
             <h3 className="text-xl font-bold text-slate-900">Настройки дашборда</h3>
@@ -125,8 +121,8 @@ export const DashSettingsModal: React.FC = () => {
               Применить
             </button>
           </div>
-        </motion.div>
+        </div>
       </div>
-    </AnimatePresence>
+    </>
   );
 };

@@ -1,5 +1,4 @@
 import React from 'react';
-import { motion, AnimatePresence } from 'motion/react';
 import { AlertTriangle } from 'lucide-react';
 import { useUIStore } from '../store/useUIStore';
 
@@ -24,18 +23,12 @@ export const MarketplaceMismatchModal: React.FC = () => {
   };
 
   return (
-    <AnimatePresence>
-      <motion.div 
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+    <>
+      <div 
+        className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4 fade-in"
       >
-        <motion.div 
-          initial={{ scale: 0.95, opacity: 0, y: 20 }}
-          animate={{ scale: 1, opacity: 1, y: 0 }}
-          exit={{ scale: 0.95, opacity: 0, y: 20 }}
-          className="bg-white rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden"
+        <div 
+          className="bg-white rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden modal-enter"
         >
           <div className="p-8 pb-6 flex items-center gap-4 bg-amber-50">
             <div className="w-12 h-12 rounded-full bg-amber-100 flex items-center justify-center text-amber-600 shrink-0">
@@ -69,8 +62,8 @@ export const MarketplaceMismatchModal: React.FC = () => {
               Изменить на {mismatchData.detected}
             </button>
           </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
+        </div>
+      </div>
+    </>
   );
 };

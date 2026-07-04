@@ -18,6 +18,7 @@ function verifyServerSignature(payloadForCheck, signature) {
 }
 
 function doPost(e) {
+  _transHeadersCache = null;
   let lock;
   try {
     const payload = JSON.parse(e.postData.contents);
@@ -53,6 +54,33 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
     
+    if (action === 'getOzonKeys') {
+      const payloadForCheck = {
+        action: payload.action,
+        timestamp: payload.timestamp
+      };
+
+      if (!verifyServerSignature(payloadForCheck, payload.signature)) {
+        return ContentService
+          .createTextOutput(JSON.stringify({
+            status: 'error',
+            message: 'Invalid server signature'
+          }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const props = PropertiesService.getScriptProperties();
+      const ozonClientId = props.getProperty('global_ozonClientId') || '';
+      const ozonApiKey = props.getProperty('global_ozonApiKey') || '';
+
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          status: 'success',
+          data: { ozonClientId: ozonClientId, ozonApiKey: ozonApiKey }
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
     const data = payload.data;
     const sessionToken = payload.sessionToken;
     
@@ -73,7 +101,7 @@ function doPost(e) {
     let result = {};
     
     if (action === 'archiveTransactions') {
-       if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+       assertAdmin(currentUser);
        const monthsToKeep = payload.data && payload.data.monthsToKeep ? payload.data.monthsToKeep : 6;
        PropertiesService.getScriptProperties().setProperty('archive_monthsToKeep', String(monthsToKeep));
        ScriptApp.newTrigger('runArchiveOldTransactionsAsBackground').timeBased().after(100).create();
@@ -96,20 +124,29 @@ function doPost(e) {
         result = logoutUser(sessionToken);
         break;
       case 'getUsers':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = getUsers();
         break;
       case 'addUser':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = addUser(data.username, data.password, data.role);
         break;
       case 'deleteUser':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = deleteUser(payload.username, currentUser.username);
         break;
       case 'setup':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = setupDatabase();
+        break;
+      case 'getInitialData':
+        result = {
+          stock: getStock(),
+          skus: getSkus(),
+          transactions: getTransactions(payload.data),
+          kits: getKits(),
+          services: getServices()
+        };
         break;
       case 'getStock':
         result = getStock();
@@ -130,16 +167,23 @@ function doPost(e) {
         result = getServices();
         break;
       case 'addService':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = addService(data.name, data.cost);
         break;
       case 'updateService':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = updateService(payload.id, data.name, data.cost, data.isActive);
         break;
       case 'deleteService':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = updateService(payload.id, data.name, data.cost, false);
+        break;
+      case 'addServiceRate':
+        assertAdmin(currentUser);
+        result = addServiceRate(data.serviceId, data.cost, data.validFrom);
+        break;
+      case 'getServiceRates':
+        result = getServiceRates();
         break;
       case 'getSkus':
         result = getSkus();
@@ -154,7 +198,7 @@ function doPost(e) {
         result = deleteSku(payload.sku, currentUser.username);
         break;
       case 'commit':
-        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate);
+        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username);
         break;
       case 'getGlobalSettings':
         if (sessionToken && !currentUser) {
@@ -163,24 +207,41 @@ function doPost(e) {
         result = getGlobalSettings(currentUser ? currentUser.role : null);
         break;
       case 'saveGlobalSettings':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = saveGlobalSettings(data, currentUser.role);
         break;
       case 'getArchivedItems':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = getArchivedItems();
         break;
       case 'restoreArchivedItem':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = restoreArchivedItem(payload.archiveId);
         break;
       case 'restoreMultipleArchivedItems':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = restoreMultipleArchivedItems(payload.archiveIds);
         break;
       case 'hardDeleteArchivedItems':
-        if (currentUser.role !== 'admin' && currentUser.username.toLowerCase() !== 'admin' && currentUser.username.toLowerCase() !== 'админ' && currentUser.username.toLowerCase() !== 'администратор') throw new Error('Forbidden: Требуются права администратора');
+        assertAdmin(currentUser);
         result = hardDeleteArchivedItems(payload.archiveIds);
+        break;
+      case 'saveKit':
+        assertAdmin(currentUser);
+        result = saveKit(data.kitSku, data.components, data.kitType);
+        break;
+      case 'deleteKit':
+        assertAdmin(currentUser);
+        result = deleteKit(payload.kitSku);
+        break;
+      case 'saveExternalShipments':
+        result = saveExternalShipments(data.shipments);
+        break;
+      case 'getExternalShipments':
+        result = getExternalShipments();
+        break;
+      case 'updateExternalShipmentStatus':
+        result = updateExternalShipmentStatus(data.postingId, data.status);
         break;
       default:
         throw new Error('Unknown action: ' + action);
@@ -195,6 +256,19 @@ function doPost(e) {
   } finally {
     // Освобождаем блокировку
     if (lock) lock.releaseLock();
+  }
+}
+
+function isAdminRole(role) {
+  if (!role) return false;
+  var r = String(role).trim().toLowerCase();
+  return r === 'admin' || r === 'администратор';
+}
+
+function assertAdmin(user) {
+  if (!user) throw new Error('Unauthorized');
+  if (!isAdminRole(user.role)) {
+    throw new Error('Forbidden: Требуются права администратора');
   }
 }
 
@@ -250,26 +324,18 @@ function setupDatabase() {
   }
   
   // Sheet: Транзакции
-  const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
-  const transSheet2 = getSheetByNameRobust(ss, 'История');
-  let transSheet = null;
-  
-  if (transSheet1 && transSheet2) {
-    transSheet = transSheet1.getLastRow() >= transSheet2.getLastRow() ? transSheet1 : transSheet2;
-  } else {
-    transSheet = transSheet1 || transSheet2;
-  }
+  let transSheet = getTransactionSheet(ss);
 
   if (!transSheet) {
     transSheet = ss.insertSheet('Транзакции');
-    transSheet.appendRow(['ID', 'Дата', 'Тип', 'Артикул', 'Количество', 'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки']);
-    transSheet.getRange('A1:J1').setFontWeight('bold');
+    transSheet.appendRow(['ID', 'Дата', 'Тип', 'Артикул', 'Количество', 'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки', 'Пользователь']);
+    transSheet.getRange('A1:K1').setFontWeight('bold');
   } else {
     // Миграция Транзакции
     const data = transSheet.getDataRange().getValues();
     if (data.length > 0) {
       const headers = data[0].map(h => String(h).trim());
-      const expectedHeaders = ['ID', 'Дата', 'Тип', 'Артикул', 'Количество', 'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки'];
+      const expectedHeaders = ['ID', 'Дата', 'Тип', 'Артикул', 'Количество', 'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки', 'Пользователь'];
       const hasNameColumn = headers.some(h => h.toLowerCase().includes('наименование'));
       const isPerfectMatch = expectedHeaders.every((h, i) => headers[i] === h);
 
@@ -289,6 +355,7 @@ function setupDatabase() {
         
         const destIdx = headers.findIndex(h => h.toLowerCase() === 'объект');
         const deliveryDateIdx = headers.findIndex(h => h.toLowerCase() === 'дата поставки');
+        const userIdx = headers.findIndex(h => h.toLowerCase() === 'пользователь');
 
         const newData = [expectedHeaders];
         for (let i = 1; i < data.length; i++) {
@@ -305,13 +372,14 @@ function setupDatabase() {
           const total = parseNumber(totalIdx !== -1 ? row[totalIdx] : row[7]);
           const dest = destIdx !== -1 && row[destIdx] ? String(row[destIdx]) : (row[8] || '');
           const deliveryDate = deliveryDateIdx !== -1 && row[deliveryDateIdx] ? String(row[deliveryDateIdx]) : (row[9] || '');
+          const userObj = userIdx !== -1 && row[userIdx] ? String(row[userIdx]) : '';
           
-          newData.push([id, date, type, article, qty, price, writeOff, total, dest, deliveryDate]);
+          newData.push([id, date, type, article, qty, price, writeOff, total, dest, deliveryDate, userObj]);
         }
         
         transSheet.clear();
-        transSheet.getRange(1, 1, newData.length, 10).setValues(newData);
-        transSheet.getRange('A1:J1').setFontWeight('bold');
+        transSheet.getRange(1, 1, newData.length, 11).setValues(newData);
+        transSheet.getRange('A1:K1').setFontWeight('bold');
       }
     }
   }
@@ -320,27 +388,32 @@ function setupDatabase() {
   let skuSheet = ss.getSheetByName('SKU');
   if (!skuSheet) {
     skuSheet = ss.insertSheet('SKU');
-    skuSheet.appendRow(['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB']);
-    skuSheet.getRange('A1:E1').setFontWeight('bold');
+    skuSheet.appendRow(['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+    skuSheet.getRange('A1:G1').setFontWeight('bold');
   } else {
     const data = skuSheet.getDataRange().getValues();
     if (data.length > 0) {
       const headers = data[0].map(h => String(h).trim());
-      const expectedHeaders = ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB'];
+      const expectedHeaders = ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)'];
       const isPerfectMatch = expectedHeaders.every((h, i) => headers[i] === h);
 
       if (!isPerfectMatch) {
         const skuIdx = 0; // SKU is always 0
         const pcsIdx = headers.findIndex(h => h === 'ШТ/КОР') !== -1 ? headers.findIndex(h => h === 'ШТ/КОР') : 1;
-        const minStockIdx = headers.findIndex(h => h === 'Мин. остаток') !== -1 ? headers.findIndex(h => h === 'Мин. остаток') : 4;
+        const minStockIdx = headers.findIndex(h => h === 'Мин. остаток') !== -1 ? headers.findIndex(h => h === 'Мин. остаток') : 2;
         
-        // Find existing ozon and wb barcodes (could be 'ozonBarcode', 'ШК Ozon', or just column 5)
+        // Find existing ozon and wb barcodes (could be 'ozonBarcode', 'ШК Ozon', or just column 3/4)
         const ozonIdx = headers.findIndex(h => h === 'ozonBarcode' || h === 'ШК Ozon') !== -1 
                         ? headers.findIndex(h => h === 'ozonBarcode' || h === 'ШК Ozon') 
-                        : (headers.length > 5 ? 5 : -1);
+                        : 3;
         const wbIdx = headers.findIndex(h => h === 'wbBarcode' || h === 'Баркод WB') !== -1 
                       ? headers.findIndex(h => h === 'wbBarcode' || h === 'Баркод WB') 
-                      : (headers.length > 6 ? 6 : -1);
+                      : 4;
+        const boxesPerPalletIdx = headers.findIndex(h => h === 'boxesPerPallet' || h === 'КОР/ПАЛ') !== -1
+                                  ? headers.findIndex(h => h === 'boxesPerPallet' || h === 'КОР/ПАЛ')
+                                  : 5;
+        const volIdx = headers.findIndex(h => h === 'Литраж (л)' || h === 'volumeLiters') !== -1
+          ? headers.findIndex(h => h === 'Литраж (л)' || h === 'volumeLiters') : 6;
 
         const newData = [expectedHeaders];
         for (let i = 1; i < data.length; i++) {
@@ -350,15 +423,17 @@ function setupDatabase() {
           const sku = String(row[skuIdx] || '');
           const pcs = parseNumber(row[pcsIdx]);
           const minStock = parseNumber(row[minStockIdx]);
-          const ozon = ozonIdx !== -1 && row[ozonIdx] ? String(row[ozonIdx]) : '';
-          const wb = wbIdx !== -1 && row[wbIdx] ? String(row[wbIdx]) : '';
+          const ozon = ozonIdx !== -1 && row[ozonIdx] && String(row[ozonIdx]) !== '0' ? String(row[ozonIdx]) : '';
+          const wb = wbIdx !== -1 && row[wbIdx] && String(row[wbIdx]) !== '0' ? String(row[wbIdx]) : '';
+          const bpp = boxesPerPalletIdx !== -1 && boxesPerPalletIdx < row.length ? parseNumber(row[boxesPerPalletIdx]) : 0;
+          const vol = volIdx !== -1 && volIdx < row.length ? parseNumber(row[volIdx]) : 0;
           
-          newData.push([sku, pcs, minStock, ozon, wb]);
+          newData.push([sku, pcs, minStock, ozon, wb, bpp, vol]);
         }
         
         skuSheet.clear();
-        skuSheet.getRange(1, 1, newData.length, 5).setValues(newData);
-        skuSheet.getRange('A1:E1').setFontWeight('bold');
+        skuSheet.getRange(1, 1, newData.length, 7).setValues(newData);
+        skuSheet.getRange('A1:G1').setFontWeight('bold');
       }
     }
   }
@@ -370,7 +445,7 @@ function setupDatabase() {
     usersSheet.appendRow(['Username', 'Password', 'Role']);
     usersSheet.getRange('A1:C1').setFontWeight('bold');
     // Add default admin
-    usersSheet.appendRow(['Админ', hashPassword('Admin_9x$K2mP'), 'admin']);
+    usersSheet.appendRow(['Админ', hashPassword('Admin_Mercurius_2025!'), 'admin']);
   }
   
   // Sheet: Сессии
@@ -404,6 +479,9 @@ function setupDatabase() {
     servicesSheet.setFrozenRows(1);
   }
   
+  getKitSheet(ss);
+  getOrCreateSheet(ss, 'Тарифы услуг', ['ServiceID', 'Стоимость', 'ДействуетС']);
+  getOrCreateSheet(ss, 'Внешние отгрузки', ['PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo']);
   return true;
 }
 
@@ -449,10 +527,61 @@ function getStock() {
 
 // ─── Вспомогательные функции ──────────────────────────────────────────────────
 
+function ensureColumns(sheet, requiredHeaders) {
+  const lastCol = sheet.getLastColumn();
+  let existingHeaders = [];
+  if (lastCol > 0) {
+    existingHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+      .map(h => String(h).trim());
+  }
+  requiredHeaders.forEach(function(header) {
+    if (!existingHeaders.includes(header)) {
+      const newCol = sheet.getLastColumn() + 1;
+      sheet.getRange(1, newCol).setValue(header);
+      existingHeaders.push(header);
+    }
+  });
+}
+
+function getOrCreateSheet(ss, sheetName, headers) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    if (headers && headers.length > 0) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      sheet.setFrozenRows(1);
+    }
+  }
+  return sheet;
+}
+
+const KIT_HEADERS = ['kitSku', 'componentSku', 'quantity', 'kitType'];
+function getKitSheet(ss) {
+  const sheet = getOrCreateSheet(ss, 'Комплекты', KIT_HEADERS);
+  ensureColumns(sheet, KIT_HEADERS);
+  return sheet;
+}
+
+
 const TRANS_HEADERS = [
   'ID', 'Дата', 'Тип', 'Артикул', 'Количество',
-  'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки'
+  'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки', 'Пользователь'
 ];
+
+function parseAdditionalCostsFromDestination(destination) {
+  if (!destination) return 0;
+  var total = 0;
+  var pack = destination.match(/Упаковка:[^|\]]*=\s*([\d.,]+)\s*₽/);
+  if (pack) total += parseNumber(pack[1]);
+  var other = destination.match(/Прочее:\s*([\d.,]+)\s*₽/);
+  if (other) total += parseNumber(other[1]);
+  var servBlock = destination.match(/Услуги:([^\]]*)/);
+  if (servBlock) {
+    var re = /\(([\d.,]+)\s*₽\)/g, m;
+    while ((m = re.exec(servBlock[1])) !== null) total += parseNumber(m[1]);
+  }
+  return roundToTwo(total);
+}
 
 function parseNumber(val) {
   if (typeof val === 'number') return val;
@@ -465,51 +594,114 @@ function roundToTwo(num) {
   return Math.round((num + Number.EPSILON) * 100) / 100;
 }
 
-function parseTransactionRow(row) {
+function parseTransactionRow(row, headers) {
   let dateStr = '';
-  if (row[1] instanceof Date) {
+  const dateIdx = headers ? headers.indexOf('Дата') : 1;
+  if (dateIdx !== -1 && row[dateIdx] instanceof Date) {
     try {
-      dateStr = Utilities.formatDate(
-        row[1], Session.getScriptTimeZone(), "yyyy-MM-dd'T'HH:mm:ss"
-      );
-    } catch(e) { dateStr = String(row[1]); }
-  } else {
-    dateStr = String(row[1] || '');
+      dateStr = Utilities.formatDate(row[dateIdx], Session.getScriptTimeZone(), "yyyy-MM-dd'T'HH:mm:ss");
+    } catch(e) { dateStr = String(row[dateIdx]); }
+  } else if (dateIdx !== -1) {
+    dateStr = String(row[dateIdx] || '');
   }
 
   let deliveryStr = '';
-  if (row[9] instanceof Date) {
+  const delIdx = headers ? headers.indexOf('Дата поставки') : 9;
+  if (delIdx !== -1 && row[delIdx] instanceof Date) {
     try {
-      deliveryStr = Utilities.formatDate(
-        row[9], Session.getScriptTimeZone(), 'yyyy-MM-dd'
-      );
-    } catch(e) { deliveryStr = String(row[9]); }
-  } else {
-    deliveryStr = String(row[9] || '');
+      deliveryStr = Utilities.formatDate(row[delIdx], Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    } catch(e) { deliveryStr = String(row[delIdx]); }
+  } else if (delIdx !== -1) {
+    deliveryStr = String(row[delIdx] || '');
   }
 
-  return {
-    id:           String(row[0]),
-    date:         dateStr,
-    type:         String(row[2]),
-    article:      String(row[3]),
-    quantity:     parseNumber(row[4]),
-    price:        parseNumber(row[5]),
-    writeOffCost: parseNumber(row[6]),
-    total:        parseNumber(row[7]),
-    destination:  String(row[8] || ''),
-    deliveryDate: deliveryStr
+  const getCol = (names, fallbackIdx) => {
+    if (!headers) return row[fallbackIdx];
+    for (let name of names) {
+      const idx = headers.indexOf(name);
+      if (idx !== -1) return row[idx];
+    }
+    return row[fallbackIdx];
   };
+
+  return {
+    id:           String(getCol(['ID'], 0)),
+    date:         dateStr,
+    type:         String(getCol(['Тип'], 2)),
+    article:      String(getCol(['Артикул'], 3)),
+    quantity:     parseNumber(getCol(['Количество'], 4)),
+    price:        parseNumber(getCol(['Цена'], 5)),
+    writeOffCost: parseNumber(getCol(['Себестоимость списания', 'Сумма списания'], 6)),
+    total:        parseNumber(getCol(['Сумма', 'Итого'], 7)),
+    destination:  String(getCol(['Объект'], 8) || ''),
+    deliveryDate: deliveryStr,
+    user:         String(getCol(['Пользователь'], 10) || ''),
+    groupId:      String(headers && headers.indexOf('groupId') !== -1 ? row[headers.indexOf('groupId')] : ''),
+    isComponent:  headers && headers.indexOf('isComponent') !== -1 ? Boolean(row[headers.indexOf('isComponent')]) : false
+  };
+}
+
+
+let _transHeadersCache = null;
+function getTransColIndex(sheet, headerName) {
+  if (!_transHeadersCache) {
+    const lastCol = sheet.getLastColumn();
+    if (lastCol === 0) return -1;
+    _transHeadersCache = sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+      .map(h => String(h).trim());
+  }
+  return _transHeadersCache.indexOf(headerName);
+}
+
+function buildTransactionRow(obj) {
+  const ss = getSpreadsheet();
+  const sheet = getTransactionSheet(ss);
+  if (!_transHeadersCache) getTransColIndex(sheet, 'ID'); // init cache
+  
+  const row = new Array(_transHeadersCache.length).fill('');
+  
+  const map = {
+    'ID': obj.id,
+    'Дата': obj.date,
+    'Тип': obj.type,
+    'Артикул': obj.article,
+    'Количество': obj.quantity,
+    'Цена': obj.price,
+    'Себестоимость списания': obj.writeOffCost,
+    'Сумма списания': obj.writeOffCost,
+    'Сумма': obj.total,
+    'Итого': obj.total,
+    'Объект': obj.destination,
+    'Дата поставки': obj.deliveryDate,
+    'Пользователь': obj.user,
+    'groupId': obj.groupId || '',
+    'isComponent': obj.isComponent || false
+  };
+  
+  for (let i = 0; i < _transHeadersCache.length; i++) {
+    const header = _transHeadersCache[i];
+    if (map[header] !== undefined) {
+      row[i] = map[header];
+    }
+  }
+  return row;
 }
 
 function getTransactionSheet(ss) {
   const sheet1 = getSheetByNameRobust(ss, 'Транзакции');
   const sheet2 = getSheetByNameRobust(ss, 'История');
+  let finalSheet = null;
   if (sheet1 && sheet2) {
-    return sheet1.getLastRow() >= sheet2.getLastRow() ? sheet1 : sheet2;
+    finalSheet = sheet1.getLastRow() >= sheet2.getLastRow() ? sheet1 : sheet2;
+  } else {
+    finalSheet = sheet1 || sheet2;
   }
-  return sheet1 || sheet2;
+  if (finalSheet) {
+    ensureColumns(finalSheet, ['groupId', 'isComponent']);
+  }
+  return finalSheet;
 }
+
 
 // ─── Вариант 2: фильтрация на стороне GAS ─────────────────────────────────────
 
@@ -519,27 +711,26 @@ function getTransactions(params) {
   const dateTo   = params.dateTo   || null;
   const article  = params.article  || null;
   const type     = params.type     || null;
-  const limit    = Math.min(params.limit || 500, 1000);
+  const limit    = Math.min(params.limit || 100000, 100000);
+  const offset   = Math.max(params.offset || 0, 0);
 
   const ss    = getSpreadsheet();
   const sheet = getTransactionSheet(ss);
-  if (!sheet) return { rows: [], total: 0, hasMore: false };
+  if (!sheet) return { rows: [], total: 0, hasMore: false, offset, limit };
 
   const lastRow = sheet.getLastRow();
-  if (lastRow <= 1) return { rows: [], total: 0, hasMore: false };
+  if (lastRow <= 1) return { rows: [], total: 0, hasMore: false, offset, limit };
 
-  const data = sheet.getRange(1, 1, lastRow, 10).getValues();
+  const lastCol = sheet.getLastColumn();
+  const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
 
   const fromMs = dateFrom ? new Date(dateFrom + 'T00:00:00').getTime() : 0;
   const toMs   = dateTo   ? new Date(dateTo   + 'T23:59:59').getTime() : Infinity;
 
-  const rows   = [];
-  let skipped  = 0;
-  let tooOld   = 0;
+  const filtered = [];
 
   for (let i = data.length - 1; i >= 1; i--) {
-    if (rows.length >= limit) break;
-
     const row = data[i];
     if (row.join('').trim() === '') continue;
     if (!row[0] || String(row[0]).trim() === '') continue;
@@ -552,23 +743,24 @@ function getTransactions(params) {
       rowMs = isNaN(parsed.getTime()) ? 0 : parsed.getTime();
     }
 
-    if (dateTo   && rowMs > toMs)   { skipped++; continue; }
-    if (dateFrom && rowMs < fromMs) {
-      tooOld++;
-      if (tooOld > 5) break; // допускаем 5 нарушений порядка
-      continue;
-    }
+    if (dateTo   && rowMs > toMs)   { continue; }
+    if (dateFrom && rowMs < fromMs) { continue; }
 
-    if (article && String(row[3]) !== article) { skipped++; continue; }
-    if (type    && String(row[2]) !== type)    { skipped++; continue; }
+    if (article && String(row[3]) !== article) { continue; }
+    if (type    && String(row[2]) !== type)    { continue; }
 
-    rows.push(parseTransactionRow(row));
+    filtered.push(parseTransactionRow(row, headers));
   }
 
+  const total = filtered.length;
+  const page  = filtered.slice(offset, offset + limit);
+
   return {
-    rows,
-    total:   lastRow - 1,
-    hasMore: rows.length >= limit
+    rows: page,
+    total: total,
+    hasMore: (offset + limit) < total,
+    offset: offset,
+    limit: limit
   };
 }
 
@@ -584,7 +776,9 @@ function archiveOldTransactions(monthsToKeep) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return { archived: 0, kept: 0 };
 
-  const data = sheet.getRange(1, 1, lastRow, 10).getValues();
+  const lastCol = sheet.getLastColumn();
+  const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
 
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - monthsToKeep);
@@ -592,7 +786,7 @@ function archiveOldTransactions(monthsToKeep) {
   const cutoffMs = cutoff.getTime();
 
   const archiveMap = {};
-  const toKeep     = [TRANS_HEADERS];
+  const toKeep     = [headers];
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -632,19 +826,19 @@ function archiveOldTransactions(monthsToKeep) {
 
     if (!archiveSheet) {
       archiveSheet = ss.insertSheet(archiveName);
-      archiveSheet.appendRow(TRANS_HEADERS);
-      archiveSheet.getRange('A1:J1').setFontWeight('bold');
+      archiveSheet.appendRow(headers);
+      archiveSheet.getRange('A1:K1').setFontWeight('bold');
       archiveSheet.hideSheet();
     }
 
     const insertFrom = archiveSheet.getLastRow() + 1;
     const rows       = archiveMap[year];
-    archiveSheet.getRange(insertFrom, 1, rows.length, 10).setValues(rows);
+    archiveSheet.getRange(insertFrom, 1, rows.length, lastCol).setValues(rows);
   }
 
   sheet.clear();
-  sheet.getRange(1, 1, toKeep.length, 10).setValues(toKeep);
-  sheet.getRange('A1:J1').setFontWeight('bold');
+  sheet.getRange(1, 1, toKeep.length, lastCol).setValues(toKeep);
+  sheet.getRange('A1:K1').setFontWeight('bold');
 
   Logger.log('Архивация: ' + totalArchived + ' строк перенесено, ' + 
              (toKeep.length - 1) + ' оставлено');
@@ -704,18 +898,35 @@ function getSkus() {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) return [];
   
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
   
+  const headers = data[0].map(h => String(h).trim());
+  const skuIdx = headers.indexOf('SKU') !== -1 ? headers.indexOf('SKU') : 0;
+  const pcsIdx = headers.indexOf('ШТ/КОР') !== -1 ? headers.indexOf('ШТ/КОР') : 1;
+  const minStockIdx = headers.indexOf('Мин. остаток') !== -1 ? headers.indexOf('Мин. остаток') : 2;
+  const ozonIdx = headers.indexOf('ШК Ozon') !== -1 ? headers.indexOf('ШК Ozon') : 3;
+  const wbIdx = headers.indexOf('Баркод WB') !== -1 ? headers.indexOf('Баркод WB') : 4;
+  const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
+  const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
+  
   const rows = data.slice(1);
   
-  return rows.map(row => ({
-    sku: row[0] ? String(row[0]) : '',
-    pcsPerBox: Number(row[1]) || 1,
-    minStock: Number(row[2]) || 0,
-    ozonBarcode: row[3] ? String(row[3]) : '',
-    wbBarcode: row[4] ? String(row[4]) : ''
-  }));
+  return rows.map(row => {
+    const ozon = ozonIdx !== -1 && ozonIdx < row.length ? String(row[ozonIdx] || '') : '';
+    const wb = wbIdx !== -1 && wbIdx < row.length ? String(row[wbIdx] || '') : '';
+    return {
+      sku: skuIdx !== -1 && skuIdx < row.length ? String(row[skuIdx] || '') : '',
+      pcsPerBox: pcsIdx !== -1 && pcsIdx < row.length ? Number(row[pcsIdx]) || 1 : 1,
+      minStock: minStockIdx !== -1 && minStockIdx < row.length ? Number(row[minStockIdx]) || 0 : 0,
+      ozonBarcode: ozon === '0' ? '' : ozon,
+      wbBarcode: wb === '0' ? '' : wb,
+      boxesPerPallet: bppIdx !== -1 && bppIdx < row.length ? Number(row[bppIdx]) || 0 : 0,
+      volumeLiters: volIdx !== -1 && volIdx < row.length ? Number(row[volIdx]) || 0 : 0
+    };
+  });
 }
 
 function addSku(skuData) {
@@ -723,23 +934,41 @@ function addSku(skuData) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден. Выполните инициализацию.');
   
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  
   const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).trim());
+  const skuIdx = headers.indexOf('SKU') !== -1 ? headers.indexOf('SKU') : 0;
+  const ozonIdx = headers.indexOf('ШК Ozon') !== -1 ? headers.indexOf('ШК Ozon') : 3;
+  const wbIdx = headers.indexOf('Баркод WB') !== -1 ? headers.indexOf('Баркод WB') : 4;
+  const pcsIdx = headers.indexOf('ШТ/КОР') !== -1 ? headers.indexOf('ШТ/КОР') : 1;
+  const minStockIdx = headers.indexOf('Мин. остаток') !== -1 ? headers.indexOf('Мин. остаток') : 2;
+  const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
+  const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
+
   for (let i = 1; i < data.length; i++) {
-    if (skuData.ozonBarcode && String(data[i][3]) === String(skuData.ozonBarcode)) {
-      throw new Error(`ШК ${skuData.ozonBarcode} уже привязан к артикулу ${data[i][0]}`);
+    const existingOzon = ozonIdx !== -1 && ozonIdx < data[i].length ? String(data[i][ozonIdx]) : '';
+    const existingWb = wbIdx !== -1 && wbIdx < data[i].length ? String(data[i][wbIdx]) : '';
+    if (skuData.ozonBarcode && existingOzon !== '0' && existingOzon !== '' && existingOzon === String(skuData.ozonBarcode)) {
+      throw new Error(`ШК ${skuData.ozonBarcode} уже привязан к артикулу ${data[i][skuIdx]}`);
     }
-    if (skuData.wbBarcode && String(data[i][4]) === String(skuData.wbBarcode)) {
-      throw new Error(`Баркод ${skuData.wbBarcode} уже привязан к артикулу ${data[i][0]}`);
+    if (skuData.wbBarcode && existingWb !== '0' && existingWb !== '' && existingWb === String(skuData.wbBarcode)) {
+      throw new Error(`Баркод ${skuData.wbBarcode} уже привязан к артикулу ${data[i][skuIdx]}`);
     }
   }
   
-  sheet.appendRow([
-    skuData.sku,
-    skuData.pcsPerBox,
-    skuData.minStock,
-    skuData.ozonBarcode || '',
-    skuData.wbBarcode || ''
-  ]);
+  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+  const newRow = new Array(currentHeaders.length).fill('');
+  
+  if (skuIdx !== -1) newRow[skuIdx] = skuData.sku;
+  if (pcsIdx !== -1) newRow[pcsIdx] = skuData.pcsPerBox;
+  if (minStockIdx !== -1) newRow[minStockIdx] = skuData.minStock;
+  if (ozonIdx !== -1) newRow[ozonIdx] = skuData.ozonBarcode || '';
+  if (wbIdx !== -1) newRow[wbIdx] = skuData.wbBarcode || '';
+  if (bppIdx !== -1) newRow[bppIdx] = skuData.boxesPerPallet || 0;
+  if (volIdx !== -1) newRow[volIdx] = skuData.volumeLiters || 0;
+  
+  sheet.appendRow(newRow);
   
   return getSkus();
 }
@@ -749,27 +978,48 @@ function updateSku(skuData, oldSku) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден.');
   
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  
   const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).trim());
+  
+  const skuIdx = headers.indexOf('SKU') !== -1 ? headers.indexOf('SKU') : 0;
+  const pcsIdx = headers.indexOf('ШТ/КОР') !== -1 ? headers.indexOf('ШТ/КОР') : 1;
+  const minStockIdx = headers.indexOf('Мин. остаток') !== -1 ? headers.indexOf('Мин. остаток') : 2;
+  const ozonIdx = headers.indexOf('ШК Ozon') !== -1 ? headers.indexOf('ШК Ozon') : 3;
+  const wbIdx = headers.indexOf('Баркод WB') !== -1 ? headers.indexOf('Баркод WB') : 4;
+  const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
+  const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
+  
   for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0]) !== String(oldSku)) {
-      if (skuData.ozonBarcode && String(data[i][3]) === String(skuData.ozonBarcode)) {
-        throw new Error(`ШК ${skuData.ozonBarcode} уже привязан к артикулу ${data[i][0]}`);
+    if (String(data[i][skuIdx]) !== String(oldSku)) {
+      const existingOzon = ozonIdx !== -1 && ozonIdx < data[i].length ? String(data[i][ozonIdx]) : '';
+      const existingWb = wbIdx !== -1 && wbIdx < data[i].length ? String(data[i][wbIdx]) : '';
+      if (skuData.ozonBarcode && existingOzon !== '0' && existingOzon !== '' && existingOzon === String(skuData.ozonBarcode)) {
+        throw new Error(`ШК ${skuData.ozonBarcode} уже привязан к артикулу ${data[i][skuIdx]}`);
       }
-      if (skuData.wbBarcode && String(data[i][4]) === String(skuData.wbBarcode)) {
-        throw new Error(`Баркод ${skuData.wbBarcode} уже привязан к артикулу ${data[i][0]}`);
+      if (skuData.wbBarcode && existingWb !== '0' && existingWb !== '' && existingWb === String(skuData.wbBarcode)) {
+        throw new Error(`Баркод ${skuData.wbBarcode} уже привязан к артикулу ${data[i][skuIdx]}`);
       }
     }
   }
 
   for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(oldSku)) {
-      sheet.getRange(i + 1, 1, 1, 5).setValues([[
-        skuData.sku,
-        skuData.pcsPerBox,
-        skuData.minStock,
-        skuData.ozonBarcode || '',
-        skuData.wbBarcode || ''
-      ]]);
+    if (String(data[i][skuIdx]) === String(oldSku)) {
+      const updatedRow = [...data[i]];
+      // Make sure array is long enough
+      while (updatedRow.length < headers.length) {
+        updatedRow.push('');
+      }
+      if (skuIdx !== -1) updatedRow[skuIdx] = skuData.sku;
+      if (pcsIdx !== -1) updatedRow[pcsIdx] = skuData.pcsPerBox;
+      if (minStockIdx !== -1) updatedRow[minStockIdx] = skuData.minStock;
+      if (ozonIdx !== -1) updatedRow[ozonIdx] = skuData.ozonBarcode || '';
+      if (wbIdx !== -1) updatedRow[wbIdx] = skuData.wbBarcode || '';
+      if (bppIdx !== -1) updatedRow[bppIdx] = skuData.boxesPerPallet || 0;
+      if (volIdx !== -1) updatedRow[volIdx] = skuData.volumeLiters || 0;
+      
+      sheet.getRange(i + 1, 1, 1, updatedRow.length).setValues([updatedRow]);
       
       const stockSheet = ss.getSheetByName('Остатки');
       if (stockSheet) {
@@ -793,11 +1043,32 @@ function ensureSkuExists(article) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) return;
   
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  
   const data = sheet.getDataRange().getValues();
   const exists = data.some(row => String(row[0]) === String(article));
   
   if (!exists) {
-    sheet.appendRow([article, 1, 0, 0, 0]);
+    const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+    const newRow = new Array(currentHeaders.length).fill('');
+    
+    const skuIdx = currentHeaders.indexOf('SKU') !== -1 ? currentHeaders.indexOf('SKU') : 0;
+    const pcsIdx = currentHeaders.indexOf('ШТ/КОР') !== -1 ? currentHeaders.indexOf('ШТ/КОР') : 1;
+    const minStockIdx = currentHeaders.indexOf('Мин. остаток') !== -1 ? currentHeaders.indexOf('Мин. остаток') : 2;
+    const ozonIdx = currentHeaders.indexOf('ШК Ozon') !== -1 ? currentHeaders.indexOf('ШК Ozon') : 3;
+    const wbIdx = currentHeaders.indexOf('Баркод WB') !== -1 ? currentHeaders.indexOf('Баркод WB') : 4;
+    const bppIdx = currentHeaders.indexOf('КОР/ПАЛ') !== -1 ? currentHeaders.indexOf('КОР/ПАЛ') : 5;
+    const volIdx = currentHeaders.indexOf('Литраж (л)') !== -1 ? currentHeaders.indexOf('Литраж (л)') : 6;
+    
+    if (skuIdx !== -1) newRow[skuIdx] = article;
+    if (pcsIdx !== -1) newRow[pcsIdx] = 1;
+    if (minStockIdx !== -1) newRow[minStockIdx] = 0;
+    if (ozonIdx !== -1) newRow[ozonIdx] = '';
+    if (wbIdx !== -1) newRow[wbIdx] = '';
+    if (bppIdx !== -1) newRow[bppIdx] = 0;
+    if (volIdx !== -1) newRow[volIdx] = 0;
+    
+    sheet.appendRow(newRow);
   }
 }
 
@@ -821,21 +1092,20 @@ function deleteSku(sku, deletedBy) {
 
 function deleteTransaction(id, deletedBy, isUpdate = false) {
   const ss = getSpreadsheet();
-  const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
-  const transSheet2 = getSheetByNameRobust(ss, 'История');
-  let transSheet = null;
-  if (transSheet1 && transSheet2) {
-    transSheet = transSheet1.getLastRow() >= transSheet2.getLastRow() ? transSheet1 : transSheet2;
-  } else {
-    transSheet = transSheet1 || transSheet2;
-  }
+  const transSheet = getTransactionSheet(ss);
   
+  if (!transSheet) throw new Error('База данных не инициализирована');
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
   
   if (!transSheet || !stockSheet) throw new Error('База данных не инициализирована');
   
   const transDataAll = transSheet.getDataRange().getValues();
   if (transDataAll.length <= 1) throw new Error('Нет транзакций');
+
+  const headers = transDataAll[0].map(h => String(h).trim());
+  const gIdx = headers.indexOf('groupId');
+  const cIdx = headers.indexOf('isComponent');
+  const wocIdx = headers.indexOf('Себестоимость списания');
 
   let rowIndex = -1;
   let transData = null;
@@ -882,79 +1152,94 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
       writeOffCost: writeOffCost,
       total: total,
       destination: dest,
-      deliveryDate: deliveryDateStr
+      deliveryDate: deliveryDateStr,
+      user: String(transData[10] || '')
     }, deletedBy);
   }
   
-      const stockData = stockSheet.getDataRange().getValues();
-  for (let i = 1; i < stockData.length; i++) {
-    // Indexes: 0=article, 1=qty, 2=avgCost, 3=cap, 4=sales, 5=turnover
-    if (String(stockData[i][0]) === article) {
-      let newQty = Number(stockData[i][1]);
-      let newAvgCost = Number(stockData[i][2]);
-      let newCap = Number(stockData[i][3]);
-      
-      if (type === 'Приход') {
-        newQty -= qty;
-        if (newQty < 0) {
-          throw new Error(`Удаление этого прихода приведёт к отрицательному остатку товара "${article}". Доступно: ${newQty + qty}, нужно удалить: ${qty}. Сначала отмените расходы, ссылающиеся на этот товар.`);
+  const stockData = stockSheet.getDataRange().getValues();
+  const isVirtualKitMainRowRefund = (type === 'Расход' && writeOffCost === 0 && (gIdx !== -1 && transData[gIdx]));
+  if (!isVirtualKitMainRowRefund) {
+    for (let i = 1; i < stockData.length; i++) {
+      // Indexes: 0=article, 1=qty, 2=avgCost, 3=cap, 4=sales, 5=turnover
+      if (String(stockData[i][0]) === article) {
+        let newQty = Number(stockData[i][1]);
+        let newAvgCost = Number(stockData[i][2]);
+        let newCap = Number(stockData[i][3]);
+        
+        if (type === 'Приход') {
+          newQty -= qty;
+          if (newQty < 0) {
+            throw new Error(`Удаление этого прихода приведёт к отрицательному остатку товара "${article}". Доступно: ${newQty + qty}, нужно удалить: ${qty}. Сначала отмените расходы, ссылающиеся на этот товар.`);
+          }
+          newCap = roundToTwo(newCap - total);
+          newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
+        } else if (type === 'Расход') {
+          newQty += qty;
+          newCap = roundToTwo(newCap + writeOffCost);
+          newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
         }
-        newCap = roundToTwo(newCap - total);
-        newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
-      } else if (type === 'Расход') {
-        newQty += qty;
-        newCap = roundToTwo(newCap + writeOffCost);
+        
+        stockSheet.getRange(i + 1, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
+        break;
       }
-      
-      stockSheet.getRange(i + 1, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
-      break;
     }
   }
-  
+
+  // Check for components of a kit
+  if (gIdx !== -1 && cIdx !== -1 && type === 'Расход' && transData[gIdx]) {
+    const groupId = transData[gIdx];
+    for (let k = transDataAll.length - 1; k >= 1; k--) {
+      if (String(transDataAll[k][gIdx]) === String(groupId) && transDataAll[k][2] === 'Расход' && (transDataAll[k][cIdx] === true || String(transDataAll[k][cIdx]).toLowerCase() === 'true')) {
+        for (let j = 1; j < stockData.length; j++) {
+           if (String(stockData[j][0]) === String(transDataAll[k][3])) {
+              let nQty = Number(stockData[j][1]) + Number(transDataAll[k][4]);
+              const componentWoc = Number(transDataAll[k][wocIdx !== -1 ? wocIdx : 6]) || 0;
+              let nCap = roundToTwo(Number(stockData[j][3]) + componentWoc);
+              let nAvg = nQty > 0 ? roundToTwo(nCap / nQty) : 0;
+              stockSheet.getRange(j + 1, 2, 1, 3).setValues([[nQty, nAvg, nCap]]);
+              break;
+           }
+        }
+        transSheet.deleteRow(k + 1);
+      }
+    }
+  }
+
   transSheet.deleteRow(rowIndex);
   SpreadsheetApp.flush();
   return { stock: getStock(), transactions: getTransactions().rows };
 }
 
-function updateTransaction(id, newData, deletedBy) {
-  deleteTransaction(id, deletedBy, true);
-  return commitTransaction([newData], newData.type, newData.destination, newData.deliveryDate);
+function updateTransaction(id, data, username) {
+  deleteTransaction(id, username, true);
+  const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '');
+  return {
+    stock: getStock(),
+    newTransactions: getTransactions().rows,
+    skus: getSkus()
+  };
 }
 
-function commitTransaction(items, type, destination, deliveryDate = '') {
+function commitTransaction(data, type, destination, deliveryDate, username, originalDate) {
+  const items = Array.isArray(data) ? data : [data];
+  const dateStr = originalDate || new Date().toISOString();
   const ss = getSpreadsheet();
-  const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
-  const transSheet2 = getSheetByNameRobust(ss, 'История');
-  let transSheet = null;
-  if (transSheet1 && transSheet2) {
-    transSheet = transSheet1.getLastRow() >= transSheet2.getLastRow() ? transSheet1 : transSheet2;
-  } else {
-    transSheet = transSheet1 || transSheet2;
-  }
-  
+  const transSheet = getTransactionSheet(ss);
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
-  
-  if (!transSheet || !stockSheet) {
-    throw new Error('База данных не инициализирована');
-  }
-  
-  // Формат даты: день-месяц-год
-  const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd-MM-yyyy");
   
   const stockData = stockSheet.getDataRange().getValues();
   const stockMap = {};
   for (let i = 1; i < stockData.length; i++) {
-    const article = String(stockData[i][0]);
-    stockMap[article] = {
+    const row = stockData[i];
+    stockMap[String(row[0])] = {
       rowIdx: i + 1,
-      quantity: Number(stockData[i][1]) || 0,
-      avgCost: Number(stockData[i][2]) || 0,
-      capitalization: Number(stockData[i][3]) || 0,
-      sales120: Number(stockData[i][4]) || 0,
-      turnover: Number(stockData[i][5]) || 0
+      quantity: Number(row[1]),
+      avgCost: Number(row[2]),
+      capitalization: Number(row[3])
     };
   }
-  
+
   if (type === 'Расход') {
     const requestedQty = {};
     items.forEach(item => {
@@ -962,13 +1247,45 @@ function commitTransaction(items, type, destination, deliveryDate = '') {
       requestedQty[item.article] = (requestedQty[item.article] || 0) + Number(item.quantity);
     });
     
+    // Validate main kits components
+    const errors = [];
+    const componentDemand = {};
     for (const article in requestedQty) {
-      const available = stockMap[article] ? stockMap[article].quantity : 0;
-      if (requestedQty[article] > available) {
-        throw new Error(`Недостаточно товара "${article}". Доступно: ${available}, требуется: ${requestedQty[article]}`);
+      const kitData = getKitComponents(article);
+      const isKit = kitData.components && kitData.components.length > 0;
+      if (isKit) {
+        for (const comp of kitData.components) {
+          const needed = comp.quantity * requestedQty[article];
+          componentDemand[comp.componentSku] = (componentDemand[comp.componentSku] || 0) + needed;
+        }
+        if (kitData.type === 'legacy') {
+          const available = stockMap[article] ? stockMap[article].quantity : 0;
+          if (requestedQty[article] > available) {
+            errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
+          }
+        }
+      } else {
+        const available = stockMap[article] ? stockMap[article].quantity : 0;
+        if (requestedQty[article] > available) {
+          errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
+        }
       }
     }
+    
+    for (const compSku in componentDemand) {
+      const needed = componentDemand[compSku];
+      const available = stockMap[compSku] ? stockMap[compSku].quantity : 0;
+      if (available < needed) {
+        errors.push('Нет ' + compSku + ': нужно ' + needed + ' шт., есть ' + available + ' шт.');
+      }
+    }
+    if (errors.length > 0) {
+      throw new Error('Недостаточно наличия на складе:\n' + errors.join('\n'));
+    }
   }
+  
+  const newTransactions = [];
+  const shipmentTotalQty = items.reduce(function(s, it){ if (it.status && it.status !== 'ok') return s; return s + (Number(it.quantity) || 0); }, 0);
   
   items.forEach(item => {
     if (item.status && item.status !== 'ok') return;
@@ -979,6 +1296,73 @@ function commitTransaction(items, type, destination, deliveryDate = '') {
     const total = roundToTwo(qty * price);
     
     let writeOffCost = 0;
+    let componentsTotal = 0;
+    let kitGroupId = '';
+    let isVirtualKit = false;
+    
+    // Kit logic for Расход
+    if (type === 'Расход') {
+      const kitData = getKitComponents(article);
+      if (kitData.components && kitData.components.length > 0) {
+        if (kitData.type === 'virtual') {
+          isVirtualKit = true;
+        }
+        kitGroupId = Utilities.getUuid();
+        
+        for (const comp of kitData.components) {
+          const compQty = comp.quantity * qty;
+          const compStock = stockMap[comp.componentSku] || { quantity: 0, avgCost: 0, capitalization: 0 };
+          const compAvg = compStock.avgCost;
+          const compTotal = roundToTwo(compAvg * compQty);
+          componentsTotal += compTotal;
+          
+          const newCompQty = compStock.quantity - compQty;
+          const newCompCap = roundToTwo(compStock.capitalization - compTotal);
+          
+          if (stockMap[comp.componentSku]) {
+            stockMap[comp.componentSku].quantity = newCompQty;
+            stockMap[comp.componentSku].capitalization = newCompCap;
+            stockSheet.getRange(compStock.rowIdx, 2, 1, 3).setValues([[newCompQty, compAvg, newCompCap]]);
+          }
+          
+          const compTransId = Utilities.getUuid();
+          const compRow = buildTransactionRow({
+            id:          compTransId,
+            date:        dateStr,
+            type:        'Расход',
+            article:     comp.componentSku,
+            quantity:    compQty,
+            price:       compAvg,
+            writeOffCost: compTotal,
+            total:       compTotal,
+            destination: destination,
+            deliveryDate: '',
+            comment:     'Авто: комплект ' + article,
+            user:        username,
+            groupId:     kitGroupId,
+            isComponent: true
+          });
+          
+          transSheet.appendRow(compRow);
+          
+          newTransactions.push({
+            id: compTransId,
+            date: dateStr,
+            type: 'Расход',
+            article: comp.componentSku,
+            quantity: compQty,
+            price: compAvg,
+            writeOffCost: compTotal,
+            total: compTotal,
+            destination: destination,
+            deliveryDate: '',
+            user: username,
+            groupId: kitGroupId,
+            isComponent: true
+          });
+        }
+      }
+    }
     
     if (type === 'Приход') {
       ensureSkuExists(article);
@@ -1005,37 +1389,72 @@ function commitTransaction(items, type, destination, deliveryDate = '') {
         };
       }
     } else if (type === 'Расход') {
-      if (stockMap[article]) {
-        const curr = stockMap[article];
-        writeOffCost = roundToTwo(curr.avgCost * qty);
-        
-        const newQty = curr.quantity - qty;
-        const newCap = roundToTwo(curr.capitalization - writeOffCost);
-        const newSales = curr.sales120 + qty;
-        
-        stockMap[article].quantity = newQty;
-        stockMap[article].capitalization = newCap;
-        stockMap[article].sales120 = newSales;
-        
-        stockSheet.getRange(curr.rowIdx, 2, 1, 4).setValues([[newQty, curr.avgCost, newCap, newSales]]);
+      if (isVirtualKit) {
+        writeOffCost = 0;
+      } else {
+        if (stockMap[article]) {
+          const curr = stockMap[article];
+          writeOffCost = roundToTwo(curr.avgCost * qty);
+          
+          const newQty = curr.quantity - qty;
+          const newCap = roundToTwo(curr.capitalization - writeOffCost);
+          
+          stockMap[article].quantity = newQty;
+          stockMap[article].capitalization = newCap;
+          
+          stockSheet.getRange(curr.rowIdx, 2, 1, 3).setValues([[newQty, curr.avgCost, newCap]]);
+        }
       }
     }
     
-    transSheet.appendRow([
-      Utilities.getUuid(),
-      dateStr,
+    const shipmentAdditional = (type === 'Расход' && kitGroupId) ? parseAdditionalCostsFromDestination(destination) : 0;
+    const additionalCosts = (shipmentAdditional > 0 && shipmentTotalQty > 0) ? roundToTwo(shipmentAdditional * qty / shipmentTotalQty) : 0;
+    const mainTotal = (type === 'Расход' && kitGroupId) ? roundToTwo(writeOffCost + componentsTotal + additionalCosts) : total;
+    const mainPrice = (type === 'Расход' && kitGroupId && qty > 0) ? roundToTwo(mainTotal / qty) : price;
+    
+    const transId = Utilities.getUuid();
+    
+    const mainRow = buildTransactionRow({
+      id: transId,
+      date: dateStr,
+      type: type,
+      article: article,
+      quantity: qty,
+      price: mainPrice,
+      writeOffCost: writeOffCost,
+      total: mainTotal,
+      destination: destination,
+      deliveryDate: deliveryDate,
+      user: username,
+      groupId: kitGroupId || '',
+      isComponent: false
+    });
+    
+    transSheet.appendRow(mainRow);
+    
+    newTransactions.push({
+      id: transId,
+      date: dateStr,
       type,
       article,
-      qty,
-      price,
+      quantity: qty,
+      price: mainPrice,
       writeOffCost,
-      total,
+      total: mainTotal,
       destination,
-      deliveryDate
-    ]);
+      deliveryDate,
+      user: username,
+      groupId: kitGroupId || '',
+      isComponent: false
+    });
   });
+
   
-  return getStock();
+  return {
+    stock: getStock(),
+    newTransactions: newTransactions,
+    skus: getSkus() // return skus explicitly since we might have added one in ensureSkuExists
+  };
 }
 
 // --- User Management & Authentication ---
@@ -1093,7 +1512,7 @@ function loginUser(username, password) {
       sheet.clear();
       sheet.appendRow(['Username', 'Password', 'Role']);
     }
-    sheet.appendRow(['Админ', hashPassword('Admin_9x$K2mP'), 'admin']);
+    sheet.appendRow(['Админ', hashPassword('Admin_Mercurius_2025!'), 'admin']);
     data = sheet.getDataRange().getValues();
   }
   
@@ -1123,8 +1542,18 @@ function loginUser(username, password) {
   const sessionSheet = ss.getSheetByName('Сессии');
   if (!sessionSheet) throw new Error('Ошибка БД: лист Сессии не найден');
   
+  // Очистка старых сессий текущего пользователя или истёкших сессий
+  const now = new Date().getTime();
+  const sessionData = sessionSheet.getDataRange().getValues();
+  for (let i = sessionData.length - 1; i >= 1; i--) {
+     // Удалить если сессия истекла или принадлежит тому же пользователю (чтобы не копить дубли сессий на одного)
+     if (Number(sessionData[i][3]) < now || String(sessionData[i][1]) === user.username) {
+        sessionSheet.deleteRow(i + 1);
+     }
+  }
+
   const token = Utilities.getUuid();
-  const expiresAt = new Date().getTime() + (24 * 60 * 60 * 1000); // 24 hours
+  const expiresAt = now + (24 * 60 * 60 * 1000); // 24 hours
   
   sessionSheet.appendRow([token, user.username, user.role, expiresAt]);
   
@@ -1183,7 +1612,8 @@ function addUser(username, password, role) {
 }
 
 function deleteUser(username, deletedBy) {
-  if (username === 'admin') throw new Error('Нельзя удалить главного администратора');
+  const normalizedUser = String(username).toLowerCase();
+  if (normalizedUser === 'admin' || normalizedUser === 'админ' || normalizedUser === 'администратор') throw new Error('Нельзя удалить главного администратора');
   
   const ss = getSpreadsheet();
   const sheet = ss.getSheetByName('Пользователи');
@@ -1312,7 +1742,7 @@ function restoreArchivedItem(archiveId) {
       const uData = usersSheet.getDataRange().getValues();
       const exists = uData.some((r, idx) => idx > 0 && String(r[0]).trim().toLowerCase() === String(payload.username).trim().toLowerCase());
       if (!exists) {
-        addUser(payload.username, payload.password, payload.role);
+        usersSheet.appendRow([payload.username, payload.password, payload.role]);
       }
     }
   } else if (type === 'Transaction') {
@@ -1325,9 +1755,7 @@ function restoreArchivedItem(archiveId) {
 
 function restoreTransaction(payload) {
   const ss = getSpreadsheet();
-  const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
-  const transSheet2 = getSheetByNameRobust(ss, 'История');
-  let transSheet = transSheet1 || transSheet2;
+  const transSheet = getTransactionSheet(ss);
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
   
   if (!transSheet) return;
@@ -1386,19 +1814,9 @@ function restoreTransaction(payload) {
      stockSheet.appendRow([article, newQty, newAvgCost, newCap, newSales, 0]);
   }
   
+  // Даты сохраняем как есть (ISO-формат), без конвертации
   let dateStr = payload.date || '';
-  if (dateStr.includes('T')) {
-      dateStr = Utilities.formatDate(new Date(dateStr), Session.getScriptTimeZone(), "dd-MM-yyyy");
-  }
-
   let deliveryStr = payload.deliveryDate || '';
-  if (deliveryStr.includes('T')) {
-      try {
-        deliveryStr = Utilities.formatDate(new Date(deliveryStr), Session.getScriptTimeZone(), "yyyy-MM-dd");
-      } catch(e) {
-        // ignore
-      }
-  }
   
   transSheet.appendRow([
     payload.id,
@@ -1410,7 +1828,8 @@ function restoreTransaction(payload) {
     payload.writeOffCost,
     payload.total,
     payload.destination || '',
-    deliveryStr
+    deliveryStr,
+    payload.user || ''
   ]);
 }
 
@@ -1422,9 +1841,7 @@ function deleteMultipleTransactions(ids, deletedBy) {
   const spreadsheetId = ss.getId();
   
   // 1. Получаем листы
-  const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
-  const transSheet2 = getSheetByNameRobust(ss, 'История');
-  const transSheet = (transSheet1 && transSheet2) ? (transSheet1.getLastRow() >= transSheet2.getLastRow() ? transSheet1 : transSheet2) : (transSheet1 || transSheet2);
+  const transSheet = getTransactionSheet(ss);
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
   
   let archiveSheet = ss.getSheetByName('Удаленное');
@@ -1480,8 +1897,10 @@ function deleteMultipleTransactions(ids, deletedBy) {
       let dateStr = transDataAll[i][1] instanceof Date ? transDataAll[i][1].toISOString() : String(transDataAll[i][1]);
       let deliveryDateStr = transDataAll[i][9] instanceof Date ? transDataAll[i][9].toISOString() : String(transDataAll[i][9] || '');
 
+      let userStr = transDataAll[i][10] ? String(transDataAll[i][10]) : '';
+
       // Формируем объект для архива
-      const archiveObj = { id: rowId, date: dateStr, type, article, quantity: qty, price, writeOffCost, total, destination: dest, deliveryDate: deliveryDateStr };
+      const archiveObj = { id: rowId, date: dateStr, type, article, quantity: qty, price, writeOffCost, total, destination: dest, deliveryDate: deliveryDateStr, user: userStr };
       rowsToArchive.push([Utilities.getUuid(), 'Transaction', deletedAt, JSON.stringify(archiveObj), deletedBy]);
 
       // Аккумулируем откат остатков
@@ -1598,15 +2017,9 @@ function restoreMultipleArchivedItems(archiveIds) {
       const dataJSON = String(archiveDataAll[i][3]);
       try {
         const payload = JSON.parse(dataJSON);
-        const dateObj = payload.date ? new Date(payload.date) : new Date();
-        let dateStr = "";
-        try { dateStr = Utilities.formatDate(dateObj, Session.getScriptTimeZone(), "yyyy-MM-dd'T'HH:mm:ss"); } catch (e) { dateStr = String(payload.date); }
-        
-        let deliveryStr = "";
-        if (payload.deliveryDate) {
-          const dObj = new Date(payload.deliveryDate);
-          try { deliveryStr = Utilities.formatDate(dObj, Session.getScriptTimeZone(), "yyyy-MM-dd"); } catch (e) { deliveryStr = String(payload.deliveryDate); }
-        }
+        // Даты сохраняем как есть (ISO-формат payload), без переформатирования
+        let dateStr = payload.date ? String(payload.date) : new Date().toISOString();
+        let deliveryStr = payload.deliveryDate ? String(payload.deliveryDate) : "";
 
         transactionsToRestore.push([
           payload.id, dateStr, payload.type, payload.article,
@@ -1622,9 +2035,7 @@ function restoreMultipleArchivedItems(archiveIds) {
 
   if (transactionsToRestore.length > 0) {
     // 2. Добавляем восстановленные данные обратно
-    const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
-    const transSheet2 = getSheetByNameRobust(ss, 'История');
-    const transSheet = (transSheet1 && transSheet2) ? (transSheet1.getLastRow() >= transSheet2.getLastRow() ? transSheet1 : transSheet2) : (transSheet1 || transSheet2);
+    const transSheet = getTransactionSheet(ss);
     
     // Проверка на дубликаты перед вставкой
     const activeTransData = transSheet.getDataRange().getValues();
@@ -1745,9 +2156,7 @@ function hardDeleteArchivedItems(archiveIds) {
 }
 
 function recalculateStockFully(ss) {
-  const transSheet1 = getSheetByNameRobust(ss, 'Транзакции');
-  const transSheet2 = getSheetByNameRobust(ss, 'История');
-  const transSheet = (transSheet1 && transSheet2) ? (transSheet1.getLastRow() >= transSheet2.getLastRow() ? transSheet1 : transSheet2) : (transSheet1 || transSheet2);
+  const transSheet = getTransactionSheet(ss);
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
   
   if (!transSheet || !stockSheet) return;
@@ -1888,11 +2297,15 @@ function setupDailyAnalyticsTrigger() {
 function getGlobalSettings(role) {
   const props = PropertiesService.getScriptProperties();
   const settings = {
-    geminiModel: props.getProperty('global_geminiModel') || 'gemini-1.5-flash'
+    geminiModel: props.getProperty('global_geminiModel') || 'gemini-flash-latest',
+    serviceOrder: props.getProperty('global_serviceOrder') || '',
+    storageRatePerLiterDay: Number(props.getProperty('global_storageRate')) || 0
   };
   // Ключ — только администратору
-  if (role === 'admin') {
+  if (isAdminRole(role)) {
     settings.geminiKey = props.getProperty('global_geminiKey') || '';
+    settings.ozonClientId = props.getProperty('global_ozonClientId') || '';
+    settings.ozonApiKey = props.getProperty('global_ozonApiKey') || '';
   }
   return settings;
 }
@@ -1905,10 +2318,138 @@ function saveGlobalSettings(data, role) {
   if (data.geminiModel !== undefined) {
     props.setProperty('global_geminiModel', data.geminiModel);
   }
+  if (data.serviceOrder !== undefined) {
+    props.setProperty('global_serviceOrder', data.serviceOrder);
+  }
+  if (data.storageRatePerLiterDay !== undefined) {
+    props.setProperty('global_storageRate', String(data.storageRatePerLiterDay));
+  }
+  if (data.ozonClientId !== undefined) {
+    props.setProperty('global_ozonClientId', data.ozonClientId);
+  }
+  if (data.ozonApiKey !== undefined) {
+    props.setProperty('global_ozonApiKey', data.ozonApiKey);
+  }
   return getGlobalSettings(role);
 }
 
 // --- Services (Услуги) ---
+
+function getTodayDateString() {
+  try {
+    return Utilities.formatDate(new Date(), Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd");
+  } catch (e) {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+}
+
+function formatDateString(val) {
+  if (val instanceof Date) {
+    try {
+      return Utilities.formatDate(val, Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd");
+    } catch(e) {
+      const year = val.getFullYear();
+      const month = String(val.getMonth() + 1).padStart(2, '0');
+      const day = String(val.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+  }
+  let s = String(val).trim();
+  if (!s) return '';
+  if (s.includes('T')) {
+    s = s.split('T')[0];
+  }
+  const match = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    return `${match[1]}-${match[2]}-${match[3]}`;
+  }
+  try {
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+  } catch(e) {}
+  return s;
+}
+
+function getServiceRates() {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('Тарифы услуг');
+  if (!sheet) return [];
+  
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  
+  return data.slice(1).map(row => {
+    return {
+      serviceId: String(row[0]),
+      cost: Number(row[1]) || 0,
+      validFrom: formatDateString(row[2])
+    };
+  });
+}
+
+function getServiceCostAt(serviceId, dateStr, ratesArr, services) {
+  const serviceRates = (ratesArr || []).filter(r => String(r.serviceId) === String(serviceId) && r.validFrom && r.validFrom <= dateStr);
+  if (serviceRates.length > 0) {
+    serviceRates.sort((a, b) => b.validFrom.localeCompare(a.validFrom));
+    return serviceRates[0].cost;
+  }
+  
+  if (services) {
+    const svc = services.find(s => String(s.id) === String(serviceId));
+    if (svc) return svc.cost;
+  }
+  
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('Услуги');
+  if (sheet) {
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(serviceId)) {
+        return Number(data[i][2]) || 0;
+      }
+    }
+  }
+  return 0;
+}
+
+function addServiceRate(serviceId, cost, validFrom) {
+  if (!serviceId) {
+    throw new Error('ID услуги не может быть пустым');
+  }
+  const numericCost = Number(cost);
+  if (isNaN(numericCost) || numericCost < 0) {
+    throw new Error('Стоимость тарифа должна быть числом не меньше 0');
+  }
+  
+  if (!validFrom) {
+    throw new Error('Дата действия тарифа не указана');
+  }
+  const dateObj = new Date(validFrom);
+  if (isNaN(dateObj.getTime())) {
+    throw new Error('Указана невалидная дата действия тарифа');
+  }
+  
+  const formattedDate = formatDateString(dateObj);
+
+  const ss = getSpreadsheet();
+  let sheet = ss.getSheetByName('Тарифы услуг');
+  if (!sheet) {
+    setupDatabase();
+    sheet = ss.getSheetByName('Тарифы услуг');
+  }
+  
+  sheet.appendRow([String(serviceId), numericCost, formattedDate]);
+  return getServiceRates();
+}
 
 function getServices() {
   const ss = getSpreadsheet();
@@ -1918,12 +2459,20 @@ function getServices() {
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
   
-  return data.slice(1).map(row => ({
+  const services = data.slice(1).map(row => ({
     id: String(row[0]),
     name: String(row[1]),
     cost: Number(row[2]) || 0,
     isActive: row[3] !== false && row[3] !== 'false' && row[3] !== 0 && String(row[3]).toLowerCase() !== 'false'
   }));
+
+  const rates = getServiceRates();
+  const todayStr = getTodayDateString();
+
+  return services.map(s => {
+    s.currentCost = getServiceCostAt(s.id, todayStr, rates, services);
+    return s;
+  });
 }
 
 function addService(name, cost) {
@@ -1974,3 +2523,517 @@ function updateService(id, name, cost, isActive) {
   if (!found) throw new Error('Услуга не найдена');
   return getServices();
 }
+
+
+function getKits() {
+  const ss = getSpreadsheet();
+  const sheet = getKitSheet(ss);
+  const data = sheet.getDataRange().getValues();
+  const kits = {};
+  if (data.length <= 1) return kits;
+  
+  const headers = data[0];
+  const kitTypeIdx = headers.indexOf('kitType');
+  
+  for (let i = 1; i < data.length; i++) {
+    const kitSku = String(data[i][0]).trim();
+    const componentSku = String(data[i][1]).trim();
+    let qty = Number(data[i][2]);
+    if (isNaN(qty) || qty <= 0) qty = 1;
+    
+    let kitType = 'legacy';
+    if (kitTypeIdx !== -1 && data[i][kitTypeIdx]) {
+      const val = String(data[i][kitTypeIdx]).trim().toLowerCase();
+      if (val === 'virtual') kitType = 'virtual';
+    }
+    
+    if (kitSku && componentSku) {
+      if (!kits[kitSku]) {
+        kits[kitSku] = { type: kitType, components: [] };
+      }
+      kits[kitSku].components.push({ componentSku, quantity: qty });
+    }
+  }
+  return kits;
+}
+
+function saveKit(kitSku, components, kitType) {
+  const ss = getSpreadsheet();
+  const sheet = getKitSheet(ss);
+  const data = sheet.getDataRange().getValues();
+  
+  const rowsToDelete = [];
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === kitSku) {
+      rowsToDelete.push(i + 1);
+    }
+  }
+  
+  for (let i = rowsToDelete.length - 1; i >= 0; i--) {
+    sheet.deleteRow(rowsToDelete[i]);
+  }
+  
+  const typeToWrite = kitType || 'legacy';
+  
+  if (components && components.length > 0) {
+    const newRows = components.map(c => [kitSku, c.componentSku, Number(c.quantity) || 1, typeToWrite]);
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, 4).setValues(newRows);
+  }
+  
+  SpreadsheetApp.flush();
+  return { status: 'success', kitSku: kitSku, count: components ? components.length : 0 };
+}
+
+function deleteKit(kitSku) {
+  return saveKit(kitSku, []);
+}
+
+function getKitComponents(kitSku) {
+  const kits = getKits();
+  return kits[kitSku] || { type: 'legacy', components: [] };
+}
+
+function migrateKitCosts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getTransactionSheet(ss);
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var idx = function(name) { return headers.indexOf(name); };
+
+  var cDate = 1, cType = 2, cQty = 4, cPrice = 5;
+  var cWriteOff = idx('Себестоимость списания'); if (cWriteOff === -1) cWriteOff = idx('Сумма списания');
+  var cTotal = idx('Сумма'); if (cTotal === -1) cTotal = idx('Итого');
+  var cDest = idx('Объект');
+  var cGroup = idx('groupId');
+  var cComp = idx('isComponent');
+
+  var isCompOf = function(row){ return row[cComp] === true || String(row[cComp]).toLowerCase() === 'true'; };
+  var shipKey = function(row){ return String(row[cDate]) + '||' + String(row[cDest] || ''); };
+
+  // 1) сумма total компонентов по groupId
+  var compSum = {};
+  for (var i = 1; i < data.length; i++) {
+    var g = String(data[i][cGroup] || '');
+    if (g && isCompOf(data[i])) compSum[g] = (compSum[g] || 0) + (Number(data[i][cTotal]) || 0);
+  }
+
+  // 2) суммарное количество главных строк по отгрузке (Дата+Объект)
+  var shipQty = {};
+  for (var k = 1; k < data.length; k++) {
+    if (isCompOf(data[k])) continue;
+    if (String(data[k][cType]) !== 'Расход') continue;
+    var key = shipKey(data[k]);
+    shipQty[key] = (shipQty[key] || 0) + (Number(data[k][cQty]) || 0);
+  }
+
+  // 3) пересчёт главных транзакций комплектов
+  var updated = 0;
+  for (var j = 1; j < data.length; j++) {
+    var gid = String(data[j][cGroup] || '');
+    if (!gid || isCompOf(data[j])) continue;
+    if (String(data[j][cType]) !== 'Расход') continue;
+    if (!(gid in compSum)) continue;
+
+    var writeOff = Number(data[j][cWriteOff]) || 0;
+    var qty = Number(data[j][cQty]) || 0;
+    var totalShip = shipQty[shipKey(data[j])] || qty;
+    var shipAdd = parseAdditionalCostsFromDestination(String(data[j][cDest] || ''));
+    var add = (shipAdd > 0 && totalShip > 0) ? roundToTwo(shipAdd * qty / totalShip) : 0;
+
+    var newTotal = roundToTwo(writeOff + compSum[gid] + add);
+    var newPrice = qty > 0 ? roundToTwo(newTotal / qty) : Number(data[j][cPrice]) || 0;
+
+    sheet.getRange(j + 1, cTotal + 1).setValue(newTotal);
+    sheet.getRange(j + 1, cPrice + 1).setValue(newPrice);
+    updated++;
+  }
+  Logger.log('Обновлено главных транзакций комплектов: ' + updated);
+  return updated;
+}
+
+function cleanupZeroCostRows() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getTransactionSheet(ss);
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var idx = function(name){ return headers.indexOf(name); };
+  var cTotal = idx('Сумма'); if (cTotal === -1) cTotal = 7;
+
+  var junkIds = {
+    '4a85ceab-31f6-4a76-a724-6408d89bff81': true,
+    '81dd00aa-39bf-4f6f-98f1-ed1dcb94b7a1': true
+  };
+
+  var deleted = 0;
+  // идём снизу вверх, чтобы индексы строк не съезжали при удалении
+  for (var i = data.length - 1; i >= 1; i--) {
+    var id = String(data[i][0]);
+    if (junkIds[id] === true) {
+      if (Number(data[i][cTotal]) === 0) {
+        sheet.deleteRow(i + 1);
+        deleted++;
+        Logger.log('Удалена мусорная строка id=' + id + ' (строка листа ' + (i + 1) + ')');
+      } else {
+        Logger.log('ПРОПУЩЕНО (Сумма != 0) id=' + id + ' Сумма=' + data[i][cTotal]);
+      }
+    }
+  }
+  Logger.log('Итого удалено строк: ' + deleted);
+  return deleted;
+}
+
+function migrateDatesToISO() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getTransactionSheet(ss);
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var idx = function(name){ return headers.indexOf(name); };
+  var tz = Session.getScriptTimeZone();
+
+  var cDate = idx('Дата'); if (cDate === -1) cDate = 1;
+  var cDelivery = idx('Дата поставки'); if (cDelivery === -1) cDelivery = 9;
+
+  function toIsoZ(val) {
+    if (val instanceof Date) {
+      return Utilities.formatDate(val, tz, 'yyyy-MM-dd') + 'T12:00:00.000Z';
+    }
+    var s = String(val).trim();
+    if (!s) return null;                                   // пусто — пропуск
+    if (s.indexOf('T') !== -1 && s.indexOf('Z') !== -1) return null; // уже ISO-Z — пропуск
+    var head = s.split(',')[0].trim();
+    var dmy = head.match(/^(\d{2})[.\-](\d{2})[.\-](\d{4})$/); // DD-MM-YYYY / DD.MM.YYYY
+    if (dmy) return dmy[3] + '-' + dmy[2] + '-' + dmy[1] + 'T12:00:00.000Z';
+    var ymd = s.match(/^(\d{4})-(\d{2})-(\d{2})/);          // YYYY-MM-DD (с временем без Z или без него)
+    if (ymd) return ymd[1] + '-' + ymd[2] + '-' + ymd[3] + 'T12:00:00.000Z';
+    var d = new Date(s);                                    // запасной вариант: JS-toString и пр.
+    if (!isNaN(d.getTime())) return Utilities.formatDate(d, tz, 'yyyy-MM-dd') + 'T12:00:00.000Z';
+    Logger.log('Не распознана дата: "' + s + '"');
+    return null;
+  }
+
+  var countB = 0, countJ = 0;
+  for (var i = 1; i < data.length; i++) {
+    var nb = toIsoZ(data[i][cDate]);
+    if (nb !== null) {
+      sheet.getRange(i + 1, cDate + 1).setNumberFormat('@');
+      sheet.getRange(i + 1, cDate + 1).setValue(nb);
+      countB++;
+    }
+    var nj = toIsoZ(data[i][cDelivery]);
+    if (nj !== null) {
+      sheet.getRange(i + 1, cDelivery + 1).setNumberFormat('@');
+      sheet.getRange(i + 1, cDelivery + 1).setValue(nj);
+      countJ++;
+    }
+  }
+  Logger.log('Дата (B) обновлено: ' + countB + '; Дата поставки (J) обновлено: ' + countJ);
+  return { date: countB, delivery: countJ };
+}
+
+function migrateBowlKitsToVirtual() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var MIGRATIONS = [
+    { kit: 'BowlGrayMini_01', newComponent: 'Миска серая' },
+    { kit: 'BowlBlueMini_01', newComponent: 'Миска бирюзовая' }
+  ];
+  
+  var report = {};
+  
+  for (var m = 0; m < MIGRATIONS.length; m++) {
+    var kit = MIGRATIONS[m].kit;
+    var newComponent = MIGRATIONS[m].newComponent;
+    
+    // Check if already migrated
+    var currentKitInfo = getKitComponents(kit);
+    var isVirtual = currentKitInfo.type === 'virtual';
+    var hasNewComponent = currentKitInfo.components && currentKitInfo.components.some(function(c) {
+      return c.componentSku === newComponent;
+    });
+    
+    // Read current kit qty from Остатки
+    var stockSheet = getSheetByNameRobust(ss, 'Остатки');
+    var stockData = stockSheet.getDataRange().getValues();
+    var qty = 0;
+    var avgCost = 0;
+    var cap = 0;
+    var kitRowIdx = -1;
+    var componentRowIdx = -1;
+    var componentQty = 0;
+    var componentAvgCost = 0;
+    var componentCap = 0;
+    
+    for (var i = 1; i < stockData.length; i++) {
+      var art = String(stockData[i][0]).trim();
+      if (art === kit) {
+        qty = Number(stockData[i][1]) || 0;
+        avgCost = Number(stockData[i][2]) || 0;
+        cap = Number(stockData[i][3]) || 0;
+        kitRowIdx = i + 1;
+      } else if (art === newComponent) {
+        componentQty = Number(stockData[i][1]) || 0;
+        componentAvgCost = Number(stockData[i][2]) || 0;
+        componentCap = Number(stockData[i][3]) || 0;
+        componentRowIdx = i + 1;
+      }
+    }
+    
+    if (qty <= 0 && isVirtual && hasNewComponent) {
+      Logger.log(kit + ': уже мигрировано');
+      report[kit] = 'already migrated';
+      continue;
+    }
+    
+    // 1. SKU sheet check/addition
+    var skuSheet = ss.getSheetByName('SKU');
+    var skuData = skuSheet.getDataRange().getValues();
+    var skuExists = false;
+    for (var i = 1; i < skuData.length; i++) {
+      if (String(skuData[i][0]).trim() === newComponent) {
+        skuExists = true;
+        break;
+      }
+    }
+    if (!skuExists) {
+      skuSheet.appendRow([newComponent, 18, 0, '', '', 0]);
+      Logger.log('Добавлен новый артикул в SKU: ' + newComponent);
+    }
+    
+    // 2. Transfer stock if qty > 0
+    if (qty > 0) {
+      var transSheet = getTransactionSheet(ss);
+      var nowStr = new Date().toISOString();
+      
+      // a) Расход для kit
+      var refundRowObj = {
+        id: Utilities.getUuid(),
+        date: nowStr,
+        type: 'Расход',
+        article: kit,
+        quantity: qty,
+        price: avgCost,
+        writeOffCost: cap,
+        total: cap,
+        destination: 'Склад [Миграция комплектов]',
+        user: 'миграция'
+      };
+      var refundRow = buildTransactionRow(refundRowObj);
+      transSheet.appendRow(refundRow);
+      
+      // b) Приход для newComponent
+      var receiveRowObj = {
+        id: Utilities.getUuid(),
+        date: nowStr,
+        type: 'Приход',
+        article: newComponent,
+        quantity: qty,
+        price: avgCost,
+        writeOffCost: 0,
+        total: cap,
+        destination: 'Склад [Миграция комплектов]',
+        user: 'миграция'
+      };
+      var receiveRow = buildTransactionRow(receiveRowObj);
+      transSheet.appendRow(receiveRow);
+      
+      // c) Остатки sheet updates
+      if (kitRowIdx !== -1) {
+        stockSheet.getRange(kitRowIdx, 2, 1, 3).setValues([[0, 0, 0]]);
+      }
+      
+      if (componentRowIdx !== -1) {
+        var finalQty = componentQty + qty;
+        var finalCap = roundToTwo(componentCap + cap);
+        var finalAvgCost = finalQty > 0 ? roundToTwo(finalCap / finalQty) : 0;
+        stockSheet.getRange(componentRowIdx, 2, 1, 3).setValues([[finalQty, finalAvgCost, finalCap]]);
+      } else {
+        stockSheet.appendRow([newComponent, qty, avgCost, cap, 0, 0]);
+      }
+      Logger.log('Перенесено остатков с ' + kit + ' на ' + newComponent + ': ' + qty + ' шт.');
+    }
+    
+    // 3. Комплекты sheet updates
+    var kitSheet = getKitSheet(ss);
+    var kitDataRaw = kitSheet.getDataRange().getValues();
+    var rowsToDelete = [];
+    for (var i = kitDataRaw.length - 1; i >= 1; i--) {
+      if (String(kitDataRaw[i][0]).trim() === kit) {
+        rowsToDelete.push(i + 1);
+      }
+    }
+    for (var i = 0; i < rowsToDelete.length; i++) {
+      kitSheet.deleteRow(rowsToDelete[i]);
+    }
+    
+    var newRows = [
+      [kit, newComponent, 1, 'virtual'],
+      [kit, 'Бутылки', 1, 'virtual'],
+      [kit, 'Пакеты', 1, 'virtual']
+    ];
+    kitSheet.getRange(kitSheet.getLastRow() + 1, 1, newRows.length, 4).setValues(newRows);
+    
+    SpreadsheetApp.flush();
+    Logger.log('Состав комплекта ' + kit + ' обновлен на виртуальный.');
+    report[kit] = 'migrated (transferred ' + qty + ' qty)';
+  }
+  
+  Logger.log('Отчёт о миграции: ' + JSON.stringify(report, null, 2));
+  return report;
+}
+
+function migrateComponentWriteOffCosts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var transSheet = getTransactionSheet(ss);
+  if (!transSheet) {
+    Logger.log('Лист :Транзакции не найден.');
+    return 0;
+  }
+  
+  var range = transSheet.getDataRange();
+  var values = range.getValues();
+  if (values.length <= 1) {
+    Logger.log('Нет транзакций для миграции.');
+    return 0;
+  }
+  
+  var headers = values[0].map(function(h) { return String(h).trim(); });
+  var cIdx = headers.indexOf('isComponent');
+  var wocIdx = headers.indexOf('Себестоимость списания');
+  var totalIdx = headers.indexOf('Сумма');
+  
+  if (cIdx === -1 || wocIdx === -1 || totalIdx === -1) {
+    Logger.log('Не удалось найти необходимые колонки: isComponent, Себестоимость списания или Сумма.');
+    return 0;
+  }
+  
+  var correctedCount = 0;
+  
+  for (var i = 1; i < values.length; i++) {
+    var isComp = values[i][cIdx];
+    var isCompBool = isComp === true || String(isComp).toLowerCase() === 'true';
+    if (isCompBool) {
+      var wocVal = Number(values[i][wocIdx]) || 0;
+      var totalVal = Number(values[i][totalIdx]) || 0;
+      
+      if (Math.abs(wocVal - totalVal) > 0.01) {
+        transSheet.getRange(i + 1, wocIdx + 1).setValue(totalVal);
+        correctedCount++;
+      }
+    }
+  }
+  
+  SpreadsheetApp.flush();
+  Logger.log('Количество исправленных строк компонентов: ' + correctedCount);
+  return correctedCount;
+}
+
+function getExternalShipmentsSheet() {
+  const ss = getSpreadsheet();
+  return getOrCreateSheet(ss, 'Внешние отгрузки', ['PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo']);
+}
+
+function saveExternalShipments(shipments) {
+  if (!shipments || !Array.isArray(shipments)) {
+    throw new Error('Invalid shipments data: must be an array');
+  }
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const existingPostingIds = new Set();
+  
+  for (let i = 1; i < data.length; i++) {
+    const postingId = String(data[i][0]).trim();
+    if (postingId) {
+      existingPostingIds.add(postingId);
+    }
+  }
+  
+  let addedCount = 0;
+  const nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd HH:mm:ss");
+  
+  const rowsToAdd = [];
+  for (let i = 0; i < shipments.length; i++) {
+    const s = shipments[i];
+    if (!s) continue;
+    const postingId = String(s.postingId || '').trim();
+    if (!postingId) continue;
+    
+    if (!existingPostingIds.has(postingId)) {
+      rowsToAdd.push([
+        postingId,
+        nowStr,
+        s.shipmentDate || '',
+        'new',
+        s.itemsJSON || '',
+        s.transGroupInfo || ''
+      ]);
+      existingPostingIds.add(postingId);
+      addedCount++;
+    }
+  }
+  
+  if (rowsToAdd.length > 0) {
+    sheet.getRange(data.length + 1, 1, rowsToAdd.length, 6).setValues(rowsToAdd);
+    SpreadsheetApp.flush();
+  }
+  
+  return { addedCount: addedCount };
+}
+
+function getExternalShipments() {
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  
+  const shipments = [];
+  const tz = Session.getScriptTimeZone() || "GMT";
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (String(row[0]).trim() === '') continue;
+    
+    let detectedAt = '';
+    if (row[1] instanceof Date) {
+      detectedAt = Utilities.formatDate(row[1], tz, "yyyy-MM-dd HH:mm:ss");
+    } else {
+      detectedAt = String(row[1] || '');
+    }
+
+    let shipmentDate = '';
+    if (row[2] instanceof Date) {
+      shipmentDate = Utilities.formatDate(row[2], tz, "yyyy-MM-dd");
+    } else {
+      shipmentDate = String(row[2] || '');
+    }
+
+    shipments.push({
+      postingId: String(row[0]),
+      detectedAt: detectedAt,
+      shipmentDate: shipmentDate,
+      status: String(row[3]),
+      itemsJSON: String(row[4]),
+      transGroupInfo: String(row[5] || '')
+    });
+  }
+  return shipments;
+}
+
+function updateExternalShipmentStatus(postingId, status) {
+  if (!postingId) {
+    throw new Error('PostingID is required');
+  }
+  if (status !== 'processed' && status !== 'ignored') {
+    throw new Error('Invalid status. Allowed values: processed, ignored');
+  }
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  
+  const targetId = String(postingId).trim().toLowerCase();
+  for (let i = 1; i < data.length; i++) {
+    const currentId = String(data[i][0]).trim().toLowerCase();
+    if (currentId === targetId) {
+      sheet.getRange(i + 1, 4).setValue(status);
+      SpreadsheetApp.flush();
+      return { success: true };
+    }
+  }
+  throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+

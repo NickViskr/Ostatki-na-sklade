@@ -1,5 +1,62 @@
 @import "tailwindcss";
 
+@layer theme, base, components, utilities;
+
+@theme {
+  /* We keep default light mode colors as they are, tailwind uses them by default. */
+}
+
+/* Dark mode mapping */
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Re-map white/black */
+    --color-white: #0f172a; /* Make white maps to slate-900 dark bg */
+    --color-black: #f8fafc; /* Make black maps to slate-50 */
+    
+    /* Re-map slate (gray) palette by inverting the indices */
+    --color-slate-50: #020617;   /* slate-950 */
+    --color-slate-100: #0f172a;  /* slate-900 */
+    --color-slate-200: #1e293b;  /* slate-800 */
+    --color-slate-300: #334155;  /* slate-700 */
+    --color-slate-400: #475569;  /* slate-600 */
+    --color-slate-500: #94a3b8;  /* slate-400 - middle ground */
+    --color-slate-600: #cbd5e1;  /* slate-300 */
+    --color-slate-700: #e2e8f0;  /* slate-200 */
+    --color-slate-800: #f1f5f9;  /* slate-100 */
+    --color-slate-900: #f8fafc;  /* slate-50 */
+
+    /* Re-map indigo (primary) palette - make light indigos dark and dark indigos light, or just keep some readable contrast */
+    --color-indigo-50: #1e1b4b;  /* indigo-950 */
+    --color-indigo-100: #312e81; /* indigo-900 */
+    --color-indigo-200: #3730a3; /* indigo-800 */
+    /* keep primary 500, 600, 700 relatively vibrant but readable */
+    --color-indigo-500: #818cf8; /* indigo-400 */
+    --color-indigo-600: #a5b4fc; /* indigo-300 */
+    --color-indigo-700: #c7d2fe; /* indigo-200 */
+    --color-indigo-800: #e0e7ff; /* indigo-100 */
+    --color-indigo-900: #eef2ff; /* indigo-50 */
+
+    /* Alert colors: Red */
+    --color-red-50: #450a0a;   /* red-950 */
+    --color-red-100: #7f1d1d;  /* red-900 */
+    --color-red-500: #f87171;  /* red-400 */
+    --color-red-600: #fca5a5;  /* red-300 */
+    --color-red-700: #fecaca;  /* red-200 */
+
+    /* Alert colors: Emerald */
+    --color-emerald-50: #022c22;  /* emerald-950 */
+    --color-emerald-100: #064e3b; /* emerald-900 */
+    --color-emerald-500: #34d399; /* emerald-400 */
+    --color-emerald-600: #6ee7b7; /* emerald-300 */
+    --color-emerald-700: #a7f3d0; /* emerald-200 */
+
+    /* Alert colors: Amber */
+    --color-amber-50: #451a03;  /* amber-950 */
+    --color-amber-100: #78350f; /* amber-900 */
+    --color-amber-500: #fbbf24; /* amber-400 */
+  }
+}
+
 @layer base {
   input[type="number"] {
     /* Push text away from the arrows */
@@ -22,4 +79,28 @@
   input[type="number"] {
     -moz-appearance: number-input;
   }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tab-enter {
+  animation: fadeInUp 0.2s ease-out forwards;
+}
+
+@keyframes fadeScale {
+  from { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.modal-enter {
+  animation: fadeScale 0.2s ease-out forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.fade-in {
+  animation: fadeIn 0.2s ease-out forwards;
 }

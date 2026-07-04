@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Search, 
   Calendar, 
@@ -13,12 +13,13 @@ import {
   ArrowUp,
   ArrowDown,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Loader2,
+  Layers
 } from 'lucide-react';
-import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, parseAppDate } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -84,10 +85,14 @@ const DestinationCell: React.FC<{ destination: string }> = ({ destination }) => 
   );
 };
 
-export const HistoryTab: React.FC = () => {
+export const HistoryTab: React.FC = React.memo(() => {
   const transactions = useWarehouseStore((state) => state.transactions);
+  const hasMoreTransactions = useWarehouseStore((state) => state.hasMoreTransactions);
+  const fetchMoreTransactions = useWarehouseStore((state) => state.fetchMoreTransactions);
+  const isSyncing = useWarehouseStore((state) => state.isSyncing);
   const skus = useWarehouseStore((state) => state.skus);
   const handleDeleteTransaction = useWarehouseStore((state) => state.handleDeleteTransaction);
+  const handleDeleteMultipleTransactions = useWarehouseStore((state) => state.handleDeleteMultipleTransactions);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
@@ -119,24 +124,48 @@ export const HistoryTab: React.FC = () => {
   const setEditingTrans = useUIStore((state) => state.setEditingTrans);
   const setShowEditTransModal = useUIStore((state) => state.setShowEditTransModal);
 
+  const [expandedKitGroups, setExpandedKitGroups] = useState<Set<string>>(new Set());
+  const toggleKit = (groupId: string) => {
+    setExpandedKitGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+      return next;
+    });
+  };
   const [transToDelete, setTransToDelete] = useState<string | null>(null);
+  const [transToDeleteIds, setTransToDeleteIds] = useState<string[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
-  const handleDeleteMultipleTransactions = useWarehouseStore((state) => state.handleDeleteMultipleTransactions);
 
   const destinations = useSettingsStore((state) => state.destinations);
 
   const formatDate = (dateStr: string) => {
     if (!dateStr) return '';
-    if (dateStr.includes('.')) return dateStr.split(',')[0].trim().replace(/\./g, '-');
+    // Check ISO format first (contains 'T') — must come before the '.' check
+    // because ISO milliseconds like ".177" would wrongly trigger the DD.MM.YYYY branch
+    if (dateStr.includes('T')) {
+      const d = new Date(dateStr);
+      if (!isNaN(d.getTime())) {
+        const day = String(d.getDate()).padStart(2, '0');
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const year = d.getFullYear();
+        return `${day}.${month}.${year}`;
+      }
+      return dateStr.split('T')[0];
+    }
+    // DD.MM.YYYY format (possibly with time: "05.06.2026, 19:10:07")
+    if (dateStr.includes('.')) {
+      return dateStr.split(',')[0].trim();
+    }
+    // Fallback: try parsing as-is
     const d = new Date(dateStr);
     if (!isNaN(d.getTime())) {
       const day = String(d.getDate()).padStart(2, '0');
       const month = String(d.getMonth() + 1).padStart(2, '0');
       const year = d.getFullYear();
-      return `${day}-${month}-${year}`;
+      return `${day}.${month}.${year}`;
     }
-    return dateStr.split('T')[0];
+    return dateStr;
   };
 
   const filteredHistory = useMemo(() => {
@@ -144,36 +173,30 @@ export const HistoryTab: React.FC = () => {
       const matchesSku = histSelectedSkus.length === 0 || histSelectedSkus.includes(t.article);
       const matchesType = histTypeFilter === 'all' || t.type === histTypeFilter;
       
-      let matchesDate = true;
+      const matchesDate = true;
+      let dateMatched = true;
       if (histStartDate || histEndDate) {
-        // Parse t.date safely since it could be "DD.MM.YYYY, HH:MM:SS" or ISO
-        let tDate: Date;
-        if (t.date.includes('.')) {
-          const parts = t.date.split(',')[0].trim().split('.');
-          if (parts.length === 3) {
-            tDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T12:00:00Z`);
-          } else {
-            tDate = new Date(t.date);
-          }
+        // Единый разбор даты: поддержка DD-MM-YYYY, DD.MM.YYYY и ISO
+        const tDate = parseAppDate(t.date);
+        if (!tDate) {
+          dateMatched = false;
         } else {
-          tDate = new Date(t.date);
-        }
-
-        if (histStartDate) {
-          const sDate = new Date(histStartDate);
-          sDate.setHours(0, 0, 0, 0);
-          if (tDate < sDate) matchesDate = false;
-        }
-        if (histEndDate) {
-          const eDate = new Date(histEndDate);
-          eDate.setHours(23, 59, 59, 999);
-          if (tDate > eDate) matchesDate = false;
+          if (histStartDate) {
+            const sDate = new Date(histStartDate);
+            sDate.setHours(0, 0, 0, 0);
+            if (tDate < sDate) dateMatched = false;
+          }
+          if (histEndDate) {
+            const eDate = new Date(histEndDate);
+            eDate.setHours(23, 59, 59, 999);
+            if (tDate > eDate) dateMatched = false;
+          }
         }
       }
       
       const matchesDest = histDestFilter === 'all' || t.destination === histDestFilter;
 
-      return matchesSku && matchesType && matchesDate && matchesDest;
+      return matchesSku && matchesType && dateMatched && matchesDest && !t.isComponent;
     });
   }, [transactions, histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter]);
 
@@ -189,11 +212,8 @@ export const HistoryTab: React.FC = () => {
         if (sortConfig.key === 'date') {
           // Parse date properly for sorting
            const parseDate = (dstr: string) => {
-            if (dstr.includes('.')) {
-              const parts = dstr.split(',')[0].trim().split('.');
-              if (parts.length === 3) return new Date(`${parts[2]}-${parts[1]}-${parts[0]}T12:00:00Z`).getTime();
-            }
-            return new Date(dstr).getTime();
+            const d = parseAppDate(dstr);
+            return d ? d.getTime() : 0;
           };
           aValue = parseDate(a.date);
           bValue = parseDate(b.date);
@@ -242,138 +262,89 @@ export const HistoryTab: React.FC = () => {
       <ArrowDown size={14} className="inline text-indigo-600 ml-1" />;
   };
 
-  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSelectAll = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.checked) {
       setSelectedIds(new Set(displayedHistory.map(t => t.id)));
     } else {
       setSelectedIds(new Set());
     }
-  };
+  }, [displayedHistory]);
 
-  const toggleSelect = (id: string) => {
+  const toggleSelect = useCallback((id: string) => {
     const newSet = new Set(selectedIds);
-    if (newSet.has(id)) {
-      newSet.delete(id);
-    } else {
-      newSet.add(id);
-    }
+    if (newSet.has(id)) newSet.delete(id);
+    else newSet.add(id);
     setSelectedIds(newSet);
-  };
+  }, [selectedIds]);
 
   const currentSelectionCount = selectedIds.size;
   const isAllSelected = displayedHistory.length > 0 && currentSelectionCount === displayedHistory.length;
 
-  const handleBulkDelete = async () => {
+  const handleBulkDelete = useCallback(async () => {
     if (selectedIds.size === 0) return;
     const success = await handleDeleteMultipleTransactions(Array.from(selectedIds));
-    if (success) {
-      setSelectedIds(new Set());
-    }
+    if (success) setSelectedIds(new Set());
     setBulkDeleteConfirm(false);
-  };
+  }, [selectedIds, handleDeleteMultipleTransactions]);
 
-  const handleExportCSV = () => {
-    const allServiceColumns = new Set<string>();
-    
-    const parsedDestinations = filteredHistory.map(t => {
-      const dest = t.destination || '';
-      const bracketMatch = dest.match(/(.*?)\[(.*?)\]$/);
-      const stringMatch = dest.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
-
-      let main = '';
-      const servicesRecord: Record<string, number> = {};
-      let tagStrings: string[] = [];
-
-      if (bracketMatch) {
-        main = bracketMatch[1].trim();
-        tagStrings = bracketMatch[2].split('|').map(s => s.trim());
-      } else if (stringMatch) {
-        main = stringMatch[1].trim();
-        if (stringMatch[2]) tagStrings = [stringMatch[2].trim()];
-      } else {
-        main = dest.trim();
-      }
-
-      for (const tag of tagStrings) {
-        if (tag.startsWith('Упаковка:')) {
-          const match = tag.match(/=\s*(\d+)₽/);
-          if (match) servicesRecord['Упаковка'] = Number(match[1]);
-          else {
-            const m2 = tag.match(/Упаковка:\s*(\d+)₽/);
-            if (m2) servicesRecord['Упаковка'] = Number(m2[1]);
-          }
-        } 
-        else if (tag.startsWith('Прочее:')) {
-          const match = tag.match(/=\s*(\d+)₽/);
-          if (match) servicesRecord['Прочее'] = Number(match[1]);
-          else {
-            const m2 = tag.match(/Прочее:\s*(\d+)₽/);
-            if (m2) servicesRecord['Прочее'] = Number(m2[1]);
-          }
-        }
-        else if (tag.startsWith('Услуги:') || tag.startsWith('Доп. услуги:')) {
-           const servicesStr = tag.replace(/^(Услуги:|Доп\. услуги:)\s*/, '');
-           const individualServices = servicesStr.split(', ');
-           for (const indSer of individualServices) {
-              const m = indSer.match(/(.*) x\d+ \((\d+)₽\)$/);
-              if (m) {
-                 servicesRecord[m[1].trim()] = Number(m[2]);
-              }
-           }
-        }
-      }
-
-      Object.keys(servicesRecord).forEach(k => allServiceColumns.add(k));
-      return { main, servicesRecord };
-    });
-
-    const serviceColumnsArray = Array.from(allServiceColumns).sort();
-    const headers = ['ДАТА', 'ТИП', 'АРТИКУЛ', 'КОЛ-ВО', 'ЦЕНА', 'СУММА', 'ОБЪЕКТ', 'ПОСТАВКА', ...serviceColumnsArray];
-    
-    const rows = filteredHistory.map((t, idx) => {
-      const { main, servicesRecord } = parsedDestinations[idx];
-      const row = [
-        formatDate(t.date),
-        t.type.toUpperCase(),
-        t.article,
-        t.quantity.toString(),
-        formatCurrency(t.price).replace(/\s/g, ''),
-        formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost).replace(/\s/g, ''),
-        main,
-        t.deliveryDate ? formatDate(t.deliveryDate) : '-'
-      ];
-      for (const col of serviceColumnsArray) {
-        row.push(servicesRecord[col] !== undefined ? servicesRecord[col].toString() : '');
-      }
-      return row;
-    });
-
-    const csvContent = [headers, ...rows]
-      .map(e => e.map(item => `"${String(item).replace(/"/g, '""')}"`).join(';'))
-      .join('\n');
-
-    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+  const handleExportCSV = useCallback(() => {
+    const csvRows = ['id,date,type,article,quantity,price,total,destination,user'];
+    for (const t of filteredHistory) {
+      csvRows.push([t.id, t.date, t.type, t.article, t.quantity, t.price, t.total, t.destination, t.user || ''].join(','));
+    }
+    const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `history_export_${new Date().toISOString().split('T')[0]}.csv`);
-    document.body.appendChild(link);
+    link.href = url;
+    link.download = 'history.csv';
     link.click();
-    document.body.removeChild(link);
-  };
+    URL.revokeObjectURL(url);
+  }, [filteredHistory]);
 
   return (
-    <motion.div 
+    <div 
       key="history"
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      className="space-y-6"
+      className="space-y-6 tab-enter"
     >
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end gap-4">
         <div>
           <h2 className="text-3xl font-bold">История операций</h2>
           <p className="text-slate-500">Все движения товаров по складу</p>
+          <div className="flex gap-2 mt-4 text-sm">
+            <button
+              onClick={() => {
+                const today = new Date().toISOString().split('T')[0];
+                setHistStartDate(today);
+                setHistEndDate(today);
+              }}
+              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md transition-colors"
+            >Сегодня</button>
+            <button
+              onClick={() => {
+                const today = new Date();
+                const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                setHistStartDate(weekAgo);
+                setHistEndDate(today.toISOString().split('T')[0]);
+              }}
+              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md transition-colors"
+            >7 дней</button>
+            <button
+              onClick={() => {
+                const today = new Date();
+                const monthAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                setHistStartDate(monthAgo);
+                setHistEndDate(today.toISOString().split('T')[0]);
+              }}
+              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md transition-colors"
+            >30 дней</button>
+            <button
+              onClick={() => {
+                setHistStartDate('');
+                setHistEndDate('');
+              }}
+              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md transition-colors"
+            >За всё время</button>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {currentSelectionCount > 0 && (
@@ -541,67 +512,203 @@ export const HistoryTab: React.FC = () => {
               <th className="px-3 py-3 font-bold cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('deliveryDate')}>
                 Поставка {getSortIcon('deliveryDate')}
               </th>
+              {isAdmin && (
+                <th className="px-3 py-3 font-bold cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('user')}>
+                  Кто {getSortIcon('user')}
+                </th>
+              )}
               <th className="px-3 py-3 font-bold text-right">Действия</th>
             </tr>
           </thead>
           <tbody>
-            {displayedHistory.map((t, index) => (
-              <tr key={`${t.id}-${index}`} className={`border-b border-slate-100 hover:bg-slate-50/50 transition-colors ${selectedIds.has(t.id) ? 'bg-indigo-50/30' : ''}`}>
-                <td className="px-3 py-3 text-center">
-                  <input 
-                    type="checkbox" 
-                    checked={selectedIds.has(t.id)}
-                    onChange={() => toggleSelect(t.id)}
-                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
-                  />
-                </td>
-                <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
-                  {formatDate(t.date)}
-                </td>
-                <td className="px-3 py-3">
-                  <span className={`flex items-center justify-center gap-1 w-fit px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                    t.type === 'Приход' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
-                  }`}>
-                    {t.type}
-                  </span>
-                </td>
-                <td className="px-3 py-3">
-                  <div className="text-sm font-bold text-indigo-600 font-mono">{t.article}</div>
-                </td>
-                <td className="px-3 py-3 text-right font-bold whitespace-nowrap">{t.quantity}</td>
-                <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
-                  {formatCurrency(t.price)} ₽
-                </td>
-                <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
-                  {formatCurrency(t.type === 'Приход' ? t.total : t.writeOffCost)} ₽
-                </td>
-                <td className="px-3 py-3 text-[11px] text-slate-500 max-w-[240px] whitespace-normal">
-                  <DestinationCell destination={t.destination} />
-                </td>
-                <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
-                  {t.deliveryDate ? formatDate(t.deliveryDate) : '-'}
-                </td>
-                <td className="px-3 py-3 text-right">
-                  <div className="flex justify-end gap-1">
-                    <button 
-                      onClick={() => {
-                        setEditingTrans(t);
-                        setShowEditTransModal(true);
-                      }}
-                      className="p-1.5 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all"
-                    >
-                      <Edit3 size={16} />
-                    </button>
-                    <button 
-                      onClick={() => setTransToDelete(t.id)}
-                      className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-all"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {displayedHistory.map((t, index) => {
+              const currentDateStr = formatDate(t.date);
+              const prevDateStr = index > 0 ? formatDate(displayedHistory[index - 1].date) : null;
+              const showDateHeader = sortConfig?.key === 'date' && currentDateStr !== prevDateStr;
+
+              // Helper for date headers
+              const getDateHeaderText = (dateStr: string) => {
+                const parts = dateStr.split('-');
+                if (parts.length === 3) {
+                  const d = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+                  const today = new Date();
+                  today.setHours(0, 0, 0, 0);
+                  const dt = new Date(d);
+                  dt.setHours(0,0,0,0);
+                  const diffTime = Math.abs(today.getTime() - dt.getTime());
+                  const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24)); 
+                  
+                  if (diffDays === 0) return 'Сегодня';
+                  if (diffDays === 1) return 'Вчера';
+                  
+                  const months = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+                  return `${d.getDate()} ${months[d.getMonth()]}`;
+                }
+                return dateStr;
+              };
+
+              const kitComponents = t.groupId
+                ? transactions.filter(x => x.groupId === t.groupId && x.isComponent)
+                : [];
+              const isKitRow = kitComponents.length > 0;
+              const isKitExpanded = t.groupId ? expandedKitGroups.has(t.groupId) : false;
+
+              // Суммарная стоимость для свёрнутого вида:
+              const kitOwnTotal = (t.total ?? 0) - kitComponents.reduce((sum, c) => sum + (c.total ?? 0), 0);
+              const kitWriteOffTotal = (t.total ?? t.writeOffCost ?? 0);
+              const kitPriceTotal = isKitRow && t.quantity > 0
+                ? (t.total ?? t.writeOffCost ?? 0) / t.quantity
+                : t.price;
+
+              return (
+                <React.Fragment key={`${t.id}-${index}`}>
+                  {showDateHeader && (
+                    <tr className="bg-slate-50/80 border-b border-slate-200">
+                      <td colSpan={11} className="px-4 py-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                        {getDateHeaderText(currentDateStr)}
+                      </td>
+                    </tr>
+                  )}
+                  <tr className={`border-b transition-colors ${selectedIds.has(t.id) ? 'bg-indigo-50/30' : ''} border-slate-100 hover:bg-slate-50/50`}>
+                    <td className="px-3 py-3 text-center">
+                      {!t.isComponent && (
+                        <input 
+                          type="checkbox" 
+                          checked={selectedIds.has(t.id)}
+                          onChange={() => toggleSelect(t.id)}
+                          className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                        />
+                      )}
+                    </td>
+                    <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
+                      {currentDateStr}
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className={`flex items-center justify-center gap-1 w-fit px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                        t.type === 'Приход' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
+                      }`}>
+                        {t.type}
+                      </span>
+                    </td>
+                    <td className={`px-3 py-3 ${t.isComponent ? 'pl-10' : ''}`}>
+                      <div className="flex items-center gap-2">
+                        <div className="text-sm font-bold text-indigo-600 font-mono">{t.article}</div>
+                        {(() => {
+                          if (!t.groupId) return null;
+                          const components = transactions.filter(
+                            x => x.groupId === t.groupId && x.isComponent
+                          );
+                          if (components.length === 0) return null;
+                          const isExpanded = expandedKitGroups.has(t.groupId);
+                          return (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); toggleKit(t.groupId!); }}
+                              className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 bg-violet-100 text-violet-600 rounded ml-1.5 align-middle hover:bg-violet-200 transition-colors"
+                              title={isExpanded ? 'Свернуть компоненты' : 'Показать компоненты комплекта'}
+                            >
+                              {isExpanded ? <ChevronDown size={9} /> : <ChevronRight size={9} />}
+                              {components.length} компл.
+                            </button>
+                          );
+                        })()}
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 text-right font-bold whitespace-nowrap">{t.quantity}</td>
+                    <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
+                      {formatCurrency(isKitRow && !isKitExpanded ? kitPriceTotal : t.price)} ₽
+                    </td>
+                    <td className="px-3 py-3 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
+                      {formatCurrency(
+                        t.type === 'Приход'
+                          ? t.total
+                          : (isKitRow && isKitExpanded ? kitOwnTotal : kitWriteOffTotal)
+                      )} ₽
+                    </td>
+                    <td className="px-3 py-3 text-[11px] text-slate-500 max-w-[240px] whitespace-normal">
+                      <DestinationCell destination={t.destination} />
+                    </td>
+                    <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
+                      {t.deliveryDate ? formatDate(t.deliveryDate) : '-'}
+                    </td>
+                    {isAdmin && (
+                      <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
+                        {t.user || '-'}
+                      </td>
+                    )}
+                    <td className="px-3 py-3 text-right">
+                      {!t.isComponent ? (
+                        <div className="flex justify-end gap-1">
+                          <button 
+                            onClick={() => {
+                              setEditingTrans(t);
+                              setShowEditTransModal(true);
+                            }}
+                            className="p-1.5 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all"
+                          >
+                            <Edit3 size={16} />
+                          </button>
+                          <button 
+                            onClick={() => {
+                              const componentIds = t.groupId
+                                ? transactions.filter(x => x.groupId === t.groupId && x.isComponent).map(x => x.id)
+                                : [];
+                              setTransToDeleteIds([t.id, ...componentIds]);
+                              setTransToDelete(t.id);
+                            }}
+                            className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-all"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex justify-end gap-1 px-2">
+                          <span className="text-xs text-slate-300 italic">авто</span>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                  {t.groupId && expandedKitGroups.has(t.groupId) && (() => {
+                    const components = transactions.filter(
+                      x => x.groupId === t.groupId && x.isComponent
+                    );
+                    return components.map(c => (
+                      <tr key={c.id} className="border-b border-l-4 border-l-violet-300 bg-violet-50/40 border-slate-100/50">
+                        <td className="px-3 py-2 text-center"></td>
+                        <td className="px-3 py-2 text-xs font-medium text-slate-400 whitespace-nowrap">
+                          {formatDate(c.date)}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className="flex items-center justify-center gap-1 w-fit px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-600">
+                            {c.type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 pl-10">
+                          <div className="flex items-center gap-2">
+                            <div className="text-sm font-bold text-indigo-600 font-mono">{c.article}</div>
+                            <span className="px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 text-[10px] font-bold uppercase tracking-wider">
+                              компл.
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-right font-bold whitespace-nowrap text-sm">{c.quantity}</td>
+                        <td className="px-3 py-2 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
+                          {formatCurrency(c.price)} ₽
+                        </td>
+                        <td className="px-3 py-2 text-right text-sm font-bold text-slate-900 whitespace-nowrap">
+                          {formatCurrency(c.total ?? 0)} ₽
+                        </td>
+                        <td className="px-3 py-2 text-[11px] text-slate-400" />
+                        <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">-</td>
+                        {isAdmin && <td className="px-3 py-2 text-xs text-slate-400">-</td>}
+                        <td className="px-3 py-2 text-right">
+                          <span className="text-xs text-slate-300 italic px-2">авто</span>
+                        </td>
+                      </tr>
+                    ));
+                  })()}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
         
@@ -656,14 +763,33 @@ export const HistoryTab: React.FC = () => {
         )}
       </div>
 
+      {hasMoreTransactions && (
+        <div className="flex justify-center mt-6">
+          <button
+            onClick={() => fetchMoreTransactions()}
+            disabled={isSyncing}
+            className="flex items-center gap-2 bg-white text-indigo-600 border border-slate-200 px-6 py-3 rounded-2xl font-bold hover:bg-slate-50 transition-all shadow-sm shadow-slate-200 disabled:opacity-50"
+          >
+            {isSyncing ? <Loader2 size={20} className="animate-spin" /> : <ChevronDown size={20} />}
+            Загрузить ещё
+          </button>
+        </div>
+      )}
+
       <ConfirmDialog 
         show={transToDelete !== null}
         title="Удаление операции"
         message="Вы действительно хотите удалить эту операцию из истории? Действие нельзя отменить, и остатки товара могут измениться."
-        onConfirm={() => {
-          if (transToDelete) handleDeleteTransaction(transToDelete);
+        onConfirm={async () => {
+          if (transToDeleteIds.length > 1) {
+            await handleDeleteMultipleTransactions(transToDeleteIds);
+          } else if (transToDelete) {
+            await handleDeleteTransaction(transToDelete);
+          }
+          setTransToDelete(null);
+          setTransToDeleteIds([]);
         }}
-        onCancel={() => setTransToDelete(null)}
+        onCancel={() => { setTransToDelete(null); setTransToDeleteIds([]); }}
       />
 
       <ConfirmDialog 
@@ -673,6 +799,6 @@ export const HistoryTab: React.FC = () => {
         onConfirm={handleBulkDelete}
         onCancel={() => setBulkDeleteConfirm(false)}
       />
-    </motion.div>
+    </div>
   );
-};
+});

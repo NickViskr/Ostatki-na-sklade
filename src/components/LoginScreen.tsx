@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { motion } from 'motion/react';
 import { Package, Lock, User, Loader2, Eye, EyeOff } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 
@@ -20,10 +19,8 @@ export const LoginScreen: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 relative">
 
-      <motion.div 
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="bg-white p-8 sm:p-12 rounded-[2.5rem] shadow-2xl w-full max-w-md border border-slate-100"
+      <div 
+        className="bg-white p-8 sm:p-12 rounded-[2.5rem] shadow-2xl w-full max-w-md border border-slate-100 tab-enter"
       >
         <div className="flex flex-col items-center mb-10">
           <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center shadow-xl shadow-indigo-200 mb-6 rotate-3">
@@ -87,7 +84,7 @@ export const LoginScreen: React.FC = () => {
             {isProcessing ? <Loader2 className="animate-spin" size={20} /> : 'Войти'}
           </button>
         </form>
-      </motion.div>
+      </div>
     </div>
   );
 };

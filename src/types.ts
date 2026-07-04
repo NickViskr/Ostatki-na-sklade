@@ -7,6 +7,17 @@ export interface StockItem {
   turnover: number;
 }
 
+export interface KitComponent {
+  componentSku: string;
+  quantity: number;
+}
+
+export interface KitItem {
+  kitSku: string;
+  components: KitComponent[];
+  type?: 'legacy' | 'virtual';
+}
+
 export interface Transaction {
   id: string;
   date: string;
@@ -18,6 +29,20 @@ export interface Transaction {
   total: number;
   destination: string;
   deliveryDate?: string;
+  comment?: string;
+  user?: string;
+  groupId?: string;
+  isComponent?: boolean;
+  componentsTotal?: number;
+}
+
+export interface RecognitionHistoryItem {
+  id: string;
+  timestamp: string;
+  rawText: string;
+  items: ParsedItem[];
+  opType: 'Приход' | 'Расход';
+  uploadDestination: string;
 }
 
 export interface ParsedItem {
@@ -35,6 +60,8 @@ export interface SKUItem {
   pcsPerBox: number;
   ozonBarcode?: string;
   wbBarcode?: string;
+  boxesPerPallet: number;
+  volumeLiters: number;
 }
 
 export interface User {
@@ -56,4 +83,20 @@ export interface ServiceItem {
   name: string;
   cost: number;
   isActive: boolean;
+  currentCost?: number;
+}
+
+export interface ServiceRate {
+  serviceId: string;
+  cost: number;
+  validFrom: string;
+}
+
+export interface ExternalShipment {
+  postingId: string;
+  detectedAt: string;
+  shipmentDate: string;
+  status: 'new' | 'processed' | 'ignored' | string;
+  itemsJSON: string;
+  transGroupInfo: string;
 }

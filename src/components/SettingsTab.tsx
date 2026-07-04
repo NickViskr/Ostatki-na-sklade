@@ -9,12 +9,11 @@ import {
   Loader2,
   Save
 } from 'lucide-react';
-import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { toast } from 'sonner';
 
-export const SettingsTab: React.FC = () => {
+export const SettingsTab: React.FC = React.memo(() => {
   const isSyncing = useWarehouseStore((state) => state.isSyncing);
   const handleSetupDatabase = useWarehouseStore((state) => state.handleSetupDatabase);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
@@ -27,10 +26,15 @@ export const SettingsTab: React.FC = () => {
   const setGeminiKey = useSettingsStore((state) => state.setGeminiKey);
   const notificationEmail = useSettingsStore((state) => state.notificationEmail);
   const setNotificationEmail = useSettingsStore((state) => state.setNotificationEmail);
+  const ozonClientId = useSettingsStore((state) => state.ozonClientId);
+  const setOzonClientId = useSettingsStore((state) => state.setOzonClientId);
+  const ozonApiKey = useSettingsStore((state) => state.ozonApiKey);
+  const setOzonApiKey = useSettingsStore((state) => state.setOzonApiKey);
 
   const [availableModels, setAvailableModels] = useState<string[]>(['gemini-1.5-flash']);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [isSavingGlobal, setIsSavingGlobal] = useState(false);
+  const [isSavingOzon, setIsSavingOzon] = useState(false);
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
@@ -69,8 +73,13 @@ export const SettingsTab: React.FC = () => {
     setIsSavingGlobal(true);
     try {
       const currentOrder = useSettingsStore.getState().serviceOrderIds;
-      const modelWithOrder = currentOrder && currentOrder.length > 0 ? `${geminiModel}|order=${JSON.stringify(currentOrder)}` : geminiModel;
-      const res = await fetchGas('saveGlobalSettings', { data: { geminiKey, geminiModel: modelWithOrder } });
+      const res = await fetchGas('saveGlobalSettings', { 
+        data: { 
+          geminiKey, 
+          geminiModel, 
+          serviceOrder: currentOrder && currentOrder.length > 0 ? JSON.stringify(currentOrder) : undefined
+        } 
+      });
       if (res?.status === 'success') toast.success('Настройки AI применены для всех пользователей');
       else toast.error(res?.message || 'Ошибка сохранения глобальных настроек');
     } catch (e) {
@@ -80,13 +89,31 @@ export const SettingsTab: React.FC = () => {
     }
   };
 
+  const handleSaveOzonKeys = async () => {
+    setIsSavingOzon(true);
+    try {
+      const res = await fetchGas('saveGlobalSettings', { 
+        data: { 
+          ozonClientId, 
+          ozonApiKey 
+        } 
+      });
+      if (res?.status === 'success') {
+        toast.success('Ключи Ozon успешно сохранены');
+      } else {
+        toast.error(res?.message || 'Ошибка сохранения ключей Ozon');
+      }
+    } catch (e) {
+      toast.error('Сбой сети при сохранении ключей Ozon');
+    } finally {
+      setIsSavingOzon(false);
+    }
+  };
+
   return (
-    <motion.div 
+    <div 
       key="settings"
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      className="max-w-4xl mx-auto space-y-8"
+      className="max-w-4xl mx-auto space-y-8 tab-enter"
     >
       <div className="text-center space-y-2">
         <h2 className="text-3xl font-bold">Настройки системы</h2>
@@ -95,21 +122,90 @@ export const SettingsTab: React.FC = () => {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* Google Sheets Config */}
-        <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-6">
-          <div className="flex items-center gap-3 text-indigo-600">
-            <Database size={24} />
-            <h3 className="text-xl font-bold">Google Таблицы</h3>
+        <div className="space-y-8">
+          <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-6">
+            <div className="flex items-center gap-3 text-indigo-600">
+              <Database size={24} />
+              <h3 className="text-xl font-bold">Google Таблицы</h3>
+            </div>
+            
+            <div className="space-y-4">
+              <button 
+                onClick={handleSetupDatabase}
+                disabled={isSyncing}
+                className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+              >
+                {isSyncing ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={20} />}
+                Инициализировать базу данных
+              </button>
+            </div>
           </div>
-          
-          <div className="space-y-4">
-            <button 
-              onClick={handleSetupDatabase}
-              disabled={isSyncing}
-              className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
-            >
-              {isSyncing ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={20} />}
-              Инициализировать базу данных
-            </button>
+
+          {/* Ozon Seller API Config */}
+          <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-6">
+            <div className="flex items-center gap-3 text-sky-600">
+              <Key size={24} />
+              <h3 className="text-xl font-bold">Интеграция Ozon Seller</h3>
+            </div>
+
+            <div className="space-y-4">
+              {isAdmin ? (
+                <>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-500 uppercase">Ozon Client-Id</label>
+                    <input 
+                      type="password"
+                      value={ozonClientId}
+                      onChange={(e) => setOzonClientId(e.target.value)}
+                      placeholder="Ваш Client-Id Ozon..."
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-500 uppercase">Ozon Api-Key</label>
+                    <input 
+                      type="password"
+                      value={ozonApiKey}
+                      onChange={(e) => setOzonApiKey(e.target.value)}
+                      placeholder="Ваш API-Key Ozon..."
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleSaveOzonKeys}
+                    disabled={isSavingOzon || !ozonClientId || !ozonApiKey}
+                    className="w-full mt-2 bg-sky-500 text-white py-3 rounded-xl font-bold hover:bg-sky-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                  >
+                    {isSavingOzon ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+                    Сохранить ключи Ozon
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-500 uppercase">Ozon Client-Id</label>
+                    <input 
+                      type="password"
+                      value="••••••••••••••••"
+                      disabled
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-100 text-slate-400 outline-none cursor-not-allowed"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-500 uppercase">Ozon Api-Key</label>
+                    <input 
+                      type="password"
+                      value="••••••••••••••••"
+                      disabled
+                      className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-100 text-slate-400 outline-none cursor-not-allowed"
+                    />
+                  </div>
+                  <p className="text-[10px] text-sky-600 font-medium">Изменять ключи Ozon может только администратор.</p>
+                </>
+              )}
+            </div>
           </div>
         </div>
 
@@ -196,6 +292,6 @@ export const SettingsTab: React.FC = () => {
           </div>
         </div>
       </div>
-    </motion.div>
+    </div>
   );
-};
+});

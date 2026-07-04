@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { motion } from 'motion/react';
-import { Users, UserPlus, Trash2, Shield, User, Key, Loader2, RefreshCw, Copy, Check, AlertCircle } from 'lucide-react';
+import { Users, UserPlus, Trash2, Shield, User, Key, Loader2, RefreshCw, Copy, Check, AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
-export const UsersTab: React.FC = () => {
+export const UsersTab: React.FC = React.memo(() => {
   const usersList = useWarehouseStore((state) => state.usersList);
   const fetchUsersList = useWarehouseStore((state) => state.fetchUsersList);
   const handleAddUser = useWarehouseStore((state) => state.handleAddUser);
@@ -20,6 +19,7 @@ export const UsersTab: React.FC = () => {
   const [copied, setCopied] = useState(false);
   
   const [userToDelete, setUserToDelete] = useState<string | null>(null);
+  const [showNewUserPassword, setShowNewUserPassword] = useState(false);
 
   useEffect(() => {
     fetchUsersList();
@@ -54,7 +54,10 @@ export const UsersTab: React.FC = () => {
     }
   };
 
-  const isCurrentUserAdmin = currentUser?.role === 'admin' || currentUser?.username === 'admin' || currentUser?.username === 'администратор';
+  const isCurrentUserAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
+    ['admin', 'админ', 'администратор'].includes(
+      currentUser?.username?.toLowerCase() || ''
+    );
 
   if (!isCurrentUserAdmin) {
     return (
@@ -67,10 +70,8 @@ export const UsersTab: React.FC = () => {
   }
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="space-y-8 max-w-5xl mx-auto"
+    <div 
+      className="space-y-8 max-w-5xl mx-auto tab-enter"
     >
       <div className="flex items-center justify-between">
         <div>
@@ -97,7 +98,7 @@ export const UsersTab: React.FC = () => {
               <h3 className="text-lg font-bold">Новый пользователь</h3>
             </div>
 
-            <form onSubmit={onSubmit} className="space-y-4">
+            <form onSubmit={onSubmit} className="space-y-4" autoComplete="off">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Логин</label>
                 <input
@@ -106,6 +107,8 @@ export const UsersTab: React.FC = () => {
                   onChange={(e) => setUsername(e.target.value)}
                   className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
                   placeholder="Введите логин"
+                  autoComplete="off"
+                  name="new-username"
                   required
                 />
               </div>
@@ -121,14 +124,27 @@ export const UsersTab: React.FC = () => {
                     Сгенерировать
                   </button>
                 </div>
-                <input
-                  type="text"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium font-mono"
-                  placeholder="Введите пароль"
-                  required
-                />
+                <div className="relative">
+                  <input
+                    type={showNewUserPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full pl-4 pr-12 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium font-mono"
+                    placeholder="Введите пароль"
+                    autoComplete="new-password"
+                    name="new-password"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewUserPassword(!showNewUserPassword)}
+                    className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-indigo-600 transition-colors"
+                    tabIndex={-1}
+                    title={showNewUserPassword ? "Скрыть пароль" : "Показать пароль"}
+                  >
+                    {showNewUserPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+                  </button>
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -231,11 +247,9 @@ export const UsersTab: React.FC = () => {
 
       {/* Modal for new user password */}
       {newlyCreatedUser && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl"
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
+          <div
+            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl modal-enter"
           >
             <div className="flex items-center gap-3 mb-6 text-emerald-600">
               <div className="w-12 h-12 bg-emerald-100 rounded-full flex items-center justify-center">
@@ -281,7 +295,7 @@ export const UsersTab: React.FC = () => {
                 Закрыть
               </button>
             </div>
-          </motion.div>
+          </div>
         </div>
       )}
 
@@ -294,6 +308,6 @@ export const UsersTab: React.FC = () => {
         }}
         onCancel={() => setUserToDelete(null)}
       />
-    </motion.div>
+    </div>
   );
-};
+});

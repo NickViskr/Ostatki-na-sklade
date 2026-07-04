@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
   CheckCircle2,
   X,
@@ -8,8 +8,9 @@ import {
   Calculator,
   ArrowUp,
   ArrowDown,
+  Layers,
+  Zap,
 } from "lucide-react";
-import { motion } from "motion/react";
 import { useWarehouseStore } from "../store/useWarehouseStore";
 import { useUIStore } from "../store/useUIStore";
 import { formatCurrency } from "../lib/utils";
@@ -40,6 +41,10 @@ export const ConfirmModal: React.FC = () => {
   const setAiFeedback = useUIStore((state) => state.setAiFeedback);
   const setShowConfirmModal = useUIStore((state) => state.setShowConfirmModal);
 
+  const kits = useWarehouseStore((state) => state.kits);
+  const stock = useWarehouseStore((state) => state.stock);
+  const skus = useWarehouseStore((state) => state.skus);
+
   // Additional costs state for 'Расход'
   const [packagingCost, setPackagingCost] = useState<number | "">("");
   const [packagingDist, setPackagingDist] = useState<"batch" | "unit">("unit");
@@ -50,10 +55,24 @@ export const ConfirmModal: React.FC = () => {
   const [deliveryDate, setDeliveryDate] = useState<string>("");
 
   const services = useWarehouseStore((state) => state.services);
+  const serviceRates = useWarehouseStore((state) => state.serviceRates);
   const serviceOrderIds = useSettingsStore((state) => state.serviceOrderIds);
   const setServiceOrderIds = useSettingsStore(
     (state) => state.setServiceOrderIds,
   );
+
+  const getServiceCostAt = (serviceId: string, dateStr?: string) => {
+    const targetDate = dateStr || new Date().toISOString().split('T')[0];
+    const rates = serviceRates.filter(
+      (r) => String(r.serviceId) === String(serviceId) && r.validFrom <= targetDate
+    );
+    if (rates.length > 0) {
+      rates.sort((a, b) => b.validFrom.localeCompare(a.validFrom));
+      return rates[0].cost;
+    }
+    const s = services.find((srv) => String(srv.id) === String(serviceId));
+    return s ? s.cost : 0;
+  };
 
   const activeServices = useMemo(() => {
     let active = services.filter((s) => s.isActive);
@@ -89,18 +108,47 @@ export const ConfirmModal: React.FC = () => {
 
     // Save to global settings
     const currentModel = useSettingsStore.getState().geminiModel;
-    const modelStrToSave = `${currentModel}|order=${JSON.stringify(newOrderIds)}`;
     const geminiKey = useSettingsStore.getState().geminiKey;
     useWarehouseStore
       .getState()
       .fetchGas("saveGlobalSettings", {
-        data: { geminiKey, geminiModel: modelStrToSave },
+        data: { 
+          geminiKey, 
+          geminiModel: currentModel,
+          serviceOrder: JSON.stringify(newOrderIds)
+        },
       });
   };
 
   const [selectedServices, setSelectedServices] = useState<
     Record<string, number>
   >({});
+
+  const kitPreviews = useMemo(() => {
+    if (opType !== "Расход" || !parsedItems) return [];
+    return parsedItems
+      .filter((item) => kits.some((k) => k.kitSku === item.article))
+      .map((item) => {
+        const kit = kits.find((k) => k.kitSku === item.article);
+        if (!kit) return null;
+        return {
+          article: item.article,
+          quantity: item.quantity,
+          components: kit.components.map((comp) => ({
+            componentSku: comp.componentSku,
+            needed: comp.quantity * item.quantity,
+            available: stock.find((s) => s.article === comp.componentSku)?.quantity ?? 0,
+          })),
+        };
+      })
+      .filter((p): p is NonNullable<typeof p> => p !== null);
+  }, [opType, parsedItems, kits, stock]);
+
+  const hasKitShortage = useMemo(() => {
+    return kitPreviews.some((p) =>
+      p.components.some((c) => c.available < c.needed),
+    );
+  }, [kitPreviews]);
 
   const finalItems = useMemo(() => {
     if (!parsedItems) return [];
@@ -110,7 +158,7 @@ export const ConfirmModal: React.FC = () => {
       (s) => (selectedServices[s.id] || 0) > 0,
     );
     const totalServicesCost = selectedActiveServices.reduce(
-      (sum, s) => sum + s.cost * (selectedServices[s.id] || 0),
+      (sum, s) => sum + getServiceCostAt(s.id, deliveryDate) * (selectedServices[s.id] || 0),
       0,
     );
 
@@ -183,14 +231,77 @@ export const ConfirmModal: React.FC = () => {
     otherDist,
     activeServices,
     selectedServices,
+    deliveryDate,
+    serviceRates,
   ]);
+
+  const { totalBoxes, totalPallets } = useMemo(() => {
+    if (opType !== "Расход" || !finalItems) return { totalBoxes: 0, totalPallets: 0 };
+    let boxesSum = 0;
+    let palletsSum = 0;
+    finalItems.forEach((item) => {
+      const skuData = skus.find((s) => s.sku === item.article);
+      const pcsPerBox = skuData ? skuData.pcsPerBox : 0;
+      const boxesPerPallet = skuData ? skuData.boxesPerPallet : 0;
+
+      const boxes = pcsPerBox > 0 ? Math.ceil(item.quantity / pcsPerBox) : 0;
+      boxesSum += boxes;
+
+      if (boxes > 0 && boxesPerPallet > 0) {
+        palletsSum += Math.ceil(boxes / boxesPerPallet);
+      }
+    });
+    return { totalBoxes: boxesSum, totalPallets: Math.ceil(palletsSum) };
+  }, [finalItems, skus, opType]);
+
+  const hasPrefilledRef = useRef(false);
+
+  useEffect(() => {
+    if (opType !== "Расход") return;
+    if (hasPrefilledRef.current) return;
+    if (!parsedItems || parsedItems.length === 0) return;
+    if (skus.length === 0 || services.length === 0) return;
+
+    let boxesSum = 0;
+    let palletsSum = 0;
+    parsedItems.forEach((item) => {
+      const skuData = skus.find((s) => s.sku === item.article);
+      const pcsPerBox = skuData ? skuData.pcsPerBox : 0;
+      const boxesPerPallet = skuData ? skuData.boxesPerPallet : 0;
+
+      const boxes = pcsPerBox > 0 ? Math.ceil(item.quantity / pcsPerBox) : 0;
+      boxesSum += boxes;
+
+      if (boxes > 0 && boxesPerPallet > 0) {
+        palletsSum += Math.ceil(boxes / boxesPerPallet);
+      }
+    });
+
+    const active = services.filter((s) => s.isActive);
+    const newSelected: Record<string, number> = {};
+
+    active.forEach((service) => {
+      const nameLower = service.name.toLowerCase();
+      if (nameLower.includes("паллет")) {
+        newSelected[service.id] = palletsSum;
+      } else if (nameLower.includes("короб")) {
+        newSelected[service.id] = boxesSum;
+      }
+    });
+
+    if (Object.keys(newSelected).length > 0) {
+      setSelectedServices((prev) => ({ ...prev, ...newSelected }));
+    }
+    hasPrefilledRef.current = true;
+  }, [parsedItems, skus, services, opType]);
 
   if (!parsedItems) return null;
 
   const isConfirmDisabled =
     isProcessing ||
     finalItems.length === 0 ||
-    finalItems.some((item) => item.status === "error");
+    finalItems.some((item) => item.status === "error") ||
+    hasKitShortage;
 
   const handleConfirm = async () => {
     if (opType === "Расход") {
@@ -248,8 +359,10 @@ export const ConfirmModal: React.FC = () => {
     if (selectedActiveServices.length > 0) {
       const servicesText = selectedActiveServices
         .map(
-          (s) =>
-            `${s.name} x${selectedServices[s.id]} (${Math.round(s.cost * selectedServices[s.id])}₽)`,
+          (s) => {
+            const svcCost = getServiceCostAt(s.id, deliveryDate);
+            return `${s.name} x${selectedServices[s.id]} (${Math.round(svcCost * selectedServices[s.id])}₽)`;
+          }
         )
         .join(", ");
       extraParts.push(`Услуги: ${servicesText}`);
@@ -276,17 +389,11 @@ export const ConfirmModal: React.FC = () => {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+    <div
+      className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in"
     >
-      <motion.div
-        initial={{ scale: 0.95, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        exit={{ scale: 0.95, opacity: 0 }}
-        className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col"
+      <div
+        className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col modal-enter"
       >
         <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
           <div>
@@ -361,18 +468,30 @@ export const ConfirmModal: React.FC = () => {
                       />
                     </td>
                     <td className="px-6 py-4 text-right font-bold">
-                      <input
-                        type="number"
-                        min="1"
-                        value={item.quantity === 0 ? "" : item.quantity}
-                        onChange={(e) => {
-                          const val = Number(e.target.value) || 0;
-                          updateParsedItem(idx, {
-                            quantity: val < 0 ? 0 : val,
-                          });
-                        }}
-                        className="w-24 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
-                      />
+                      <div className="flex flex-col items-end">
+                        <input
+                          type="number"
+                          min="1"
+                          value={item.quantity === 0 ? "" : item.quantity}
+                          onChange={(e) => {
+                            const val = Number(e.target.value) || 0;
+                            updateParsedItem(idx, {
+                              quantity: val < 0 ? 0 : val,
+                            });
+                          }}
+                          className="w-24 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                        />
+                        {opType === "Расход" && (() => {
+                          const skuData = skus.find((s) => s.sku === item.article);
+                          const pcsPerBox = skuData ? skuData.pcsPerBox : 0;
+                          const boxes = pcsPerBox > 0 ? Math.ceil(item.quantity / pcsPerBox) : 0;
+                          return (
+                            <span className="text-xs text-slate-400 font-medium mt-1">
+                              {boxes} кор.
+                            </span>
+                          );
+                        })()}
+                      </div>
                     </td>
                     <td className="px-6 py-4 text-right font-medium whitespace-nowrap">
                       {opType === "Приход" ? (
@@ -431,6 +550,20 @@ export const ConfirmModal: React.FC = () => {
             </table>
           </div>
 
+          {opType === "Расход" && (
+            <div className="flex gap-6 p-5 bg-slate-50 border border-slate-200 rounded-3xl">
+              <div className="flex-1">
+                <span className="text-xs text-slate-400 font-bold uppercase tracking-wider block mb-1">Всего коробок</span>
+                <span className="text-xl font-black text-slate-900">{totalBoxes} кор.</span>
+              </div>
+              <div className="w-px bg-slate-200 self-stretch" />
+              <div className="flex-1">
+                <span className="text-xs text-slate-400 font-bold uppercase tracking-wider block mb-1">Всего паллет</span>
+                <span className="text-xl font-black text-slate-900">{totalPallets} пал.</span>
+              </div>
+            </div>
+          )}
+
           {(opType === "Приход" || opType === "Расход") &&
             activeServices.length > 0 && (
               <div className="bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100 space-y-4">
@@ -470,7 +603,8 @@ export const ConfirmModal: React.FC = () => {
                     <tbody>
                       {activeServices.map((service, index) => {
                         const quantity = selectedServices[service.id] || 0;
-                        const totalSum = quantity * service.cost;
+                        const currentCost = getServiceCostAt(service.id, deliveryDate);
+                        const totalSum = quantity * currentCost;
 
                         return (
                           <tr
@@ -523,7 +657,7 @@ export const ConfirmModal: React.FC = () => {
                             </td>
 
                             <td className="px-4 py-3 text-right font-medium text-slate-500 whitespace-nowrap w-28">
-                              {Math.round(service.cost).toLocaleString("ru-RU")}{" "}
+                              {Math.round(currentCost).toLocaleString("ru-RU")}{" "}
                               ₽
                             </td>
 
@@ -653,6 +787,46 @@ export const ConfirmModal: React.FC = () => {
               </button>
             </div>
           </div>
+
+          {kitPreviews.length > 0 && (
+            <div className="bg-violet-50 border border-violet-200 rounded-3xl p-6 space-y-3">
+              <div className="flex items-center gap-2 text-violet-700 font-bold text-sm">
+                <Layers size={15} />
+                Комплекты — из-за отгрузки будут дополнительно списаны следующие позиции:
+              </div>
+              {kitPreviews.map((preview) => (
+                <div key={preview.article}>
+                  <p className="text-xs font-bold text-slate-500 mb-1">
+                    {preview.article} × {preview.quantity} шт.:
+                  </p>
+                  {preview.components.map((comp) => {
+                    const ok = comp.available >= comp.needed;
+                    return (
+                      <div
+                        key={comp.componentSku}
+                        className={`flex items-center justify-between text-sm px-3 py-1.5 rounded-xl bg-white mb-1 ${
+                          !ok ? "border border-red-200" : ""
+                        }`}
+                      >
+                        <span className="font-mono text-slate-700">
+                          {comp.componentSku}
+                        </span>
+                        <span className="text-slate-500">{comp.needed} шт.</span>
+                        <span
+                          className={`text-xs ${
+                            ok ? "text-slate-400" : "text-red-500 font-bold"
+                          }`}
+                        >
+                          склад: {comp.available} шт.
+                        </span>
+                        <span>{ok ? "✅" : "❌"}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
@@ -702,23 +876,7 @@ export const ConfirmModal: React.FC = () => {
             </button>
           </div>
         </div>
-      </motion.div>
-    </motion.div>
+      </div>
+    </div>
   );
 };
-
-const Zap = ({ size, className }: { size?: number; className?: string }) => (
-  <svg
-    width={size || 24}
-    height={size || 24}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-  >
-    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-  </svg>
-);

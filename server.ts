@@ -15,7 +15,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: "1mb" }));
 
   // ── CORS ──────────────────────────────────────────────────────────────────────
   const ALLOWED_ORIGIN = process.env.APP_ORIGIN || "http://localhost:3000";
@@ -59,6 +59,7 @@ async function startServer() {
   app.use("/api/gas", rateLimitMiddleware);
   app.use("/api/parse-invoice", rateLimitMiddleware);
   app.use("/api/models", rateLimitMiddleware);
+  app.use("/api/ozon/check", rateLimitMiddleware);
 
   // ── In-memory кеш валидных токенов ────────────────────────────────────────────
   const sessionCache = new Map<string, { expiresAt: number }>();
@@ -118,6 +119,50 @@ async function startServer() {
     return res.json({ status: "success", message: "Key cache cleared" });
   });
 
+  // ── Кэш Ozon API ключей ────────────────────────────────────────────────────────
+  let cachedOzonKeys: { value: { ozonClientId: string; ozonApiKey: string }; expiresAt: number } | null = null;
+  const OZON_KEY_TTL_MS = 60 * 60 * 1000; // 1 час
+
+  async function fetchOzonKeys(): Promise<{ ozonClientId: string; ozonApiKey: string } | null> {
+    if (cachedOzonKeys && Date.now() < cachedOzonKeys.expiresAt) {
+      return cachedOzonKeys.value;
+    }
+
+    const gasUrl = process.env.GAS_URL;
+    const secret = process.env.SERVER_SECRET;
+    if (!gasUrl || !secret) return null;
+
+    const payloadObject = {
+      action: "getOzonKeys",
+      timestamp: Date.now().toString()
+    };
+    
+    const signature = crypto
+      .createHmac("sha256", secret)
+      .update(JSON.stringify(payloadObject))
+      .digest("hex");
+
+    try {
+       const gasResponse = await fetch(gasUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payloadObject, signature })
+       });
+       const gasData = await gasResponse.json();
+       if (gasData.status === "success" && gasData.data?.ozonClientId && gasData.data?.ozonApiKey) {
+         const keys = {
+           ozonClientId: gasData.data.ozonClientId,
+           ozonApiKey: gasData.data.ozonApiKey
+         };
+         cachedOzonKeys = { value: keys, expiresAt: Date.now() + OZON_KEY_TTL_MS };
+         return keys;
+       }
+    } catch (e) {
+       console.error("Failed to fetch Ozon keys Server-to-Server", e);
+    }
+    return null;
+  }
+
   // Helper to fetch custom org API key from GAS (Server-to-Server)
   async function fetchOrgApiKey(): Promise<string | null> {
     const gasUrl = process.env.GAS_URL;
@@ -151,6 +196,15 @@ async function startServer() {
     return null;
   }
 
+  
+  // ── Server-side GAS Response Cache ─────────────────────────────────────
+  const gasCache = new Map<string, { data: any; cachedAt: number }>();
+  const GAS_CACHE_TTL_MS = 30_000; // 30 секунд
+
+  function isCacheable(action: string): boolean {
+    return ['getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems'].includes(action);
+  }
+
   // API Endpoint to proxy GAS requests
   app.post("/api/gas", async (req, res) => {
     try {
@@ -161,9 +215,23 @@ async function startServer() {
 
       const action = req.body?.action;
       const token = req.body?.sessionToken;
+      const { sessionToken, ...cacheableBody } = req.body;
+      const cacheKey = JSON.stringify(cacheableBody);
+      
+      if (action && isCacheable(action) && token && isTokenCached(token)) {
+        const cached = gasCache.get(cacheKey);
+        if (cached && Date.now() - cached.cachedAt < GAS_CACHE_TTL_MS) {
+          return res.json(cached.data);
+        }
+      }
+
+      if (action && !isCacheable(action) && action !== 'verifySession' && action !== 'login' && action !== 'getGlobalSettings') {
+        gasCache.clear();
+      }
+
 
       // Не пропускаем серверные action через клиентский прокси
-      const forbiddenActions = ['getGeminiKey'];
+      const forbiddenActions = ['getGeminiKey', 'getOzonKeys'];
       if (forbiddenActions.includes(action)) {
         return res.status(403).json({ status: "error", message: "Forbidden action" });
       }
@@ -180,23 +248,42 @@ async function startServer() {
         // Если фейковый токен спамит и его нет в кэше, он пойдет в GAS, но мы ограничим IP через rate-limit
       }
 
-      const gasResponse = await fetch(gasUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body)
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30_000);
+      let gasResponse;
+      try {
+        gasResponse = await fetch(gasUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(req.body),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+          return res.status(504).json({ status: "error", message: "GAS request timeout (30s)" });
+        }
+        throw err;
+      }
       
       const data = await gasResponse.json();
 
+      
       // Если GAS ответил успехом для сессии, сохраняем токен в кэш
       if (data.status === "success") {
+        if (action && isCacheable(action)) {
+          gasCache.set(cacheKey, { data, cachedAt: Date.now() });
+        }
+
         if (token) cacheToken(token);
         if (isPublic && data.data?.sessionToken) cacheToken(data.data.sessionToken);
 
         // Инвалидируем кэш ключа, если настройки были сохранены
         if (action === "saveGlobalSettings") {
           cachedApiKey = null;
-          console.log("Кэш API ключа сброшен после сохранения настроек");
+          cachedOzonKeys = null;
+          console.log("Кэш API ключей сброшен после сохранения настроек");
         }
       }
 
@@ -234,25 +321,257 @@ async function startServer() {
     }
   });
 
+  // ── Ozon Seller API Integration ──────────────────────────────────────────────
+  async function callOzonApi(endpoint: string, keys: { ozonClientId: string; ozonApiKey: string }, body: any) {
+    const url = `https://api-seller.ozon.ru${endpoint}`;
+    return fetch(url, {
+      method: "POST",
+      headers: {
+        "Client-Id": keys.ozonClientId,
+        "Api-Key": keys.ozonApiKey,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+  }
+
+  async function fetchOzonWithFallback(paths: string[], keys: { ozonClientId: string; ozonApiKey: string }, body: any) {
+    let res;
+    for (let i = 0; i < paths.length; i++) {
+      res = await callOzonApi(paths[i], keys, body);
+      if (res.status !== 404) {
+        break;
+      }
+    }
+    if (!res || !res.ok) {
+      const status = res ? res.status : 500;
+      const errText = res ? await res.text() : "No response";
+      let errJson;
+      try { errJson = JSON.parse(errText); } catch (e) {}
+      const errMsg = errJson?.message || errJson?.error?.message || errText || `HTTP ${status}`;
+      const errorObj: any = new Error(errMsg);
+      errorObj.stage = "ozon_api";
+      errorObj.httpStatus = status;
+      throw errorObj;
+    }
+    return res.json();
+  }
+
+  app.post("/api/ozon/check", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token) {
+        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
+      }
+
+      if (!isTokenCached(token)) {
+        const gasUrl = process.env.GAS_URL;
+        if (!gasUrl) {
+          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+        }
+        try {
+          const gasResponse = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
+          });
+          const gasData = await gasResponse.json();
+          if (gasData.status === "success") {
+            cacheToken(token);
+          } else {
+            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
+          }
+        } catch (e: any) {
+          console.error("Session verification failed:", e);
+          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
+        }
+      }
+
+      // Get keys
+      const keys = await fetchOzonKeys();
+      if (!keys) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+
+      // Fetch FBO supply orders from last 30 days
+      const toDate = new Date();
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - 30);
+
+      const filter = {
+        from: fromDate.toISOString(),
+        to: toDate.toISOString()
+      };
+
+      const payload = {
+        filter,
+        page: 1,
+        page_size: 100
+      };
+
+      let listData;
+      try {
+        listData = await fetchOzonWithFallback(["/v2/supply-order/list", "/v1/supply-order/list"], keys, payload);
+      } catch (err: any) {
+        return res.status(err.httpStatus || 500).json({
+          status: "error",
+          stage: "ozon_api",
+          httpStatus: err.httpStatus || 500,
+          message: err.message
+        });
+      }
+
+      const rawOrders = listData.result || listData.supply_orders || listData.orders || (Array.isArray(listData) ? listData : []);
+      const formattedShipments = [];
+
+      for (const order of rawOrders) {
+        const orderId = order.supply_order_id || order.id || order.posting_id || order.postingId;
+        if (!orderId) continue;
+
+        let getData;
+        let bundleData;
+
+        try {
+          getData = await fetchOzonWithFallback(
+            ["/v2/supply-order/get", "/v1/supply-order/get"],
+            keys,
+            { supply_order_id: orderId }
+          );
+        } catch (err: any) {
+          return res.status(err.httpStatus || 500).json({
+            status: "error",
+            stage: "ozon_api",
+            httpStatus: err.httpStatus || 500,
+            message: `Failed to get supply order ${orderId}: ${err.message}`
+          });
+        }
+
+        try {
+          bundleData = await fetchOzonWithFallback(
+            ["/v1/supply-order/bundle", "/v2/supply-order/bundle"],
+            keys,
+            { supply_order_id: orderId }
+          );
+        } catch (err: any) {
+          return res.status(err.httpStatus || 500).json({
+            status: "error",
+            stage: "ozon_api",
+            httpStatus: err.httpStatus || 500,
+            message: `Failed to get bundle for ${orderId}: ${err.message}`
+          });
+        }
+
+        // Extract items
+        const rawItems = bundleData.items || bundleData.products || bundleData.result?.items || bundleData.result?.products || getData.items || getData.products || getData.result?.items || getData.result?.products || [];
+        const items = (Array.isArray(rawItems) ? rawItems : []).map((item: any) => {
+          const offerId = String(item.offer_id || item.offerId || item.sku || item.article || item.product_id || item.productId || '').trim();
+          const barcode = String(item.barcode || item.bar_code || (Array.isArray(item.barcodes) ? item.barcodes[0] : item.barcodes) || '').trim();
+          const quantity = Number(item.quantity || item.qty || item.count || item.amount || 1);
+          return { offerId, barcode, quantity };
+        });
+
+        const shipmentDate = getData.shipment_date || getData.shipmentDate || getData.date || getData.delivery_date || order.shipment_date || order.shipmentDate || new Date().toISOString().split('T')[0];
+
+        formattedShipments.push({
+          postingId: String(orderId),
+          shipmentDate,
+          items
+        });
+      }
+
+      // Convert to GAS payload shape and save
+      const shipmentsForGas = formattedShipments.map(s => ({
+        postingId: s.postingId,
+        shipmentDate: s.shipmentDate,
+        itemsJSON: JSON.stringify(s.items),
+        transGroupInfo: ""
+      }));
+
+      const gasUrl = process.env.GAS_URL;
+      if (!gasUrl) {
+        return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+      }
+
+      const gasResponse = await fetch(gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "saveExternalShipments",
+          sessionToken: token,
+          data: {
+            shipments: shipmentsForGas
+          }
+        })
+      });
+
+      const gasData = await gasResponse.json();
+      if (gasData.status !== "success") {
+        return res.status(500).json({ status: "error", message: gasData.message || "Failed to save external shipments in GAS" });
+      }
+
+      return res.json({
+        status: "success",
+        data: {
+          found: formattedShipments.length,
+          added: gasData.data?.addedCount || 0
+        }
+      });
+
+    } catch (error: any) {
+      console.error("Ozon check endpoint failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
   // API Endpoint for Gemini Invoice Parsing
   app.post("/api/parse-invoice", async (req, res) => {
     try {
+      const token = req.body?.sessionToken;
+      if (!token) {
+        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
+      }
+
+      if (!isTokenCached(token)) {
+        const gasUrl = process.env.GAS_URL;
+        if (!gasUrl) {
+          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+        }
+        try {
+          const gasResponse = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
+          });
+          const gasData = await gasResponse.json();
+          if (gasData.status === "success") {
+            cacheToken(token);
+          } else {
+            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
+          }
+        } catch (e: any) {
+          console.error("Session verification failed:", e);
+          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
+        }
+      }
+
       // Receive full SKU list to build mapping dictionary and table
       const { text, skus, opType, modelName, feedback, customPrompt } = req.body;
-      
-      console.log('Received skus:', JSON.stringify(skus?.slice(0, 3)));
       
       const apiKey = await getApiKey();
       
       if (!apiKey) {
-        return res.status(500).json({ 
-          status: "error", 
-          message: "GEMINI_API_KEY is not configured on the server and no custom key available." 
-        });
+        const err = new Error("GEMINI_API_KEY is not configured on the server and no custom key available.");
+        (err as any).stage = "no_api_key";
+        throw err;
       }
 
       const ai = new GoogleGenAI({ apiKey });
-      const model = modelName || "gemini-1.5-flash";
+      const model = modelName || "gemini-flash-latest";
 
       // Build mapping dictionaries to embed in the prompt
       const ozonBarcodeMap: Record<string, string> = {};
@@ -475,17 +794,46 @@ ${wbDictStr}`;
         }
       }
 
-      const parsed = JSON.parse(result.text || "{}");
+      let parsed;
+      try {
+        parsed = JSON.parse(result?.text || "{}");
+      } catch (parseErr: any) {
+        const err = new Error("Failed to parse Gemini response as JSON: " + parseErr.message);
+        (err as any).stage = "json_parse";
+        (err as any).rawError = (result?.text || "").substring(0, 500);
+        throw err;
+      }
+
       if (!parsed.items) {
         parsed.items = [];
       }
       res.json({ status: "success", data: parsed });
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("Gemini Error:", error);
+      
+      const message = error.message || String(error);
+      const model = req.body?.modelName || "gemini-flash-latest";
+      const stage = error.stage || "gemini_request";
+      let httpStatus: number | undefined = undefined;
+      const rawError = error.rawError;
+
+      if (stage === "gemini_request") {
+        const statusMatch = message.match(/\b(404|429|503)\b/);
+        if (statusMatch) {
+          httpStatus = parseInt(statusMatch[1], 10);
+        }
+      }
+
       res.status(500).json({ 
         status: "error", 
-        message: (error as Error).message 
+        message,
+        details: {
+          stage,
+          model,
+          httpStatus,
+          rawError
+        }
       });
     }
   });

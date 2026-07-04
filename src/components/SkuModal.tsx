@@ -4,7 +4,6 @@ import {
   Save, 
   Loader2 
 } from 'lucide-react';
-import { motion } from 'motion/react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 
@@ -26,17 +25,11 @@ export const SkuModal: React.FC = () => {
   };
 
   return (
-    <motion.div 
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+    <div 
+      className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in"
     >
-      <motion.div 
-        initial={{ scale: 0.95, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        exit={{ scale: 0.95, opacity: 0 }}
-        className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg overflow-hidden"
+      <div 
+        className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg overflow-hidden modal-enter"
       >
         <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
           <h3 className="text-2xl font-bold">{editingSku ? 'Редактировать SKU' : 'Добавить новый SKU'}</h3>
@@ -61,15 +54,28 @@ export const SkuModal: React.FC = () => {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-3 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-500 uppercase">Шт в коробке</label>
               <input 
                 type="number"
                 min="1"
+                max="99999"
                 value={skuForm.pcsPerBox}
-                onChange={(e) => setSkuForm({...skuForm, pcsPerBox: Math.max(1, e.target.value === '' ? 1 : parseInt(e.target.value))})}
-                className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+                onChange={(e) => setSkuForm({...skuForm, pcsPerBox: Math.min(99999, Math.max(1, e.target.value === '' ? 1 : parseInt(e.target.value)))})}
+                className="w-full px-4 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-bold text-slate-500 uppercase">Коробок на паллете</label>
+              <input 
+                type="number"
+                min="0"
+                max="99999"
+                placeholder="Необяз."
+                value={skuForm.boxesPerPallet || ''}
+                onChange={(e) => setSkuForm({...skuForm, boxesPerPallet: e.target.value === '' ? 0 : Math.min(99999, Math.max(0, parseInt(e.target.value)))})}
+                className="w-full px-4 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
               />
             </div>
             <div className="space-y-2">
@@ -77,11 +83,29 @@ export const SkuModal: React.FC = () => {
               <input 
                 type="number"
                 min="0"
+                max="99999"
                 value={skuForm.minStock}
-                onChange={(e) => setSkuForm({...skuForm, minStock: Math.max(0, e.target.value === '' ? 0 : parseInt(e.target.value))})}
-                className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+                onChange={(e) => setSkuForm({...skuForm, minStock: Math.min(99999, Math.max(0, e.target.value === '' ? 0 : parseInt(e.target.value)))})}
+                className="w-full px-4 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
               />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-bold text-slate-500 uppercase">Литраж, л</label>
+            <input 
+              type="number"
+              step="0.01"
+              min="0"
+              max="99999"
+              placeholder="Необяз."
+              value={skuForm.volumeLiters === 0 || skuForm.volumeLiters === undefined ? '' : skuForm.volumeLiters}
+              onChange={(e) => {
+                const val = e.target.value === '' ? 0 : parseFloat(e.target.value);
+                setSkuForm({...skuForm, volumeLiters: isNaN(val) ? 0 : Math.min(99999, Math.max(0, val))});
+              }}
+              className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-6">
@@ -129,7 +153,7 @@ export const SkuModal: React.FC = () => {
             </button>
           </div>
         </form>
-      </motion.div>
-    </motion.div>
+      </div>
+    </div>
   );
 };

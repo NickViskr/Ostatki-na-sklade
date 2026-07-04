@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
 import { Trash2, RotateCcw, Box, User, History, Archive, Loader2, Calendar } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
-export const DeletedItemsTab: React.FC = () => {
+export const DeletedItemsTab: React.FC = React.memo(() => {
   const archivedItems = useWarehouseStore((state) => state.archivedItems);
   const fetchArchivedItems = useWarehouseStore((state) => state.fetchArchivedItems);
   const handleRestoreArchivedItem = useWarehouseStore((state) => state.handleRestoreArchivedItem);
@@ -114,11 +113,8 @@ export const DeletedItemsTab: React.FC = () => {
   };
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      className="space-y-6 max-w-6xl mx-auto"
+    <div 
+      className="space-y-6 max-w-6xl mx-auto tab-enter"
     >
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -188,13 +184,9 @@ export const DeletedItemsTab: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                <AnimatePresence>
                   {archivedItems.map((item) => (
-                    <motion.tr 
+                    <tr 
                       key={item.archiveId}
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0, x: -20 }}
                       className={`hover:bg-slate-50 transition-colors group ${selectedIds.has(item.archiveId) ? 'bg-indigo-50/30' : ''}`}
                     >
                       <td className="px-6 py-4 text-center">
@@ -243,9 +235,8 @@ export const DeletedItemsTab: React.FC = () => {
                           Восстановить
                         </button>
                       </td>
-                    </motion.tr>
+                    </tr>
                   ))}
-                </AnimatePresence>
               </tbody>
             </table>
           </div>
@@ -286,6 +277,6 @@ export const DeletedItemsTab: React.FC = () => {
         confirmLabel="Восстановить все"
         cancelLabel="Отмена"
       />
-    </motion.div>
+    </div>
   );
-};
+});

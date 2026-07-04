@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import { Transaction, SKUItem, ParsedItem } from '../types';
+import { Transaction, SKUItem, ParsedItem, RecognitionHistoryItem } from '../types';
 
-type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'skus' | 'settings' | 'users' | 'deleted';
+type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'skus' | 'directory' | 'settings' | 'users' | 'deleted';
 
 interface UIState {
   isSidebarCollapsed: boolean;
@@ -40,6 +40,10 @@ interface UIState {
   // Upload State
   rawText: string;
   setRawText: (text: string) => void;
+  filesInfo: string[];
+  setFilesInfo: (files: string[]) => void;
+  recognitionHistory: RecognitionHistoryItem[];
+  addRecognitionHistory: (item: RecognitionHistoryItem) => void;
   opType: 'Приход' | 'Расход';
   setOpType: (type: 'Приход' | 'Расход') => void;
   uploadDestination: string;
@@ -49,6 +53,7 @@ interface UIState {
   updateParsedItem: (index: number, updates: Partial<ParsedItem>) => void;
   aiFeedback: string;
   setAiFeedback: (feedback: string) => void;
+  clearRecognitionData: () => void;
 
   // Modals
   showConfirmModal: boolean;
@@ -65,6 +70,10 @@ interface UIState {
   setShowSkuModal: (show: boolean) => void;
   editingSku: SKUItem | null;
   setEditingSku: (sku: SKUItem | null) => void;
+  showKitModal: boolean;
+  setShowKitModal: (show: boolean) => void;
+  kitModalSku: string | null;
+  setKitModalSku: (sku: string | null) => void;
   
   // Manual Form
   manualForm: {
@@ -128,6 +137,14 @@ export const useUIStore = create<UIState>((set) => ({
 
   rawText: '',
   setRawText: (rawText) => set({ rawText }),
+  filesInfo: [],
+  setFilesInfo: (filesInfo) => set({ filesInfo }),
+  recognitionHistory: [],
+  addRecognitionHistory: (item) => set((state) => {
+    // Keep max 3 items
+    const newHistory = [item, ...state.recognitionHistory].slice(0, 3);
+    return { recognitionHistory: newHistory };
+  }),
   opType: 'Расход',
   setOpType: (opType) => set({ opType }),
   uploadDestination: 'Ozon',
@@ -142,6 +159,13 @@ export const useUIStore = create<UIState>((set) => ({
   }),
   aiFeedback: '',
   setAiFeedback: (aiFeedback) => set({ aiFeedback }),
+  clearRecognitionData: () => set({
+    recognitionHistory: [],
+    rawText: '',
+    filesInfo: [],
+    parsedItems: null,
+    aiFeedback: ''
+  }),
 
   showConfirmModal: false,
   setShowConfirmModal: (showConfirmModal) => set({ showConfirmModal }),
@@ -157,6 +181,10 @@ export const useUIStore = create<UIState>((set) => ({
   setShowSkuModal: (showSkuModal) => set({ showSkuModal }),
   editingSku: null,
   setEditingSku: (editingSku) => set({ editingSku }),
+  showKitModal: false,
+  setShowKitModal: (showKitModal) => set({ showKitModal }),
+  kitModalSku: null,
+  setKitModalSku: (kitModalSku) => set({ kitModalSku }),
 
   manualForm: {
     article: '',
@@ -168,7 +196,7 @@ export const useUIStore = create<UIState>((set) => ({
   },
   setManualForm: (manualForm) => set({ manualForm }),
 
-  skuForm: { sku: '', price: '', minStock: '', pcsPerBox: '' },
+  skuForm: { sku: '', price: '', minStock: '', pcsPerBox: '', boxesPerPallet: 0, volumeLiters: 0 },
   setSkuForm: (skuForm) => set({ skuForm }),
   skuSearch: '',
   setSkuSearch: (skuSearch) => set({ skuSearch }),
