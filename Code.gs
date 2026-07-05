@@ -226,6 +226,14 @@ function doPost(e) {
         assertAdmin(currentUser);
         result = hardDeleteArchivedItems(payload.archiveIds);
         break;
+      case 'recalcCapFromAvg':
+        assertAdmin(currentUser);
+        const recalcResult = recalcCapitalizationFromAvg();
+        result = {
+          recalc: recalcResult,
+          stock: getStock()
+        };
+        break;
       case 'saveKit':
         assertAdmin(currentUser);
         result = saveKit(data.kitSku, data.components, data.kitType);
@@ -3199,5 +3207,53 @@ function updateExternalShipmentStatus(postingId, status) {
     }
   }
   throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+
+function recalcCapitalizationFromAvg() {
+  const ss = getSpreadsheet();
+  const sheet = getSheetByNameRobust(ss, 'Остатки');
+  if (!sheet) throw new Error('Лист Остатки не найден.');
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return { updated: 0, details: [] };
+  
+  const lastCol = sheet.getLastColumn();
+  const range = sheet.getRange(1, 1, lastRow, Math.max(lastCol, 6));
+  const data = range.getValues();
+  
+  let updatedCount = 0;
+  const details = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    
+    const article = String(row[0]);
+    if (!article) continue;
+    
+    const qty = parseNumber(row[1]);
+    const avgCost = parseNumber(row[2]);
+    const oldCap = parseNumber(row[3]);
+    const newCap = roundToTwo(qty * avgCost);
+    
+    if (Math.abs(oldCap - newCap) > 0.01) {
+      sheet.getRange(i + 1, 4).setValue(newCap);
+      updatedCount++;
+      details.push({
+        article: article,
+        oldCap: oldCap,
+        newCap: newCap
+      });
+    }
+  }
+  
+  if (updatedCount > 0) {
+    SpreadsheetApp.flush();
+  }
+  
+  return {
+    updated: updatedCount,
+    details: details
+  };
 }
 

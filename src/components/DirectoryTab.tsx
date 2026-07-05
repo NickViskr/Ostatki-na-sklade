@@ -11,6 +11,29 @@ export const DirectoryTab: React.FC = React.memo(() => {
   const serviceRates = useWarehouseStore((state) => state.serviceRates);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
+  const setStock = useWarehouseStore((state) => state.setStock);
+  
+  const [showRecalcConfirm, setShowRecalcConfirm] = useState(false);
+  const [isRecalculating, setIsRecalculating] = useState(false);
+
+  const handleRecalcCapitalization = async () => {
+    setShowRecalcConfirm(false);
+    setIsRecalculating(true);
+    const loadingToast = toast.loading('Пересчет капитализации...');
+    try {
+      const res = await fetchGas('recalcCapFromAvg');
+      if (res.status === 'success') {
+        setStock(res.data.stock);
+        toast.success(`Исправлено строк: ${res.data.recalc.updated}`, { id: loadingToast });
+      } else {
+        toast.error(res.message || 'Ошибка пересчета капитализации', { id: loadingToast });
+      }
+    } catch (e: any) {
+      toast.error(e.message || 'Ошибка сети', { id: loadingToast });
+    } finally {
+      setIsRecalculating(false);
+    }
+  };
   
   const handleAddService = useWarehouseStore((state) => state.handleAddService);
   const handleUpdateService = useWarehouseStore((state) => state.handleUpdateService);
@@ -272,6 +295,35 @@ export const DirectoryTab: React.FC = React.memo(() => {
           </div>
         </div>
       </div>
+
+      {isAdmin && (
+        <div id="admin-tools-block" className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="p-3 bg-rose-50 text-rose-600 rounded-2xl">
+              <ShieldAlert className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Панель администратора</h3>
+              <p className="text-sm text-slate-500">Административные инструменты для ремонта данных и обслуживания.</p>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-sm font-semibold text-slate-800">Пересчет капитализации из себестоимости</div>
+              <div className="text-xs text-slate-400">Используйте после ручной правки себестоимости в таблице</div>
+            </div>
+            <button
+              id="recalc-cap-btn"
+              onClick={() => setShowRecalcConfirm(true)}
+              disabled={isRecalculating}
+              className="px-6 py-3 bg-red-600 text-white rounded-2xl text-sm font-bold hover:bg-red-700 transition-all shadow-md shrink-0 flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              Пересчитать капитализацию из себестоимости
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden min-w-0">
         <div className="overflow-x-auto">
@@ -555,6 +607,16 @@ export const DirectoryTab: React.FC = React.memo(() => {
           }
         }}
         onCancel={() => setConfirmDeleteService(null)}
+      />
+
+      <ConfirmDialog
+        show={showRecalcConfirm}
+        title="Пересчет капитализации"
+        message="Капитализация всех товаров будет пересчитана как количество x себестоимость. Продолжить?"
+        onConfirm={handleRecalcCapitalization}
+        onCancel={() => setShowRecalcConfirm(false)}
+        confirmLabel="Продолжить"
+        cancelLabel="Отмена"
       />
     </div>
   );
