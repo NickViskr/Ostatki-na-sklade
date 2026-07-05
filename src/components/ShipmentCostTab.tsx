@@ -321,6 +321,9 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     return transactions
       .filter((t) => t.type === "Расход")
       .filter((t) => {
+        const dest = (t.destination || "").toLowerCase();
+        if (dest.includes("списание") || dest.includes("миграция")) return false;
+
         if (destinationFilter && extractDestinationName(t.destination) !== destinationFilter)
           return false;
 

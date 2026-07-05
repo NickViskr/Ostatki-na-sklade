@@ -75,6 +75,7 @@ export const EditTransModal: React.FC = () => {
               min="0"
               step="0.01"
               value={editingTrans.type === 'Приход' ? editingTrans.price : editingTrans.writeOffCost}
+              disabled={editingTrans.type === 'Расход'}
               onChange={(e) => {
                 const val = e.target.value === '' ? '' : parseFloat(e.target.value);
                 if (editingTrans.type === 'Приход') {
@@ -83,8 +84,17 @@ export const EditTransModal: React.FC = () => {
                   setEditingTrans({...editingTrans, writeOffCost: val, total: val === '' ? 0 : val * (Number(editingTrans.quantity) || 0)});
                 }
               }}
-              className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+              className={`w-full px-6 py-4 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500 ${
+                editingTrans.type === 'Расход' 
+                  ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
+                  : 'bg-slate-50'
+              }`}
             />
+            {editingTrans.type === 'Расход' && (
+              <p className="text-xs text-slate-400">
+                Себестоимость расхода рассчитывается автоматически по средней себестоимости склада
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

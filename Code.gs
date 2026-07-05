@@ -1731,6 +1731,7 @@ function getArchivedItems() {
     const row = data[i];
     if (row.join('').trim() === '') continue;
     if (!row[0] || String(row[0]).trim() === '') continue;
+    if (String(row[1]) === 'UpdatedVersion') continue;
     rows.push({
       archiveId: String(row[0]),
       type: String(row[1]),
