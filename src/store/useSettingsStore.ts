@@ -10,6 +10,7 @@ interface SettingsState {
   customPrompt: string;
   serviceOrderIds: string[];
   storageRatePerLiterDay: number;
+  boxesPerPalletGlobal: number;
   ozonClientId: string;
   ozonApiKey: string;
   setGasUrl: (url: string) => void;
@@ -20,6 +21,7 @@ interface SettingsState {
   setCustomPrompt: (prompt: string) => void;
   setServiceOrderIds: (ids: string[]) => void;
   setStorageRatePerLiterDay: (rate: number) => void;
+  setBoxesPerPalletGlobal: (count: number) => void;
   setOzonClientId: (id: string) => void;
   setOzonApiKey: (key: string) => void;
 }
@@ -142,6 +144,7 @@ export const useSettingsStore = create<SettingsState>()(
       customPrompt: DEFAULT_PROMPT,
       serviceOrderIds: [],
       storageRatePerLiterDay: 0,
+      boxesPerPalletGlobal: 0,
       ozonClientId: '',
       ozonApiKey: '',
       setGasUrl: (gasUrl) => set({ gasUrl }),
@@ -155,6 +158,7 @@ export const useSettingsStore = create<SettingsState>()(
       setCustomPrompt: (customPrompt) => set({ customPrompt }),
       setServiceOrderIds: (serviceOrderIds) => set({ serviceOrderIds }),
       setStorageRatePerLiterDay: (storageRatePerLiterDay) => set({ storageRatePerLiterDay }),
+      setBoxesPerPalletGlobal: (boxesPerPalletGlobal) => set({ boxesPerPalletGlobal }),
       setOzonClientId: (ozonClientId) => set({ ozonClientId }),
       setOzonApiKey: (ozonApiKey) => set({ ozonApiKey }),
     }),

@@ -60,6 +60,7 @@ export const ConfirmModal: React.FC = () => {
   const setServiceOrderIds = useSettingsStore(
     (state) => state.setServiceOrderIds,
   );
+  const boxesPerPalletGlobal = useSettingsStore((state) => state.boxesPerPalletGlobal);
 
   const getServiceCostAt = (serviceId: string, dateStr?: string) => {
     const targetDate = dateStr || new Date().toISOString().split('T')[0];
@@ -238,21 +239,17 @@ export const ConfirmModal: React.FC = () => {
   const { totalBoxes, totalPallets } = useMemo(() => {
     if (opType !== "Расход" || !finalItems) return { totalBoxes: 0, totalPallets: 0 };
     let boxesSum = 0;
-    let palletsSum = 0;
     finalItems.forEach((item) => {
       const skuData = skus.find((s) => s.sku === item.article);
       const pcsPerBox = skuData ? skuData.pcsPerBox : 0;
-      const boxesPerPallet = skuData ? skuData.boxesPerPallet : 0;
-
       const boxes = pcsPerBox > 0 ? Math.ceil(item.quantity / pcsPerBox) : 0;
       boxesSum += boxes;
-
-      if (boxes > 0 && boxesPerPallet > 0) {
-        palletsSum += Math.ceil(boxes / boxesPerPallet);
-      }
     });
-    return { totalBoxes: boxesSum, totalPallets: Math.ceil(palletsSum) };
-  }, [finalItems, skus, opType]);
+    const calculatedPallets = boxesSum >= 10 && boxesPerPalletGlobal > 0
+      ? Math.ceil(boxesSum / boxesPerPalletGlobal)
+      : 0;
+    return { totalBoxes: boxesSum, totalPallets: calculatedPallets };
+  }, [finalItems, skus, opType, boxesPerPalletGlobal]);
 
   const hasPrefilledRef = useRef(false);
 
@@ -263,19 +260,16 @@ export const ConfirmModal: React.FC = () => {
     if (skus.length === 0 || services.length === 0) return;
 
     let boxesSum = 0;
-    let palletsSum = 0;
     parsedItems.forEach((item) => {
       const skuData = skus.find((s) => s.sku === item.article);
       const pcsPerBox = skuData ? skuData.pcsPerBox : 0;
-      const boxesPerPallet = skuData ? skuData.boxesPerPallet : 0;
-
       const boxes = pcsPerBox > 0 ? Math.ceil(item.quantity / pcsPerBox) : 0;
       boxesSum += boxes;
-
-      if (boxes > 0 && boxesPerPallet > 0) {
-        palletsSum += Math.ceil(boxes / boxesPerPallet);
-      }
     });
+
+    const calculatedPallets = boxesSum >= 10 && boxesPerPalletGlobal > 0
+      ? Math.ceil(boxesSum / boxesPerPalletGlobal)
+      : 0;
 
     const active = services.filter((s) => s.isActive);
     const newSelected: Record<string, number> = {};
@@ -283,9 +277,11 @@ export const ConfirmModal: React.FC = () => {
     active.forEach((service) => {
       const nameLower = service.name.toLowerCase();
       if (nameLower.includes("паллет")) {
-        newSelected[service.id] = palletsSum;
+        newSelected[service.id] = calculatedPallets;
       } else if (nameLower.includes("короб")) {
         newSelected[service.id] = boxesSum;
+      } else if (nameLower.includes("забор")) {
+        newSelected[service.id] = 1;
       }
     });
 
@@ -293,7 +289,7 @@ export const ConfirmModal: React.FC = () => {
       setSelectedServices((prev) => ({ ...prev, ...newSelected }));
     }
     hasPrefilledRef.current = true;
-  }, [parsedItems, skus, services, opType]);
+  }, [parsedItems, skus, services, opType, boxesPerPalletGlobal]);
 
   if (!parsedItems) return null;
 

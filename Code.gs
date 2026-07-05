@@ -1106,6 +1106,7 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
   const gIdx = headers.indexOf('groupId');
   const cIdx = headers.indexOf('isComponent');
   const wocIdx = headers.indexOf('Себестоимость списания');
+  const destIdx = headers.indexOf('Объект') !== -1 ? headers.indexOf('Объект') : 8;
 
   let rowIndex = -1;
   let transData = null;
@@ -1126,7 +1127,7 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
   const price = Number(transData[5]);
   const writeOffCost = Number(transData[6]);
   const total = Number(transData[7]);
-  const dest = String(transData[8] || '');
+  const dest = String(transData[destIdx] || '');
   
   let dateStr = '';
   if (transData[1] instanceof Date) {
@@ -1176,7 +1177,11 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
           newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
         } else if (type === 'Расход') {
           newQty += qty;
-          newCap = roundToTwo(newCap + writeOffCost);
+          if (isWriteOffDestination(dest)) {
+            // Капитализация НЕ увеличивается при удалении списания
+          } else {
+            newCap = roundToTwo(newCap + writeOffCost);
+          }
           newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
         }
         
@@ -1195,7 +1200,13 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
            if (String(stockData[j][0]) === String(transDataAll[k][3])) {
               let nQty = Number(stockData[j][1]) + Number(transDataAll[k][4]);
               const componentWoc = Number(transDataAll[k][wocIdx !== -1 ? wocIdx : 6]) || 0;
-              let nCap = roundToTwo(Number(stockData[j][3]) + componentWoc);
+              const componentDest = String(transDataAll[k][destIdx] || '');
+              let nCap;
+              if (isWriteOffDestination(componentDest)) {
+                nCap = Number(stockData[j][3]);
+              } else {
+                nCap = roundToTwo(Number(stockData[j][3]) + componentWoc);
+              }
               let nAvg = nQty > 0 ? roundToTwo(nCap / nQty) : 0;
               stockSheet.getRange(j + 1, 2, 1, 3).setValues([[nQty, nAvg, nCap]]);
               break;
@@ -1219,6 +1230,10 @@ function updateTransaction(id, data, username) {
     newTransactions: getTransactions().rows,
     skus: getSkus()
   };
+}
+
+function isWriteOffDestination(dest) {
+  return String(dest || '').indexOf('Списание') !== -1;
 }
 
 function commitTransaction(data, type, destination, deliveryDate, username, originalDate) {
@@ -1317,12 +1332,21 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
           componentsTotal += compTotal;
           
           const newCompQty = compStock.quantity - compQty;
-          const newCompCap = roundToTwo(compStock.capitalization - compTotal);
+          let newCompCap;
+          let newCompAvg;
+          if (isWriteOffDestination(destination)) {
+            newCompCap = newCompQty === 0 ? 0 : compStock.capitalization;
+            newCompAvg = newCompQty > 0 ? roundToTwo(newCompCap / newCompQty) : 0;
+          } else {
+            newCompCap = roundToTwo(compStock.capitalization - compTotal);
+            newCompAvg = compAvg;
+          }
           
           if (stockMap[comp.componentSku]) {
             stockMap[comp.componentSku].quantity = newCompQty;
             stockMap[comp.componentSku].capitalization = newCompCap;
-            stockSheet.getRange(compStock.rowIdx, 2, 1, 3).setValues([[newCompQty, compAvg, newCompCap]]);
+            stockMap[comp.componentSku].avgCost = newCompAvg;
+            stockSheet.getRange(compStock.rowIdx, 2, 1, 3).setValues([[newCompQty, newCompAvg, newCompCap]]);
           }
           
           const compTransId = Utilities.getUuid();
@@ -1397,12 +1421,21 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
           writeOffCost = roundToTwo(curr.avgCost * qty);
           
           const newQty = curr.quantity - qty;
-          const newCap = roundToTwo(curr.capitalization - writeOffCost);
+          let newCap;
+          let newAvgCost;
+          if (isWriteOffDestination(destination)) {
+            newCap = newQty === 0 ? 0 : curr.capitalization;
+            newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
+          } else {
+            newCap = roundToTwo(curr.capitalization - writeOffCost);
+            newAvgCost = curr.avgCost;
+          }
           
           stockMap[article].quantity = newQty;
           stockMap[article].capitalization = newCap;
+          stockMap[article].avgCost = newAvgCost;
           
-          stockSheet.getRange(curr.rowIdx, 2, 1, 3).setValues([[newQty, curr.avgCost, newCap]]);
+          stockSheet.getRange(curr.rowIdx, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
         }
       }
     }
@@ -1775,43 +1808,62 @@ function restoreTransaction(payload) {
   const writeOffCost = Number(payload.writeOffCost);
   
   ensureSkuExists(article);
-  
-  const stockData = stockSheet.getDataRange().getValues();
-  let stockFound = false;
-  for (let i = 1; i < stockData.length; i++) {
-    if (String(stockData[i][0]) === String(article)) {
-      stockFound = true;
-      let newQty = Number(stockData[i][1]);
-      let newAvgCost = Number(stockData[i][2]);
-      let newCap = Number(stockData[i][3]);
-      let newSales = Number(stockData[i][4]);
-      
-      if (type === 'Приход') {
-        newQty += qty;
-        newCap += total;
-        newAvgCost = newQty > 0 ? newCap / newQty : 0;
-      } else if (type === 'Расход') {
-        newQty -= qty;
-        if (newQty < 0) {
-          throw new Error(`Недостаточно товара "${article}" на складе. Доступно: ${newQty + qty}, откат расхода: ${qty}`);
-        }
-        newCap -= writeOffCost;
-        newSales += qty;
-      }
-      
-      stockSheet.getRange(i + 1, 2, 1, 4).setValues([[newQty, newAvgCost, newCap, newSales]]);
-      break;
+
+  let skipStockUpdate = false;
+  if (type === 'Расход') {
+    const kitData = getKitComponents(payload.article);
+    const kits = getKits();
+    const kitExists = kits.hasOwnProperty(payload.article);
+    if (kitExists && kitData && kitData.type === 'virtual' && Number(payload.writeOffCost) === 0) {
+      skipStockUpdate = true;
     }
   }
   
-  if (!stockFound) {
-     let newQty = 0; let newAvgCost = 0; let newCap = 0; let newSales = 0;
-     if (type === 'Приход') {
-         newQty = qty; newCap = total; newAvgCost = qty > 0 ? total / qty : 0;
-     } else {
-         newQty = -qty; newCap = -writeOffCost; newSales = qty;
-     }
-     stockSheet.appendRow([article, newQty, newAvgCost, newCap, newSales, 0]);
+  if (!skipStockUpdate) {
+    const stockData = stockSheet.getDataRange().getValues();
+    let stockFound = false;
+    for (let i = 1; i < stockData.length; i++) {
+      if (String(stockData[i][0]) === String(article)) {
+        stockFound = true;
+        let newQty = Number(stockData[i][1]);
+        let newAvgCost = Number(stockData[i][2]);
+        let newCap = Number(stockData[i][3]);
+        let newSales = Number(stockData[i][4]);
+        
+        if (type === 'Приход') {
+          newQty += qty;
+          newCap += total;
+          newAvgCost = newQty > 0 ? newCap / newQty : 0;
+        } else if (type === 'Расход') {
+          newQty -= qty;
+          if (newQty < 0) {
+            throw new Error(`Недостаточно товара "${article}" на складе. Доступно: ${newQty + qty}, откат расхода: ${qty}`);
+          }
+          if (isWriteOffDestination(payload.destination)) {
+            if (newQty === 0) {
+              newCap = 0;
+            }
+          } else {
+            newCap -= writeOffCost;
+          }
+          newAvgCost = newQty > 0 ? newCap / newQty : 0;
+          newSales += qty;
+        }
+        
+        stockSheet.getRange(i + 1, 2, 1, 4).setValues([[newQty, newAvgCost, newCap, newSales]]);
+        break;
+      }
+    }
+    
+    if (!stockFound) {
+       let newQty = 0; let newAvgCost = 0; let newCap = 0; let newSales = 0;
+       if (type === 'Приход') {
+           newQty = qty; newCap = total; newAvgCost = qty > 0 ? total / qty : 0;
+       } else {
+           newQty = -qty; newCap = -writeOffCost; newSales = qty;
+       }
+       stockSheet.appendRow([article, newQty, newAvgCost, newCap, newSales, 0]);
+    }
   }
   
   // Даты сохраняем как есть (ISO-формат), без конвертации
@@ -1829,7 +1881,9 @@ function restoreTransaction(payload) {
     payload.total,
     payload.destination || '',
     deliveryStr,
-    payload.user || ''
+    payload.user || '',
+    payload.groupId || '',
+    payload.isComponent || false
   ]);
 }
 
@@ -1837,6 +1891,7 @@ function deleteMultipleTransactions(ids, deletedBy) {
   if (!ids || ids.length === 0) return { stock: getStock(), transactions: getTransactions().rows };
   if (!deletedBy) deletedBy = 'unknown';
 
+  const kits = getKits();
   const ss = getSpreadsheet();
   const spreadsheetId = ss.getId();
   
@@ -1859,6 +1914,10 @@ function deleteMultipleTransactions(ids, deletedBy) {
   // 2. Читаем все данные сразу
   const transDataAll = transSheet.getDataRange().getValues();
   const stockDataAll = stockSheet.getDataRange().getValues();
+
+  const headers = transDataAll[0] || [];
+  const groupIdIdx = headers.indexOf('groupId');
+  const isComponentIdx = headers.indexOf('isComponent');
 
   // Словари для быстрого поиска и работы
   const idsSet = new Set(ids);
@@ -1899,18 +1958,43 @@ function deleteMultipleTransactions(ids, deletedBy) {
 
       let userStr = transDataAll[i][10] ? String(transDataAll[i][10]) : '';
 
+      const groupIdVal = (groupIdIdx !== -1) ? transDataAll[i][groupIdIdx] : '';
+      const isComponentVal = (isComponentIdx !== -1) ? transDataAll[i][isComponentIdx] : '';
+
       // Формируем объект для архива
-      const archiveObj = { id: rowId, date: dateStr, type, article, quantity: qty, price, writeOffCost, total, destination: dest, deliveryDate: deliveryDateStr, user: userStr };
+      const archiveObj = { 
+        id: rowId, 
+        date: dateStr, 
+        type, 
+        article, 
+        quantity: qty, 
+        price, 
+        writeOffCost, 
+        total, 
+        destination: dest, 
+        deliveryDate: deliveryDateStr, 
+        user: userStr,
+        groupId: groupIdVal !== null && groupIdVal !== undefined ? groupIdVal : '',
+        isComponent: isComponentVal !== null && isComponentVal !== undefined ? isComponentVal : ''
+      };
       rowsToArchive.push([Utilities.getUuid(), 'Transaction', deletedAt, JSON.stringify(archiveObj), deletedBy]);
 
-      // Аккумулируем откат остатков
+      //  откат остатков
       if (stockChanges[article]) {
         if (type === 'Приход') {
           stockChanges[article].qtyDiff -= qty;
           stockChanges[article].capDiff -= total;
         } else if (type === 'Расход') {
-          stockChanges[article].qtyDiff += qty;
-          stockChanges[article].capDiff += writeOffCost;
+          const kit = kits[article];
+          const isVirtualKit = kit && kit.type === 'virtual';
+          if (writeOffCost === 0 && isVirtualKit) {
+            // НЕ изменяем qtyDiff и capDiff для виртуального комплекта
+          } else {
+            stockChanges[article].qtyDiff += qty;
+            if (!isWriteOffDestination(dest)) {
+              stockChanges[article].capDiff += writeOffCost;
+            }
+          }
         }
       }
     }
@@ -2033,6 +2117,22 @@ function restoreMultipleArchivedItems(archiveIds) {
     }
   }
 
+  const kits = getKits();
+  const stockSheet = getSheetByNameRobust(ss, 'Остатки');
+  if (!stockSheet) throw new Error('Лист "Остатки" не найден.');
+  const stockDataAll = stockSheet.getDataRange().getValues();
+  
+  const stockChanges = {};
+  for (let i = 1; i < stockDataAll.length; i++) {
+    stockChanges[String(stockDataAll[i][0])] = {
+      rowIndex: i,
+      qtyDiff: 0,
+      capDiff: 0,
+      currentQty: Number(stockDataAll[i][1]) || 0,
+      currentCap: Number(stockDataAll[i][3]) || 0,
+    };
+  }
+
   if (transactionsToRestore.length > 0) {
     // 2. Добавляем восстановленные данные обратно
     const transSheet = getTransactionSheet(ss);
@@ -2061,6 +2161,37 @@ function restoreMultipleArchivedItems(archiveIds) {
     }
     
     transactionsToRestore = filteredToRestore; // for logs or info later
+    
+    // Инкрементально накапливаем изменения остатков
+    for (let i = 0; i < filteredToRestore.length; i++) {
+      const trans = filteredToRestore[i];
+      const type = trans[2];
+      const article = String(trans[3]);
+      const qty = Number(trans[4]) || 0;
+      const writeOffCost = Number(trans[6]) || 0;
+      const total = Number(trans[7]) || 0;
+      
+      if (stockChanges[article]) {
+        if (type === 'Приход') {
+          stockChanges[article].qtyDiff += qty;
+          stockChanges[article].capDiff += total;
+        } else if (type === 'Расход') {
+          const dest = String(trans[8] || '');
+          const kit = kits[article];
+          const isVirtualKit = kit && kit.type === 'virtual';
+          if (writeOffCost === 0 && isVirtualKit) {
+            // НЕ изменяем qtyDiff и capDiff для виртуального комплекта
+          } else {
+            if (isWriteOffDestination(dest) === true) {
+              stockChanges[article].qtyDiff -= qty;
+            } else {
+              stockChanges[article].qtyDiff -= qty;
+              stockChanges[article].capDiff -= writeOffCost;
+            }
+          }
+        }
+      }
+    }
   }
 
   let restoreMsg = '';
@@ -2095,13 +2226,42 @@ function restoreMultipleArchivedItems(archiveIds) {
     }
   }
 
-  // Единоразово пересчитываем весь склад
-  recalculateStockFully(ss);
+  // Применяем накопленные изменения к листу "Остатки" одной записью
+  let warnings = [];
+  let isStockChanged = false;
+  Object.keys(stockChanges).forEach(sku => {
+    const change = stockChanges[sku];
+    if (change.qtyDiff !== 0 || change.capDiff !== 0) {
+      change.currentQty += change.qtyDiff;
+      if (change.currentQty < 0) {
+        warnings.push(`Остаток товара "${sku}" ушел в минус. Установлен в 0.`);
+        change.currentQty = 0;
+      }
+      change.currentCap += change.capDiff;
+      if (change.currentQty <= 0) {
+        change.currentQty = 0;
+        change.currentCap = 0;
+      } else if (change.currentCap < 0) {
+        change.currentCap = 0;
+      }
+      const newAvgCost = change.currentQty > 0 ? change.currentCap / change.currentQty : 0;
+      
+      stockDataAll[change.rowIndex][1] = change.currentQty;
+      stockDataAll[change.rowIndex][2] = newAvgCost;
+      stockDataAll[change.rowIndex][3] = change.currentCap;
+      isStockChanged = true;
+    }
+  });
 
-  if (duplicatesCount > 0 || apiErrors > 0) {
+  if (isStockChanged) {
+    stockSheet.getRange(1, 1, stockDataAll.length, Math.max(stockDataAll[0].length, 6)).setValues(stockDataAll);
+  }
+
+  if (duplicatesCount > 0 || apiErrors > 0 || warnings.length > 0) {
      restoreMsg = `Восстановлено: ${transactionsToRestore.length}. `;
      if (duplicatesCount > 0) restoreMsg += `Пропущено дубликатов: ${duplicatesCount}. `;
-     if (apiErrors > 0) restoreMsg += `Ошибок удаления из архива: ${apiErrors}.`;
+     if (apiErrors > 0) restoreMsg += `Ошибок удаления из архива: ${apiErrors}. `;
+     if (warnings.length > 0) restoreMsg += `Предупреждения: ${warnings.join('; ')}.`;
      return { stock: getStock(), archived: getArchivedItems(), transactions: getTransactions().rows, partial: true, message: restoreMsg.trim() };
   }
 
@@ -2299,7 +2459,8 @@ function getGlobalSettings(role) {
   const settings = {
     geminiModel: props.getProperty('global_geminiModel') || 'gemini-flash-latest',
     serviceOrder: props.getProperty('global_serviceOrder') || '',
-    storageRatePerLiterDay: Number(props.getProperty('global_storageRate')) || 0
+    storageRatePerLiterDay: Number(props.getProperty('global_storageRate')) || 0,
+    boxesPerPalletGlobal: Number(props.getProperty('global_boxesPerPallet')) || 0
   };
   // Ключ — только администратору
   if (isAdminRole(role)) {
@@ -2323,6 +2484,9 @@ function saveGlobalSettings(data, role) {
   }
   if (data.storageRatePerLiterDay !== undefined) {
     props.setProperty('global_storageRate', String(data.storageRatePerLiterDay));
+  }
+  if (data.boxesPerPalletGlobal !== undefined) {
+    props.setProperty('global_boxesPerPallet', String(data.boxesPerPalletGlobal));
   }
   if (data.ozonClientId !== undefined) {
     props.setProperty('global_ozonClientId', data.ozonClientId);

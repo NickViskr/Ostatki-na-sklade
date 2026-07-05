@@ -152,7 +152,7 @@ export const SkusTab: React.FC = React.memo(() => {
           <button 
             onClick={() => {
               setEditingSku(null);
-              setSkuForm({ sku: '', price: 0, minStock: 10, pcsPerBox: 1, boxesPerPallet: 0, volumeLiters: 0 });
+              setSkuForm({ sku: '', price: 0, minStock: 10, pcsPerBox: 1, volumeLiters: 0 });
               setShowSkuModal(true);
             }}
             className="flex items-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200"
@@ -198,6 +198,9 @@ export const SkusTab: React.FC = React.memo(() => {
               <th className="px-6 py-4 font-semibold text-slate-600 text-center">
                 Комплект
               </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('volumeLiters')}>
+                Литраж, л {getSortIcon('volumeLiters')}
+              </th>
               <th className="px-6 py-4 font-semibold text-slate-600 text-right">Действия</th>
             </tr>
           </thead>
@@ -222,6 +225,13 @@ export const SkusTab: React.FC = React.memo(() => {
                       </span>
                     : <span className="text-slate-200 text-xs">—</span>
                   }
+                </td>
+                <td className="px-6 py-4 text-right font-medium text-slate-900">
+                  {s.volumeLiters && s.volumeLiters > 0 ? (
+                    s.volumeLiters
+                  ) : (
+                    <span className="text-slate-300">—</span>
+                  )}
                 </td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-2">

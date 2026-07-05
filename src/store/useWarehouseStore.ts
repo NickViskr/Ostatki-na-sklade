@@ -15,53 +15,17 @@ const normalizeStock = (items: StockItem[]): StockItem[] =>
 
 const expandIdsWithCascade = (ids: string[], transactions: Transaction[]): string[] => {
   const idsSet = new Set(ids);
-  
-  // 1. Cascade to component transactions of any deleted main items
-  const mainIds = new Set<string>();
+  const mainGroupIds = new Set<string>();
   transactions.forEach(t => {
-    if (idsSet.has(t.id) && !t.isComponent) {
-      if (t.groupId) mainIds.add(t.groupId);
-      mainIds.add(t.id);
+    if (idsSet.has(t.id) && !t.isComponent && t.groupId) {
+      mainGroupIds.add(t.groupId);
     }
   });
-
   transactions.forEach(t => {
-    if (t.isComponent && t.groupId && (mainIds.has(t.groupId) || idsSet.has(t.groupId))) {
+    if (t.isComponent && t.groupId && mainGroupIds.has(t.groupId)) {
       idsSet.add(t.id);
     }
   });
-
-  // 2. Cascade to entire shipment group if all main items are deleted
-  const shipmentGroups: Record<string, Transaction[]> = {};
-  transactions.forEach(t => {
-    if (t.type === 'Расход') {
-      const dStr = t.date ? t.date.split(',')[0].trim() : '';
-      const delStr = t.deliveryDate ? t.deliveryDate.split(',')[0].trim() : '';
-      const key = `${dStr}_${delStr}_${t.destination || ''}`;
-      if (!shipmentGroups[key]) shipmentGroups[key] = [];
-      shipmentGroups[key].push(t);
-    }
-  });
-
-  Object.values(shipmentGroups).forEach(groupItems => {
-    const mainItemsInGroup = groupItems.filter(item => !item.isComponent && item.total > 0);
-    if (mainItemsInGroup.length > 0 && mainItemsInGroup.every(item => idsSet.has(item.id))) {
-      groupItems.forEach(item => { idsSet.add(item.id); });
-    } else {
-      const deletedComponentArticles = new Set(
-        Array.from(idsSet).flatMap(id => {
-          const tx = transactions.find(t => t.id === id);
-          return tx?.isComponent ? [tx.article] : [];
-        })
-      );
-      groupItems.forEach(item => {
-        if (!item.isComponent && item.total === 0 && deletedComponentArticles.has(item.article)) {
-          idsSet.add(item.id);
-        }
-      });
-    }
-  });
-
   return Array.from(idsSet);
 };
 
@@ -827,6 +791,9 @@ export const useWarehouseStore = create<WarehouseState>()(
             if (res.data.storageRatePerLiterDay !== undefined) {
               useSettingsStore.getState().setStorageRatePerLiterDay(Number(res.data.storageRatePerLiterDay) || 0);
             }
+            if (res.data.boxesPerPalletGlobal !== undefined) {
+              useSettingsStore.getState().setBoxesPerPalletGlobal(Number(res.data.boxesPerPalletGlobal) || 0);
+            }
             if (res.data.serviceOrder) {
               try {
                 const orderStr = typeof res.data.serviceOrder === 'string' ? res.data.serviceOrder : JSON.stringify(res.data.serviceOrder);
@@ -875,6 +842,9 @@ export const useWarehouseStore = create<WarehouseState>()(
             useSettingsStore.getState().setOzonApiKey(res.data.ozonApiKey || '');
             if (res.data.storageRatePerLiterDay !== undefined) {
               useSettingsStore.getState().setStorageRatePerLiterDay(Number(res.data.storageRatePerLiterDay) || 0);
+            }
+            if (res.data.boxesPerPalletGlobal !== undefined) {
+              useSettingsStore.getState().setBoxesPerPalletGlobal(Number(res.data.boxesPerPalletGlobal) || 0);
             }
             if (res.data.serviceOrder) {
               try {

@@ -231,6 +231,55 @@ export const HistoryTab: React.FC = React.memo(() => {
     return sortableItems;
   }, [filteredHistory, sortConfig]);
 
+  const selectedTransactions = useMemo(() => {
+    return sortedHistory.filter(t => selectedIds.has(t.id));
+  }, [sortedHistory, selectedIds]);
+
+  const hasWriteOff = useMemo(() => {
+    return selectedTransactions.some(t => t.destination && t.destination.includes('Списание'));
+  }, [selectedTransactions]);
+
+  const bulkDeleteMessage = useMemo(() => {
+    if (selectedTransactions.length === 0) return '';
+    
+    const limit = 15;
+    const itemsToShow = selectedTransactions.slice(0, limit);
+    const remainingCount = selectedTransactions.length - limit;
+    
+    return (
+      <div className="space-y-4 text-slate-600 text-sm mt-3" id="bulk-delete-list">
+        <div className="max-h-60 overflow-y-auto border border-slate-100 rounded-2xl p-3 bg-slate-50/50 space-y-2 font-sans">
+          {itemsToShow.map((t) => (
+            <div key={t.id} className="flex items-center justify-between gap-4 border-b border-slate-100 last:border-none pb-2 last:pb-0 text-xs">
+              <span className="font-medium text-slate-700 flex items-center gap-2">
+                <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                  t.type === 'Приход' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
+                }`}>
+                  {t.type}
+                </span>
+                <span className="font-mono text-slate-800 font-bold">{t.article}</span>
+              </span>
+              <span className="text-slate-500 whitespace-nowrap">
+                <span className="font-bold text-slate-800">{t.quantity} шт</span> ({formatDate(t.date)})
+              </span>
+            </div>
+          ))}
+          {remainingCount > 0 && (
+            <div className="text-xs text-slate-400 font-medium text-center pt-1">
+              ...и ещё {remainingCount}
+            </div>
+          )}
+        </div>
+
+        {hasWriteOff && (
+          <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 font-bold text-xs flex gap-2" id="write-off-warning">
+            Внимание: выбраны списания — их удаление вернёт товар на склад
+          </div>
+        )}
+      </div>
+    ) as any;
+  }, [selectedTransactions, hasWriteOff]);
+
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(30);
 
@@ -794,8 +843,8 @@ export const HistoryTab: React.FC = React.memo(() => {
 
       <ConfirmDialog 
         show={bulkDeleteConfirm}
-        title="Оптовое удаление операций"
-        message={`Вы действительно хотите удалить ${currentSelectionCount} строк из истории? Действие нельзя отменить. Остатки товаров затронуты не будут или будут обновлены (зависит от логики сервера).`}
+        title={`Удалить ${currentSelectionCount} записей?`}
+        message={bulkDeleteMessage}
         onConfirm={handleBulkDelete}
         onCancel={() => setBulkDeleteConfirm(false)}
       />

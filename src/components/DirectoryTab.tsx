@@ -21,16 +21,24 @@ export const DirectoryTab: React.FC = React.memo(() => {
   const setServiceOrderIds = useSettingsStore(state => state.setServiceOrderIds);
   const storageRatePerLiterDay = useSettingsStore(state => state.storageRatePerLiterDay);
   const setStorageRatePerLiterDay = useSettingsStore(state => state.setStorageRatePerLiterDay);
+  const boxesPerPalletGlobal = useSettingsStore(state => state.boxesPerPalletGlobal);
+  const setBoxesPerPalletGlobal = useSettingsStore(state => state.setBoxesPerPalletGlobal);
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
 
   const [localRate, setLocalRate] = useState(String(storageRatePerLiterDay || 0));
   const [isSavingRate, setIsSavingRate] = useState(false);
+  const [localBoxes, setLocalBoxes] = useState(String(boxesPerPalletGlobal || 0));
+  const [isSavingBoxes, setIsSavingBoxes] = useState(false);
 
   React.useEffect(() => {
     setLocalRate(String(storageRatePerLiterDay || 0));
   }, [storageRatePerLiterDay]);
+
+  React.useEffect(() => {
+    setLocalBoxes(String(boxesPerPalletGlobal || 0));
+  }, [boxesPerPalletGlobal]);
 
   const handleSaveStorageRate = async () => {
     const rateVal = parseFloat(localRate);
@@ -51,6 +59,28 @@ export const DirectoryTab: React.FC = React.memo(() => {
       toast.error(e.message || 'Ошибка при сохранении ставки');
     } finally {
       setIsSavingRate(false);
+    }
+  };
+
+  const handleSaveBoxes = async () => {
+    const boxesVal = parseInt(localBoxes, 10);
+    if (isNaN(boxesVal) || boxesVal < 0) {
+      toast.error('Введите корректное число коробок на паллете');
+      return;
+    }
+    setIsSavingBoxes(true);
+    try {
+      const res = await fetchGas('saveGlobalSettings', { data: { boxesPerPalletGlobal: boxesVal } });
+      if (res.status === 'success') {
+        setBoxesPerPalletGlobal(boxesVal);
+        toast.success('Среднее количество коробок на паллете успешно сохранено');
+      } else {
+        toast.error(res.message || 'Ошибка при сохранении значения');
+      }
+    } catch (e: any) {
+      toast.error(e.message || 'Ошибка при сохранении значения');
+    } finally {
+      setIsSavingBoxes(false);
     }
   };
 
@@ -181,36 +211,65 @@ export const DirectoryTab: React.FC = React.memo(() => {
             <Clock className="w-6 h-6" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900">Хранение товаров</h3>
-            <p className="text-sm text-slate-500">Настройка тарифа для расчета стоимости хранения литража на складе.</p>
+            <h3 className="text-lg font-bold text-slate-900">Глобальные настройки склада</h3>
+            <p className="text-sm text-slate-500">Настройка тарифа хранения и среднего количества коробок на паллете.</p>
           </div>
         </div>
 
-        <div className="flex items-end gap-4 max-w-md">
-          <div className="flex-1 space-y-2">
-            <label className="text-xs font-bold text-slate-400 uppercase">Стоимость хранения 1 л/сутки, ₽</label>
-            <div className="relative">
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                disabled={!isAdmin || isSavingRate}
-                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium disabled:opacity-60"
-                value={localRate}
-                onChange={(e) => setLocalRate(e.target.value)}
-              />
-              <span className="absolute right-4 inset-y-0 flex items-center text-slate-400 text-sm font-medium">₽</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="flex items-end gap-4 w-full">
+            <div className="flex-1 space-y-2">
+              <label className="text-xs font-bold text-slate-400 uppercase">Стоимость хранения 1 л/сутки, ₽</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  disabled={!isAdmin || isSavingRate}
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium disabled:opacity-60"
+                  value={localRate}
+                  onChange={(e) => setLocalRate(e.target.value)}
+                />
+                <span className="absolute right-4 inset-y-0 flex items-center text-slate-400 text-sm font-medium">₽</span>
+              </div>
             </div>
+            {isAdmin && (
+              <button
+                onClick={handleSaveStorageRate}
+                disabled={isSavingRate}
+                className="px-6 py-3 bg-slate-900 text-white rounded-2xl text-sm font-bold hover:bg-slate-800 transition-all shadow-md shrink-0 flex items-center gap-2"
+              >
+                {isSavingRate ? 'Сохранение...' : 'Сохранить'}
+              </button>
+            )}
           </div>
-          {isAdmin && (
-            <button
-              onClick={handleSaveStorageRate}
-              disabled={isSavingRate}
-              className="px-6 py-3 bg-slate-900 text-white rounded-2xl text-sm font-bold hover:bg-slate-800 transition-all shadow-md shrink-0 flex items-center gap-2"
-            >
-              {isSavingRate ? 'Сохранение...' : 'Сохранить ставку'}
-            </button>
-          )}
+
+          <div className="flex items-end gap-4 w-full">
+            <div className="flex-1 space-y-2">
+              <label className="text-xs font-bold text-slate-400 uppercase">Коробок на паллете (среднее)</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  disabled={!isAdmin || isSavingBoxes}
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium disabled:opacity-60"
+                  value={localBoxes}
+                  onChange={(e) => setLocalBoxes(e.target.value)}
+                />
+                <span className="absolute right-4 inset-y-0 flex items-center text-slate-400 text-sm font-medium">шт</span>
+              </div>
+            </div>
+            {isAdmin && (
+              <button
+                onClick={handleSaveBoxes}
+                disabled={isSavingBoxes}
+                className="px-6 py-3 bg-slate-900 text-white rounded-2xl text-sm font-bold hover:bg-slate-800 transition-all shadow-md shrink-0 flex items-center gap-2"
+              >
+                {isSavingBoxes ? 'Сохранение...' : 'Сохранить'}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
