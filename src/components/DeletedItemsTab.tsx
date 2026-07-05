@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Trash2, RotateCcw, Box, User, History, Archive, Loader2, Calendar } from 'lucide-react';
+import { Trash2, RotateCcw, Box, User, History, Archive, Loader2, Calendar, ChevronDown } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -10,10 +10,11 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
   const isSyncing = useWarehouseStore((state) => state.isSyncing);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
 
-  const [itemToRestore, setItemToRestore] = useState<string | null>(null);
+  const [itemsToRestore, setItemsToRestore] = useState<string[] | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [bulkRestoreConfirm, setBulkRestoreConfirm] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   
   const handleHardDeleteArchivedItems = useWarehouseStore((state) => state.handleHardDeleteArchivedItems);
   const handleRestoreMultipleArchivedItems = useWarehouseStore((state) => state.handleRestoreMultipleArchivedItems);
@@ -49,6 +50,109 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
     }
     setSelectedIds(newSet);
   };
+
+  const toggleGroupExpanded = (key: string) => {
+    const newSet = new Set(expandedGroups);
+    if (newSet.has(key)) {
+      newSet.delete(key);
+    } else {
+      newSet.add(key);
+    }
+    setExpandedGroups(newSet);
+  };
+
+  const isGroupSelected = (allIds: string[]) => {
+    return allIds.length > 0 && allIds.every(id => selectedIds.has(id));
+  };
+
+  const toggleGroupSelect = (allIds: string[]) => {
+    const newSet = new Set(selectedIds);
+    const allSelected = allIds.every(id => newSet.has(id));
+    if (allSelected) {
+      allIds.forEach(id => newSet.delete(id));
+    } else {
+      allIds.forEach(id => newSet.add(id));
+    }
+    setSelectedIds(newSet);
+  };
+
+  const displayRows = React.useMemo(() => {
+    const processedKeys = new Set<string>();
+    const rows: {
+      id: string;
+      type: 'single' | 'group';
+      item?: typeof archivedItems[0];
+      groupKey?: string;
+      mainItem?: typeof archivedItems[0];
+      components?: typeof archivedItems[0][];
+      allIds?: string[];
+    }[] = [];
+
+    archivedItems.forEach((item) => {
+      let groupId: string | undefined = undefined;
+      if (item.type === 'Transaction') {
+        try {
+          const parsed = JSON.parse(item.dataJSON);
+          if (parsed.groupId) {
+            groupId = parsed.groupId;
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      if (groupId) {
+        const key = `${groupId}_${item.deletedAt}`;
+        if (!processedKeys.has(key)) {
+          processedKeys.add(key);
+
+          // Find all items in this group
+          const groupItems = archivedItems.filter((i) => {
+            if (i.type !== 'Transaction') return false;
+            try {
+              const parsed = JSON.parse(i.dataJSON);
+              return parsed.groupId === groupId && i.deletedAt === item.deletedAt;
+            } catch {
+              return false;
+            }
+          });
+
+          // Find main item: isComponent is NOT true
+          let mainItem = groupItems.find((i) => {
+            try {
+              const parsed = JSON.parse(i.dataJSON);
+              return parsed.isComponent !== true;
+            } catch {
+              return false;
+            }
+          });
+          if (!mainItem) {
+            mainItem = groupItems[0];
+          }
+
+          // Components are those where isComponent is true
+          const components = groupItems.filter((i) => i.archiveId !== mainItem!.archiveId);
+
+          rows.push({
+            id: `group-${key}`,
+            type: 'group',
+            groupKey: key,
+            mainItem,
+            components,
+            allIds: groupItems.map(i => i.archiveId)
+          });
+        }
+      } else {
+        rows.push({
+          id: `single-${item.archiveId}`,
+          type: 'single',
+          item
+        });
+      }
+    });
+
+    return rows;
+  }, [archivedItems]);
 
   const currentSelectionCount = selectedIds.size;
   const isAllSelected = archivedItems.length > 0 && currentSelectionCount === archivedItems.length;
@@ -184,59 +288,163 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                  {archivedItems.map((item) => (
-                    <tr 
-                      key={item.archiveId}
-                      className={`hover:bg-slate-50 transition-colors group ${selectedIds.has(item.archiveId) ? 'bg-indigo-50/30' : ''}`}
-                    >
-                      <td className="px-6 py-4 text-center">
-                        <input 
-                          type="checkbox" 
-                          checked={selectedIds.has(item.archiveId)}
-                          onChange={() => toggleSelect(item.archiveId)}
-                          className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
-                        />
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center">
-                            {getTypeIcon(item.type)}
+                {displayRows.map((row) => {
+                  if (row.type === 'single') {
+                    const item = row.item!;
+                    return (
+                      <tr 
+                        key={row.id}
+                        className={`hover:bg-slate-50 transition-colors group ${selectedIds.has(item.archiveId) ? 'bg-indigo-50/30' : ''}`}
+                      >
+                        <td className="px-6 py-4 text-center">
+                          <input 
+                            type="checkbox" 
+                            checked={selectedIds.has(item.archiveId)}
+                            onChange={() => toggleSelect(item.archiveId)}
+                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                          />
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center">
+                              {getTypeIcon(item.type)}
+                            </div>
+                            <div>
+                              <div className="font-bold text-slate-900">{getTypeName(item.type)}</div>
+                              <div className="text-[10px] text-slate-400 font-mono tracking-wider">{item.archiveId.split('-')[0]}</div>
+                            </div>
                           </div>
-                          <div>
-                            <div className="font-bold text-slate-900">{getTypeName(item.type)}</div>
-                            <div className="text-[10px] text-slate-400 font-mono tracking-wider">{item.archiveId.split('-')[0]}</div>
+                        </td>
+                        <td className="px-6 py-4">
+                          {renderDataPreview(item.type, item.dataJSON)}
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-700 font-bold text-xs uppercase" title={item.deletedBy || 'Неизвестно'}>
+                              {(item.deletedBy || 'u')[0]}
+                            </div>
+                            <span className="font-medium text-slate-700">{item.deletedBy || 'Неизвестно'}</span>
                           </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        {renderDataPreview(item.type, item.dataJSON)}
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-700 font-bold text-xs uppercase" title={item.deletedBy || 'Неизвестно'}>
-                            {(item.deletedBy || 'u')[0]}
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col">
+                            <span className="font-medium text-slate-700">{formatDate(item.deletedAt).split(',')[0]}</span>
+                            <span className="text-xs text-slate-400">{formatDate(item.deletedAt).split(',')[1]}</span>
                           </div>
-                          <span className="font-medium text-slate-700">{item.deletedBy || 'Неизвестно'}</span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex flex-col">
-                          <span className="font-medium text-slate-700">{formatDate(item.deletedAt).split(',')[0]}</span>
-                          <span className="text-xs text-slate-400">{formatDate(item.deletedAt).split(',')[1]}</span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button
-                          onClick={() => setItemToRestore(item.archiveId)}
-                          disabled={isProcessing}
-                          className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-indigo-600 font-bold hover:bg-indigo-50 hover:border-indigo-200 transition-all shadow-sm opacity-0 group-hover:opacity-100 disabled:opacity-50 flex items-center justify-end gap-2 ml-auto"
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button
+                            onClick={() => setItemsToRestore([item.archiveId])}
+                            disabled={isProcessing}
+                            className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-indigo-600 font-bold hover:bg-indigo-50 hover:border-indigo-200 transition-all shadow-sm opacity-0 group-hover:opacity-100 disabled:opacity-50 flex items-center justify-end gap-2 ml-auto"
+                          >
+                            <RotateCcw size={16} />
+                            Восстановить
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  } else {
+                    const mainItem = row.mainItem!;
+                    const isExpanded = expandedGroups.has(row.groupKey!);
+                    const isSelected = isGroupSelected(row.allIds!);
+
+                    return (
+                      <React.Fragment key={row.id}>
+                        <tr 
+                          className={`hover:bg-slate-50 transition-colors group ${isSelected ? 'bg-indigo-50/30' : ''}`}
                         >
-                          <RotateCcw size={16} />
-                          Восстановить
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                          <td className="px-6 py-4 text-center">
+                            <input 
+                              type="checkbox" 
+                              checked={isSelected}
+                              onChange={() => toggleGroupSelect(row.allIds!)}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                            />
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center">
+                                {getTypeIcon(mainItem.type)}
+                              </div>
+                              <div>
+                                <div className="font-bold text-slate-900">{getTypeName(mainItem.type)}</div>
+                                <div className="text-[10px] text-slate-400 font-mono tracking-wider">{mainItem.archiveId.split('-')[0]}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col items-start">
+                              {renderDataPreview(mainItem.type, mainItem.dataJSON)}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleGroupExpanded(row.groupKey!);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 mt-1.5 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-150 rounded-full transition-colors cursor-pointer"
+                              >
+                                <span>комплект: {row.components!.length} компонентов</span>
+                                <ChevronDown size={12} className={`transform transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-700 font-bold text-xs uppercase" title={mainItem.deletedBy || 'Неизвестно'}>
+                                {(mainItem.deletedBy || 'u')[0]}
+                              </div>
+                              <span className="font-medium text-slate-700">{mainItem.deletedBy || 'Неизвестно'}</span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col">
+                              <span className="font-medium text-slate-700">{formatDate(mainItem.deletedAt).split(',')[0]}</span>
+                              <span className="text-xs text-slate-400">{formatDate(mainItem.deletedAt).split(',')[1]}</span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-right">
+                            <button
+                              onClick={() => setItemsToRestore(row.allIds!)}
+                              disabled={isProcessing}
+                              className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-indigo-600 font-bold hover:bg-indigo-50 hover:border-indigo-200 transition-all shadow-sm opacity-0 group-hover:opacity-100 disabled:opacity-50 flex items-center justify-end gap-2 ml-auto"
+                            >
+                              <RotateCcw size={16} />
+                              Восстановить
+                            </button>
+                          </td>
+                        </tr>
+                        {isExpanded && (
+                          <tr className="bg-slate-50/30">
+                            <td colSpan={6} className="px-6 py-3 border-t border-slate-100">
+                              <div className="pl-12 pr-6 py-2 border-l-2 border-indigo-200 space-y-2">
+                                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Состав комплекта (только для просмотра):</div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                                  {row.components!.map((comp) => {
+                                    let parsed: any = {};
+                                    try {
+                                      parsed = JSON.parse(comp.dataJSON);
+                                    } catch (e) {}
+                                    return (
+                                      <div key={comp.archiveId} className="bg-white p-3 rounded-xl border border-slate-200/60 shadow-sm flex items-center justify-between">
+                                        <div className="flex flex-col">
+                                          <span className="font-mono text-xs font-semibold text-slate-800">{parsed.article || '—'}</span>
+                                          <span className="text-[10px] text-slate-400">Компонент</span>
+                                        </div>
+                                        <div className="text-right">
+                                          <span className="text-xs font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md">{parsed.quantity || 0} шт</span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  }
+                })}
               </tbody>
             </table>
           </div>
@@ -244,16 +452,20 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
       </div>
 
       <ConfirmDialog 
-        show={itemToRestore !== null}
+        show={itemsToRestore !== null}
         title="Восстановление данных"
         message="Вы уверены, что хотите восстановить эти данные из архива? Они вернутся в основной раздел."
         onConfirm={async () => {
-          if (itemToRestore) {
-            await handleRestoreArchivedItem(itemToRestore);
-            setItemToRestore(null);
+          if (itemsToRestore) {
+            if (itemsToRestore.length === 1) {
+              await handleRestoreArchivedItem(itemsToRestore[0]);
+            } else {
+              await handleRestoreMultipleArchivedItems(itemsToRestore);
+            }
+            setItemsToRestore(null);
           }
         }}
-        onCancel={() => setItemToRestore(null)}
+        onCancel={() => setItemsToRestore(null)}
         confirmLabel="Восстановить"
         cancelLabel="Отмена"
       />
@@ -280,3 +492,4 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
     </div>
   );
 });
+
