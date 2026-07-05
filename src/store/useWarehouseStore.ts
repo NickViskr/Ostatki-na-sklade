@@ -96,6 +96,7 @@ interface WarehouseState {
   pendingOzonPostingId: string | null;
   setPendingOzonPostingId: (id: string | null) => void;
   getEffectiveAvailability: (article: string) => number;
+  getEffectiveAvgCost: (article: string) => number;
 }
 
 export const useWarehouseStore = create<WarehouseState>()(
@@ -141,6 +142,27 @@ export const useWarehouseStore = create<WarehouseState>()(
     } else {
       const stockItem = get().stock.find(s => s.article === article);
       return stockItem ? Number(stockItem.quantity) : 0;
+    }
+  },
+
+  getEffectiveAvgCost: (article) => {
+    const kits = get().kits;
+    const virtualKit = kits.find(k => k.kitSku === article && k.type === 'virtual');
+    if (virtualKit) {
+      if (!virtualKit.components || virtualKit.components.length === 0) {
+        return 0;
+      }
+      let sum = 0;
+      for (const comp of virtualKit.components) {
+        const stockItem = get().stock.find(s => s.article === comp.componentSku);
+        const avgCost = stockItem ? Number(stockItem.avgCost) : 0;
+        const norm = Number(comp.quantity) || 0;
+        sum += avgCost * norm;
+      }
+      return sum;
+    } else {
+      const stockItem = get().stock.find(s => s.article === article);
+      return stockItem ? Number(stockItem.avgCost) : 0;
     }
   },
 
@@ -711,7 +733,7 @@ export const useWarehouseStore = create<WarehouseState>()(
             status = 'unknown';
             errorMsg = 'Артикул не найден';
           } else {
-            item.price = stockItem ? stockItem.avgCost : 0;
+            item.price = get().getEffectiveAvgCost(article);
             if (get().getEffectiveAvailability(article) < item.quantity) {
               status = 'error';
               errorMsg = 'Недостаточно на складе';

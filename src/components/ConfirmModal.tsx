@@ -168,9 +168,20 @@ export const ConfirmModal: React.FC = () => {
       0,
     );
 
+    const totalQuantity = parsedItems.reduce(
+      (acc, item) => acc + item.quantity,
+      0,
+    );
+
     // Вспомогательная функция для расчета доли услуги на единицу товара
     const getServicesExtraPerUnit = (item: (typeof parsedItems)[0]) => {
-      if (totalServicesCost === 0 || totalBaseValue === 0) return 0;
+      if (totalServicesCost === 0) return 0;
+      if (totalBaseValue === 0) {
+        if (totalQuantity === 0) return 0;
+        const shareRatio = item.quantity / totalQuantity;
+        const extraCostForLine = totalServicesCost * shareRatio;
+        return item.quantity > 0 ? extraCostForLine / item.quantity : 0;
+      }
       const itemBaseValue = item.quantity * item.price;
       const shareRatio = itemBaseValue / totalBaseValue;
       const extraCostForLine = totalServicesCost * shareRatio;
@@ -196,11 +207,6 @@ export const ConfirmModal: React.FC = () => {
     if (pack === 0 && other === 0 && totalServicesCost === 0)
       return parsedItems;
 
-    const totalQuantity = parsedItems.reduce(
-      (acc, item) => acc + item.quantity,
-      0,
-    );
-
     return parsedItems.map((item) => {
       const packPerUnit =
         packagingDist === "unit"
@@ -223,6 +229,42 @@ export const ConfirmModal: React.FC = () => {
         price: item.price + extraPerUnit,
       };
     });
+  }, [
+    parsedItems,
+    opType,
+    packagingCost,
+    packagingDist,
+    otherCost,
+    otherDist,
+    activeServices,
+    selectedServices,
+    deliveryDate,
+    serviceRates,
+  ]);
+
+  const extraCostsTotal = useMemo(() => {
+    if (opType !== "Расход" || !parsedItems) return 0;
+
+    const pack = Number(packagingCost) || 0;
+    const other = Number(otherCost) || 0;
+
+    const totalQuantity = parsedItems.reduce(
+      (acc, item) => acc + item.quantity,
+      0,
+    );
+
+    const packTotal = packagingDist === "unit" ? pack * totalQuantity : pack;
+    const otherTotal = otherDist === "unit" ? other * totalQuantity : other;
+
+    const selectedActiveServices = activeServices.filter(
+      (s) => (selectedServices[s.id] || 0) > 0,
+    );
+    const totalServicesCost = selectedActiveServices.reduce(
+      (sum, s) => sum + getServiceCostAt(s.id, deliveryDate) * (selectedServices[s.id] || 0),
+      0,
+    );
+
+    return packTotal + otherTotal + totalServicesCost;
   }, [
     parsedItems,
     opType,
@@ -524,14 +566,14 @@ export const ConfirmModal: React.FC = () => {
                       ) : (
                         <div className="flex flex-col items-end gap-1">
                           <span>
-                            {formatCurrency(parsedItems[idx].price)} ₽
+                            {formatCurrency(item.price)} ₽
                           </span>
-                          {item.price > parsedItems[idx].price && (
+                          {Math.abs(item.price - parsedItems[idx].price) > 0.001 && (
                             <div
-                              className="text-[10px] text-indigo-500 font-bold"
-                              title="Цена с учетом дополнительных расходов (услуги, упаковка)"
+                              className="text-[10px] text-slate-400 font-medium"
+                              title="Базовая себестоимость"
                             >
-                              Итог: {formatCurrency(item.price)} ₽
+                              базовая: {formatCurrency(parsedItems[idx].price)} ₽
                             </div>
                           )}
                         </div>
@@ -849,6 +891,16 @@ export const ConfirmModal: React.FC = () => {
                 ₽
               </div>
             </div>
+            {opType === "Расход" && (
+              <div id="additional-expenses-block">
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                  Доп. расходы
+                </div>
+                <div className="text-2xl font-bold text-indigo-600">
+                  {formatCurrency(extraCostsTotal)} ₽
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="flex gap-4">
