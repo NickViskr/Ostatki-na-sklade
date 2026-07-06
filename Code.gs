@@ -1221,6 +1221,7 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
            }
         }
         transSheet.deleteRow(k + 1);
+        if (k + 1 < rowIndex) { rowIndex = rowIndex - 1; }
       }
     }
   }
@@ -1731,7 +1732,7 @@ function getArchivedItems() {
     const row = data[i];
     if (row.join('').trim() === '') continue;
     if (!row[0] || String(row[0]).trim() === '') continue;
-    if (String(row[1]) === 'UpdatedVersion') continue;
+    if (String(row[3]).indexOf('"type":"UpdatedVersion"') !== -1) continue;
     rows.push({
       archiveId: String(row[0]),
       type: String(row[1]),
