@@ -288,6 +288,7 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [destinationFilter, setDestinationFilter] = useState("");
+  const [dateMode, setDateMode] = useState<'delivery' | 'created'>('delivery');
 
   const formatDateStr = (dateRaw?: string, fallback = "") => {
     if (!dateRaw) return fallback;
@@ -329,7 +330,9 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
 
         if (!dateFrom && !dateTo) return true;
 
-        const tDate = parseAppDate(t.deliveryDate || t.date);
+        const tDate = dateMode === 'delivery'
+          ? parseAppDate(t.deliveryDate || t.date)
+          : parseAppDate(t.date);
         if (!tDate) return true;
 
         const timestamp = tDate.getTime();
@@ -348,11 +351,15 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
         return true;
       })
       .sort((a, b) => {
-        const aDate = parseAppDate(a.deliveryDate || a.date);
-        const bDate = parseAppDate(b.deliveryDate || b.date);
+        const aDate = dateMode === 'delivery'
+          ? parseAppDate(a.deliveryDate || a.date)
+          : parseAppDate(a.date);
+        const bDate = dateMode === 'delivery'
+          ? parseAppDate(b.deliveryDate || b.date)
+          : parseAppDate(b.date);
         return (bDate ? bDate.getTime() : 0) - (aDate ? aDate.getTime() : 0);
       });
-  }, [transactions, dateFrom, dateTo, destinationFilter]);
+  }, [transactions, dateFrom, dateTo, destinationFilter, dateMode]);
 
   // Group by date and destination to show shipments as batches
   const groupedShipments = useMemo(() => {
@@ -826,6 +833,29 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
             <Download size={18} />
             <span className="hidden sm:inline">Экспорт CSV</span>
           </button>
+
+          <div className="flex gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200/60 shadow-sm">
+            <button
+              onClick={() => setDateMode('delivery')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                dateMode === 'delivery'
+                  ? 'bg-white shadow text-slate-900'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              По дате отгрузки
+            </button>
+            <button
+              onClick={() => setDateMode('created')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                dateMode === 'created'
+                  ? 'bg-white shadow text-slate-900'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              По дате создания
+            </button>
+          </div>
 
           <div className="flex flex-wrap items-center gap-2 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 w-full md:w-auto">
             <div className="flex items-center gap-2 px-2 border-r border-slate-100 text-slate-400">

@@ -53,6 +53,24 @@ export const ConfirmModal: React.FC = () => {
   const [otherDist, setOtherDist] = useState<"batch" | "unit">("batch");
 
   const [deliveryDate, setDeliveryDate] = useState<string>("");
+  const [missingFieldsError, setMissingFieldsError] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (missingFieldsError.length > 0) {
+      const updated: string[] = [];
+      if (!deliveryDate && missingFieldsError.includes("«Дата поставки на маркетплейс»")) {
+        updated.push("«Дата поставки на маркетплейс»");
+      }
+      if (packagingCost === "" && missingFieldsError.includes("«Стоимость упаковки»")) {
+        updated.push("«Стоимость упаковки»");
+      }
+      const isDifferent = updated.length !== missingFieldsError.length || 
+        updated.some((val, i) => val !== missingFieldsError[i]);
+      if (isDifferent) {
+        setMissingFieldsError(updated);
+      }
+    }
+  }, [deliveryDate, packagingCost, missingFieldsError]);
 
   const services = useWarehouseStore((state) => state.services);
   const serviceRates = useWarehouseStore((state) => state.serviceRates);
@@ -348,10 +366,13 @@ export const ConfirmModal: React.FC = () => {
       if (packagingCost === "") missingFields.push("«Стоимость упаковки»");
 
       if (missingFields.length > 0) {
+        setMissingFieldsError(missingFields);
         toast.error(
           `Необходимо заполнить следующие поля:\n${missingFields.join(", ")}`,
         );
         return;
+      } else {
+        setMissingFieldsError([]);
       }
     }
 
@@ -744,7 +765,11 @@ export const ConfirmModal: React.FC = () => {
                       )
                     }
                     placeholder="0 ₽"
-                    className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+                    className={`w-full px-4 py-3 rounded-xl bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium border ${
+                      missingFieldsError.includes("«Стоимость упаковки»")
+                        ? "border-red-400 focus:ring-red-500"
+                        : "border-indigo-100"
+                    }`}
                   />
                 </div>
                 <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
@@ -792,7 +817,11 @@ export const ConfirmModal: React.FC = () => {
                 type="date"
                 value={deliveryDate}
                 onChange={(e) => setDeliveryDate(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-indigo-100 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+                className={`w-full px-4 py-3 rounded-xl bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium border ${
+                  missingFieldsError.includes("«Дата поставки на маркетплейс»")
+                    ? "border-red-400 focus:ring-red-500"
+                    : "border-indigo-100"
+                }`}
               />
             </div>
           </div>
@@ -866,6 +895,13 @@ export const ConfirmModal: React.FC = () => {
             </div>
           )}
         </div>
+
+        {missingFieldsError.length > 0 && (
+          <div className="mx-8 mb-4 p-4 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-sm font-medium flex items-center gap-2">
+            <AlertCircle className="text-red-500 shrink-0" size={16} />
+            <span>Заполните обязательные поля: {missingFieldsError.join(", ")}</span>
+          </div>
+        )}
 
         <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
           <div className="flex gap-8">
