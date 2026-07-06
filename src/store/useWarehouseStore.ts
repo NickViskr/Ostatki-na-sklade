@@ -662,16 +662,22 @@ export const useWarehouseStore = create<WarehouseState>()(
         const newStock = normalizeStock(Array.isArray(payloadData.stock) ? payloadData.stock : (Array.isArray(payloadData) ? payloadData : []));
         
         set((state) => {
-          const uniqueMap = new Map<string, Transaction>();
-          // Remove old ID from the list
-          state.transactions.filter(t => t.id !== id).forEach(t => uniqueMap.set(t.id, t));
-          // Integrate the server's up-to-date active transaction list
-          if (payloadData.newTransactions) {
-            payloadData.newTransactions.forEach((tx: Transaction) => uniqueMap.set(tx.id, tx));
+          let updatedTransactions: Transaction[];
+          if (payloadData && Array.isArray(payloadData.newTransactions)) {
+            updatedTransactions = payloadData.newTransactions;
+          } else {
+            const uniqueMap = new Map<string, Transaction>();
+            // Remove old ID from the list
+            state.transactions.filter(t => t.id !== id).forEach(t => uniqueMap.set(t.id, t));
+            // Integrate the server's up-to-date active transaction list
+            if (payloadData && payloadData.newTransactions) {
+              payloadData.newTransactions.forEach((tx: Transaction) => uniqueMap.set(tx.id, tx));
+            }
+            updatedTransactions = Array.from(uniqueMap.values());
           }
           return {
             stock: newStock,
-            transactions: Array.from(uniqueMap.values()),
+            transactions: updatedTransactions,
             skus: payloadData.skus || state.skus
           };
         });
