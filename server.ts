@@ -389,6 +389,45 @@ async function startServer() {
     return res.json();
   }
 
+  // ── Ozon Cluster Сache ────────────────────────────────────────────────────────
+  let cachedClusterMap = new Map<string, string>();
+  let clusterMapLastUpdatedAt = 0;
+  const CLUSTER_MAP_TTL_MS = 24 * 60 * 60 * 1000; // 24 часа
+
+  async function loadClusterMap(keys: { ozonClientId: string; ozonApiKey: string }): Promise<Map<string, string>> {
+    const now = Date.now();
+    if (clusterMapLastUpdatedAt > 0 && (now - clusterMapLastUpdatedAt < CLUSTER_MAP_TTL_MS)) {
+      return cachedClusterMap;
+    }
+
+    try {
+      const newMap = new Map<string, string>();
+
+      const ozonResponse = await fetchOzonApi("/v1/cluster/list", keys, { cluster_type: "CLUSTER_TYPE_OZON" });
+      const cisResponse = await fetchOzonApi("/v1/cluster/list", keys, { cluster_type: "CLUSTER_TYPE_CIS" });
+
+      const processClusters = (data: any) => {
+        if (data && Array.isArray(data.clusters)) {
+          for (const cluster of data.clusters) {
+            if (cluster && cluster.macrolocal_cluster_id !== undefined && cluster.macrolocal_cluster_id !== null && cluster.name) {
+              newMap.set(String(cluster.macrolocal_cluster_id), String(cluster.name));
+            }
+          }
+        }
+      };
+
+      processClusters(ozonResponse);
+      processClusters(cisResponse);
+
+      cachedClusterMap = newMap;
+      clusterMapLastUpdatedAt = now;
+      return cachedClusterMap;
+    } catch (err: any) {
+      console.error("Ошибка при загрузке справочника кластеров Ozon:", err);
+      return cachedClusterMap;
+    }
+  }
+
   app.post("/api/ozon/check", async (req, res) => {
     try {
       const token = req.body?.sessionToken;
@@ -529,6 +568,7 @@ async function startServer() {
       }
 
       // Step 5. Forming records on supply
+      const clusterMap = await loadClusterMap(keys);
       const finalShipments: any[] = [];
       
       for (const order of ordersDetailsList) {
@@ -552,11 +592,19 @@ async function startServer() {
           
           const postingId = String(supply.supply_id);
           const ozonStatus = String(supply.state || '');
-          const storageWarehouse = supply.storage_warehouse?.name
-            ? supply.storage_warehouse.name
-            : (supply.macrolocal_cluster_id !== null && supply.macrolocal_cluster_id !== undefined && String(supply.macrolocal_cluster_id).trim() !== '')
-              ? `Кластер ${supply.macrolocal_cluster_id}`
-              : '';
+          
+          const hasMacrolocal = supply.macrolocal_cluster_id !== null && supply.macrolocal_cluster_id !== undefined && String(supply.macrolocal_cluster_id).trim() !== '';
+          const macrolocalStr = hasMacrolocal ? String(supply.macrolocal_cluster_id).trim() : '';
+
+          let storageWarehouse = '';
+          if (supply.storage_warehouse?.name) {
+            storageWarehouse = supply.storage_warehouse.name;
+          } else if (hasMacrolocal && clusterMap.has(macrolocalStr)) {
+            storageWarehouse = clusterMap.get(macrolocalStr) || '';
+          } else if (hasMacrolocal) {
+            storageWarehouse = `Кластер ${supply.macrolocal_cluster_id}`;
+          }
+
           const bundleId = supply.bundle_id || '';
           
           finalShipments.push({

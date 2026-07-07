@@ -289,7 +289,42 @@
 
 ---
 
-### 6. Остатки на складах Ozon — `AnalyticsStocks`
+### 6. Список кластеров и складов — `ClusterList`
+
+| | |
+|---|---|
+| Endpoint | `POST /v1/cluster/list` |
+| Обязательные параметры | `cluster_type`: `CLUSTER_TYPE_OZON` (Россия, 22 кластера) или `CLUSTER_TYPE_CIS` (СНГ, 4 кластера). Без параметра метод вызвать нельзя |
+| Пагинация | нет |
+| Класс | read |
+
+Назначение: готовый справочник для расшифровки `macrolocal_cluster_id` из поставок (`SupplyOrderGet` → `supplies[]`) в человекочитаемое название направления (город/регион), а также `warehouse_id` → название и тип склада.
+
+Структура ответа:
+```json
+{
+  "clusters": [
+    {
+      "id": <int64>,                    // внутренний id кластера (например 150) — НЕ равен macrolocal
+      "name": <string>,                 // человекочитаемое название (город/регион)
+      "type": <string>,                 // "OZON" | "CIS"
+      "macrolocal_cluster_id": <int64>, // ЧЕТЫРЁХЗНАЧНЫЙ id — совпадает с macrolocal_cluster_id в поставках
+      "logistic_clusters": [
+        { "warehouses": [ { "warehouse_id": <int64>, "name": <string>, "type": <string> } ] }
+      ]
+    }
+  ]
+}
+```
+
+Замечания (важно для кода):
+- Поле `macrolocal_cluster_id` присутствует у каждого кластера рядом с `name` — прямое соответствие подтверждено живыми данными (например 4007 → «Санкт-Петербург и СЗО», 4042 → «Самара»). Российские значения в диапазоне 4002–4077.
+- Поля `type` (у кластера и у склада) реально приходят в ответе, но отсутствуют в swagger-схеме MCP-снимка — закладываться на возможное отсутствие. Типы складов: FULL_FILLMENT / CROSS_DOCK / SORTING_CENTER / ORDERS_RECEIVING_POINT.
+- Для полного словаря нужно два вызова: CLUSTER_TYPE_OZON + CLUSTER_TYPE_CIS.
+
+---
+
+### 7. Остатки на складах Ozon — `AnalyticsStocks`
 
 | | |
 |---|---|
@@ -398,6 +433,7 @@
 | Дата обновления статуса | `SupplyOrderGet` → `state_updated_date` |
 | Пункт отгрузки | `SupplyOrderGet` → `drop_off_warehouse.name` |
 | Склад хранения | `SupplyOrderGet` → `supplies[].storage_warehouse.name` |
+| Направление вРЦ-поставки (кластер) | `supplies[].macrolocal_cluster_id` → расшифровка через `/v1/cluster/list` (`clusters[].macrolocal_cluster_id` → `name`) |
 | Окно отгрузки (таймслот) | `SupplyOrderGet` → `timeslot.timeslot.from/to` |
 | Артикул позиции | `SupplyOrderBundle` → `offer_id` |
 | SKU / штрихкод | `SupplyOrderBundle` → `sku` / `barcode` |
