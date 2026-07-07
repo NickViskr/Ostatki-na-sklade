@@ -335,17 +335,11 @@ async function startServer() {
     });
   }
 
-  async function fetchOzonWithFallback(paths: string[], keys: { ozonClientId: string; ozonApiKey: string }, body: any) {
-    let res;
-    for (let i = 0; i < paths.length; i++) {
-      res = await callOzonApi(paths[i], keys, body);
-      if (res.status !== 404) {
-        break;
-      }
-    }
-    if (!res || !res.ok) {
-      const status = res ? res.status : 500;
-      const errText = res ? await res.text() : "No response";
+  async function fetchOzonApi(endpoint: string, keys: { ozonClientId: string; ozonApiKey: string }, body: any) {
+    const res = await callOzonApi(endpoint, keys, body);
+    if (!res.ok) {
+      const status = res.status;
+      const errText = await res.text();
       let errJson;
       try { errJson = JSON.parse(errText); } catch (e) {}
       const errMsg = errJson?.message || errJson?.error?.message || errText || `HTTP ${status}`;
@@ -387,133 +381,248 @@ async function startServer() {
         }
       }
 
+      const devMode = req.body?.devMode === true;
+
       // Get keys
       const keys = await fetchOzonKeys();
       if (!keys) {
         return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
       }
 
-      // Fetch FBO supply orders from last 30 days
-      const toDate = new Date();
-      const fromDate = new Date();
-      fromDate.setDate(fromDate.getDate() - 30);
-
-      const filter = {
-        from: fromDate.toISOString(),
-        to: toDate.toISOString()
-      };
-
-      const payload = {
-        filter,
-        page: 1,
-        page_size: 100
-      };
-
-      let listData;
-      try {
-        listData = await fetchOzonWithFallback(["/v2/supply-order/list", "/v1/supply-order/list"], keys, payload);
-      } catch (err: any) {
-        return res.status(err.httpStatus || 500).json({
-          status: "error",
-          stage: "ozon_api",
-          httpStatus: err.httpStatus || 500,
-          message: err.message
-        });
+      // Step 2. Active orders list
+      const activeOrderIdsSet = new Set<string>();
+      let lastId = "";
+      let pageCount = 0;
+      
+      while (pageCount < 20) {
+        const body: any = {
+          filter: {
+            states: [
+              "DATA_FILLING",
+              "READY_TO_SUPPLY",
+              "ACCEPTED_AT_SUPPLY_WAREHOUSE",
+              "IN_TRANSIT",
+              "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
+              "REPORTS_CONFIRMATION_AWAITING",
+              "REPORT_REJECTED",
+              "OVERDUE"
+            ]
+          },
+          limit: 100,
+          sort_by: "ORDER_CREATION",
+          sort_dir: "DESC"
+        };
+        if (lastId) {
+          body.last_id = lastId;
+        }
+        
+        const listData = await fetchOzonApi("/v3/supply-order/list", keys, body);
+        const orderIds = listData.order_ids || [];
+        for (const oid of orderIds) {
+          if (oid !== undefined && oid !== null) {
+            activeOrderIdsSet.add(String(oid));
+          }
+        }
+        
+        lastId = listData.last_id || "";
+        if (!lastId) {
+          break;
+        }
+        pageCount++;
       }
 
-      const rawOrders = listData.result || listData.supply_orders || listData.orders || (Array.isArray(listData) ? listData : []);
-      const formattedShipments = [];
-
-      for (const order of rawOrders) {
-        const orderId = order.supply_order_id || order.id || order.posting_id || order.postingId;
-        if (!orderId) continue;
-
-        let getData;
-        let bundleData;
-
-        try {
-          getData = await fetchOzonWithFallback(
-            ["/v2/supply-order/get", "/v1/supply-order/get"],
-            keys,
-            { supply_order_id: orderId }
-          );
-        } catch (err: any) {
-          return res.status(err.httpStatus || 500).json({
-            status: "error",
-            stage: "ozon_api",
-            httpStatus: err.httpStatus || 500,
-            message: `Failed to get supply order ${orderId}: ${err.message}`
-          });
-        }
-
-        try {
-          bundleData = await fetchOzonWithFallback(
-            ["/v1/supply-order/bundle", "/v2/supply-order/bundle"],
-            keys,
-            { supply_order_id: orderId }
-          );
-        } catch (err: any) {
-          return res.status(err.httpStatus || 500).json({
-            status: "error",
-            stage: "ozon_api",
-            httpStatus: err.httpStatus || 500,
-            message: `Failed to get bundle for ${orderId}: ${err.message}`
-          });
-        }
-
-        // Extract items
-        const rawItems = bundleData.items || bundleData.products || bundleData.result?.items || bundleData.result?.products || getData.items || getData.products || getData.result?.items || getData.result?.products || [];
-        const items = (Array.isArray(rawItems) ? rawItems : []).map((item: any) => {
-          const offerId = String(item.offer_id || item.offerId || item.sku || item.article || item.product_id || item.productId || '').trim();
-          const barcode = String(item.barcode || item.bar_code || (Array.isArray(item.barcodes) ? item.barcodes[0] : item.barcodes) || '').trim();
-          const quantity = Number(item.quantity || item.qty || item.count || item.amount || 1);
-          return { offerId, barcode, quantity };
-        });
-
-        const shipmentDate = getData.shipment_date || getData.shipmentDate || getData.date || getData.delivery_date || order.shipment_date || order.shipmentDate || new Date().toISOString().split('T')[0];
-
-        formattedShipments.push({
-          postingId: String(orderId),
-          shipmentDate,
-          items
-        });
-      }
-
-      // Convert to GAS payload shape and save
-      const shipmentsForGas = formattedShipments.map(s => ({
-        postingId: s.postingId,
-        shipmentDate: s.shipmentDate,
-        itemsJSON: JSON.stringify(s.items),
-        transGroupInfo: ""
-      }));
-
+      // Step 3. Already tracked shipments
       const gasUrl = process.env.GAS_URL;
       if (!gasUrl) {
         return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
       }
 
-      const gasResponse = await fetch(gasUrl, {
+      const gasResponse1 = await fetch(gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "getExternalShipments",
+          sessionToken: token,
+          ...(devMode ? { devMode: true } : {})
+        })
+      });
+      const gasResult1 = await gasResponse1.json();
+      if (gasResult1.status !== "success") {
+        return res.status(500).json({ status: "error", message: gasResult1.message || "Failed to get external shipments from GAS" });
+      }
+      
+      const existingShipments = gasResult1.data || [];
+      const existingByPostingId = new Map<string, { status: string; ozonStatus: string }>();
+      
+      for (const s of existingShipments) {
+        const postingIdVal = String(s.postingId || '').trim();
+        if (postingIdVal) {
+          existingByPostingId.set(postingIdVal, {
+            status: String(s.status || '').trim(),
+            ozonStatus: String(s.ozonStatus || '').trim()
+          });
+        }
+      }
+      
+      for (const s of existingShipments) {
+        const oId = String(s.orderId || '').trim();
+        const oStatus = String(s.ozonStatus || '').trim();
+        if (oId && !["COMPLETED", "CANCELLED", "REJECTED_AT_SUPPLY_WAREHOUSE"].includes(oStatus)) {
+          activeOrderIdsSet.add(oId);
+        }
+      }
+      
+      const allOrderIds = Array.from(activeOrderIdsSet);
+
+      // Step 4. Details of orders
+      const ordersDetailsList: any[] = [];
+      const batchSize = 50;
+      for (let i = 0; i < allOrderIds.length; i += batchSize) {
+        const batchIds = allOrderIds.slice(i, i + batchSize);
+        if (batchIds.length === 0) continue;
+        
+        const detailResponse = await fetchOzonApi("/v3/supply-order/get", keys, { order_ids: batchIds });
+        const orders = detailResponse.orders || [];
+        for (const order of orders) {
+          if (order) {
+            ordersDetailsList.push(order);
+          }
+        }
+      }
+
+      // Step 5. Forming records on supply
+      const finalShipments: any[] = [];
+      
+      for (const order of ordersDetailsList) {
+        const orderId = String(order.order_id);
+        const orderNumber = String(order.order_number || '');
+        const ozonStatusDate = String(order.state_updated_date || '');
+        const dropOffWarehouse = order.drop_off_warehouse?.name || '';
+        
+        let timeslotStr = '';
+        let shipmentDate = '';
+        if (order.timeslot?.timeslot?.from) {
+          const fromVal = String(order.timeslot.timeslot.from);
+          const toVal = order.timeslot.timeslot.to ? String(order.timeslot.timeslot.to) : '';
+          timeslotStr = `${fromVal} — ${toVal}`;
+          shipmentDate = fromVal.substring(0, 10); // First 10 chars, YYYY-MM-DD
+        }
+        
+        const supplies = order.supplies || [];
+        for (const supply of supplies) {
+          if (!supply || !supply.supply_id) continue;
+          
+          const postingId = String(supply.supply_id);
+          const ozonStatus = String(supply.state || '');
+          const storageWarehouse = supply.storage_warehouse?.name || '';
+          const bundleId = supply.bundle_id || '';
+          
+          finalShipments.push({
+            postingId,
+            orderId,
+            orderNumber,
+            ozonStatus,
+            ozonStatusDate,
+            dropOffWarehouse,
+            storageWarehouse,
+            timeslot: timeslotStr,
+            shipmentDate,
+            bundleId
+          });
+        }
+      }
+
+      // Step 6. Composition of supply
+      const shipmentsForGas: any[] = [];
+      
+      for (const s of finalShipments) {
+        const postingId = s.postingId;
+        const bundleId = s.bundleId;
+        
+        let shouldFetchBundle = false;
+        const existInfo = existingByPostingId.get(postingId);
+        if (!existInfo) {
+          shouldFetchBundle = true;
+        } else if (existInfo.status === 'new') {
+          shouldFetchBundle = true;
+        }
+        
+        let items: any[] = [];
+        
+        if (shouldFetchBundle && bundleId) {
+          let hasNext = true;
+          let lastId = "";
+          let bundlePageCount = 0;
+          
+          while (hasNext && bundlePageCount < 20) {
+            const body: any = {
+              bundle_ids: [bundleId],
+              limit: 100
+            };
+            if (lastId) {
+              body.last_id = lastId;
+            }
+            
+            const bundleResult = await fetchOzonApi("/v1/supply-order/bundle", keys, body);
+            const rawItems = bundleResult.items || [];
+            
+            for (const item of rawItems) {
+              items.push({
+                offerId: String(item.offer_id || '').trim(),
+                barcode: String(item.barcode || '').trim(),
+                quantity: Number(item.quantity || 0)
+              });
+            }
+            
+            lastId = bundleResult.last_id || "";
+            hasNext = bundleResult.has_next === true;
+            bundlePageCount++;
+          }
+        }
+        
+        const itemsJSON = shouldFetchBundle ? JSON.stringify(items) : "";
+        
+        shipmentsForGas.push({
+          postingId: s.postingId,
+          shipmentDate: s.shipmentDate,
+          itemsJSON,
+          transGroupInfo: "",
+          orderId: s.orderId,
+          orderNumber: s.orderNumber,
+          ozonStatus: s.ozonStatus,
+          ozonStatusDate: s.ozonStatusDate,
+          dropOffWarehouse: s.dropOffWarehouse,
+          storageWarehouse: s.storageWarehouse,
+          timeslot: s.timeslot
+        });
+      }
+
+      // Step 7. Saving to GAS
+      const gasResponse2 = await fetch(gasUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "saveExternalShipments",
           sessionToken: token,
+          ...(devMode ? { devMode: true } : {}),
           data: {
             shipments: shipmentsForGas
           }
         })
       });
 
-      const gasData = await gasResponse.json();
+      const gasData = await gasResponse2.json();
       if (gasData.status !== "success") {
         return res.status(500).json({ status: "error", message: gasData.message || "Failed to save external shipments in GAS" });
       }
 
+      // Step 8. Response to client
       return res.json({
         status: "success",
         data: {
-          found: formattedShipments.length,
-          added: gasData.data?.addedCount || 0
+          found: shipmentsForGas.length,
+          added: gasData.data?.addedCount || 0,
+          updated: gasData.data?.updatedCount || 0
         }
       });
 
@@ -521,7 +630,7 @@ async function startServer() {
       console.error("Ozon check endpoint failed:", error);
       return res.status(error.httpStatus || 500).json({
         status: "error",
-        stage: "ozon_api",
+        stage: error.stage || "ozon_api",
         httpStatus: error.httpStatus || 500,
         message: error.message || String(error)
       });
