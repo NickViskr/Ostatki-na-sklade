@@ -12,6 +12,7 @@ import {
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { toast } from 'sonner';
+import { ConfirmDialog } from './ConfirmDialog';
 
 export const SettingsTab: React.FC = React.memo(() => {
   const isSyncing = useWarehouseStore((state) => state.isSyncing);
@@ -37,6 +38,7 @@ export const SettingsTab: React.FC = React.memo(() => {
   const [isSavingOzon, setIsSavingOzon] = useState(false);
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isCreatingTestDb, setIsCreatingTestDb] = useState(false);
+  const [showTestDbConfirm, setShowTestDbConfirm] = useState(false);
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
@@ -129,9 +131,6 @@ export const SettingsTab: React.FC = React.memo(() => {
   };
 
   const handleCreateTestDb = async () => {
-    const ok = window.confirm('Будет создана свежая тестовая копия боевой БД. Старая тестовая БД (если есть) будет перемещена в корзину Google Диска. Продолжить?');
-    if (!ok) return;
-
     setIsCreatingTestDb(true);
     try {
       const res = await fetchGas('createOrUpdateTestDatabase');
@@ -191,7 +190,7 @@ export const SettingsTab: React.FC = React.memo(() => {
                   </p>
 
                   <button 
-                    onClick={handleCreateTestDb}
+                    onClick={() => setShowTestDbConfirm(true)}
                     disabled={isCreatingTestDb}
                     className="w-full bg-amber-600 text-white py-4 rounded-2xl font-bold hover:bg-amber-700 disabled:opacity-50 transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2 mt-2"
                   >
@@ -357,6 +356,16 @@ export const SettingsTab: React.FC = React.memo(() => {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        show={showTestDbConfirm}
+        title="Создать/обновить тестовую БД?"
+        message='Будет создана свежая тестовая копия боевой БД. Старая тестовая БД (если есть) будет перемещена в корзину Google Диска. Листы "Пользователи" и "Сессии" в копии будут очищены.'
+        confirmLabel="Создать"
+        cancelLabel="Отмена"
+        onConfirm={handleCreateTestDb}
+        onCancel={() => setShowTestDbConfirm(false)}
+      />
     </div>
   );
 });

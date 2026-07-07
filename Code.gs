@@ -3293,7 +3293,6 @@ function backupDatabase() {
 
 function createOrUpdateTestDatabase() {
   const props = PropertiesService.getScriptProperties();
-  const oldId = props.getProperty('test_dbSpreadsheetId');
   
   const ss = getSpreadsheet();
   const file = DriveApp.getFileById(ss.getId());
@@ -3331,19 +3330,23 @@ function createOrUpdateTestDatabase() {
   props.setProperty('test_dbSpreadsheetId', copy.getId());
   props.setProperty('test_dbSpreadsheetUrl', testSs.getUrl());
   
-  const newId = copy.getId();
-  if (oldId && oldId !== newId) {
+  let trashedCount = 0;
+  const filesIter = folder.getFiles();
+  while (filesIter.hasNext()) {
+    const f = filesIter.next();
+    if (f.getId() === copy.getId()) continue;
     try {
-      DriveApp.getFileById(oldId).setTrashed(true);
-    } catch (e) {
-      // Игнорируем ошибку
+      f.setTrashed(true);
+      trashedCount++;
+    } catch (err) {
+      Logger.log('Не удалось убрать в корзину старую тестовую БД: ' + f.getName() + ' — ' + err);
     }
   }
   
   return {
     name: copy.getName(),
     url: testSs.getUrl(),
-    replacedOld: Boolean(oldId && oldId !== newId)
+    trashedOld: trashedCount
   };
 }
 
