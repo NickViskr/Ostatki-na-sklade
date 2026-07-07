@@ -12,7 +12,8 @@ import {
   Trash2,
   Book,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Package
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -63,6 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: 'skus', label: 'SKU База', icon: BookOpen },
     { id: 'directory', label: 'Справочник', icon: Book },
     ...(isCurrentUserAdmin ? [
+      { id: 'ozon', label: 'Ozon', icon: Package },
       { id: 'users', label: 'Пользователи', icon: Users },
       { id: 'deleted', label: 'Удаленное', icon: Trash2 },
       { id: 'settings', label: 'Настройки', icon: Settings2 }

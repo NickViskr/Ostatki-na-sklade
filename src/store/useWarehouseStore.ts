@@ -93,6 +93,7 @@ interface WarehouseState {
   externalShipments: ExternalShipment[];
   checkOzonShipments: () => Promise<void>;
   markExternalShipment: (postingId: string, status: 'processed' | 'ignored') => Promise<boolean>;
+  fetchExternalShipments: () => Promise<void>;
   pendingOzonPostingId: string | null;
   setPendingOzonPostingId: (id: string | null) => void;
   getEffectiveAvailability: (article: string) => number;
@@ -1141,7 +1142,7 @@ export const useWarehouseStore = create<WarehouseState>()(
       if (res.status === 'success') {
         set(state => ({
           externalShipments: state.externalShipments.map(s => 
-            s.postingId === postingId ? { ...s, status } : s
+          s.postingId === postingId ? { ...s, status } : s
           )
         }));
         
@@ -1159,6 +1160,25 @@ export const useWarehouseStore = create<WarehouseState>()(
       console.error(e);
       toast.error('Ошибка сети при обновлении статуса: ' + e.message);
       return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  fetchExternalShipments: async () => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('getExternalShipments');
+      if (result.status === 'success') {
+        if (Array.isArray(result.data)) {
+          set({ externalShipments: result.data });
+        }
+      } else {
+        toast.error(result.message || 'Ошибка при загрузке поставок Ozon');
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при загрузке поставок Ozon: ' + e.message);
     } finally {
       set({ isProcessing: false });
     }
