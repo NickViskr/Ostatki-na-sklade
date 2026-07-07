@@ -21,6 +21,7 @@ import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { DashSettingsModal } from './DashSettingsModal';
 import { formatCurrency } from '../lib/utils';
+import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
 
 export const Dashboard: React.FC = React.memo(() => {
   const stock = useWarehouseStore((state) => state.stock);
@@ -31,6 +32,9 @@ export const Dashboard: React.FC = React.memo(() => {
   const lastSyncTime = useWarehouseStore((state) => state.lastSyncTime);
   const fetchStock = useWarehouseStore((state) => state.fetchStock);
   const storageRatePerLiterDay = useSettingsStore((state) => state.storageRatePerLiterDay) || 0;
+  
+  const externalShipments = useWarehouseStore((state) => state.externalShipments);
+  const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -77,6 +81,98 @@ export const Dashboard: React.FC = React.memo(() => {
       localStorage.setItem(`dashFilter_${currentUser.username}`, JSON.stringify(dashTableSelectedSkus));
     }
   }, [dashTableSelectedSkus, currentUser?.username]);
+
+  const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
+
+  useEffect(() => {
+    if (isAdmin) {
+      fetchExternalShipments();
+    }
+  }, [isAdmin, fetchExternalShipments]);
+
+  const funnelData = useMemo(() => {
+    if (!isAdmin || !externalShipments || externalShipments.length === 0) {
+      return null;
+    }
+
+    const counts: Record<string, number> = {};
+    externalShipments.forEach((s) => {
+      const statusKey = (s.ozonStatus || 'DATA_FILLING').toUpperCase();
+      counts[statusKey] = (counts[statusKey] || 0) + 1;
+    });
+
+    const orderedCards: Array<{ status: string; label: string; badgeClass: string; count: number }> = [];
+
+    // First, add existing statuses from STATUS_FUNNEL_ORDER
+    STATUS_FUNNEL_ORDER.forEach((status) => {
+      const count = counts[status] || 0;
+      if (count > 0) {
+        const details = getStatusDetails(status);
+        orderedCards.push({
+          status,
+          label: details.label,
+          badgeClass: details.badgeClass,
+          count
+        });
+        delete counts[status];
+      }
+    });
+
+    // Then, add other statuses that were not in STATUS_FUNNEL_ORDER
+    Object.entries(counts).forEach(([status, count]) => {
+      if (count > 0) {
+        const details = getStatusDetails(status);
+        orderedCards.push({
+          status,
+          label: details.label,
+          badgeClass: details.badgeClass,
+          count
+        });
+      }
+    });
+
+    // M = number of unique orders
+    const uniqueOrders = new Set<string>();
+    externalShipments.forEach((s) => {
+      let key = '';
+      if (s.orderId && s.orderId.trim()) {
+        key = `orderId_${s.orderId.trim()}`;
+      } else if (s.orderNumber && s.orderNumber.trim()) {
+        key = `orderNumber_${s.orderNumber.trim()}`;
+      } else {
+        key = `postingId_${s.postingId}`;
+      }
+      uniqueOrders.add(key);
+    });
+
+    // Максимальный валидный ozonStatusDate по всем строкам
+    let maxDate: Date | null = null;
+    for (const s of externalShipments) {
+      if (s.ozonStatusDate) {
+        const d = new Date(s.ozonStatusDate);
+        if (!isNaN(d.getTime())) {
+          if (!maxDate || d > maxDate) {
+            maxDate = d;
+          }
+        }
+      }
+    }
+
+    const maxDateStr = maxDate ? maxDate.toLocaleString('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    }) : null;
+
+    return {
+      cards: orderedCards,
+      totalShipments: externalShipments.length,
+      totalOrders: uniqueOrders.size,
+      lastUpdatedStr: maxDateStr
+    };
+  }, [externalShipments, isAdmin]);
 
   const augmentedStock = useMemo(() => {
     const virtualKits = kits.filter(k => k.type === 'virtual');
@@ -382,6 +478,41 @@ export const Dashboard: React.FC = React.memo(() => {
           </div>
         </div>
       </div>
+
+      {/* Ozon Supply Funnel */}
+      {isAdmin && funnelData && (
+        <div className="space-y-3 bg-slate-50/50 p-6 rounded-3xl border border-slate-200/60 shadow-sm">
+          <div className="flex justify-between items-center">
+            <h3 className="text-xl font-bold text-slate-800">Воронка поставок Ozon</h3>
+          </div>
+          
+          <div className="flex flex-wrap gap-3">
+            {funnelData.cards.map((card) => (
+              <div
+                key={card.status}
+                onClick={() => setActiveTab('ozon')}
+                className={`bg-white p-4 rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-sm cursor-pointer transition-all flex flex-col gap-2 min-w-[150px] ${
+                  ['COMPLETED', 'CANCELLED'].includes(card.status) ? 'opacity-60' : ''
+                }`}
+              >
+                <div className="flex items-center">
+                  <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold tracking-wide truncate ${card.badgeClass}`}>
+                    {card.label}
+                  </span>
+                </div>
+                <div className="text-3xl font-extrabold text-slate-900 leading-none">
+                  {card.count}
+                </div>
+              </div>
+            ))}
+          </div>
+          
+          <p className="text-xs text-slate-400 font-medium">
+            {funnelData.totalShipments} поставок в {funnelData.totalOrders} заявках
+            {funnelData.lastUpdatedStr && ` · статусы обновлены ${funnelData.lastUpdatedStr}`}
+          </p>
+        </div>
+      )}
 
       {/* Filters Bar */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
