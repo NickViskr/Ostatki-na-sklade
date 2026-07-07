@@ -36,6 +36,7 @@ export const SettingsTab: React.FC = React.memo(() => {
   const [isSavingGlobal, setIsSavingGlobal] = useState(false);
   const [isSavingOzon, setIsSavingOzon] = useState(false);
   const [isBackingUp, setIsBackingUp] = useState(false);
+  const [isCreatingTestDb, setIsCreatingTestDb] = useState(false);
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
@@ -127,6 +128,25 @@ export const SettingsTab: React.FC = React.memo(() => {
     }
   };
 
+  const handleCreateTestDb = async () => {
+    const ok = window.confirm('Будет создана свежая тестовая копия боевой БД. Старая тестовая БД (если есть) будет перемещена в корзину Google Диска. Продолжить?');
+    if (!ok) return;
+
+    setIsCreatingTestDb(true);
+    try {
+      const res = await fetchGas('createOrUpdateTestDatabase');
+      if (res?.status === 'success') {
+        toast.success(`Тестовая БД готова: ${res.data.name}`);
+      } else {
+        toast.error(res?.message || 'Ошибка создания тестовой БД');
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Сбой сети при создании тестовой БД');
+    } finally {
+      setIsCreatingTestDb(false);
+    }
+  };
+
   return (
     <div 
       key="settings"
@@ -168,6 +188,18 @@ export const SettingsTab: React.FC = React.memo(() => {
                   </button>
                   <p className="text-[11px] text-slate-500 text-center leading-normal">
                     Полная копия таблицы сохраняется в папку "Резервные копии БД Склад" на Google Диске
+                  </p>
+
+                  <button 
+                    onClick={handleCreateTestDb}
+                    disabled={isCreatingTestDb}
+                    className="w-full bg-amber-600 text-white py-4 rounded-2xl font-bold hover:bg-amber-700 disabled:opacity-50 transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2 mt-2"
+                  >
+                    {isCreatingTestDb ? <Loader2 className="animate-spin" /> : <Database size={20} />}
+                    Создать/обновить тестовую БД
+                  </button>
+                  <p className="text-[11px] text-slate-500 text-center leading-normal">
+                    Копия боевой БД для режима разработки. Листы "Пользователи" и "Сессии" очищаются. Файл — в папке "Тестовая БД Склад" на Google Диске
                   </p>
                 </div>
               )}

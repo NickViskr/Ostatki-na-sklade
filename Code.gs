@@ -143,6 +143,10 @@ function doPost(e) {
         assertAdmin(currentUser);
         result = backupDatabase();
         break;
+      case 'createOrUpdateTestDatabase':
+        assertAdmin(currentUser);
+        result = createOrUpdateTestDatabase();
+        break;
       case 'getInitialData':
         result = {
           stock: getStock(),
@@ -288,8 +292,8 @@ function getSpreadsheet() {
   return SpreadsheetApp.getActiveSpreadsheet();
 }
 
-function setupDatabase() {
-  const ss = getSpreadsheet();
+function setupDatabase(targetSs) {
+  const ss = targetSs || getSpreadsheet();
   
   // Sheet: Остатки
   let stockSheet = ss.getSheetByName('Остатки');
@@ -3284,6 +3288,62 @@ function backupDatabase() {
   return {
     name: copy.getName(),
     url: copy.getUrl()
+  };
+}
+
+function createOrUpdateTestDatabase() {
+  const props = PropertiesService.getScriptProperties();
+  const oldId = props.getProperty('test_dbSpreadsheetId');
+  
+  const ss = getSpreadsheet();
+  const file = DriveApp.getFileById(ss.getId());
+  const now = new Date();
+  const tz = Session.getScriptTimeZone() || "GMT";
+  const dateString = Utilities.formatDate(now, tz, "yyyy-MM-dd HH-mm");
+  const copyName = ss.getName() + " — ТЕСТОВАЯ (" + dateString + ")";
+  
+  const folderName = "Тестовая БД Склад";
+  let folder;
+  const folders = DriveApp.getFoldersByName(folderName);
+  if (folders.hasNext()) {
+    folder = folders.next();
+  } else {
+    folder = DriveApp.createFolder(folderName);
+  }
+  
+  const copy = file.makeCopy(copyName, folder);
+  const testSs = SpreadsheetApp.openById(copy.getId());
+  
+  const usersSheet = testSs.getSheetByName('Пользователи');
+  if (usersSheet) {
+    usersSheet.clearContents();
+    usersSheet.getRange('A1:C1').setValues([['Username', 'Password', 'Role']]).setFontWeight('bold');
+  }
+  
+  const sessionsSheet = testSs.getSheetByName('Сессии');
+  if (sessionsSheet) {
+    sessionsSheet.clearContents();
+    sessionsSheet.getRange('A1:D1').setValues([['Token', 'Username', 'Role', 'ExpiresAt']]).setFontWeight('bold');
+  }
+  
+  setupDatabase(testSs);
+  
+  props.setProperty('test_dbSpreadsheetId', copy.getId());
+  props.setProperty('test_dbSpreadsheetUrl', testSs.getUrl());
+  
+  const newId = copy.getId();
+  if (oldId && oldId !== newId) {
+    try {
+      DriveApp.getFileById(oldId).setTrashed(true);
+    } catch (e) {
+      // Игнорируем ошибку
+    }
+  }
+  
+  return {
+    name: copy.getName(),
+    url: testSs.getUrl(),
+    replacedOld: Boolean(oldId && oldId !== newId)
   };
 }
 
