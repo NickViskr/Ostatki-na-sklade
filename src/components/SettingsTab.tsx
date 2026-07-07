@@ -35,6 +35,7 @@ export const SettingsTab: React.FC = React.memo(() => {
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [isSavingGlobal, setIsSavingGlobal] = useState(false);
   const [isSavingOzon, setIsSavingOzon] = useState(false);
+  const [isBackingUp, setIsBackingUp] = useState(false);
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
@@ -110,6 +111,22 @@ export const SettingsTab: React.FC = React.memo(() => {
     }
   };
 
+  const handleBackup = async () => {
+    setIsBackingUp(true);
+    try {
+      const res = await fetchGas('backupDatabase');
+      if (res?.status === 'success') {
+        toast.success(`Резервная копия создана: ${res.data.name}`);
+      } else {
+        toast.error(res?.message || 'Ошибка создания резервной копии');
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Сбой сети при создании резервной копии');
+    } finally {
+      setIsBackingUp(false);
+    }
+  };
+
   return (
     <div 
       key="settings"
@@ -138,6 +155,22 @@ export const SettingsTab: React.FC = React.memo(() => {
                 {isSyncing ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={20} />}
                 Инициализировать базу данных
               </button>
+
+              {isAdmin && (
+                <div className="space-y-2 pt-2 border-t border-slate-100">
+                  <button 
+                    onClick={handleBackup}
+                    disabled={isBackingUp}
+                    className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold hover:bg-emerald-700 disabled:opacity-50 transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2"
+                  >
+                    {isBackingUp ? <Loader2 className="animate-spin" /> : <Database size={20} />}
+                    Резервная копия БД
+                  </button>
+                  <p className="text-[11px] text-slate-500 text-center leading-normal">
+                    Полная копия таблицы сохраняется в папку "Резервные копии БД Склад" на Google Диске
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 

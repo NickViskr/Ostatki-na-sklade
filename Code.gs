@@ -139,6 +139,10 @@ function doPost(e) {
         assertAdmin(currentUser);
         result = setupDatabase();
         break;
+      case 'backupDatabase':
+        assertAdmin(currentUser);
+        result = backupDatabase();
+        break;
       case 'getInitialData':
         result = {
           stock: getStock(),
@@ -3258,4 +3262,29 @@ function recalcCapitalizationFromAvg() {
     details: details
   };
 }
+
+function backupDatabase() {
+  const ss = getSpreadsheet();
+  const file = DriveApp.getFileById(ss.getId());
+  const now = new Date();
+  const tz = Session.getScriptTimeZone() || "GMT";
+  const dateString = Utilities.formatDate(now, tz, "yyyy-MM-dd HH-mm");
+  const copyName = ss.getName() + " — резервная копия " + dateString;
+  
+  const folderName = "Резервные копии БД Склад";
+  let folder;
+  const folders = DriveApp.getFoldersByName(folderName);
+  if (folders.hasNext()) {
+    folder = folders.next();
+  } else {
+    folder = DriveApp.createFolder(folderName);
+  }
+  
+  const copy = file.makeCopy(copyName, folder);
+  return {
+    name: copy.getName(),
+    url: copy.getUrl()
+  };
+}
+
 
