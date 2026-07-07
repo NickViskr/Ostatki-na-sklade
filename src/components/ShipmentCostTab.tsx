@@ -317,6 +317,12 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     return dateRaw.split("T")[0];
   };
 
+  const getTxMonthKey = useCallback((t: any) => {
+    return dateMode === 'delivery'
+      ? getMonthKey(t.deliveryDate || t.date)
+      : getMonthKey(t.date);
+  }, [dateMode]);
+
   // We only care about 'Расход' transactions for shipment costs
   const shipmentTransactions = useMemo(() => {
     return transactions
@@ -541,11 +547,11 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     shipmentTransactions
       .filter(t => !t.isComponent)
       .forEach(t => {
-        const m = getMonthKey(t.deliveryDate || t.date);
+        const m = getTxMonthKey(t);
         if (m) months.add(m);
       });
     return Array.from(months).sort().reverse();
-  }, [shipmentTransactions]);
+  }, [shipmentTransactions, getTxMonthKey]);
 
   React.useEffect(() => {
     if (viewMode === 'monthly' && !selectedMonth && availableMonths.length > 0) {
@@ -559,7 +565,7 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     // Step 1: filter only MAIN transactions by month and destination
     const mainTxs = shipmentTransactions.filter(t => {
       if (t.isComponent) return false;
-      if (selectedMonth && getMonthKey(t.deliveryDate || t.date) !== selectedMonth) return false;
+      if (selectedMonth && getTxMonthKey(t) !== selectedMonth) return false;
       if (destinationFilter && extractDestinationName(t.destination) !== destinationFilter) return false;
       return true;
     });
@@ -641,7 +647,26 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
                  totalCost, unitCost, isKit: data.isKit, components };
       })
       .sort((a, b) => b.totalCost - a.totalCost);
-  }, [transactions, shipmentTransactions, viewMode, selectedMonth, destinationFilter]);
+  }, [transactions, shipmentTransactions, viewMode, selectedMonth, destinationFilter, getTxMonthKey]);
+
+  const monthlyShipmentCount = useMemo(() => {
+    if (viewMode !== 'monthly') return 0;
+
+    const mainTxs = shipmentTransactions.filter(t => {
+      if (t.isComponent) return false;
+      if (selectedMonth && getTxMonthKey(t) !== selectedMonth) return false;
+      if (destinationFilter && extractDestinationName(t.destination) !== destinationFilter) return false;
+      return true;
+    });
+
+    const uniqueShipments = new Set<string>();
+    mainTxs.forEach(t => {
+      const key = formatDateStr(t.date) + '|' + extractDestinationName(t.destination);
+      uniqueShipments.add(key);
+    });
+
+    return uniqueShipments.size;
+  }, [shipmentTransactions, viewMode, selectedMonth, destinationFilter, getTxMonthKey]);
 
   const handleDeleteWithRedistribution = useCallback(async (idOfItemToDelete: string) => {
     let matchedGroupItems: typeof transactions = [];
@@ -971,8 +996,8 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
             <div className="text-sm font-bold text-slate-400 uppercase tracking-wider">
               Всего отгрузок
             </div>
-            <div className="text-2xl font-bold text-slate-900">
-              {viewMode === 'monthly' ? monthlySummary.length : groupedShipments.length}
+            <div className="text-[22px] font-bold text-slate-900 leading-tight">
+              {viewMode === 'monthly' ? monthlyShipmentCount : groupedShipments.length}
             </div>
           </div>
         </div>
