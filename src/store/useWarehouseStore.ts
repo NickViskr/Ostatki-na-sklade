@@ -1106,10 +1106,14 @@ export const useWarehouseStore = create<WarehouseState>()(
     set({ isProcessing: true });
     try {
       const sessionToken = get().sessionToken;
+      const role = get().currentUser?.role?.toLowerCase() || '';
+      const isAdminRole = role === 'admin' || role === 'администратор';
+      const sendDevMode = get().devMode && isAdminRole;
+
       const res = await fetch('/api/ozon/check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionToken })
+        body: JSON.stringify({ sessionToken, ...(sendDevMode ? { devMode: true } : {}) })
       });
       
       const result = await res.json();
@@ -1118,7 +1122,7 @@ export const useWarehouseStore = create<WarehouseState>()(
         if (gasResult.status === 'success' && Array.isArray(gasResult.data)) {
           set({ externalShipments: gasResult.data });
         }
-        toast.success(`Синхронизация Ozon завершена. Найдено отгрузок: ${result.data?.found || 0}, добавлено новых: ${result.data?.added || 0}`);
+        toast.success(`Синхронизация Ozon завершена. Найдено отгрузок: ${result.data?.found || 0}, добавлено новых: ${result.data?.added || 0}, обновлено: ${result.data?.updated || 0}`);
       } else {
         toast.error(result.message || 'Ошибка при синхронизации Ozon');
       }

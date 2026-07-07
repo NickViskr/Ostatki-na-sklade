@@ -99,4 +99,11 @@ export interface ExternalShipment {
   status: 'new' | 'processed' | 'ignored' | string;
   itemsJSON: string;
   transGroupInfo: string;
+  orderId?: string;
+  orderNumber?: string;
+  ozonStatus?: string;
+  ozonStatusDate?: string;
+  dropOffWarehouse?: string;
+  storageWarehouse?: string;
+  timeslot?: string;
 }
