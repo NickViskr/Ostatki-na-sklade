@@ -267,7 +267,17 @@ async function startServer() {
         throw err;
       }
       
-      const data = await gasResponse.json();
+      let data;
+      const rawText = await gasResponse.text();
+      try {
+        data = JSON.parse(rawText);
+      } catch (parseErr: any) {
+        console.error("GAS returned non-JSON response:", rawText.substring(0, 1000));
+        return res.status(502).json({
+          status: "error",
+          message: `Google Apps Script returned a non-JSON response. Raw response snippet: ${rawText.substring(0, 300)}`
+        });
+      }
 
       
       // Если GAS ответил успехом для сессии, сохраняем токен в кэш
@@ -542,7 +552,11 @@ async function startServer() {
           
           const postingId = String(supply.supply_id);
           const ozonStatus = String(supply.state || '');
-          const storageWarehouse = supply.storage_warehouse?.name || '';
+          const storageWarehouse = supply.storage_warehouse?.name
+            ? supply.storage_warehouse.name
+            : (supply.macrolocal_cluster_id !== null && supply.macrolocal_cluster_id !== undefined && String(supply.macrolocal_cluster_id).trim() !== '')
+              ? `Кластер ${supply.macrolocal_cluster_id}`
+              : '';
           const bundleId = supply.bundle_id || '';
           
           finalShipments.push({
