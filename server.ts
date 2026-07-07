@@ -335,10 +335,38 @@ async function startServer() {
     });
   }
 
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  let lastOzonCallAt = 0;
+
   async function fetchOzonApi(endpoint: string, keys: { ozonClientId: string; ozonApiKey: string }, body: any) {
-    const res = await callOzonApi(endpoint, keys, body);
+    let res: any = null;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const elapsed = Date.now() - lastOzonCallAt;
+      if (elapsed < 400) await sleep(400 - elapsed);
+      lastOzonCallAt = Date.now();
+
+      res = await callOzonApi(endpoint, keys, body);
+      if (res.status === 429) {
+        if (attempt < 5) {
+          await sleep(1000 * attempt);
+          continue;
+        }
+      }
+      break;
+    }
+
+    if (!res) {
+      throw new Error("No response from Ozon API");
+    }
+
     if (!res.ok) {
       const status = res.status;
+      if (status === 429) {
+        const errorObj: any = new Error("Ozon API: превышен лимит запросов, повторите синхронизацию через минуту");
+        errorObj.stage = "ozon_api";
+        errorObj.httpStatus = 429;
+        throw errorObj;
+      }
       const errText = await res.text();
       let errJson;
       try { errJson = JSON.parse(errText); } catch (e) {}
