@@ -310,6 +310,11 @@ function getSpreadsheet() {
   return SpreadsheetApp.getActiveSpreadsheet();
 }
 
+const EXTERNAL_SHIPMENTS_HEADERS = [
+  'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот'
+];
+
 function setupDatabase(targetSs) {
   const ss = targetSs || getSpreadsheet();
   
@@ -515,7 +520,7 @@ function setupDatabase(targetSs) {
   
   getKitSheet(ss);
   getOrCreateSheet(ss, 'Тарифы услуг', ['ServiceID', 'Стоимость', 'ДействуетС']);
-  getOrCreateSheet(ss, 'Внешние отгрузки', ['PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo']);
+  getOrCreateSheet(ss, 'Внешние отгрузки', EXTERNAL_SHIPMENTS_HEADERS);
   return true;
 }
 
@@ -3129,7 +3134,9 @@ function migrateComponentWriteOffCosts() {
 
 function getExternalShipmentsSheet() {
   const ss = getSpreadsheet();
-  return getOrCreateSheet(ss, 'Внешние отгрузки', ['PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo']);
+  const sheet = getOrCreateSheet(ss, 'Внешние отгрузки', EXTERNAL_SHIPMENTS_HEADERS);
+  ensureColumns(sheet, EXTERNAL_SHIPMENTS_HEADERS);
+  return sheet;
 }
 
 function saveExternalShipments(shipments) {
@@ -3138,45 +3145,97 @@ function saveExternalShipments(shipments) {
   }
   const sheet = getExternalShipmentsSheet();
   const data = sheet.getDataRange().getValues();
-  const existingPostingIds = new Set();
+  const headers = data[0].map(h => String(h).trim());
   
+  const postingIdIdx = headers.indexOf('PostingID');
+  const detectedAtIdx = headers.indexOf('Дата обнаружения');
+  const shipmentDateIdx = headers.indexOf('Дата отгрузки');
+  const statusIdx = headers.indexOf('Статус');
+  const itemsJsonIdx = headers.indexOf('ПозицииJSON');
+  const transGroupInfoIdx = headers.indexOf('TransGroupInfo');
+  
+  const orderIdIdx = headers.indexOf('OrderID');
+  const orderNumberIdx = headers.indexOf('Номер заявки');
+  const ozonStatusIdx = headers.indexOf('Статус Ozon');
+  const ozonStatusDateIdx = headers.indexOf('Дата статуса Ozon');
+  const dropOffWarehouseIdx = headers.indexOf('Пункт отгрузки');
+  const storageWarehouseIdx = headers.indexOf('Склад хранения');
+  const timeslotIdx = headers.indexOf('Таймслот');
+  
+  if (postingIdIdx === -1) {
+    throw new Error('PostingID column not found in Внешние отгрузки');
+  }
+  
+  const existingPostingIdToRowIndex = {};
   for (let i = 1; i < data.length; i++) {
-    const postingId = String(data[i][0]).trim();
-    if (postingId) {
-      existingPostingIds.add(postingId);
+    const pId = String(data[i][postingIdIdx]).trim();
+    if (pId) {
+      existingPostingIdToRowIndex[pId] = i;
     }
   }
   
   let addedCount = 0;
+  let updatedCount = 0;
   const nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd HH:mm:ss");
   
   const rowsToAdd = [];
+  const processedPostingIds = new Set();
+  
   for (let i = 0; i < shipments.length; i++) {
     const s = shipments[i];
     if (!s) continue;
     const postingId = String(s.postingId || '').trim();
     if (!postingId) continue;
     
-    if (!existingPostingIds.has(postingId)) {
-      rowsToAdd.push([
-        postingId,
-        nowStr,
-        s.shipmentDate || '',
-        'new',
-        s.itemsJSON || '',
-        s.transGroupInfo || ''
-      ]);
-      existingPostingIds.add(postingId);
+    if (processedPostingIds.has(postingId)) continue;
+    processedPostingIds.add(postingId);
+    
+    if (existingPostingIdToRowIndex[postingId] !== undefined) {
+      const rowIndex = existingPostingIdToRowIndex[postingId];
+      const sheetRow = rowIndex + 1;
+      const currentStatus = statusIdx >= 0 ? String(data[rowIndex][statusIdx]).trim() : '';
+      
+      if (orderIdIdx >= 0) sheet.getRange(sheetRow, orderIdIdx + 1).setValue(s.orderId || '');
+      if (orderNumberIdx >= 0) sheet.getRange(sheetRow, orderNumberIdx + 1).setValue(s.orderNumber || '');
+      if (ozonStatusIdx >= 0) sheet.getRange(sheetRow, ozonStatusIdx + 1).setValue(s.ozonStatus || '');
+      if (ozonStatusDateIdx >= 0) sheet.getRange(sheetRow, ozonStatusDateIdx + 1).setValue(s.ozonStatusDate || '');
+      if (dropOffWarehouseIdx >= 0) sheet.getRange(sheetRow, dropOffWarehouseIdx + 1).setValue(s.dropOffWarehouse || '');
+      if (storageWarehouseIdx >= 0) sheet.getRange(sheetRow, storageWarehouseIdx + 1).setValue(s.storageWarehouse || '');
+      if (timeslotIdx >= 0) sheet.getRange(sheetRow, timeslotIdx + 1).setValue(s.timeslot || '');
+      
+      if (currentStatus === 'new') {
+        if (shipmentDateIdx >= 0) sheet.getRange(sheetRow, shipmentDateIdx + 1).setValue(s.shipmentDate || '');
+        if (itemsJsonIdx >= 0) sheet.getRange(sheetRow, itemsJsonIdx + 1).setValue(s.itemsJSON || '');
+      }
+      updatedCount++;
+    } else {
+      const newRow = new Array(headers.length).fill('');
+      if (postingIdIdx >= 0) newRow[postingIdIdx] = postingId;
+      if (detectedAtIdx >= 0) newRow[detectedAtIdx] = nowStr;
+      if (shipmentDateIdx >= 0) newRow[shipmentDateIdx] = s.shipmentDate || '';
+      if (statusIdx >= 0) newRow[statusIdx] = 'new';
+      if (itemsJsonIdx >= 0) newRow[itemsJsonIdx] = s.itemsJSON || '';
+      if (transGroupInfoIdx >= 0) newRow[transGroupInfoIdx] = s.transGroupInfo || '';
+      
+      if (orderIdIdx >= 0) newRow[orderIdIdx] = s.orderId || '';
+      if (orderNumberIdx >= 0) newRow[orderNumberIdx] = s.orderNumber || '';
+      if (ozonStatusIdx >= 0) newRow[ozonStatusIdx] = s.ozonStatus || '';
+      if (ozonStatusDateIdx >= 0) newRow[ozonStatusDateIdx] = s.ozonStatusDate || '';
+      if (dropOffWarehouseIdx >= 0) newRow[dropOffWarehouseIdx] = s.dropOffWarehouse || '';
+      if (storageWarehouseIdx >= 0) newRow[storageWarehouseIdx] = s.storageWarehouse || '';
+      if (timeslotIdx >= 0) newRow[timeslotIdx] = s.timeslot || '';
+      
+      rowsToAdd.push(newRow);
       addedCount++;
     }
   }
   
   if (rowsToAdd.length > 0) {
-    sheet.getRange(data.length + 1, 1, rowsToAdd.length, 6).setValues(rowsToAdd);
-    SpreadsheetApp.flush();
+    sheet.getRange(data.length + 1, 1, rowsToAdd.length, headers.length).setValues(rowsToAdd);
   }
   
-  return { addedCount: addedCount };
+  SpreadsheetApp.flush();
+  return { addedCount: addedCount, updatedCount: updatedCount };
 }
 
 function getExternalShipments() {
@@ -3184,33 +3243,60 @@ function getExternalShipments() {
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
   
+  const headers = data[0].map(h => String(h).trim());
+  const postingIdIdx = headers.indexOf('PostingID');
+  const detectedAtIdx = headers.indexOf('Дата обнаружения');
+  const shipmentDateIdx = headers.indexOf('Дата отгрузки');
+  const statusIdx = headers.indexOf('Статус');
+  const itemsJsonIdx = headers.indexOf('ПозицииJSON');
+  const transGroupInfoIdx = headers.indexOf('TransGroupInfo');
+  
+  const orderIdIdx = headers.indexOf('OrderID');
+  const orderNumberIdx = headers.indexOf('Номер заявки');
+  const ozonStatusIdx = headers.indexOf('Статус Ozon');
+  const ozonStatusDateIdx = headers.indexOf('Дата статуса Ozon');
+  const dropOffWarehouseIdx = headers.indexOf('Пункт отгрузки');
+  const storageWarehouseIdx = headers.indexOf('Склад хранения');
+  const timeslotIdx = headers.indexOf('Таймслот');
+  
+  if (postingIdIdx === -1) return [];
+  
   const shipments = [];
   const tz = Session.getScriptTimeZone() || "GMT";
+  
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    if (String(row[0]).trim() === '') continue;
+    if (row.length <= postingIdIdx) continue;
+    const postingIdVal = String(row[postingIdIdx]).trim();
+    if (postingIdVal === '') continue;
     
-    let detectedAt = '';
-    if (row[1] instanceof Date) {
-      detectedAt = Utilities.formatDate(row[1], tz, "yyyy-MM-dd HH:mm:ss");
-    } else {
-      detectedAt = String(row[1] || '');
-    }
-
-    let shipmentDate = '';
-    if (row[2] instanceof Date) {
-      shipmentDate = Utilities.formatDate(row[2], tz, "yyyy-MM-dd");
-    } else {
-      shipmentDate = String(row[2] || '');
-    }
-
+    const getVal = (idx, isDate, dateFormat) => {
+      if (idx === -1 || idx >= row.length) return '';
+      const val = row[idx];
+      if (isDate && val instanceof Date) {
+        try {
+          return Utilities.formatDate(val, tz, dateFormat);
+        } catch (e) {
+          return String(val);
+        }
+      }
+      return val !== undefined && val !== null ? String(val) : '';
+    };
+    
     shipments.push({
-      postingId: String(row[0]),
-      detectedAt: detectedAt,
-      shipmentDate: shipmentDate,
-      status: String(row[3]),
-      itemsJSON: String(row[4]),
-      transGroupInfo: String(row[5] || '')
+      postingId: postingIdVal,
+      detectedAt: getVal(detectedAtIdx, true, "yyyy-MM-dd HH:mm:ss"),
+      shipmentDate: getVal(shipmentDateIdx, true, "yyyy-MM-dd"),
+      status: getVal(statusIdx, false),
+      itemsJSON: getVal(itemsJsonIdx, false),
+      transGroupInfo: getVal(transGroupInfoIdx, false),
+      orderId: getVal(orderIdIdx, false),
+      orderNumber: getVal(orderNumberIdx, false),
+      ozonStatus: getVal(ozonStatusIdx, false),
+      ozonStatusDate: getVal(ozonStatusDateIdx, true, "yyyy-MM-dd HH:mm:ss"),
+      dropOffWarehouse: getVal(dropOffWarehouseIdx, false),
+      storageWarehouse: getVal(storageWarehouseIdx, false),
+      timeslot: getVal(timeslotIdx, false)
     });
   }
   return shipments;
