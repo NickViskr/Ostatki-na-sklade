@@ -97,6 +97,8 @@ interface WarehouseState {
   setPendingOzonPostingId: (id: string | null) => void;
   getEffectiveAvailability: (article: string) => number;
   getEffectiveAvgCost: (article: string) => number;
+  devMode: boolean;
+  setDevMode: (v: boolean) => void;
 }
 
 export const useWarehouseStore = create<WarehouseState>()(
@@ -120,6 +122,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   hasMoreTransactions: false,
   externalShipments: [],
   pendingOzonPostingId: null,
+  devMode: typeof localStorage !== 'undefined' && localStorage.getItem('devMode') === 'true',
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -181,15 +184,25 @@ export const useWarehouseStore = create<WarehouseState>()(
   setSessionToken: (sessionToken) => set({ sessionToken }),
   setIsSyncing: (isSyncing) => set({ isSyncing }),
   setIsProcessing: (isProcessing) => set({ isProcessing }),
+  setDevMode: (v) => {
+    localStorage.setItem('devMode', v ? 'true' : 'false');
+    set({ devMode: v });
+    get().fetchStock();
+    get().fetchArchivedItems();
+  },
 
   fetchGas: async (action, extraPayload = {}) => {
     const sessionToken = get().sessionToken;
+    const role = get().currentUser?.role?.toLowerCase() || '';
+    const isAdminRole = role === 'admin' || role === 'администратор';
+    const authActions = ['login', 'logout', 'verifySession'];
+    const sendDevMode = get().devMode && isAdminRole && !authActions.includes(action);
     
     try {
       const response = await fetch('/api/gas', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, sessionToken, ...extraPayload })
+        body: JSON.stringify({ action, sessionToken, ...(sendDevMode ? { devMode: true } : {}), ...extraPayload })
       });
       
       if (!response.ok) {

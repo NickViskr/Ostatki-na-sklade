@@ -19,6 +19,7 @@ function verifyServerSignature(payloadForCheck, signature) {
 
 function doPost(e) {
   _transHeadersCache = null;
+  _devModeSpreadsheet = null;
   let lock;
   try {
     const payload = JSON.parse(e.postData.contents);
@@ -96,6 +97,22 @@ function doPost(e) {
       if (!currentUser) {
         throw new Error('Unauthorized: Недействительная сессия. Пожалуйста, войдите снова.');
       }
+    }
+    
+    // ── Режим разработки: маршрутизация в тестовую БД ──
+    const DEV_MODE_EXCLUDED_ACTIONS = ['login', 'logout', 'verifySession', 'backupDatabase', 'createOrUpdateTestDatabase'];
+    if (payload.devMode === true && !DEV_MODE_EXCLUDED_ACTIONS.includes(action)) {
+      if (!currentUser || !isAdminRole(currentUser.role)) {
+        throw new Error('Режим разработки доступен только администратору');
+      }
+      if (action === 'archiveTransactions') {
+        throw new Error('Архивация недоступна в режиме разработки: фоновый процесс выполнился бы на боевой БД');
+      }
+      const testDbId = PropertiesService.getScriptProperties().getProperty('test_dbSpreadsheetId');
+      if (!testDbId) {
+        throw new Error('Тестовая БД не создана. Настройки → «Создать/обновить тестовую БД»');
+      }
+      _devModeSpreadsheet = SpreadsheetApp.openById(testDbId);
     }
     
     let result = {};
@@ -289,6 +306,7 @@ function assertAdmin(user) {
 }
 
 function getSpreadsheet() {
+  if (_devModeSpreadsheet) return _devModeSpreadsheet;
   return SpreadsheetApp.getActiveSpreadsheet();
 }
 
@@ -659,6 +677,7 @@ function parseTransactionRow(row, headers) {
 
 
 let _transHeadersCache = null;
+let _devModeSpreadsheet = null;
 function getTransColIndex(sheet, headerName) {
   if (!_transHeadersCache) {
     const lastCol = sheet.getLastColumn();
@@ -2776,7 +2795,7 @@ function getKitComponents(kitSku) {
 }
 
 function migrateKitCosts() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = getSpreadsheet();
   var sheet = getTransactionSheet(ss);
   var data = sheet.getDataRange().getValues();
   var headers = data[0];
@@ -2834,7 +2853,7 @@ function migrateKitCosts() {
 }
 
 function cleanupZeroCostRows() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = getSpreadsheet();
   var sheet = getTransactionSheet(ss);
   var data = sheet.getDataRange().getValues();
   var headers = data[0];
@@ -2865,7 +2884,7 @@ function cleanupZeroCostRows() {
 }
 
 function migrateDatesToISO() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = getSpreadsheet();
   var sheet = getTransactionSheet(ss);
   var data = sheet.getDataRange().getValues();
   var headers = data[0];
@@ -2913,7 +2932,7 @@ function migrateDatesToISO() {
 }
 
 function migrateBowlKitsToVirtual() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = getSpreadsheet();
   var MIGRATIONS = [
     { kit: 'BowlGrayMini_01', newComponent: 'Миска серая' },
     { kit: 'BowlBlueMini_01', newComponent: 'Миска бирюзовая' }
@@ -3063,7 +3082,7 @@ function migrateBowlKitsToVirtual() {
 }
 
 function migrateComponentWriteOffCosts() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = getSpreadsheet();
   var transSheet = getTransactionSheet(ss);
   if (!transSheet) {
     Logger.log('Лист :Транзакции не найден.');

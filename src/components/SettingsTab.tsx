@@ -19,6 +19,8 @@ export const SettingsTab: React.FC = React.memo(() => {
   const handleSetupDatabase = useWarehouseStore((state) => state.handleSetupDatabase);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const currentUser = useWarehouseStore((state) => state.currentUser);
+  const devMode = useWarehouseStore((state) => state.devMode);
+  const setDevMode = useWarehouseStore((state) => state.setDevMode);
   
   const setGasUrl = useSettingsStore((state) => state.setGasUrl);
   const geminiModel = useSettingsStore((state) => state.geminiModel);
@@ -200,6 +202,36 @@ export const SettingsTab: React.FC = React.memo(() => {
                   <p className="text-[11px] text-slate-500 text-center leading-normal">
                     Копия боевой БД для режима разработки. Листы "Пользователи" и "Сессии" очищаются. Файл — в папке "Тестовая БД Склад" на Google Диске
                   </p>
+
+                  <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 mt-4">
+                    <div className="flex flex-col pr-4 text-left">
+                      <span className="text-sm font-bold text-slate-700">Режим разработки — тестовая БД</span>
+                      <span className="text-[11px] text-slate-500 leading-normal">
+                        Все запросы из ЭТОГО браузера идут в тестовую БД. Других пользователей не затрагивает. Требуется созданная тестовая БД.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextVal = !devMode;
+                        setDevMode(nextVal);
+                        if (nextVal) {
+                          toast.info('Режим разработки включён — данные загружаются из тестовой БД');
+                        } else {
+                          toast.info('Режим разработки выключен — снова боевая БД');
+                        }
+                      }}
+                      className={`${
+                        devMode ? 'bg-red-600' : 'bg-slate-200'
+                      } relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2`}
+                    >
+                      <span
+                        className={`${
+                          devMode ? 'translate-x-5' : 'translate-x-0'
+                        } pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out`}
+                      />
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

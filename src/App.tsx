@@ -46,6 +46,7 @@ export default function App() {
   const fetchArchivedItems = useWarehouseStore((state) => state.fetchArchivedItems);
   const checkSession = useWarehouseStore((state) => state.checkSession);
   const currentUser = useWarehouseStore((state) => state.currentUser);
+  const devMode = useWarehouseStore((state) => state.devMode);
 
   const showConfirmModal = useUIStore((state) => state.showConfirmModal);
   const showEditTransModal = useUIStore((state) => state.showEditTransModal);
@@ -87,7 +88,10 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-slate-50 flex flex-col md:flex-row font-sans text-slate-900 overflow-hidden">
+    <div className={`h-screen bg-slate-50 flex flex-col md:flex-row font-sans text-slate-900 overflow-hidden ${devMode ? 'border-4 border-red-600' : ''}`}>
+      {devMode && (
+        <div className="fixed top-0 left-1/2 -translate-x-1/2 z-[100] bg-red-600 text-white text-xs font-bold px-4 py-1 rounded-b-md shadow">РЕЖИМ РАЗРАБОТКИ — ТЕСТОВАЯ БД</div>
+      )}
       {/* Sidebar / Bottom Nav */}
       <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
 
