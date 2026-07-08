@@ -481,8 +481,7 @@ async function startServer() {
               "IN_TRANSIT",
               "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
               "REPORTS_CONFIRMATION_AWAITING",
-              "REPORT_REJECTED",
-              "OVERDUE"
+              "REPORT_REJECTED"
             ]
           },
           limit: 100,
@@ -546,7 +545,7 @@ async function startServer() {
       for (const s of existingShipments) {
         const oId = String(s.orderId || '').trim();
         const oStatus = String(s.ozonStatus || '').trim();
-        if (oId && !["COMPLETED", "CANCELLED", "REJECTED_AT_SUPPLY_WAREHOUSE"].includes(oStatus)) {
+        if (oId && !["COMPLETED", "CANCELLED", "REJECTED_AT_SUPPLY_WAREHOUSE", "OVERDUE"].includes(oStatus)) {
           activeOrderIdsSet.add(oId);
         }
       }
@@ -594,6 +593,13 @@ async function startServer() {
           
           const postingId = String(supply.supply_id);
           const ozonStatus = String(supply.state || '');
+          
+          // Отменённые и просроченные поставки, которые ещё не отслеживаются,
+          // в базу не заносим — они не отгружались на Ozon.
+          // Уже отслеживаемые обновляются как обычно, чтобы статус корректно закрылся.
+          if ((ozonStatus === 'CANCELLED' || ozonStatus === 'OVERDUE') && !existingByPostingId.has(postingId)) {
+            continue;
+          }
           
           const hasMacrolocal = supply.macrolocal_cluster_id !== null && supply.macrolocal_cluster_id !== undefined && String(supply.macrolocal_cluster_id).trim() !== '';
           const macrolocalStr = hasMacrolocal ? String(supply.macrolocal_cluster_id).trim() : '';
