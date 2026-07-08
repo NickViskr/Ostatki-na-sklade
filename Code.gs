@@ -3170,7 +3170,13 @@ function saveExternalShipments(shipments) {
   const normCell = function(v) {
     if (v === null || v === undefined) return '';
     if (v instanceof Date) {
-      return Utilities.formatDate(v, Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd HH:mm:ss');
+      const tz = Session.getScriptTimeZone() || 'GMT';
+      // Дата без времени (00:00:00) сравнивается в формате yyyy-MM-dd,
+      // иначе строка «2026-07-10» от прокси никогда не совпадёт с ячейкой-датой
+      if (v.getHours() === 0 && v.getMinutes() === 0 && v.getSeconds() === 0) {
+        return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+      }
+      return Utilities.formatDate(v, tz, 'yyyy-MM-dd HH:mm:ss');
     }
     return String(v).trim();
   };
