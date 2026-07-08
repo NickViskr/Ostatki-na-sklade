@@ -428,6 +428,78 @@ async function startServer() {
     }
   }
 
+  // Проверка ключей Ozon и получение названия кабинета (пункт 8в плана).
+  // Ключи приходят в теле запроса — Настройки проверяют их до сохранения.
+  app.post("/api/ozon/seller-info", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token) {
+        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
+      }
+
+      if (!isTokenCached(token)) {
+        const gasUrl = process.env.GAS_URL;
+        if (!gasUrl) {
+          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+        }
+        try {
+          const gasResponse = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
+          });
+          const gasData = await gasResponse.json();
+          if (gasData.status === "success") {
+            cacheToken(token);
+          } else {
+            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
+          }
+        } catch (e: any) {
+          console.error("Session verification failed:", e);
+          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
+        }
+      }
+
+      const clientId = String(req.body?.clientId || '').trim();
+      const apiKey = String(req.body?.apiKey || '').trim();
+      if (!clientId || !apiKey) {
+        return res.status(400).json({ status: "error", message: "Укажите Client-Id и Api-Key" });
+      }
+
+      const ozRes = await callOzonApi('/v1/seller/info', { ozonClientId: clientId, ozonApiKey: apiKey }, {});
+
+      if (ozRes.status === 403) {
+        let bodyText = '';
+        try { bodyText = await ozRes.text(); } catch {}
+        // Разведка (docs/OZON_API.md): 403 с code 7 — кабинет заблокирован, а не проблема ключа
+        if (bodyText.includes('"code":7') || bodyText.toLowerCase().includes('blocked')) {
+          return res.status(400).json({ status: "error", message: "Кабинет Ozon заблокирован — обратитесь в поддержку Ozon" });
+        }
+        return res.status(400).json({ status: "error", message: "Ozon не принял ключи: доступ запрещён. Проверьте Client-Id и Api-Key" });
+      }
+
+      if (ozRes.status === 401) {
+        return res.status(400).json({ status: "error", message: "Ozon не принял ключи: неверный Client-Id или Api-Key" });
+      }
+
+      if (!ozRes.ok) {
+        const errText = await ozRes.text().catch(() => '');
+        return res.status(502).json({ status: "error", message: `Ozon API вернул ошибку ${ozRes.status}: ${errText.slice(0, 200)}` });
+      }
+
+      const data: any = await ozRes.json();
+      const name = String(data?.company?.name || '').trim();
+      if (!name) {
+        return res.status(502).json({ status: "error", message: "Ozon ответил без названия кабинета (company.name пуст)" });
+      }
+
+      return res.json({ status: "success", data: { name } });
+    } catch (e: any) {
+      console.error("seller-info error:", e);
+      return res.status(500).json({ status: "error", message: "Ошибка проверки ключей: " + (e?.message || String(e)) });
+    }
+  });
+
   app.post("/api/ozon/check", async (req, res) => {
     try {
       const token = req.body?.sessionToken;
