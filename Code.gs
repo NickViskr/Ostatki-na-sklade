@@ -313,7 +313,7 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет'
 ];
 
 function setupDatabase(targetSs) {
@@ -3229,6 +3229,7 @@ function saveExternalShipments(shipments) {
   const dropOffWarehouseIdx = headers.indexOf('Пункт отгрузки');
   const storageWarehouseIdx = headers.indexOf('Склад хранения');
   const timeslotIdx = headers.indexOf('Таймслот');
+  const cabinetIdx = headers.indexOf('Кабинет');
   
   if (postingIdIdx === -1) {
     throw new Error('PostingID column not found in Внешние отгрузки');
@@ -3300,6 +3301,13 @@ function saveExternalShipments(shipments) {
       setIfChanged(storageWarehouseIdx, s.storageWarehouse || '');
       setIfChanged(timeslotIdx, s.timeslot || '');
       
+      // Кабинет обновляется только непустым значением — старый прокси его не присылает,
+      // пустым значением затирать уже записанный кабинет нельзя
+      const newCabinet = String(s.cabinet || '').trim();
+      if (newCabinet) {
+        setIfChanged(cabinetIdx, newCabinet);
+      }
+      
       if (currentStatus === 'new') {
         // Дата отгрузки и состав перезаписываются ТОЛЬКО непустым значением —
         // пустой itemsJSON от прокси означает «состав не запрашивался», затирать им нельзя
@@ -3334,6 +3342,7 @@ function saveExternalShipments(shipments) {
       if (dropOffWarehouseIdx >= 0) newRow[dropOffWarehouseIdx] = s.dropOffWarehouse || '';
       if (storageWarehouseIdx >= 0) newRow[storageWarehouseIdx] = s.storageWarehouse || '';
       if (timeslotIdx >= 0) newRow[timeslotIdx] = s.timeslot || '';
+      if (cabinetIdx >= 0) newRow[cabinetIdx] = s.cabinet || '';
       
       rowsToAdd.push(newRow);
       addedCount++;
@@ -3368,6 +3377,7 @@ function getExternalShipments() {
   const dropOffWarehouseIdx = headers.indexOf('Пункт отгрузки');
   const storageWarehouseIdx = headers.indexOf('Склад хранения');
   const timeslotIdx = headers.indexOf('Таймслот');
+  const cabinetIdx = headers.indexOf('Кабинет');
   
   if (postingIdIdx === -1) return [];
   
@@ -3406,7 +3416,8 @@ function getExternalShipments() {
       ozonStatusDate: getVal(ozonStatusDateIdx, true, "yyyy-MM-dd HH:mm:ss"),
       dropOffWarehouse: getVal(dropOffWarehouseIdx, false),
       storageWarehouse: getVal(storageWarehouseIdx, false),
-      timeslot: getVal(timeslotIdx, false)
+      timeslot: getVal(timeslotIdx, false),
+      cabinet: getVal(cabinetIdx, false)
     });
   }
   return shipments;
