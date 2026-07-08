@@ -3166,6 +3166,15 @@ function saveExternalShipments(shipments) {
     throw new Error('PostingID column not found in Внешние отгрузки');
   }
   
+  // Нормализация значения ячейки для сравнения: даты приводятся к строке, остальное — trim
+  const normCell = function(v) {
+    if (v === null || v === undefined) return '';
+    if (v instanceof Date) {
+      return Utilities.formatDate(v, Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd HH:mm:ss');
+    }
+    return String(v).trim();
+  };
+  
   const existingPostingIdToRowIndex = {};
   for (let i = 1; i < data.length; i++) {
     const pId = String(data[i][postingIdIdx]).trim();
@@ -3176,6 +3185,7 @@ function saveExternalShipments(shipments) {
   
   let addedCount = 0;
   let updatedCount = 0;
+  let unchangedCount = 0;
   const nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd HH:mm:ss");
   
   const rowsToAdd = [];
@@ -3195,19 +3205,45 @@ function saveExternalShipments(shipments) {
       const sheetRow = rowIndex + 1;
       const currentStatus = statusIdx >= 0 ? String(data[rowIndex][statusIdx]).trim() : '';
       
-      if (orderIdIdx >= 0) sheet.getRange(sheetRow, orderIdIdx + 1).setValue(s.orderId || '');
-      if (orderNumberIdx >= 0) sheet.getRange(sheetRow, orderNumberIdx + 1).setValue(s.orderNumber || '');
-      if (ozonStatusIdx >= 0) sheet.getRange(sheetRow, ozonStatusIdx + 1).setValue(s.ozonStatus || '');
-      if (ozonStatusDateIdx >= 0) sheet.getRange(sheetRow, ozonStatusDateIdx + 1).setValue(s.ozonStatusDate || '');
-      if (dropOffWarehouseIdx >= 0) sheet.getRange(sheetRow, dropOffWarehouseIdx + 1).setValue(s.dropOffWarehouse || '');
-      if (storageWarehouseIdx >= 0) sheet.getRange(sheetRow, storageWarehouseIdx + 1).setValue(s.storageWarehouse || '');
-      if (timeslotIdx >= 0) sheet.getRange(sheetRow, timeslotIdx + 1).setValue(s.timeslot || '');
+      let rowChanged = false;
+      
+      // Записывает значение в ячейку только если оно реально отличается от текущего
+      const setIfChanged = function(colIdx, newValue) {
+        if (colIdx < 0) return;
+        const newStr = (newValue === null || newValue === undefined) ? '' : String(newValue).trim();
+        const curStr = normCell(data[rowIndex][colIdx]);
+        if (curStr !== newStr) {
+          sheet.getRange(sheetRow, colIdx + 1).setValue(newStr);
+          rowChanged = true;
+        }
+      };
+      
+      setIfChanged(orderIdIdx, s.orderId || '');
+      setIfChanged(orderNumberIdx, s.orderNumber || '');
+      setIfChanged(ozonStatusIdx, s.ozonStatus || '');
+      setIfChanged(ozonStatusDateIdx, s.ozonStatusDate || '');
+      setIfChanged(dropOffWarehouseIdx, s.dropOffWarehouse || '');
+      setIfChanged(storageWarehouseIdx, s.storageWarehouse || '');
+      setIfChanged(timeslotIdx, s.timeslot || '');
       
       if (currentStatus === 'new') {
-        if (shipmentDateIdx >= 0) sheet.getRange(sheetRow, shipmentDateIdx + 1).setValue(s.shipmentDate || '');
-        if (itemsJsonIdx >= 0) sheet.getRange(sheetRow, itemsJsonIdx + 1).setValue(s.itemsJSON || '');
+        // Дата отгрузки и состав перезаписываются ТОЛЬКО непустым значением —
+        // пустой itemsJSON от прокси означает «состав не запрашивался», затирать им нельзя
+        const newShipmentDate = String(s.shipmentDate || '').trim();
+        if (newShipmentDate) {
+          setIfChanged(shipmentDateIdx, newShipmentDate);
+        }
+        const newItemsJSON = String(s.itemsJSON || '').trim();
+        if (newItemsJSON) {
+          setIfChanged(itemsJsonIdx, newItemsJSON);
+        }
       }
-      updatedCount++;
+      
+      if (rowChanged) {
+        updatedCount++;
+      } else {
+        unchangedCount++;
+      }
     } else {
       const newRow = new Array(headers.length).fill('');
       if (postingIdIdx >= 0) newRow[postingIdIdx] = postingId;
@@ -3235,7 +3271,7 @@ function saveExternalShipments(shipments) {
   }
   
   SpreadsheetApp.flush();
-  return { addedCount: addedCount, updatedCount: updatedCount };
+  return { addedCount: addedCount, updatedCount: updatedCount, unchangedCount: unchangedCount };
 }
 
 function getExternalShipments() {
