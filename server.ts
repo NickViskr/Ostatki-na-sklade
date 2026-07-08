@@ -120,10 +120,12 @@ async function startServer() {
   });
 
   // ── Кэш Ozon API ключей ────────────────────────────────────────────────────────
-  let cachedOzonKeys: { value: { ozonClientId: string; ozonApiKey: string }; expiresAt: number } | null = null;
+  type OzonCabinetKeys = { name: string; clientId: string; apiKey: string };
+  type OzonKeysBundle = { ozonClientId: string; ozonApiKey: string; cabinets: OzonCabinetKeys[] };
+  let cachedOzonKeys: { value: OzonKeysBundle; expiresAt: number } | null = null;
   const OZON_KEY_TTL_MS = 60 * 60 * 1000; // 1 час
 
-  async function fetchOzonKeys(): Promise<{ ozonClientId: string; ozonApiKey: string } | null> {
+  async function fetchOzonKeys(): Promise<OzonKeysBundle | null> {
     if (cachedOzonKeys && Date.now() < cachedOzonKeys.expiresAt) {
       return cachedOzonKeys.value;
     }
@@ -150,9 +152,21 @@ async function startServer() {
        });
        const gasData = await gasResponse.json();
        if (gasData.status === "success" && gasData.data?.ozonClientId && gasData.data?.ozonApiKey) {
-         const keys = {
+         const rawCabinets = Array.isArray(gasData.data.cabinets) ? gasData.data.cabinets : [];
+         const cabinets: OzonCabinetKeys[] = rawCabinets
+           .filter((c: any) => c && String(c.clientId || '').trim() && String(c.apiKey || '').trim())
+           .map((c: any, i: number) => ({
+             name: String(c.name || '').trim() || `Кабинет ${i + 1}`,
+             clientId: String(c.clientId).trim(),
+             apiKey: String(c.apiKey).trim()
+           }));
+         const keys: OzonKeysBundle = {
            ozonClientId: gasData.data.ozonClientId,
-           ozonApiKey: gasData.data.ozonApiKey
+           ozonApiKey: gasData.data.ozonApiKey,
+           // Старый GAS без поля cabinets: работаем с одним кабинетом
+           cabinets: cabinets.length > 0
+             ? cabinets
+             : [{ name: 'Кабинет 1', clientId: gasData.data.ozonClientId, apiKey: gasData.data.ozonApiKey }]
          };
          cachedOzonKeys = { value: keys, expiresAt: Date.now() + OZON_KEY_TTL_MS };
          return keys;
@@ -538,45 +552,52 @@ async function startServer() {
         return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
       }
 
-      // Step 2. Active orders list
-      const activeOrderIdsSet = new Set<string>();
-      let lastId = "";
-      let pageCount = 0;
+      const cabinets = keys.cabinets;
+
+      // Step 2. Active orders list — по каждому кабинету отдельно:
+      // order_id одного кабинета нельзя запрашивать ключами другого
+      const activeOrderIdsByCabinet: Array<Set<string>> = cabinets.map(() => new Set<string>());
       
-      while (pageCount < 20) {
-        const body: any = {
-          filter: {
-            states: [
-              "DATA_FILLING",
-              "READY_TO_SUPPLY",
-              "ACCEPTED_AT_SUPPLY_WAREHOUSE",
-              "IN_TRANSIT",
-              "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
-              "REPORTS_CONFIRMATION_AWAITING",
-              "REPORT_REJECTED"
-            ]
-          },
-          limit: 100,
-          sort_by: "ORDER_CREATION",
-          sort_dir: "DESC"
-        };
-        if (lastId) {
-          body.last_id = lastId;
-        }
+      for (let ci = 0; ci < cabinets.length; ci++) {
+        const cabKeys = { ozonClientId: cabinets[ci].clientId, ozonApiKey: cabinets[ci].apiKey };
+        let lastId = "";
+        let pageCount = 0;
         
-        const listData = await fetchOzonApi("/v3/supply-order/list", keys, body);
-        const orderIds = listData.order_ids || [];
-        for (const oid of orderIds) {
-          if (oid !== undefined && oid !== null) {
-            activeOrderIdsSet.add(String(oid));
+        while (pageCount < 20) {
+          const body: any = {
+            filter: {
+              states: [
+                "DATA_FILLING",
+                "READY_TO_SUPPLY",
+                "ACCEPTED_AT_SUPPLY_WAREHOUSE",
+                "IN_TRANSIT",
+                "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
+                "REPORTS_CONFIRMATION_AWAITING",
+                "REPORT_REJECTED"
+              ]
+            },
+            limit: 100,
+            sort_by: "ORDER_CREATION",
+            sort_dir: "DESC"
+          };
+          if (lastId) {
+            body.last_id = lastId;
           }
+          
+          const listData = await fetchOzonApi("/v3/supply-order/list", cabKeys, body);
+          const orderIds = listData.order_ids || [];
+          for (const oid of orderIds) {
+            if (oid !== undefined && oid !== null) {
+              activeOrderIdsByCabinet[ci].add(String(oid));
+            }
+          }
+          
+          lastId = listData.last_id || "";
+          if (!lastId) {
+            break;
+          }
+          pageCount++;
         }
-        
-        lastId = listData.last_id || "";
-        if (!lastId) {
-          break;
-        }
-        pageCount++;
       }
 
       // Step 3. Already tracked shipments
@@ -614,37 +635,48 @@ async function startServer() {
         }
       }
       
+      // Уже отслеживаемые заявки допрашиваем ключами их кабинета.
+      // Кабинет строки определяем по названию; пустой кабинет (старые строки) = первый кабинет.
+      const cabinetIndexByName = new Map<string, number>();
+      cabinets.forEach((c, i) => cabinetIndexByName.set(c.name, i));
+      
       for (const s of existingShipments) {
         const oId = String(s.orderId || '').trim();
         const oStatus = String(s.ozonStatus || '').trim();
         if (oId && !["COMPLETED", "CANCELLED", "REJECTED_AT_SUPPLY_WAREHOUSE", "OVERDUE"].includes(oStatus)) {
-          activeOrderIdsSet.add(oId);
+          const rowCabinet = String(s.cabinet || '').trim();
+          const ci = rowCabinet && cabinetIndexByName.has(rowCabinet) ? (cabinetIndexByName.get(rowCabinet) as number) : 0;
+          activeOrderIdsByCabinet[ci].add(oId);
         }
       }
-      
-      const allOrderIds = Array.from(activeOrderIdsSet);
 
-      // Step 4. Details of orders
-      const ordersDetailsList: any[] = [];
+      // Step 4. Details of orders — ключами соответствующего кабинета
+      const ordersDetailsList: Array<{ order: any; cabinetIndex: number }> = [];
       const batchSize = 50;
-      for (let i = 0; i < allOrderIds.length; i += batchSize) {
-        const batchIds = allOrderIds.slice(i, i + batchSize);
-        if (batchIds.length === 0) continue;
-        
-        const detailResponse = await fetchOzonApi("/v3/supply-order/get", keys, { order_ids: batchIds });
-        const orders = detailResponse.orders || [];
-        for (const order of orders) {
-          if (order) {
-            ordersDetailsList.push(order);
+      for (let ci = 0; ci < cabinets.length; ci++) {
+        const cabKeys = { ozonClientId: cabinets[ci].clientId, ozonApiKey: cabinets[ci].apiKey };
+        const cabOrderIds = Array.from(activeOrderIdsByCabinet[ci]);
+        for (let i = 0; i < cabOrderIds.length; i += batchSize) {
+          const batchIds = cabOrderIds.slice(i, i + batchSize);
+          if (batchIds.length === 0) continue;
+          
+          const detailResponse = await fetchOzonApi("/v3/supply-order/get", cabKeys, { order_ids: batchIds });
+          const orders = detailResponse.orders || [];
+          for (const order of orders) {
+            if (order) {
+              ordersDetailsList.push({ order, cabinetIndex: ci });
+            }
           }
         }
       }
 
       // Step 5. Forming records on supply
-      const clusterMap = await loadClusterMap(keys);
+      const clusterMap = await loadClusterMap({ ozonClientId: cabinets[0].clientId, ozonApiKey: cabinets[0].apiKey });
       const finalShipments: any[] = [];
       
-      for (const order of ordersDetailsList) {
+      for (const entry of ordersDetailsList) {
+        const order = entry.order;
+        const cabinetIndex = entry.cabinetIndex;
         const orderId = String(order.order_id);
         const orderNumber = String(order.order_number || '');
         const ozonStatusDate = String(order.state_updated_date || '');
@@ -697,7 +729,9 @@ async function startServer() {
             storageWarehouse,
             timeslot: timeslotStr,
             shipmentDate,
-            bundleId
+            bundleId,
+            cabinetIndex,
+            cabinet: cabinets[cabinetIndex].name
           });
         }
       }
@@ -738,7 +772,7 @@ async function startServer() {
               body.last_id = lastId;
             }
             
-            const bundleResult = await fetchOzonApi("/v1/supply-order/bundle", keys, body);
+            const bundleResult = await fetchOzonApi("/v1/supply-order/bundle", { ozonClientId: cabinets[s.cabinetIndex].clientId, ozonApiKey: cabinets[s.cabinetIndex].apiKey }, body);
             const rawItems = bundleResult.items || [];
             
             for (const item of rawItems) {
@@ -768,7 +802,8 @@ async function startServer() {
           ozonStatusDate: s.ozonStatusDate,
           dropOffWarehouse: s.dropOffWarehouse,
           storageWarehouse: s.storageWarehouse,
-          timeslot: s.timeslot
+          timeslot: s.timeslot,
+          cabinet: s.cabinet
         });
       }
 
