@@ -10,7 +10,7 @@ import {
   Save
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { useSettingsStore } from '../store/useSettingsStore';
+import { useSettingsStore, OzonCabinet } from '../store/useSettingsStore';
 import { toast } from 'sonner';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -33,11 +33,60 @@ export const SettingsTab: React.FC = React.memo(() => {
   const setOzonClientId = useSettingsStore((state) => state.setOzonClientId);
   const ozonApiKey = useSettingsStore((state) => state.ozonApiKey);
   const setOzonApiKey = useSettingsStore((state) => state.setOzonApiKey);
+  const ozonCabinets = useSettingsStore((state) => state.ozonCabinets);
+  const setOzonCabinetsStore = useSettingsStore((state) => state.setOzonCabinets);
 
   const [availableModels, setAvailableModels] = useState<string[]>(['gemini-1.5-flash']);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [isSavingGlobal, setIsSavingGlobal] = useState(false);
   const [isSavingOzon, setIsSavingOzon] = useState(false);
+  const emptyCabinet: OzonCabinet = { name: '', clientId: '', apiKey: '' };
+  const [cabinetDrafts, setCabinetDrafts] = useState<OzonCabinet[]>([{ ...emptyCabinet }, { ...emptyCabinet }]);
+  const [checkingCabinet, setCheckingCabinet] = useState<number | null>(null);
+
+  useEffect(() => {
+    const fromStore: OzonCabinet[] = ozonCabinets && ozonCabinets.length > 0
+      ? ozonCabinets
+      : (ozonClientId && ozonApiKey ? [{ name: 'Кабинет 1', clientId: ozonClientId, apiKey: ozonApiKey }] : []);
+    setCabinetDrafts([
+      fromStore[0] ? { ...fromStore[0] } : { ...emptyCabinet },
+      fromStore[1] ? { ...fromStore[1] } : { ...emptyCabinet }
+    ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ozonCabinets, ozonClientId, ozonApiKey]);
+
+  const updateCabinetDraft = (index: number, field: keyof OzonCabinet, value: string) => {
+    setCabinetDrafts(prev => prev.map((c, i) => i === index ? { ...c, [field]: value } : c));
+  };
+
+  const handleCheckCabinet = async (index: number) => {
+    const cab = cabinetDrafts[index];
+    if (!cab.clientId.trim() || !cab.apiKey.trim()) {
+      toast.error('Заполните Client-Id и Api-Key кабинета');
+      return;
+    }
+    setCheckingCabinet(index);
+    try {
+      const sessionToken = useWarehouseStore.getState().sessionToken;
+      const res = await fetch('/api/ozon/seller-info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionToken, clientId: cab.clientId.trim(), apiKey: cab.apiKey.trim() })
+      });
+      const result = await res.json();
+      if (result.status === 'success' && result.data?.name) {
+        updateCabinetDraft(index, 'name', result.data.name);
+        toast.success(`Ключи рабочие. Кабинет: ${result.data.name}`);
+      } else {
+        toast.error(result?.message || 'Не удалось проверить ключи');
+      }
+    } catch (e) {
+      toast.error('Сбой сети при проверке ключей');
+    } finally {
+      setCheckingCabinet(null);
+    }
+  };
+
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isCreatingTestDb, setIsCreatingTestDb] = useState(false);
   const [showTestDbConfirm, setShowTestDbConfirm] = useState(false);
@@ -96,15 +145,22 @@ export const SettingsTab: React.FC = React.memo(() => {
   };
 
   const handleSaveOzonKeys = async () => {
+    const filled = cabinetDrafts
+      .map((c, i) => ({
+        name: c.name.trim() || `Кабинет ${i + 1}`,
+        clientId: c.clientId.trim(),
+        apiKey: c.apiKey.trim()
+      }))
+      .filter(c => c.clientId && c.apiKey);
+    if (filled.length === 0) {
+      toast.error('Заполните Client-Id и Api-Key хотя бы одного кабинета');
+      return;
+    }
     setIsSavingOzon(true);
     try {
-      const res = await fetchGas('saveGlobalSettings', { 
-        data: { 
-          ozonClientId, 
-          ozonApiKey 
-        } 
-      });
+      const res = await fetchGas('saveGlobalSettings', { data: { ozonCabinets: filled } });
       if (res?.status === 'success') {
+        setOzonCabinetsStore(filled);
         toast.success('Ключи Ozon успешно сохранены');
       } else {
         toast.error(res?.message || 'Ошибка сохранения ключей Ozon');
@@ -247,31 +303,55 @@ export const SettingsTab: React.FC = React.memo(() => {
             <div className="space-y-4">
               {isAdmin ? (
                 <>
-                  <div className="space-y-2">
-                    <label className="text-sm font-bold text-slate-500 uppercase">Ozon Client-Id</label>
-                    <input 
-                      type="password"
-                      value={ozonClientId}
-                      onChange={(e) => setOzonClientId(e.target.value)}
-                      placeholder="Ваш Client-Id Ozon..."
-                      className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-sky-500"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-bold text-slate-500 uppercase">Ozon Api-Key</label>
-                    <input 
-                      type="password"
-                      value={ozonApiKey}
-                      onChange={(e) => setOzonApiKey(e.target.value)}
-                      placeholder="Ваш API-Key Ozon..."
-                      className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-sky-500"
-                    />
-                  </div>
+                  {[0, 1].map((index) => (
+                    <div key={index} className="space-y-4 p-4 rounded-2xl border border-slate-200 bg-slate-50/50">
+                      <div className="text-sm font-bold text-slate-600 uppercase">
+                        Кабинет {index + 1}{index === 1 ? ' (необязательно)' : ''}
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-bold text-slate-500 uppercase">Название</label>
+                        <input
+                          type="text"
+                          value={cabinetDrafts[index].name}
+                          onChange={(e) => updateCabinetDraft(index, 'name', e.target.value)}
+                          placeholder="Заполнится автоматически при проверке ключей"
+                          className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-sky-500"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-bold text-slate-500 uppercase">Ozon Client-Id</label>
+                        <input
+                          type="password"
+                          value={cabinetDrafts[index].clientId}
+                          onChange={(e) => updateCabinetDraft(index, 'clientId', e.target.value)}
+                          placeholder="Client-Id кабинета..."
+                          className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-sky-500"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-bold text-slate-500 uppercase">Ozon Api-Key</label>
+                        <input
+                          type="password"
+                          value={cabinetDrafts[index].apiKey}
+                          onChange={(e) => updateCabinetDraft(index, 'apiKey', e.target.value)}
+                          placeholder="API-Key кабинета..."
+                          className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-sky-500"
+                        />
+                      </div>
+                      <button
+                        onClick={() => handleCheckCabinet(index)}
+                        disabled={checkingCabinet !== null || !cabinetDrafts[index].clientId || !cabinetDrafts[index].apiKey}
+                        className="w-full bg-white border border-sky-500 text-sky-600 py-2.5 rounded-xl font-bold hover:bg-sky-50 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                      >
+                        {checkingCabinet === index ? <Loader2 size={18} className="animate-spin" /> : <Key size={18} />}
+                        Проверить ключи и подтянуть название
+                      </button>
+                    </div>
+                  ))}
 
                   <button
                     onClick={handleSaveOzonKeys}
-                    disabled={isSavingOzon || !ozonClientId || !ozonApiKey}
+                    disabled={isSavingOzon || !cabinetDrafts.some(c => c.clientId && c.apiKey)}
                     className="w-full mt-2 bg-sky-500 text-white py-3 rounded-xl font-bold hover:bg-sky-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
                   >
                     {isSavingOzon ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}

@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+export interface OzonCabinet {
+  name: string;
+  clientId: string;
+  apiKey: string;
+}
+
 interface SettingsState {
   gasUrl: string;
   geminiModel: string;
@@ -13,6 +19,7 @@ interface SettingsState {
   boxesPerPalletGlobal: number;
   ozonClientId: string;
   ozonApiKey: string;
+  ozonCabinets: OzonCabinet[];
   setGasUrl: (url: string) => void;
   setGeminiModel: (model: string) => void;
   setGeminiKey: (key: string) => void;
@@ -24,6 +31,7 @@ interface SettingsState {
   setBoxesPerPalletGlobal: (count: number) => void;
   setOzonClientId: (id: string) => void;
   setOzonApiKey: (key: string) => void;
+  setOzonCabinets: (cabinets: OzonCabinet[]) => void;
 }
 
 const DEFAULT_PROMPT = `Ты — система распознавания накладных для складского учёта.
@@ -147,6 +155,7 @@ export const useSettingsStore = create<SettingsState>()(
       boxesPerPalletGlobal: 0,
       ozonClientId: '',
       ozonApiKey: '',
+      ozonCabinets: [],
       setGasUrl: (gasUrl) => set({ gasUrl }),
       setGeminiModel: (geminiModel) => set({ geminiModel }),
       setGeminiKey: (geminiKey) => set({ geminiKey }),
@@ -161,6 +170,7 @@ export const useSettingsStore = create<SettingsState>()(
       setBoxesPerPalletGlobal: (boxesPerPalletGlobal) => set({ boxesPerPalletGlobal }),
       setOzonClientId: (ozonClientId) => set({ ozonClientId }),
       setOzonApiKey: (ozonApiKey) => set({ ozonApiKey }),
+      setOzonCabinets: (ozonCabinets) => set({ ozonCabinets }),
     }),
     {
       name: 'warehouse-settings',
