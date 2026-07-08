@@ -529,14 +529,16 @@ async function startServer() {
       }
       
       const existingShipments = gasResult1.data || [];
-      const existingByPostingId = new Map<string, { status: string; ozonStatus: string }>();
+      const existingByPostingId = new Map<string, { status: string; ozonStatus: string; hasItems: boolean }>();
       
       for (const s of existingShipments) {
         const postingIdVal = String(s.postingId || '').trim();
         if (postingIdVal) {
+          const itemsJsonVal = String(s.itemsJSON || '').trim();
           existingByPostingId.set(postingIdVal, {
             status: String(s.status || '').trim(),
-            ozonStatus: String(s.ozonStatus || '').trim()
+            ozonStatus: String(s.ozonStatus || '').trim(),
+            hasItems: itemsJsonVal !== '' && itemsJsonVal !== '[]'
           });
         }
       }
@@ -632,9 +634,14 @@ async function startServer() {
         let shouldFetchBundle = false;
         const existInfo = existingByPostingId.get(postingId);
         if (!existInfo) {
+          // Новая поставка — состав нужен всегда
           shouldFetchBundle = true;
         } else if (existInfo.status === 'new') {
-          shouldFetchBundle = true;
+          // Уже отслеживается: состав перезапрашиваем только если статус Ozon
+          // изменился или состав в листе почему-то пуст (самовосстановление)
+          if (existInfo.ozonStatus !== s.ozonStatus || !existInfo.hasItems) {
+            shouldFetchBundle = true;
+          }
         }
         
         let items: any[] = [];
