@@ -37,6 +37,7 @@ export const Dashboard: React.FC = React.memo(() => {
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [isFunnelCollapsed, setIsFunnelCollapsed] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -482,35 +483,53 @@ export const Dashboard: React.FC = React.memo(() => {
       {/* Ozon Supply Funnel */}
       {isAdmin && funnelData && (
         <div className="space-y-3 bg-slate-50/50 p-6 rounded-3xl border border-slate-200/60 shadow-sm">
-          <div className="flex justify-between items-center">
+          <div
+            className="flex justify-between items-center cursor-pointer select-none"
+            onClick={() => setIsFunnelCollapsed(prev => !prev)}
+          >
             <h3 className="text-xl font-bold text-slate-800">Воронка поставок Ozon</h3>
+            <button
+              type="button"
+              aria-label={isFunnelCollapsed ? 'Развернуть воронку' : 'Свернуть воронку'}
+              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition-colors"
+              onClick={(e) => { e.stopPropagation(); setIsFunnelCollapsed(prev => !prev); }}
+            >
+              <ChevronDown
+                size={20}
+                className={`transition-transform duration-200 ${isFunnelCollapsed ? '-rotate-90' : ''}`}
+              />
+            </button>
           </div>
           
-          <div className="flex flex-wrap gap-3">
-            {funnelData.cards.map((card) => (
-              <div
-                key={card.status}
-                onClick={() => setActiveTab('ozon')}
-                className={`bg-white p-4 rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-sm cursor-pointer transition-all flex flex-col gap-2 min-w-[150px] ${
-                  ['COMPLETED', 'CANCELLED'].includes(card.status) ? 'opacity-60' : ''
-                }`}
-              >
-                <div className="flex items-center">
-                  <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold tracking-wide truncate ${card.badgeClass}`}>
-                    {card.label}
-                  </span>
-                </div>
-                <div className="text-3xl font-extrabold text-slate-900 leading-none">
-                  {card.count}
-                </div>
+          {!isFunnelCollapsed && (
+            <>
+              <div className="flex flex-wrap gap-3">
+                {funnelData.cards.map((card) => (
+                  <div
+                    key={card.status}
+                    onClick={() => setActiveTab('ozon')}
+                    className={`bg-white p-4 rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-sm cursor-pointer transition-all flex flex-col gap-2 min-w-[150px] ${
+                      ['COMPLETED', 'CANCELLED'].includes(card.status) ? 'opacity-60' : ''
+                    }`}
+                  >
+                    <div className="flex items-center">
+                      <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold tracking-wide truncate ${card.badgeClass}`}>
+                        {card.label}
+                      </span>
+                    </div>
+                    <div className="text-3xl font-extrabold text-slate-900 leading-none">
+                      {card.count}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          
-          <p className="text-xs text-slate-400 font-medium">
-            {funnelData.totalShipments} поставок в {funnelData.totalOrders} заявках
-            {funnelData.lastUpdatedStr && ` · статусы обновлены ${funnelData.lastUpdatedStr}`}
-          </p>
+              
+              <p className="text-xs text-slate-400 font-medium">
+                {funnelData.totalShipments} поставок в {funnelData.totalOrders} заявках
+                {funnelData.lastUpdatedStr && ` · статусы обновлены ${funnelData.lastUpdatedStr}`}
+              </p>
+            </>
+          )}
         </div>
       )}
 
