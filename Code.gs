@@ -70,14 +70,15 @@ function doPost(e) {
           .setMimeType(ContentService.MimeType.JSON);
       }
 
-      const props = PropertiesService.getScriptProperties();
-      const ozonClientId = props.getProperty('global_ozonClientId') || '';
-      const ozonApiKey = props.getProperty('global_ozonApiKey') || '';
+      const cabinets = getOzonCabinets();
+      const first = cabinets.length > 0 ? cabinets[0] : { clientId: '', apiKey: '' };
 
       return ContentService
         .createTextOutput(JSON.stringify({
           status: 'success',
-          data: { ozonClientId: ozonClientId, ozonApiKey: ozonApiKey }
+          // Старые поля (первый кабинет) — обратная совместимость с текущим прокси;
+          // cabinets — новый формат для мультикабинетной синхронизации
+          data: { ozonClientId: first.clientId, ozonApiKey: first.apiKey, cabinets: cabinets }
         }))
         .setMimeType(ContentService.MimeType.JSON);
     }
@@ -2496,6 +2497,37 @@ function setupDailyAnalyticsTrigger() {
   Logger.log('Ежедневная аналитика и очистка сессий установлены');
 }
 
+// ── Мультикабинет Ozon (пункт 8в) ──
+// Возвращает список кабинетов [{name, clientId, apiKey}].
+// Источник — Script Property global_ozonCabinets (JSON-массив).
+// Автомиграция: если списка нет, но есть старая пара global_ozonClientId/global_ozonApiKey — она становится «Кабинет 1».
+function getOzonCabinets() {
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty('global_ozonCabinets') || '';
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter(function(c) { return c && String(c.clientId || '').trim() && String(c.apiKey || '').trim(); })
+          .map(function(c, i) {
+            return {
+              name: String(c.name || '').trim() || ('Кабинет ' + (i + 1)),
+              clientId: String(c.clientId).trim(),
+              apiKey: String(c.apiKey).trim()
+            };
+          });
+      }
+    } catch (e) { /* повреждённый JSON — падаем на миграцию ниже */ }
+  }
+  const oldClientId = (props.getProperty('global_ozonClientId') || '').trim();
+  const oldApiKey = (props.getProperty('global_ozonApiKey') || '').trim();
+  if (oldClientId && oldApiKey) {
+    return [{ name: 'Кабинет 1', clientId: oldClientId, apiKey: oldApiKey }];
+  }
+  return [];
+}
+
 function getGlobalSettings(role) {
   const props = PropertiesService.getScriptProperties();
   const settings = {
@@ -2507,8 +2539,11 @@ function getGlobalSettings(role) {
   // Ключ — только администратору
   if (isAdminRole(role)) {
     settings.geminiKey = props.getProperty('global_geminiKey') || '';
-    settings.ozonClientId = props.getProperty('global_ozonClientId') || '';
-    settings.ozonApiKey = props.getProperty('global_ozonApiKey') || '';
+    const cabinets = getOzonCabinets();
+    settings.ozonCabinets = cabinets;
+    // Старые поля (первый кабинет) — обратная совместимость со старым клиентом
+    settings.ozonClientId = cabinets.length > 0 ? cabinets[0].clientId : '';
+    settings.ozonApiKey = cabinets.length > 0 ? cabinets[0].apiKey : '';
   }
   return settings;
 }
@@ -2530,11 +2565,44 @@ function saveGlobalSettings(data, role) {
   if (data.boxesPerPalletGlobal !== undefined) {
     props.setProperty('global_boxesPerPallet', String(data.boxesPerPalletGlobal));
   }
-  if (data.ozonClientId !== undefined) {
-    props.setProperty('global_ozonClientId', data.ozonClientId);
-  }
-  if (data.ozonApiKey !== undefined) {
-    props.setProperty('global_ozonApiKey', data.ozonApiKey);
+  if (data.ozonCabinets !== undefined) {
+    // Новый формат: массив [{name, clientId, apiKey}] — валидация и запись JSON
+    let cabinets = [];
+    if (Array.isArray(data.ozonCabinets)) {
+      cabinets = data.ozonCabinets
+        .filter(function(c) { return c && String(c.clientId || '').trim() && String(c.apiKey || '').trim(); })
+        .map(function(c, i) {
+          return {
+            name: String(c.name || '').trim() || ('Кабинет ' + (i + 1)),
+            clientId: String(c.clientId).trim(),
+            apiKey: String(c.apiKey).trim()
+          };
+        });
+    }
+    props.setProperty('global_ozonCabinets', JSON.stringify(cabinets));
+    // Старые свойства синхронизируем с первым кабинетом (обратная совместимость)
+    props.setProperty('global_ozonClientId', cabinets.length > 0 ? cabinets[0].clientId : '');
+    props.setProperty('global_ozonApiKey', cabinets.length > 0 ? cabinets[0].apiKey : '');
+  } else {
+    // Старый формат от старого клиента: пара ключей = первый кабинет
+    if (data.ozonClientId !== undefined) {
+      props.setProperty('global_ozonClientId', data.ozonClientId);
+    }
+    if (data.ozonApiKey !== undefined) {
+      props.setProperty('global_ozonApiKey', data.ozonApiKey);
+    }
+    if (data.ozonClientId !== undefined || data.ozonApiKey !== undefined) {
+      // Синхронизируем список кабинетов, чтобы форматы не разъехались
+      const migrated = getOzonCabinets();
+      const newFirst = {
+        name: (migrated.length > 0 && migrated[0].name) ? migrated[0].name : 'Кабинет 1',
+        clientId: (props.getProperty('global_ozonClientId') || '').trim(),
+        apiKey: (props.getProperty('global_ozonApiKey') || '').trim()
+      };
+      const rest = migrated.slice(1);
+      const updated = (newFirst.clientId && newFirst.apiKey) ? [newFirst].concat(rest) : rest;
+      props.setProperty('global_ozonCabinets', JSON.stringify(updated));
+    }
   }
   return getGlobalSettings(role);
 }
