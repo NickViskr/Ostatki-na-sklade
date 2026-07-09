@@ -53,6 +53,8 @@ export const ConfirmModal: React.FC = () => {
   const [otherDist, setOtherDist] = useState<"batch" | "unit">("batch");
 
   const [deliveryDate, setDeliveryDate] = useState<string>("");
+  const [selectedCabinet, setSelectedCabinet] = useState<string>("");
+  const needCabinetChoice = opType === "Расход" && uploadDestination === "Ozon" && ozonCabinetNames.length >= 2;
   const [missingFieldsError, setMissingFieldsError] = useState<string[]>([]);
 
   useEffect(() => {
@@ -64,13 +66,16 @@ export const ConfirmModal: React.FC = () => {
       if (packagingCost === "" && missingFieldsError.includes("«Стоимость упаковки»")) {
         updated.push("«Стоимость упаковки»");
       }
+      if (!selectedCabinet && missingFieldsError.includes("«Магазин Ozon»")) {
+        updated.push("«Магазин Ozon»");
+      }
       const isDifferent = updated.length !== missingFieldsError.length || 
         updated.some((val, i) => val !== missingFieldsError[i]);
       if (isDifferent) {
         setMissingFieldsError(updated);
       }
     }
-  }, [deliveryDate, packagingCost, missingFieldsError]);
+  }, [deliveryDate, packagingCost, selectedCabinet, missingFieldsError]);
 
   const services = useWarehouseStore((state) => state.services);
   const serviceRates = useWarehouseStore((state) => state.serviceRates);
@@ -79,6 +84,7 @@ export const ConfirmModal: React.FC = () => {
     (state) => state.setServiceOrderIds,
   );
   const boxesPerPalletGlobal = useSettingsStore((state) => state.boxesPerPalletGlobal);
+  const ozonCabinetNames = useSettingsStore((state) => state.ozonCabinetNames);
 
   const getServiceCostAt = (serviceId: string, dateStr?: string) => {
     const targetDate = dateStr || new Date().toISOString().split('T')[0];
@@ -364,6 +370,7 @@ export const ConfirmModal: React.FC = () => {
       const missingFields = [];
       if (!deliveryDate) missingFields.push("«Дата поставки на маркетплейс»");
       if (packagingCost === "") missingFields.push("«Стоимость упаковки»");
+      if (needCabinetChoice && !selectedCabinet) missingFields.push("«Магазин Ozon»");
 
       if (missingFields.length > 0) {
         setMissingFieldsError(missingFields);
@@ -377,6 +384,16 @@ export const ConfirmModal: React.FC = () => {
     }
 
     let finalDestination = uploadDestination || "";
+
+    // Магазин Ozon становится частью назначения: «Ozon (Название)».
+    // При одном кабинете подставляется автоматически, при двух — из выбора пользователя.
+    if (opType === "Расход" && finalDestination === "Ozon") {
+      if (needCabinetChoice && selectedCabinet) {
+        finalDestination = `Ozon (${selectedCabinet})`;
+      } else if (ozonCabinetNames.length === 1) {
+        finalDestination = `Ozon (${ozonCabinetNames[0]})`;
+      }
+    }
 
     const extraParts: string[] = [];
 
@@ -804,6 +821,32 @@ export const ConfirmModal: React.FC = () => {
               <div className="text-xs text-indigo-400 mt-2 px-2">
                 Эти суммы будут прибавлены к себестоимости каждого отгружаемого
                 товара согласно выбранному методу распределения.
+              </div>
+            </div>
+          )}
+
+          {needCabinetChoice && (
+            <div className={`bg-white p-6 rounded-3xl border shadow-sm ${
+              missingFieldsError.includes("«Магазин Ozon»") ? "border-red-400" : "border-indigo-100"
+            }`}>
+              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2">
+                Магазин Ozon
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {ozonCabinetNames.map((name) => (
+                  <button
+                    type="button"
+                    key={name}
+                    onClick={() => setSelectedCabinet(name)}
+                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all border ${
+                      selectedCabinet === name
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-200"
+                        : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+                    }`}
+                  >
+                    {name}
+                  </button>
+                ))}
               </div>
             </div>
           )}

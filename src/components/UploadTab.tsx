@@ -111,7 +111,9 @@ export const UploadTab: React.FC = React.memo(() => {
 
     // Set UI state
     setOpType('Расход');
-    setUploadDestination('Ozon');
+    // Поставка знает свой кабинет — подставляем магазин в назначение автоматически
+    const cabName = String(shipment.cabinet || '').trim();
+    setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
     useUIStore.getState().setParsedItems(mappedItems);
     useUIStore.getState().setShowConfirmModal(true);
     toast.success('Отгрузка Ozon подготовлена для оформления');

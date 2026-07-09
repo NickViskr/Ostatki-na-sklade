@@ -831,6 +831,7 @@ export const useWarehouseStore = create<WarehouseState>()(
             useSettingsStore.getState().setOzonClientId(res.data.ozonClientId || '');
             useSettingsStore.getState().setOzonApiKey(res.data.ozonApiKey || '');
             useSettingsStore.getState().setOzonCabinets(Array.isArray(res.data.ozonCabinets) ? res.data.ozonCabinets : []);
+            useSettingsStore.getState().setOzonCabinetNames(Array.isArray(res.data.ozonCabinetNames) ? res.data.ozonCabinetNames : []);
             if (res.data.storageRatePerLiterDay !== undefined) {
               useSettingsStore.getState().setStorageRatePerLiterDay(Number(res.data.storageRatePerLiterDay) || 0);
             }
@@ -884,6 +885,7 @@ export const useWarehouseStore = create<WarehouseState>()(
             useSettingsStore.getState().setOzonClientId(res.data.ozonClientId || '');
             useSettingsStore.getState().setOzonApiKey(res.data.ozonApiKey || '');
             useSettingsStore.getState().setOzonCabinets(Array.isArray(res.data.ozonCabinets) ? res.data.ozonCabinets : []);
+            useSettingsStore.getState().setOzonCabinetNames(Array.isArray(res.data.ozonCabinetNames) ? res.data.ozonCabinetNames : []);
             if (res.data.storageRatePerLiterDay !== undefined) {
               useSettingsStore.getState().setStorageRatePerLiterDay(Number(res.data.storageRatePerLiterDay) || 0);
             }
