@@ -106,4 +106,5 @@ export interface ExternalShipment {
   dropOffWarehouse?: string;
   storageWarehouse?: string;
   timeslot?: string;
+  cabinet?: string;
 }

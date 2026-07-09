@@ -139,6 +139,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
         items,
         postingCount: items.length,
         shipmentDate: firstItem.shipmentDate || '-',
+        cabinet: (firstItem.cabinet || '').trim(),
       };
     });
   }, [externalShipments]);
@@ -239,6 +240,11 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="font-bold text-slate-900 text-lg">Заявка № {group.label}</h3>
+                      {group.cabinet && (
+                        <span className="text-xs font-semibold px-2.5 py-1 bg-sky-50 text-sky-700 rounded-full">
+                          {group.cabinet}
+                        </span>
+                      )}
                       <span className="text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full">
                         Поставок в группе: {group.postingCount}
                       </span>
