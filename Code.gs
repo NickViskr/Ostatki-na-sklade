@@ -2537,6 +2537,10 @@ function getGlobalSettings(role) {
     boxesPerPalletGlobal: Number(props.getProperty('global_boxesPerPallet')) || 0
   };
   // Ключ — только администратору
+  // Названия кабинетов Ozon (без ключей) — всем пользователям,
+  // нужны для выбора кабинета при оформлении отгрузки
+  settings.ozonCabinetNames = getOzonCabinets().map(function(c) { return c.name; });
+  
   if (isAdminRole(role)) {
     settings.geminiKey = props.getProperty('global_geminiKey') || '';
     const cabinets = getOzonCabinets();
