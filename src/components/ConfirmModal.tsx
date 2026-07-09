@@ -54,6 +54,7 @@ export const ConfirmModal: React.FC = () => {
 
   const [deliveryDate, setDeliveryDate] = useState<string>("");
   const [selectedCabinet, setSelectedCabinet] = useState<string>("");
+  const ozonCabinetNames = useSettingsStore((state) => state.ozonCabinetNames);
   const needCabinetChoice = opType === "Расход" && uploadDestination === "Ozon" && ozonCabinetNames.length >= 2;
   const [missingFieldsError, setMissingFieldsError] = useState<string[]>([]);
 
@@ -84,7 +85,6 @@ export const ConfirmModal: React.FC = () => {
     (state) => state.setServiceOrderIds,
   );
   const boxesPerPalletGlobal = useSettingsStore((state) => state.boxesPerPalletGlobal);
-  const ozonCabinetNames = useSettingsStore((state) => state.ozonCabinetNames);
 
   const getServiceCostAt = (serviceId: string, dateStr?: string) => {
     const targetDate = dateStr || new Date().toISOString().split('T')[0];
