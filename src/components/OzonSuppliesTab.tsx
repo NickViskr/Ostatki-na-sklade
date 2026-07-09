@@ -76,6 +76,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [isLoading, setIsLoading] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandedPostings, setExpandedPostings] = useState<Set<string>>(new Set());
+  const [cabinetFilter, setCabinetFilter] = useState<string>('all');
 
   useEffect(() => {
     setIsLoading(true);
@@ -177,6 +178,17 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     });
   }, [groupedShipments]);
 
+  const availableCabinets = useMemo(() => {
+    const set = new Set<string>();
+    groupedShipments.forEach(g => { if (g.cabinet) set.add(g.cabinet); });
+    return Array.from(set).sort();
+  }, [groupedShipments]);
+
+  const filteredGroups = useMemo(() => {
+    if (cabinetFilter === 'all') return sortedGroups;
+    return sortedGroups.filter(g => g.cabinet === cabinetFilter);
+  }, [sortedGroups, cabinetFilter]);
+
   const getStatusSummary = (group: ExternalShipment[]) => {
     const statusCounts: Record<string, number> = {};
     group.forEach(s => {
@@ -211,13 +223,42 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
         </button>
       </div>
 
+      {/* Фильтр по магазинам (виден при двух и более кабинетах) */}
+      {!isLoading && availableCabinets.length >= 2 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setCabinetFilter('all')}
+            className={`px-4 py-2 rounded-xl text-sm font-bold transition-all border ${
+              cabinetFilter === 'all'
+                ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-200'
+                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            Все магазины
+          </button>
+          {availableCabinets.map((name) => (
+            <button
+              key={name}
+              onClick={() => setCabinetFilter(name)}
+              className={`px-4 py-2 rounded-xl text-sm font-bold transition-all border ${
+                cabinetFilter === name
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-200'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Loading state */}
       {isLoading ? (
         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
           <Loader2 size={40} className="animate-spin text-indigo-600 mb-4" />
           <p className="font-semibold">Загрузка заявок Ozon...</p>
         </div>
-      ) : sortedGroups.length === 0 ? (
+      ) : filteredGroups.length === 0 ? (
         /* Empty State */
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-12 text-center text-slate-500">
           <Package size={48} className="mx-auto mb-4 opacity-20 text-indigo-600" />
@@ -229,7 +270,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       ) : (
         /* Groups List */
         <div className="space-y-4">
-          {sortedGroups.map((group) => {
+          {filteredGroups.map((group) => {
             const isGroupExpanded = expandedGroups.has(group.id);
             return (
               <div key={group.id} className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden transition-all duration-300">
