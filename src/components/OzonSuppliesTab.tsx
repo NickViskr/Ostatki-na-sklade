@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { ExternalShipment } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
@@ -12,6 +12,8 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { STATUS_DICT, getStatusDetails, getStatusLabel } from '../lib/ozonStatus';
+import { useUIStore } from '../store/useUIStore';
+import { toast } from 'sonner';
 
 
 const formatStatusDate = (dateStr?: string) => {
@@ -73,6 +75,13 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const checkOzonShipments = useWarehouseStore((state) => state.checkOzonShipments);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
 
+  const skus = useWarehouseStore((state) => state.skus);
+  const markExternalShipment = useWarehouseStore((state) => state.markExternalShipment);
+  const setPendingOzonPostingId = useWarehouseStore((state) => state.setPendingOzonPostingId);
+  const setOpType = useUIStore((state) => state.setOpType);
+  const setUploadDestination = useUIStore((state) => state.setUploadDestination);
+  const askConfirmation = useUIStore((state) => state.askConfirmation);
+
   const [isLoading, setIsLoading] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandedPostings, setExpandedPostings] = useState<Set<string>>(new Set());
@@ -108,6 +117,78 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       return next;
     });
   };
+
+  const handleProcessOzonShipment = useCallback((shipment: ExternalShipment) => {
+    let itemsList: any[] = [];
+    try {
+      itemsList = JSON.parse(shipment.itemsJSON);
+    } catch (e) {
+      toast.error('Ошибка разбора позиций отгрузки');
+      return;
+    }
+
+    if (!Array.isArray(itemsList) || itemsList.length === 0) {
+      toast.error('Отгрузка не содержит позиций');
+      return;
+    }
+
+    const mappedItems = itemsList.map((item: any) => {
+      const barcode = String(item.barcode || '').trim();
+      const offerId = String(item.offerId || '').trim();
+      const quantity = Number(item.quantity) || 0;
+
+      let matchedSku = skus.find(skuItem => {
+        if (barcode && skuItem.ozonBarcode) {
+          return skuItem.ozonBarcode.trim() === barcode;
+        }
+        return false;
+      });
+
+      if (!matchedSku && offerId) {
+        matchedSku = skus.find(skuItem => skuItem.sku.toLowerCase() === offerId.toLowerCase());
+      }
+
+      if (matchedSku) {
+        return {
+          article: matchedSku.sku,
+          quantity,
+          price: matchedSku.price || 0,
+          status: 'ok' as const
+        };
+      } else {
+        return {
+          article: offerId || barcode || 'НЕИЗВЕСТНО',
+          quantity,
+          price: 0,
+          status: 'unknown' as const,
+          errorMsg: 'SKU не найден по штрихкоду или артикулу Ozon'
+        };
+      }
+    });
+
+    setPendingOzonPostingId(shipment.postingId);
+
+    setOpType('Расход');
+    // Поставка знает свой кабинет — магазин подставляется в назначение автоматически
+    const cabName = String(shipment.cabinet || '').trim();
+    setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
+    useUIStore.getState().setParsedItems(mappedItems);
+    useUIStore.getState().setShowConfirmModal(true);
+    toast.success('Отгрузка Ozon подготовлена для оформления');
+  }, [skus, setPendingOzonPostingId, setOpType, setUploadDestination]);
+
+  const handleIgnoreOzonShipment = useCallback((postingId: string) => {
+    askConfirmation(
+      "Игнорировать отгрузку Ozon?",
+      `Отгрузка №${postingId} будет скрыта и помечена как проигнорированная.`,
+      async () => {
+        const success = await markExternalShipment(postingId, 'ignored');
+        if (success) {
+          toast.success(`Отгрузка №${postingId} проигнорирована`);
+        }
+      }
+    );
+  }, [askConfirmation, markExternalShipment]);
 
   const groupedShipments = useMemo(() => {
     const groupsMap = new Map<string, ExternalShipment[]>();
@@ -359,6 +440,24 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                 </div>
                                 
                                 <div className="flex items-center gap-4 shrink-0 justify-between lg:justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-50">
+                                  {s.status === 'new' && (
+                                    <div className="flex gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); handleProcessOzonShipment(s); }}
+                                        className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-xs hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer"
+                                      >
+                                        Оформить
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); handleIgnoreOzonShipment(s.postingId); }}
+                                        className="bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-bold text-xs hover:bg-slate-300 transition-all cursor-pointer"
+                                      >
+                                        Игнорировать
+                                      </button>
+                                    </div>
+                                  )}
                                   <div className="text-left lg:text-right">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Статус Ozon</div>
                                     <div className="flex flex-wrap items-center gap-2">

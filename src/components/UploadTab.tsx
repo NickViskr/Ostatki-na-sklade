@@ -1,6 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { 
-  FileText, 
   Upload, 
   Zap, 
   Loader2,
@@ -10,8 +9,7 @@ import {
   Settings2,
   History,
   X,
-  Trash2,
-  RefreshCw
+  Trash2
 } from 'lucide-react';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
@@ -43,94 +41,11 @@ export const UploadTab: React.FC = React.memo(() => {
 
   const stock = useWarehouseStore((state) => state.stock);
   const skus = useWarehouseStore((state) => state.skus);
-  const externalShipments = useWarehouseStore((state) => state.externalShipments);
-  const checkOzonShipments = useWarehouseStore((state) => state.checkOzonShipments);
-  const markExternalShipment = useWarehouseStore((state) => state.markExternalShipment);
-  const setPendingOzonPostingId = useWarehouseStore((state) => state.setPendingOzonPostingId);
 
   const [isAddingDest, setIsAddingDest] = useState(false);
   const [newDest, setNewDest] = useState('');
   const [isPromptExpanded, setIsPromptExpanded] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-
-  const newShipments = useMemo(() => {
-    return externalShipments.filter(s => s.status === 'new');
-  }, [externalShipments]);
-
-  const handleProcessOzonShipment = useCallback((shipment: any) => {
-    let itemsList: any[] = [];
-    try {
-      itemsList = JSON.parse(shipment.itemsJSON);
-    } catch (e) {
-      toast.error('Ошибка разбора позиций отгрузки');
-      return;
-    }
-
-    if (!Array.isArray(itemsList) || itemsList.length === 0) {
-      toast.error('Отгрузка не содержит позиций');
-      return;
-    }
-
-    const mappedItems = itemsList.map((item: any) => {
-      const barcode = String(item.barcode || '').trim();
-      const offerId = String(item.offerId || '').trim();
-      const quantity = Number(item.quantity) || 0;
-
-      // Find matching SKU
-      let matchedSku = skus.find(skuItem => {
-        if (barcode && skuItem.ozonBarcode) {
-          return skuItem.ozonBarcode.trim() === barcode;
-        }
-        return false;
-      });
-
-      if (!matchedSku && offerId) {
-        matchedSku = skus.find(skuItem => skuItem.sku.toLowerCase() === offerId.toLowerCase());
-      }
-
-      if (matchedSku) {
-        return {
-          article: matchedSku.sku,
-          quantity,
-          price: matchedSku.price || 0,
-          status: 'ok' as const
-        };
-      } else {
-        return {
-          article: offerId || barcode || 'НЕИЗВЕСТНО',
-          quantity,
-          price: 0,
-          status: 'unknown' as const,
-          errorMsg: 'SKU не найден по штрихкоду или артикулу Ozon'
-        };
-      }
-    });
-
-    // Save posting ID as pending
-    setPendingOzonPostingId(shipment.postingId);
-
-    // Set UI state
-    setOpType('Расход');
-    // Поставка знает свой кабинет — подставляем магазин в назначение автоматически
-    const cabName = String(shipment.cabinet || '').trim();
-    setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
-    useUIStore.getState().setParsedItems(mappedItems);
-    useUIStore.getState().setShowConfirmModal(true);
-    toast.success('Отгрузка Ozon подготовлена для оформления');
-  }, [skus, setPendingOzonPostingId, setOpType, setUploadDestination]);
-
-  const handleIgnoreOzonShipment = useCallback((postingId: string) => {
-    askConfirmation(
-      "Игнорировать отгрузку Ozon?",
-      `Отгрузка №${postingId} будет скрыта и помечена как проигнорированная.`,
-      async () => {
-        const success = await markExternalShipment(postingId, 'ignored');
-        if (success) {
-          toast.success(`Отгрузка №${postingId} проигнорирована`);
-        }
-      }
-    );
-  }, [askConfirmation, markExternalShipment]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -211,77 +126,7 @@ export const UploadTab: React.FC = React.memo(() => {
         <p className="text-slate-500">Используйте ИИ для автоматического распознавания товаров или подключите автоматический импорт</p>
       </div>
 
-      {/* Ozon Seller Shipment Checking */}
-      <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-6">
-        <div className="flex items-center justify-between flex-wrap gap-4">
-          <div className="space-y-1">
-            <h3 className="text-xl font-bold flex items-center gap-2 text-sky-600">
-              <Zap size={22} className="text-sky-500 fill-sky-500" />
-              Отгрузки Ozon Seller
-            </h3>
-            <p className="text-slate-500 text-sm">Проверка и автоматическое оформление новых FBO поставок Ozon</p>
-          </div>
-          <button
-            onClick={checkOzonShipments}
-            disabled={isProcessing}
-            className="bg-sky-500 text-white px-6 py-3 rounded-xl font-bold hover:bg-sky-600 disabled:opacity-50 transition-all flex items-center gap-2 shadow-lg shadow-sky-100 cursor-pointer"
-          >
-            {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
-            Проверить отгрузки Ozon
-          </button>
-        </div>
 
-        {newShipments.length > 0 && (
-          <div className="space-y-4 border-t border-slate-100 pt-6">
-            <h4 className="text-sm font-bold text-slate-500 uppercase">Обнаружены новые отгрузки Ozon</h4>
-            <div className="grid gap-4">
-              {newShipments.map((shipment) => {
-                let itemCount = 0;
-                try {
-                  const items = JSON.parse(shipment.itemsJSON);
-                  if (Array.isArray(items)) {
-                    itemCount = items.reduce((acc: number, item: any) => acc + (Number(item.quantity) || 0), 0);
-                  }
-                } catch (e) {}
-
-                return (
-                  <div key={shipment.postingId} className="flex items-center justify-between p-5 bg-slate-50 rounded-2xl border border-slate-100 flex-wrap gap-4">
-                    <div className="space-y-1">
-                      <div className="font-bold text-slate-700 text-sm flex items-center gap-2">
-                        <span>Отгрузка №{shipment.postingId}</span>
-                        {shipment.transGroupInfo && (
-                          <span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded">
-                            {shipment.transGroupInfo}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-xs text-slate-500 flex gap-3">
-                        <span>Дата отгрузки: {shipment.shipmentDate || 'Не указана'}</span>
-                        <span>•</span>
-                        <span>Количество: {itemCount} шт</span>
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => handleProcessOzonShipment(shipment)}
-                        className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-xs hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer"
-                      >
-                        Оформить
-                      </button>
-                      <button
-                        onClick={() => handleIgnoreOzonShipment(shipment.postingId)}
-                        className="bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-bold text-xs hover:bg-slate-300 transition-all cursor-pointer"
-                      >
-                        Игнорировать
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
 
       <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-8">
         <div className="flex items-center gap-4 bg-slate-50 p-2 rounded-2xl border border-slate-100">
