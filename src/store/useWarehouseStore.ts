@@ -92,7 +92,7 @@ interface WarehouseState {
   handleHardDeleteArchivedItems: (archiveIds: string[]) => Promise<boolean>;
   externalShipments: ExternalShipment[];
   checkOzonShipments: () => Promise<void>;
-  markExternalShipment: (postingId: string, status: 'processed' | 'ignored') => Promise<boolean>;
+  markExternalShipment: (postingId: string, status: 'processed' | 'ignored' | 'new') => Promise<boolean>;
   fetchExternalShipments: () => Promise<void>;
   pendingOzonPostingIds: string[];
   setPendingOzonPostingIds: (ids: string[]) => void;

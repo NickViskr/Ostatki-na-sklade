@@ -224,6 +224,23 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     );
   }, [askConfirmation, markExternalShipment]);
 
+  const handleReturnGroupToNew = useCallback((group: any) => {
+    const donePostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
+      p => p.status === 'processed' || p.status === 'ignored'
+    );
+    if (donePostings.length === 0) return;
+    askConfirmation(
+      "Вернуть заявку в новые?",
+      `Все поставки заявки № ${group.label} (${donePostings.length} шт.) снова станут новыми — их можно будет оформить или игнорировать заново. Убедитесь, что связанная отгрузка удалена из Истории, иначе при повторном оформлении получится дубль расхода.`,
+      async () => {
+        for (const p of donePostings) {
+          await markExternalShipment(p.postingId, 'new');
+        }
+        toast.success(`Заявка № ${group.label} возвращена в новые`);
+      }
+    );
+  }, [askConfirmation, markExternalShipment]);
+
   const groupedShipments = useMemo(() => {
     const groupsMap = new Map<string, ExternalShipment[]>();
     
@@ -433,6 +450,15 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                           Игнорировать
                         </button>
                       </div>
+                    )}
+                    {!group.items.some((i) => i.status === 'new') &&
+                      group.items.some((i) => i.status === 'processed' || i.status === 'ignored') && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleReturnGroupToNew(group); }}
+                        className="bg-white border border-amber-400 text-amber-600 px-4 py-2 rounded-xl font-bold text-sm hover:bg-amber-50 transition-all cursor-pointer"
+                      >
+                        Вернуть в новые
+                      </button>
                     )}
                     <div className="text-slate-400 bg-slate-50 hover:bg-slate-100 p-2 rounded-xl transition-colors">
                       {isGroupExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
