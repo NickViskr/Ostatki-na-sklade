@@ -96,8 +96,14 @@ export const Dashboard: React.FC = React.memo(() => {
       return null;
     }
 
+    // Только актуальные поставки (внутренний статус new) — как на вкладке Ozon по умолчанию
+    const actualShipments = externalShipments.filter((s) => s.status === 'new');
+    if (actualShipments.length === 0) {
+      return null;
+    }
+
     const counts: Record<string, number> = {};
-    externalShipments.forEach((s) => {
+    actualShipments.forEach((s) => {
       const statusKey = (s.ozonStatus || 'DATA_FILLING').toUpperCase();
       counts[statusKey] = (counts[statusKey] || 0) + 1;
     });
@@ -134,7 +140,7 @@ export const Dashboard: React.FC = React.memo(() => {
 
     // M = number of unique orders
     const uniqueOrders = new Set<string>();
-    externalShipments.forEach((s) => {
+    actualShipments.forEach((s) => {
       let key = '';
       if (s.orderId && s.orderId.trim()) {
         key = `orderId_${s.orderId.trim()}`;
@@ -148,7 +154,7 @@ export const Dashboard: React.FC = React.memo(() => {
 
     // Максимальный валидный ozonStatusDate по всем строкам
     let maxDate: Date | null = null;
-    for (const s of externalShipments) {
+    for (const s of actualShipments) {
       if (s.ozonStatusDate) {
         const d = new Date(s.ozonStatusDate);
         if (!isNaN(d.getTime())) {
@@ -169,7 +175,7 @@ export const Dashboard: React.FC = React.memo(() => {
 
     return {
       cards: orderedCards,
-      totalShipments: externalShipments.length,
+      totalShipments: actualShipments.length,
       totalOrders: uniqueOrders.size,
       lastUpdatedStr: maxDateStr
     };
