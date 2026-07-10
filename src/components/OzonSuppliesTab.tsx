@@ -76,6 +76,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
 
   const skus = useWarehouseStore((state) => state.skus);
+  const stock = useWarehouseStore((state) => state.stock);
   const markExternalShipment = useWarehouseStore((state) => state.markExternalShipment);
   const setPendingOzonPostingIds = useWarehouseStore((state) => state.setPendingOzonPostingIds);
   const setOpType = useUIStore((state) => state.setOpType);
@@ -158,10 +159,16 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       }
 
       if (matchedSku) {
+        // Себестоимость расхода — средняя со склада (капитализация ÷ количество),
+        // справочная цена из SKU Базы только как запасной вариант
+        const stockItem = stock.find(st => st.article === matchedSku.sku);
+        const unitCost = stockItem && stockItem.quantity > 0
+          ? stockItem.avgCost
+          : (matchedSku.price || 0);
         return {
           article: matchedSku.sku,
           quantity,
-          price: matchedSku.price || 0,
+          price: unitCost,
           status: 'ok' as const
         };
       } else {
@@ -197,7 +204,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     useUIStore.getState().setParsedItems(mappedItems);
     useUIStore.getState().setShowConfirmModal(true);
     toast.success(`Заявка № ${group.label}: подготовлено поставок — ${newPostings.length}`);
-  }, [skus, setPendingOzonPostingIds, setOpType, setUploadDestination]);
+  }, [skus, stock, setPendingOzonPostingIds, setOpType, setUploadDestination]);
 
   const handleIgnoreOzonGroup = useCallback((group: any) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
