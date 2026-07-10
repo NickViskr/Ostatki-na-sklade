@@ -3431,8 +3431,8 @@ function updateExternalShipmentStatus(postingId, status) {
   if (!postingId) {
     throw new Error('PostingID is required');
   }
-  if (status !== 'processed' && status !== 'ignored') {
-    throw new Error('Invalid status. Allowed values: processed, ignored');
+  if (status !== 'processed' && status !== 'ignored' && status !== 'new') {
+    throw new Error('Invalid status. Allowed values: processed, ignored, new');
   }
   const sheet = getExternalShipmentsSheet();
   const data = sheet.getDataRange().getValues();
