@@ -275,7 +275,7 @@ function doPost(e) {
         result = getExternalShipments();
         break;
       case 'updateExternalShipmentStatus':
-        result = updateExternalShipmentStatus(data.postingId, data.status);
+        result = updateExternalShipmentStatus(data.postingId, data.status, data.transGroupInfo);
         break;
       default:
         throw new Error('Unknown action: ' + action);
@@ -3427,7 +3427,7 @@ function getExternalShipments() {
   return shipments;
 }
 
-function updateExternalShipmentStatus(postingId, status) {
+function updateExternalShipmentStatus(postingId, status, transGroupInfo) {
   if (!postingId) {
     throw new Error('PostingID is required');
   }
@@ -3436,12 +3436,23 @@ function updateExternalShipmentStatus(postingId, status) {
   }
   const sheet = getExternalShipmentsSheet();
   const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const statusIdx = headers.indexOf('Статус');
+  const transGroupInfoIdx = headers.indexOf('TransGroupInfo');
+  if (postingIdIdx === -1 || statusIdx === -1) {
+    throw new Error('Required columns not found in Внешние отгрузки');
+  }
   
   const targetId = String(postingId).trim().toLowerCase();
   for (let i = 1; i < data.length; i++) {
-    const currentId = String(data[i][0]).trim().toLowerCase();
+    const currentId = String(data[i][postingIdIdx]).trim().toLowerCase();
     if (currentId === targetId) {
-      sheet.getRange(i + 1, 4).setValue(status);
+      sheet.getRange(i + 1, statusIdx + 1).setValue(status);
+      // Привязка к транзакциям: пишется только если параметр передан
+      if (transGroupInfo !== undefined && transGroupInfo !== null && transGroupInfoIdx >= 0) {
+        sheet.getRange(i + 1, transGroupInfoIdx + 1).setValue(String(transGroupInfo));
+      }
       SpreadsheetApp.flush();
       return { success: true };
     }
