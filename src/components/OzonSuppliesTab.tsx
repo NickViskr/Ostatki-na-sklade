@@ -77,7 +77,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
 
   const skus = useWarehouseStore((state) => state.skus);
   const markExternalShipment = useWarehouseStore((state) => state.markExternalShipment);
-  const setPendingOzonPostingId = useWarehouseStore((state) => state.setPendingOzonPostingId);
+  const setPendingOzonPostingIds = useWarehouseStore((state) => state.setPendingOzonPostingIds);
   const setOpType = useUIStore((state) => state.setOpType);
   const setUploadDestination = useUIStore((state) => state.setUploadDestination);
   const askConfirmation = useUIStore((state) => state.askConfirmation);
@@ -118,21 +118,30 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     });
   };
 
-  const handleProcessOzonShipment = useCallback((shipment: ExternalShipment) => {
-    let itemsList: any[] = [];
-    try {
-      itemsList = JSON.parse(shipment.itemsJSON);
-    } catch (e) {
-      toast.error('Ошибка разбора позиций отгрузки');
+  const handleProcessOzonGroup = useCallback((group: any) => {
+    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
+    if (newPostings.length === 0) {
+      toast.error('В заявке нет новых поставок для оформления');
       return;
     }
 
-    if (!Array.isArray(itemsList) || itemsList.length === 0) {
-      toast.error('Отгрузка не содержит позиций');
+    const rawItems: any[] = [];
+    for (const posting of newPostings) {
+      try {
+        const list = JSON.parse(posting.itemsJSON);
+        if (Array.isArray(list)) rawItems.push(...list);
+      } catch (e) {
+        toast.error(`Ошибка разбора позиций поставки №${posting.postingId}`);
+        return;
+      }
+    }
+
+    if (rawItems.length === 0) {
+      toast.error('Поставки заявки не содержат позиций');
       return;
     }
 
-    const mappedItems = itemsList.map((item: any) => {
+    const mapped = rawItems.map((item: any) => {
       const barcode = String(item.barcode || '').trim();
       const offerId = String(item.offerId || '').trim();
       const quantity = Number(item.quantity) || 0;
@@ -166,26 +175,44 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       }
     });
 
-    setPendingOzonPostingId(shipment.postingId);
+    // Одинаковые артикулы из разных поставок заявки суммируются в одну строку
+    const aggregated = new Map<string, any>();
+    for (const item of mapped) {
+      const key = `${item.article}|${item.status}`;
+      const existing = aggregated.get(key);
+      if (existing) {
+        existing.quantity += item.quantity;
+      } else {
+        aggregated.set(key, { ...item });
+      }
+    }
+    const mappedItems = Array.from(aggregated.values());
+
+    setPendingOzonPostingIds(newPostings.map(p => p.postingId));
 
     setOpType('Расход');
-    // Поставка знает свой кабинет — магазин подставляется в назначение автоматически
-    const cabName = String(shipment.cabinet || '').trim();
+    // Заявка знает свой магазин — подставляем в назначение автоматически
+    const cabName = String(group.cabinet || '').trim();
     setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
     useUIStore.getState().setParsedItems(mappedItems);
     useUIStore.getState().setShowConfirmModal(true);
-    toast.success('Отгрузка Ozon подготовлена для оформления');
-  }, [skus, setPendingOzonPostingId, setOpType, setUploadDestination]);
+    toast.success(`Заявка № ${group.label}: подготовлено поставок — ${newPostings.length}`);
+  }, [skus, setPendingOzonPostingIds, setOpType, setUploadDestination]);
 
-  const handleIgnoreOzonShipment = useCallback((postingId: string) => {
+  const handleIgnoreOzonGroup = useCallback((group: any) => {
+    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
+    if (newPostings.length === 0) {
+      toast.error('В заявке нет новых поставок');
+      return;
+    }
     askConfirmation(
-      "Игнорировать отгрузку Ozon?",
-      `Отгрузка №${postingId} будет скрыта и помечена как проигнорированная.`,
+      "Игнорировать заявку Ozon?",
+      `Все новые поставки заявки № ${group.label} (${newPostings.length} шт.) будут помечены как проигнорированные.`,
       async () => {
-        const success = await markExternalShipment(postingId, 'ignored');
-        if (success) {
-          toast.success(`Отгрузка №${postingId} проигнорирована`);
+        for (const p of newPostings) {
+          await markExternalShipment(p.postingId, 'ignored');
         }
+        toast.success(`Заявка № ${group.label} проигнорирована`);
       }
     );
   }, [askConfirmation, markExternalShipment]);
@@ -384,6 +411,22 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                         {getStatusSummary(group.items)}
                       </div>
                     </div>
+                    {group.items.some((i) => i.status === 'new') && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleProcessOzonGroup(group); }}
+                          className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer"
+                        >
+                          Оформить
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleIgnoreOzonGroup(group); }}
+                          className="bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-slate-300 transition-all cursor-pointer"
+                        >
+                          Игнорировать
+                        </button>
+                      </div>
+                    )}
                     <div className="text-slate-400 bg-slate-50 hover:bg-slate-100 p-2 rounded-xl transition-colors">
                       {isGroupExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
                     </div>
@@ -440,24 +483,6 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                 </div>
                                 
                                 <div className="flex items-center gap-4 shrink-0 justify-between lg:justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-50">
-                                  {s.status === 'new' && (
-                                    <div className="flex gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); handleProcessOzonShipment(s); }}
-                                        className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-xs hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer"
-                                      >
-                                        Оформить
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); handleIgnoreOzonShipment(s.postingId); }}
-                                        className="bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-bold text-xs hover:bg-slate-300 transition-all cursor-pointer"
-                                      >
-                                        Игнорировать
-                                      </button>
-                                    </div>
-                                  )}
                                   <div className="text-left lg:text-right">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Статус Ozon</div>
                                     <div className="flex flex-wrap items-center gap-2">

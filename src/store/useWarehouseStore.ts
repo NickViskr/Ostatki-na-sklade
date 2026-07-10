@@ -94,8 +94,8 @@ interface WarehouseState {
   checkOzonShipments: () => Promise<void>;
   markExternalShipment: (postingId: string, status: 'processed' | 'ignored') => Promise<boolean>;
   fetchExternalShipments: () => Promise<void>;
-  pendingOzonPostingId: string | null;
-  setPendingOzonPostingId: (id: string | null) => void;
+  pendingOzonPostingIds: string[];
+  setPendingOzonPostingIds: (ids: string[]) => void;
   getEffectiveAvailability: (article: string) => number;
   getEffectiveAvgCost: (article: string) => number;
   devMode: boolean;
@@ -122,7 +122,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   lastSyncTime: null,
   hasMoreTransactions: false,
   externalShipments: [],
-  pendingOzonPostingId: null,
+  pendingOzonPostingIds: [],
   devMode: typeof localStorage !== 'undefined' && localStorage.getItem('devMode') === 'true',
 
   getEffectiveAvailability: (article) => {
@@ -170,7 +170,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     }
   },
 
-  setPendingOzonPostingId: (pendingOzonPostingId) => set({ pendingOzonPostingId }),
+  setPendingOzonPostingIds: (pendingOzonPostingIds) => set({ pendingOzonPostingIds }),
   setHasMoreTransactions: (hasMoreTransactions) => set({ hasMoreTransactions }),
   
   setGasError: (gasError) => set({ gasError }),
@@ -564,10 +564,12 @@ export const useWarehouseStore = create<WarehouseState>()(
         
         toast.success('Операция успешно записана в Google Таблицу!');
         
-        const pendingOzonPostingId = get().pendingOzonPostingId;
-        if (pendingOzonPostingId) {
-          get().markExternalShipment(pendingOzonPostingId, 'processed');
-          set({ pendingOzonPostingId: null });
+        const pendingOzonPostingIds = get().pendingOzonPostingIds;
+        if (pendingOzonPostingIds.length > 0) {
+          for (const pid of pendingOzonPostingIds) {
+            await get().markExternalShipment(pid, 'processed');
+          }
+          set({ pendingOzonPostingIds: [] });
         }
         
         // No background fetches needed anymore since we returned all affected data!
