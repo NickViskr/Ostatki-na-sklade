@@ -122,7 +122,7 @@ export const UploadTab: React.FC = React.memo(() => {
       className="max-w-4xl mx-auto space-y-8 tab-enter"
     >
       <div className="text-center space-y-2">
-        <h2 className="text-3xl font-bold">Загрузка накладной</h2>
+        <h2 className="text-3xl font-bold">Ручная загрузка накладной</h2>
         <p className="text-slate-500">Используйте ИИ для автоматического распознавания товаров или подключите автоматический импорт</p>
       </div>
 

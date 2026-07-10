@@ -392,7 +392,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       {/* Top Header */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div className="space-y-2">
-          <h2 className="text-3xl font-black text-slate-900 tracking-tight">Поставки Ozon</h2>
+          <h2 className="text-3xl font-black text-slate-900 tracking-tight">Поставки Озон</h2>
           <p className="text-slate-500 font-medium">Список заявок на поставку Ozon</p>
         </div>
         <button

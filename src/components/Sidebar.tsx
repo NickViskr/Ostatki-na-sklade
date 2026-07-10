@@ -57,14 +57,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
 
   const menuItems = [
     { id: 'dashboard', label: 'Склад', icon: LayoutDashboard },
-    { id: 'upload', label: 'Загрузка', icon: FileUp },
+    { id: 'upload', label: 'Ручная загрузка', icon: FileUp },
     { id: 'manual', label: 'Списание', icon: Database },
     { id: 'shipment', label: 'Отгрузка', icon: Truck },
     { id: 'history', label: 'История', icon: History },
     { id: 'skus', label: 'SKU База', icon: BookOpen },
     { id: 'directory', label: 'Справочник', icon: Book },
     ...(isCurrentUserAdmin ? [
-      { id: 'ozon', label: 'Ozon', icon: Package },
+      { id: 'ozon', label: 'Поставки Озон', icon: Package },
       { id: 'users', label: 'Пользователи', icon: Users },
       { id: 'deleted', label: 'Удаленное', icon: Trash2 },
       { id: 'settings', label: 'Настройки', icon: Settings2 }
