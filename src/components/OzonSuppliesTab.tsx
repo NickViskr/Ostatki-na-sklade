@@ -87,6 +87,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandedPostings, setExpandedPostings] = useState<Set<string>>(new Set());
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
+  const [showProcessed, setShowProcessed] = useState(false);
 
   useEffect(() => {
     setIsLoading(true);
@@ -347,6 +348,18 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     return sortedGroups.filter(g => g.cabinet === cabinetFilter);
   }, [sortedGroups, cabinetFilter]);
 
+  // Обработанные = заявки без единой новой поставки (оформлены или проигнорированы)
+  const processedGroupsCount = useMemo(
+    () => filteredGroups.filter(g => !g.items.some((i) => i.status === 'new')).length,
+    [filteredGroups]
+  );
+
+  // По умолчанию видны только актуальные заявки (есть хотя бы одна новая поставка)
+  const displayedGroups = useMemo(() => {
+    if (showProcessed) return filteredGroups;
+    return filteredGroups.filter(g => g.items.some((i) => i.status === 'new'));
+  }, [filteredGroups, showProcessed]);
+
   const getStatusSummary = (group: ExternalShipment[]) => {
     const statusCounts: Record<string, number> = {};
     group.forEach(s => {
@@ -410,13 +423,26 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
         </div>
       )}
 
+      {/* Показ обработанных заявок */}
+      {!isLoading && processedGroupsCount > 0 && (
+        <label className="flex items-center gap-2 text-sm font-bold text-slate-500 cursor-pointer select-none w-fit">
+          <input
+            type="checkbox"
+            checked={showProcessed}
+            onChange={(e) => setShowProcessed(e.target.checked)}
+            className="w-4 h-4 rounded accent-indigo-600"
+          />
+          Показать обработанные заявки ({processedGroupsCount})
+        </label>
+      )}
+
       {/* Loading state */}
       {isLoading ? (
         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
           <Loader2 size={40} className="animate-spin text-indigo-600 mb-4" />
           <p className="font-semibold">Загрузка заявок Ozon...</p>
         </div>
-      ) : filteredGroups.length === 0 ? (
+      ) : displayedGroups.length === 0 ? (
         /* Empty State */
         <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-12 text-center text-slate-500">
           <Package size={48} className="mx-auto mb-4 opacity-20 text-indigo-600" />
@@ -428,7 +454,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       ) : (
         /* Groups List */
         <div className="space-y-4">
-          {filteredGroups.map((group) => {
+          {displayedGroups.map((group) => {
             const isGroupExpanded = expandedGroups.has(group.id);
             return (
               <div key={group.id} className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden transition-all duration-300">
