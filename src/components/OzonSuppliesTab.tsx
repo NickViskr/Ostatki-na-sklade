@@ -159,12 +159,10 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       }
 
       if (matchedSku) {
-        // Себестоимость расхода — средняя со склада (капитализация ÷ количество),
-        // справочная цена из SKU Базы только как запасной вариант
-        const stockItem = stock.find(st => st.article === matchedSku.sku);
-        const unitCost = stockItem && stockItem.quantity > 0
-          ? stockItem.avgCost
-          : (matchedSku.price || 0);
+        // Себестоимость через хелпер стора: виртуальный комплект = сумма компонентов,
+        // обычный товар = средняя со склада; справочная цена SKU — запасной вариант
+        const effectiveCost = useWarehouseStore.getState().getEffectiveAvgCost(matchedSku.sku);
+        const unitCost = effectiveCost > 0 ? effectiveCost : (matchedSku.price || 0);
         return {
           article: matchedSku.sku,
           quantity,
@@ -195,16 +193,44 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     }
     const mappedItems = Array.from(aggregated.values());
 
-    setPendingOzonPostingIds(newPostings.map(p => p.postingId));
+    const proceedToModal = () => {
+      setPendingOzonPostingIds(newPostings.map(p => p.postingId));
 
-    setOpType('Расход');
-    // Заявка знает свой магазин — подставляем в назначение автоматически
-    const cabName = String(group.cabinet || '').trim();
-    setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
-    useUIStore.getState().setParsedItems(mappedItems);
-    useUIStore.getState().setShowConfirmModal(true);
-    toast.success(`Заявка № ${group.label}: подготовлено поставок — ${newPostings.length}`);
-  }, [skus, stock, setPendingOzonPostingIds, setOpType, setUploadDestination]);
+      setOpType('Расход');
+      // Заявка знает свой магазин — подставляем в назначение автоматически
+      const cabName = String(group.cabinet || '').trim();
+      setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
+      useUIStore.getState().setParsedItems(mappedItems);
+      useUIStore.getState().setShowConfirmModal(true);
+      toast.success(`Заявка № ${group.label}: подготовлено поставок — ${newPostings.length}`);
+    };
+
+    // Проверка наличия сразу при оформлении (комплекты — через доступность по компонентам)
+    const requiredByArticle: Record<string, number> = {};
+    for (const it of mappedItems) {
+      if (it.status === 'ok') {
+        requiredByArticle[it.article] = (requiredByArticle[it.article] || 0) + it.quantity;
+      }
+    }
+    const shortages: string[] = [];
+    for (const [article, reqQty] of Object.entries(requiredByArticle)) {
+      const available = useWarehouseStore.getState().getEffectiveAvailability(article);
+      if (reqQty > available) {
+        shortages.push(`${article} — нужно ${reqQty}, доступно ${available}`);
+      }
+    }
+
+    if (shortages.length > 0) {
+      askConfirmation(
+        "Товара не хватает на складе",
+        `Возможно, эта заявка дублирует отгрузку, уже оформленную вручную — тогда её стоит «Игнорировать». Дефицит: ${shortages.join('; ')}. Открыть оформление всё равно?`,
+        () => proceedToModal()
+      );
+      return;
+    }
+
+    proceedToModal();
+  }, [skus, stock, setPendingOzonPostingIds, setOpType, setUploadDestination, askConfirmation]);
 
   const handleIgnoreOzonGroup = useCallback((group: any) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
