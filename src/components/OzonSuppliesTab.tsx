@@ -213,18 +213,33 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
         requiredByArticle[it.article] = (requiredByArticle[it.article] || 0) + it.quantity;
       }
     }
-    const shortages: string[] = [];
+    const shortages: Array<{ article: string; req: number; avail: number }> = [];
     for (const [article, reqQty] of Object.entries(requiredByArticle)) {
       const available = useWarehouseStore.getState().getEffectiveAvailability(article);
       if (reqQty > available) {
-        shortages.push(`${article} — нужно ${reqQty}, доступно ${available}`);
+        shortages.push({ article, req: reqQty, avail: available });
       }
     }
 
     if (shortages.length > 0) {
       askConfirmation(
         "Товара не хватает на складе",
-        `Возможно, эта заявка дублирует отгрузку, уже оформленную вручную — тогда её стоит «Игнорировать». Дефицит: ${shortages.join('; ')}. Открыть оформление всё равно?`,
+        (
+          <>
+            <span className="block">
+              Возможно, заявка уже оформлена вручную — тогда нажмите «Игнорировать».
+            </span>
+            <span className="block mt-3 font-bold text-slate-700">Не хватает:</span>
+            {shortages.map((s) => (
+              <span key={s.article} className="block mt-1">
+                <b className="text-slate-900">{s.article}</b> — нужно{' '}
+                <b className="text-red-600">{s.req} шт.</b>, доступно{' '}
+                <b className="text-slate-900">{s.avail} шт.</b>
+              </span>
+            ))}
+            <span className="block mt-3">Открыть оформление всё равно?</span>
+          </>
+        ),
         () => proceedToModal()
       );
       return;

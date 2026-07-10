@@ -5,7 +5,7 @@ import { AlertCircle, X } from 'lucide-react';
 interface ConfirmDialogProps {
   show: boolean;
   title: string;
-  message: string;
+  message: React.ReactNode;
   onConfirm: () => void;
   onCancel: () => void;
   confirmLabel?: string;

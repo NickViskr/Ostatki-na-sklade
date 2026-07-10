@@ -1,3 +1,4 @@
+import React from 'react';
 import { create } from 'zustand';
 import { Transaction, SKUItem, ParsedItem, RecognitionHistoryItem } from '../types';
 
@@ -96,11 +97,11 @@ interface UIState {
   confirmDialog: {
     show: boolean;
     title: string;
-    message: string;
+    message: React.ReactNode;
     onConfirm: () => void;
   };
   setConfirmDialog: (dialog: any) => void;
-  askConfirmation: (title: string, message: string, onConfirm: () => void) => void;
+  askConfirmation: (title: string, message: React.ReactNode, onConfirm: () => void) => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
