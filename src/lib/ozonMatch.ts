@@ -122,6 +122,10 @@ export function matchOzonGroup(
   let duplicateCount = 0;
 
   const orderArticles = Array.from(orderMap.keys()).sort();
+  const parsedOrderDate = parseAppDate(shipmentDate);
+  const noDateMode = !parsedOrderDate && newPostings.some(
+    p => String(p.ozonStatus || '').toUpperCase() === 'READY_TO_SUPPLY'
+  );
 
   for (const { transactions: txs } of candidateGroups) {
     const firstTx = txs[0];
@@ -152,7 +156,6 @@ export function matchOzonGroup(
 
     // Дата группы = deliveryDate первой строки, если пусто — date
     const groupDateStr = firstTx.deliveryDate || firstTx.date;
-    const parsedOrderDate = parseAppDate(shipmentDate);
     const parsedGroupDate = parseAppDate(groupDateStr);
 
     let dateDiffDays: number | null = null;
@@ -172,10 +175,15 @@ export function matchOzonGroup(
                       (destTrimmed === 'Ozon') ||
                       (destTrimmed === `Ozon (${cabTrimmed})`);
 
-    // Сверка критериев
-    const isDupCandidate = compositionExact && cabinetOk && dateDiffDays !== null && dateDiffDays <= 2;
-    const isSusCandidate = (compositionExact && cabinetOk && dateDiffDays !== null && dateDiffDays <= 7) ||
-                           (sameArticles && cabinetOk && dateDiffDays !== null && dateDiffDays <= 2);
+    // Сверка критериев:
+    // - duplicate: точное совпадение состава, кабинета, при близости дат до 5 дней (или в режиме без даты при READY_TO_SUPPLY)
+    // - suspect: точное совпадение состава в пределах 7 дней, либо частичное совпадение состава (sameArticles) в пределах 5 дней (или без даты при READY_TO_SUPPLY)
+    const isDupCandidate = compositionExact && cabinetOk &&
+      (noDateMode || (dateDiffDays !== null && dateDiffDays <= 5));
+    const isSusCandidate = !isDupCandidate && cabinetOk && (
+      (compositionExact && dateDiffDays !== null && dateDiffDays <= 7) ||
+      (sameArticles && (noDateMode || (dateDiffDays !== null && dateDiffDays <= 5)))
+    );
 
     if (isDupCandidate || isSusCandidate) {
       if (isDupCandidate) {
