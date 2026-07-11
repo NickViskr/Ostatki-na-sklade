@@ -93,7 +93,7 @@ interface WarehouseState {
   externalShipments: ExternalShipment[];
   checkOzonShipments: () => Promise<void>;
   markExternalShipment: (postingId: string, status: 'processed' | 'ignored' | 'new', transGroupInfo?: string) => Promise<boolean>;
-  returnLinkedOzonSupplies: (deletedIds: string[], transactionsBefore: Transaction[]) => Promise<void>;
+  returnLinkedOzonSupplies: (deletedIds: string[]) => Promise<void>;
   fetchExternalShipments: () => Promise<void>;
   pendingOzonPostingIds: string[];
   setPendingOzonPostingIds: (ids: string[]) => void;
@@ -567,13 +567,14 @@ export const useWarehouseStore = create<WarehouseState>()(
         
         const pendingOzonPostingIds = get().pendingOzonPostingIds;
         if (pendingOzonPostingIds.length > 0) {
-          // Привязка заявки к транзакциям: groupId главных строк — в TransGroupInfo
-          const txGroupIds = Array.from(new Set(
+          // Привязка заявки к транзакциям: ID главных строк — в TransGroupInfo.
+          // Именно ID, а не groupId: groupId есть только у комплектов, у обычных товаров он пуст
+          const txIds = Array.from(new Set(
             (payloadData.newTransactions || [])
-              .filter((t: Transaction) => !t.isComponent && t.groupId)
-              .map((t: Transaction) => String(t.groupId))
+              .filter((t: Transaction) => !t.isComponent && t.id)
+              .map((t: Transaction) => String(t.id))
           ));
-          const linkInfo = JSON.stringify(txGroupIds);
+          const linkInfo = JSON.stringify(txIds);
           for (const pid of pendingOzonPostingIds) {
             await get().markExternalShipment(pid, 'processed', linkInfo);
           }
@@ -622,7 +623,7 @@ export const useWarehouseStore = create<WarehouseState>()(
         });
         
         toast.success('Операция удалена');
-        await get().returnLinkedOzonSupplies([id], transactions);
+        await get().returnLinkedOzonSupplies([id]);
         return true;
       } else {
         toast.error('Ошибка: ' + result.message);
@@ -664,7 +665,7 @@ export const useWarehouseStore = create<WarehouseState>()(
         } else {
            toast.success(`Удалено операций: ${expandedIds.length}`);
         }
-        await get().returnLinkedOzonSupplies(expandedIds, transactions);
+        await get().returnLinkedOzonSupplies(expandedIds);
         return true;
       } else {
         toast.error('Ошибка: ' + result.message);
@@ -1186,20 +1187,13 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   // Возврат Ozon-заявок в «новые», если их транзакции удалены из Истории
-  returnLinkedOzonSupplies: async (deletedIds, transactionsBefore) => {
-    const deletedGroupIds = new Set<string>();
-    for (const t of transactionsBefore) {
-      if (deletedIds.includes(t.id) && t.groupId) {
-        deletedGroupIds.add(String(t.groupId));
-      }
-    }
-    if (deletedGroupIds.size === 0) return;
-
+  returnLinkedOzonSupplies: async (deletedIds) => {
+    const deletedSet = new Set(deletedIds.map((id) => String(id)));
     const linked = get().externalShipments.filter((s) => {
       if (s.status !== 'processed' || !s.transGroupInfo) return false;
       try {
         const ids = JSON.parse(s.transGroupInfo);
-        return Array.isArray(ids) && ids.some((g: any) => deletedGroupIds.has(String(g)));
+        return Array.isArray(ids) && ids.some((tid: any) => deletedSet.has(String(tid)));
       } catch {
         return false;
       }
