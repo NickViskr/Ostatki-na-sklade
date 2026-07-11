@@ -14,6 +14,7 @@ import {
 import { STATUS_DICT, getStatusDetails, getStatusLabel } from '../lib/ozonStatus';
 import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
+import { matchOzonGroup } from '../lib/ozonMatch';
 
 
 const formatStatusDate = (dateStr?: string) => {
@@ -74,6 +75,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
   const checkOzonShipments = useWarehouseStore((state) => state.checkOzonShipments);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
+  const transactions = useWarehouseStore((state) => state.transactions);
 
   const skus = useWarehouseStore((state) => state.skus);
   const stock = useWarehouseStore((state) => state.stock);
@@ -307,17 +309,25 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       const orderNumber = firstItem.orderNumber || '';
       const orderId = firstItem.orderId || '';
       const label = orderNumber || orderId || firstItem.postingId;
+      const cabinet = (firstItem.cabinet || '').trim();
+      const shipmentDate = firstItem.shipmentDate || '-';
+
+      const newPostings = items.filter(p => p.status === 'new');
+      const matchResult = newPostings.length > 0
+        ? matchOzonGroup(newPostings, cabinet, shipmentDate, skus, transactions, externalShipments)
+        : { verdict: 'none' as const, candidates: [] };
       
       return {
         id: key,
         label,
         items,
         postingCount: items.length,
-        shipmentDate: firstItem.shipmentDate || '-',
-        cabinet: (firstItem.cabinet || '').trim(),
+        shipmentDate,
+        cabinet,
+        matchResult,
       };
     });
-  }, [externalShipments]);
+  }, [externalShipments, transactions, skus]);
 
   const sortedGroups = useMemo(() => {
     const getLatestStatusDate = (group: ExternalShipment[]) => {
@@ -488,6 +498,16 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       <span className="text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full">
                         Поставок в группе: {group.postingCount}
                       </span>
+                      {group.matchResult?.verdict === 'duplicate' && (
+                        <span className="text-xs font-semibold px-2.5 py-1 bg-red-50 text-red-700 rounded-full border border-red-100">
+                          Возможный дубль ручной отгрузки
+                        </span>
+                      )}
+                      {group.matchResult?.verdict === 'suspect' && (
+                        <span className="text-xs font-semibold px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full border border-amber-100">
+                          Похожа на ручную — проверьте
+                        </span>
+                      )}
                     </div>
                     <div className="text-sm text-slate-500 font-medium flex items-center gap-1.5">
                       <Calendar size={14} className="text-slate-400" />
@@ -543,6 +563,75 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       className="border-t border-slate-100 bg-slate-50/30 overflow-hidden"
                     >
                       <div className="p-5 space-y-4">
+                        {group.matchResult && group.matchResult.verdict !== 'none' && group.matchResult.candidates?.[0] && (() => {
+                          const bestCandidate = group.matchResult.candidates[0];
+                          return (
+                            <div className="p-4 border border-amber-200 bg-amber-50/30 rounded-2xl space-y-3">
+                              <div className="flex items-center gap-2 text-amber-800">
+                                <AlertCircle size={18} className="text-amber-600" />
+                                <span className="font-bold text-sm">Совпадение с ручной отгрузкой</span>
+                              </div>
+                              
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs font-medium text-slate-600">
+                                <div>
+                                  <span className="text-slate-400 block">Создана:</span>
+                                  <span className="text-slate-800 font-bold">{bestCandidate.date}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block">Поставка:</span>
+                                  <span className="text-slate-800 font-bold">{bestCandidate.deliveryDate || '—'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block">Назначение / Объект:</span>
+                                  <span className="text-slate-800 font-bold">{bestCandidate.destination}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block">Разница дат:</span>
+                                  <span className="text-slate-800 font-bold">
+                                    {bestCandidate.dateDiffDays !== null 
+                                      ? `${bestCandidate.dateDiffDays} ${
+                                          bestCandidate.dateDiffDays === 1 ? 'день' :
+                                          [2,3,4].includes(bestCandidate.dateDiffDays) ? 'дня' : 'дней'
+                                        }`
+                                      : 'не определена'}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="border border-slate-100 rounded-xl bg-white overflow-hidden max-w-md">
+                                <table className="min-w-full text-left border-collapse text-xs">
+                                  <thead>
+                                    <tr className="bg-slate-50 border-b border-slate-100">
+                                      <th className="px-3 py-2 font-bold text-slate-400 uppercase tracking-wider">Артикул</th>
+                                      <th className="px-3 py-2 font-bold text-slate-400 uppercase tracking-wider">Кол-во</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {bestCandidate.items.map((it, idx) => (
+                                      <tr key={idx} className="border-b border-slate-50">
+                                        <td className="px-3 py-1.5 font-semibold text-slate-700">{it.article}</td>
+                                        <td className="px-3 py-1.5 font-bold text-slate-900">{it.quantity}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+
+                              <div className="text-xs">
+                                {bestCandidate.compositionExact ? (
+                                  <span className="text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg font-bold border border-emerald-100">
+                                    Состав совпадает полностью
+                                  </span>
+                                ) : (
+                                  <span className="text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg font-bold border border-amber-100">
+                                    Количества отличаются
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
                         <div className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Поставки в рамках заявки</div>
                         
                         {group.items.map((s) => {
