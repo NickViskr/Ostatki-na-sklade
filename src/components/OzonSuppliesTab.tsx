@@ -8,8 +8,7 @@ import {
   Loader2, 
   ChevronDown, 
   ChevronUp, 
-  Calendar,
-  AlertCircle
+  Calendar
 } from 'lucide-react';
 import { STATUS_DICT, getStatusDetails, getStatusLabel } from '../lib/ozonStatus';
 import { useUIStore } from '../store/useUIStore';
@@ -565,68 +564,34 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       <div className="p-5 space-y-4">
                         {group.matchResult && group.matchResult.verdict !== 'none' && group.matchResult.candidates?.[0] && (() => {
                           const bestCandidate = group.matchResult.candidates[0];
+                          const isDuplicate = group.matchResult.verdict === 'duplicate';
+                          const cardBorderBg = isDuplicate 
+                            ? 'border-red-200 bg-red-50/30 text-red-800' 
+                            : 'border-amber-200 bg-amber-50/30 text-amber-800';
+                          
+                          const daysText = bestCandidate.dateDiffDays !== null 
+                            ? `${bestCandidate.dateDiffDays} ${
+                                bestCandidate.dateDiffDays === 1 ? 'день' :
+                                [2,3,4].includes(bestCandidate.dateDiffDays) ? 'дня' : 'дней'
+                              }`
+                            : 'не определена';
+
+                          const itemsListText = bestCandidate.items
+                            .map(it => `${it.article} ×${it.quantity}`)
+                            .join(', ');
+
                           return (
-                            <div className="p-4 border border-amber-200 bg-amber-50/30 rounded-2xl space-y-3">
-                              <div className="flex items-center gap-2 text-amber-800">
-                                <AlertCircle size={18} className="text-amber-600" />
-                                <span className="font-bold text-sm">Совпадение с ручной отгрузкой</span>
+                            <div className={`p-4 border rounded-2xl space-y-1.5 ${cardBorderBg}`}>
+                              <div className="font-bold text-sm">
+                                {isDuplicate 
+                                  ? `Возможный дубль: ручная отгрузка от ${bestCandidate.date}` 
+                                  : `Похожая ручная отгрузка от ${bestCandidate.date}`}
                               </div>
-                              
-                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs font-medium text-slate-600">
-                                <div>
-                                  <span className="text-slate-400 block">Создана:</span>
-                                  <span className="text-slate-800 font-bold">{bestCandidate.date}</span>
-                                </div>
-                                <div>
-                                  <span className="text-slate-400 block">Поставка:</span>
-                                  <span className="text-slate-800 font-bold">{bestCandidate.deliveryDate || '—'}</span>
-                                </div>
-                                <div>
-                                  <span className="text-slate-400 block">Назначение / Объект:</span>
-                                  <span className="text-slate-800 font-bold">{bestCandidate.destination}</span>
-                                </div>
-                                <div>
-                                  <span className="text-slate-400 block">Разница дат:</span>
-                                  <span className="text-slate-800 font-bold">
-                                    {bestCandidate.dateDiffDays !== null 
-                                      ? `${bestCandidate.dateDiffDays} ${
-                                          bestCandidate.dateDiffDays === 1 ? 'день' :
-                                          [2,3,4].includes(bestCandidate.dateDiffDays) ? 'дня' : 'дней'
-                                        }`
-                                      : 'не определена'}
-                                  </span>
-                                </div>
+                              <div className="text-xs text-slate-500 font-medium">
+                                Поставка: {bestCandidate.deliveryDate || '—'} · Объект: {bestCandidate.destination} · Разница дат: {daysText}
                               </div>
-
-                              <div className="border border-slate-100 rounded-xl bg-white overflow-hidden max-w-md">
-                                <table className="min-w-full text-left border-collapse text-xs">
-                                  <thead>
-                                    <tr className="bg-slate-50 border-b border-slate-100">
-                                      <th className="px-3 py-2 font-bold text-slate-400 uppercase tracking-wider">Артикул</th>
-                                      <th className="px-3 py-2 font-bold text-slate-400 uppercase tracking-wider">Кол-во</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {bestCandidate.items.map((it, idx) => (
-                                      <tr key={idx} className="border-b border-slate-50">
-                                        <td className="px-3 py-1.5 font-semibold text-slate-700">{it.article}</td>
-                                        <td className="px-3 py-1.5 font-bold text-slate-900">{it.quantity}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-
-                              <div className="text-xs">
-                                {bestCandidate.compositionExact ? (
-                                  <span className="text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg font-bold border border-emerald-100">
-                                    Состав совпадает полностью
-                                  </span>
-                                ) : (
-                                  <span className="text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg font-bold border border-amber-100">
-                                    Количества отличаются
-                                  </span>
-                                )}
+                              <div className="text-xs text-slate-600 font-medium">
+                                <span className="text-slate-400">Состав ручной отгрузки (совпадает с заявкой):</span> {itemsListText}
                               </div>
                             </div>
                           );

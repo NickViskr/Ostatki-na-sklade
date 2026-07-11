@@ -129,6 +129,9 @@ export function matchOzonGroup(
 
   for (const { transactions: txs } of candidateGroups) {
     const firstTx = txs[0];
+    const groupCreated = parseAppDate(firstTx.date);
+    const freshEnough = groupCreated !== null &&
+      (Date.now() - groupCreated.getTime()) <= 7 * 24 * 60 * 60 * 1000;
     
     // Состав группы: суммируем количества по артикулам главных строк
     const groupMap = new Map<string, number>();
@@ -143,14 +146,11 @@ export function matchOzonGroup(
       orderArticles.every((art, i) => art === groupArticles[i]);
 
     let compositionExact = false;
-    let sameArticles = false;
 
     if (hasSameArticles) {
       const allQuantitiesEqual = orderArticles.every(art => orderMap.get(art) === groupMap.get(art));
       if (allQuantitiesEqual) {
         compositionExact = true;
-      } else {
-        sameArticles = true;
       }
     }
 
@@ -176,14 +176,12 @@ export function matchOzonGroup(
                       (destTrimmed === `Ozon (${cabTrimmed})`);
 
     // Сверка критериев:
-    // - duplicate: точное совпадение состава, кабинета, при близости дат до 5 дней (или в режиме без даты при READY_TO_SUPPLY)
-    // - suspect: точное совпадение состава в пределах 7 дней, либо частичное совпадение состава (sameArticles) в пределах 5 дней (или без даты при READY_TO_SUPPLY)
+    // - duplicate: точное совпадение состава, кабинета, при близости дат до 5 дней (или без даты при READY_TO_SUPPLY, если ручная отгрузка создана за последние 7 дней)
+    // - suspect: точное совпадение состава в пределах 7 дней при наличии дат
     const isDupCandidate = compositionExact && cabinetOk &&
-      (noDateMode || (dateDiffDays !== null && dateDiffDays <= 5));
-    const isSusCandidate = !isDupCandidate && cabinetOk && (
-      (compositionExact && dateDiffDays !== null && dateDiffDays <= 7) ||
-      (sameArticles && (noDateMode || (dateDiffDays !== null && dateDiffDays <= 5)))
-    );
+      ((noDateMode && freshEnough) || (dateDiffDays !== null && dateDiffDays <= 5));
+    const isSusCandidate = !isDupCandidate && compositionExact && cabinetOk &&
+      dateDiffDays !== null && dateDiffDays <= 7;
 
     if (isDupCandidate || isSusCandidate) {
       if (isDupCandidate) {
