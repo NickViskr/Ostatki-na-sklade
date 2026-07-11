@@ -267,6 +267,31 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     );
   }, [askConfirmation, markExternalShipment]);
 
+  const handleLinkAsDuplicate = useCallback((group: any) => {
+    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
+    if (newPostings.length === 0) {
+      toast.error('В заявке нет новых поставок');
+      return;
+    }
+    const bestCandidate = group.matchResult?.candidates?.[0];
+    if (!bestCandidate) {
+      toast.error('Совпадение не найдено');
+      return;
+    }
+
+    askConfirmation(
+      "Привязать заявку к ручной отгрузке?",
+      `Заявка № ${group.label} будет помечена обработанной и привязана к ручной отгрузке от ${bestCandidate.date}. Новый расход НЕ создаётся. Если позже удалить эту отгрузку из Истории, заявка автоматически вернётся в новые.`,
+      async () => {
+        const linkInfo = JSON.stringify(bestCandidate.txIds);
+        for (const p of newPostings) {
+          await markExternalShipment(p.postingId, 'processed', linkInfo);
+        }
+        toast.success(`Заявка № ${group.label} привязана к ручной отгрузке`);
+      }
+    );
+  }, [askConfirmation, markExternalShipment]);
+
   const handleReturnGroupToNew = useCallback((group: any) => {
     const donePostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
       p => p.status === 'processed' || p.status === 'ignored'
@@ -523,6 +548,14 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                     </div>
                     {group.items.some((i) => i.status === 'new') && (
                       <div className="flex gap-2">
+                        {group.matchResult?.verdict !== 'none' && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleLinkAsDuplicate(group); }}
+                            className="bg-white border border-red-400 text-red-600 px-4 py-2 rounded-xl font-bold text-sm hover:bg-red-50 transition-all cursor-pointer whitespace-nowrap"
+                          >
+                            Привязать как дубль
+                          </button>
+                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); handleProcessOzonGroup(group); }}
                           className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer"
