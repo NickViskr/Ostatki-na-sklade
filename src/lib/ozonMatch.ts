@@ -1,6 +1,12 @@
 import { ExternalShipment, SKUItem, Transaction } from '../types';
 import { parseAppDate } from './utils';
 
+const normalizeDestination = (raw?: string): string => {
+  const s = String(raw || '');
+  const bracketIdx = s.indexOf('[');
+  return (bracketIdx === -1 ? s : s.slice(0, bracketIdx)).trim();
+};
+
 export interface MatchCandidate {
   date: string;
   deliveryDate?: string;
@@ -93,8 +99,7 @@ export function matchOzonGroup(
   const manualGroupsMap = new Map<string, Transaction[]>();
   for (const t of transactions) {
     if (t.type === 'Расход' && !t.isComponent) {
-      const dest = String(t.destination || '').trim();
-      if (dest.startsWith('Ozon')) {
+      if (normalizeDestination(t.destination).startsWith('Ozon')) {
         const key = `${t.date}|${t.destination}|${t.deliveryDate || ''}`;
         if (!manualGroupsMap.has(key)) {
           manualGroupsMap.set(key, []);
@@ -162,7 +167,7 @@ export function matchOzonGroup(
 
     // cabinetOk
     const cabTrimmed = String(cabinet || '').trim();
-    const destTrimmed = String(firstTx.destination || '').trim();
+    const destTrimmed = normalizeDestination(firstTx.destination);
     const cabinetOk = !cabTrimmed ||
                       (destTrimmed === 'Ozon') ||
                       (destTrimmed === `Ozon (${cabTrimmed})`);
