@@ -1,5 +1,6 @@
 import { ExternalShipment, SKUItem, Transaction } from '../types';
 import { parseAppDate } from './utils';
+import { isStockDeparted } from './ozonStatus';
 
 const normalizeDestination = (raw?: string): string => {
   const s = String(raw || '');
@@ -123,9 +124,10 @@ export function matchOzonGroup(
 
   const orderArticles = Array.from(orderMap.keys()).sort();
   const parsedOrderDate = parseAppDate(shipmentDate);
-  const noDateMode = !parsedOrderDate && newPostings.some(
-    p => String(p.ozonStatus || '').toUpperCase() === 'READY_TO_SUPPLY'
-  );
+  const noDateMode = !parsedOrderDate && newPostings.some(p => {
+    const st = String(p.ozonStatus || '').toUpperCase();
+    return st === 'READY_TO_SUPPLY' || isStockDeparted(st);
+  });
 
   for (const { transactions: txs } of candidateGroups) {
     const firstTx = txs[0];
@@ -176,7 +178,7 @@ export function matchOzonGroup(
                       (destTrimmed === `Ozon (${cabTrimmed})`);
 
     // Сверка критериев:
-    // - duplicate: точное совпадение состава, кабинета, при близости дат до 5 дней (или без даты при READY_TO_SUPPLY, если ручная отгрузка создана за последние 7 дней)
+    // - duplicate: точное совпадение состава, кабинета, при близости дат до 5 дней (или без даты при READY_TO_SUPPLY или любом отгруженном статусе (isStockDeparted), если ручная отгрузка создана за последние 7 дней)
     // - suspect: точное совпадение состава в пределах 7 дней при наличии дат
     const isDupCandidate = compositionExact && cabinetOk &&
       ((noDateMode && freshEnough) || (dateDiffDays !== null && dateDiffDays <= 5));
