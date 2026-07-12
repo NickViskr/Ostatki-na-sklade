@@ -3662,7 +3662,7 @@ function scheduledOzonCheck() {
       });
     } catch (fetchErr) {
       result.ok = false;
-      result.message = 'Запрос отправлен, ответа не дождались (таймаут). Данные, скорее всего, записаны — проверьте лист.';
+      result.message = 'Ошибка вызова прокси: ' + fetchErr.toString() + '. Если это таймаут — данные, скорее всего, записаны, проверьте лист.';
       props.setProperty('ozon_lastAutoSync', JSON.stringify(result));
       return result;
     }
