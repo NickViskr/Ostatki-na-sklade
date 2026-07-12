@@ -13,7 +13,7 @@ import {
 import { STATUS_DICT, getStatusDetails, getStatusLabel } from '../lib/ozonStatus';
 import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
-import { matchOzonGroup } from '../lib/ozonMatch';
+import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGroups';
 
 
 const formatStatusDate = (dateStr?: string) => {
@@ -121,135 +121,9 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     });
   };
 
-  const handleProcessOzonGroup = useCallback((group: any) => {
-    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
-    if (newPostings.length === 0) {
-      toast.error('В заявке нет новых поставок для оформления');
-      return;
-    }
+  const handleProcessOzonGroup = useProcessOzonGroup();
 
-    const rawItems: any[] = [];
-    for (const posting of newPostings) {
-      try {
-        const list = JSON.parse(posting.itemsJSON);
-        if (Array.isArray(list)) rawItems.push(...list);
-      } catch (e) {
-        toast.error(`Ошибка разбора позиций поставки №${posting.postingId}`);
-        return;
-      }
-    }
-
-    if (rawItems.length === 0) {
-      toast.error('Поставки заявки не содержат позиций');
-      return;
-    }
-
-    const mapped = rawItems.map((item: any) => {
-      const barcode = String(item.barcode || '').trim();
-      const offerId = String(item.offerId || '').trim();
-      const quantity = Number(item.quantity) || 0;
-
-      let matchedSku = skus.find(skuItem => {
-        if (barcode && skuItem.ozonBarcode) {
-          return skuItem.ozonBarcode.trim() === barcode;
-        }
-        return false;
-      });
-
-      if (!matchedSku && offerId) {
-        matchedSku = skus.find(skuItem => skuItem.sku.toLowerCase() === offerId.toLowerCase());
-      }
-
-      if (matchedSku) {
-        // Себестоимость через хелпер стора: виртуальный комплект = сумма компонентов,
-        // обычный товар = средняя со склада; справочная цена SKU — запасной вариант
-        const effectiveCost = useWarehouseStore.getState().getEffectiveAvgCost(matchedSku.sku);
-        const unitCost = effectiveCost > 0 ? effectiveCost : (matchedSku.price || 0);
-        return {
-          article: matchedSku.sku,
-          quantity,
-          price: unitCost,
-          status: 'ok' as const
-        };
-      } else {
-        return {
-          article: offerId || barcode || 'НЕИЗВЕСТНО',
-          quantity,
-          price: 0,
-          status: 'unknown' as const,
-          errorMsg: 'SKU не найден по штрихкоду или артикулу Ozon'
-        };
-      }
-    });
-
-    // Одинаковые артикулы из разных поставок заявки суммируются в одну строку
-    const aggregated = new Map<string, any>();
-    for (const item of mapped) {
-      const key = `${item.article}|${item.status}`;
-      const existing = aggregated.get(key);
-      if (existing) {
-        existing.quantity += item.quantity;
-      } else {
-        aggregated.set(key, { ...item });
-      }
-    }
-    const mappedItems = Array.from(aggregated.values());
-
-    const proceedToModal = () => {
-      setPendingOzonPostingIds(newPostings.map(p => p.postingId));
-
-      setOpType('Расход');
-      // Заявка знает свой магазин — подставляем в назначение автоматически
-      const cabName = String(group.cabinet || '').trim();
-      setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
-      useUIStore.getState().setParsedItems(mappedItems);
-      useUIStore.getState().setShowConfirmModal(true);
-      toast.success(`Заявка № ${group.label}: подготовлено поставок — ${newPostings.length}`);
-    };
-
-    // Проверка наличия сразу при оформлении (комплекты — через доступность по компонентам)
-    const requiredByArticle: Record<string, number> = {};
-    for (const it of mappedItems) {
-      if (it.status === 'ok') {
-        requiredByArticle[it.article] = (requiredByArticle[it.article] || 0) + it.quantity;
-      }
-    }
-    const shortages: Array<{ article: string; req: number; avail: number }> = [];
-    for (const [article, reqQty] of Object.entries(requiredByArticle)) {
-      const available = useWarehouseStore.getState().getEffectiveAvailability(article);
-      if (reqQty > available) {
-        shortages.push({ article, req: reqQty, avail: available });
-      }
-    }
-
-    if (shortages.length > 0) {
-      askConfirmation(
-        "Товара не хватает на складе",
-        (
-          <>
-            <span className="block">
-              Возможно, заявка уже оформлена вручную — тогда нажмите «Игнорировать».
-            </span>
-            <span className="block mt-3 font-bold text-slate-700">Не хватает:</span>
-            {shortages.map((s) => (
-              <span key={s.article} className="block mt-1">
-                <b className="text-slate-900">{s.article}</b> — нужно{' '}
-                <b className="text-red-600">{s.req} шт.</b>, доступно{' '}
-                <b className="text-slate-900">{s.avail} шт.</b>
-              </span>
-            ))}
-            <span className="block mt-3">Открыть оформление всё равно?</span>
-          </>
-        ),
-        () => proceedToModal()
-      );
-      return;
-    }
-
-    proceedToModal();
-  }, [skus, stock, setPendingOzonPostingIds, setOpType, setUploadDestination, askConfirmation]);
-
-  const handleIgnoreOzonGroup = useCallback((group: any) => {
+  const handleIgnoreOzonGroup = useCallback((group: OzonGroup) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
     if (newPostings.length === 0) {
       toast.error('В заявке нет новых поставок');
@@ -267,7 +141,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     );
   }, [askConfirmation, markExternalShipment]);
 
-  const handleLinkAsDuplicate = useCallback((group: any) => {
+  const handleLinkAsDuplicate = useCallback((group: OzonGroup) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
     if (newPostings.length === 0) {
       toast.error('В заявке нет новых поставок');
@@ -292,7 +166,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     );
   }, [askConfirmation, markExternalShipment]);
 
-  const handleReturnGroupToNew = useCallback((group: any) => {
+  const handleReturnGroupToNew = useCallback((group: OzonGroup) => {
     const donePostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
       p => p.status === 'processed' || p.status === 'ignored'
     );
@@ -310,47 +184,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   }, [askConfirmation, markExternalShipment]);
 
   const groupedShipments = useMemo(() => {
-    const groupsMap = new Map<string, ExternalShipment[]>();
-    
-    externalShipments.forEach((s) => {
-      let key = '';
-      if (s.orderId && s.orderId.trim()) {
-        key = `orderId_${s.orderId.trim()}`;
-      } else if (s.orderNumber && s.orderNumber.trim()) {
-        key = `orderNumber_${s.orderNumber.trim()}`;
-      } else {
-        key = `postingId_${s.postingId}`;
-      }
-      
-      if (!groupsMap.has(key)) {
-        groupsMap.set(key, []);
-      }
-      groupsMap.get(key)!.push(s);
-    });
-
-    return Array.from(groupsMap.entries()).map(([key, items]) => {
-      const firstItem = items[0];
-      const orderNumber = firstItem.orderNumber || '';
-      const orderId = firstItem.orderId || '';
-      const label = orderNumber || orderId || firstItem.postingId;
-      const cabinet = (firstItem.cabinet || '').trim();
-      const shipmentDate = firstItem.shipmentDate || '-';
-
-      const newPostings = items.filter(p => p.status === 'new');
-      const matchResult = newPostings.length > 0
-        ? matchOzonGroup(newPostings, cabinet, shipmentDate, skus, transactions, externalShipments)
-        : { verdict: 'none' as const, candidates: [] };
-      
-      return {
-        id: key,
-        label,
-        items,
-        postingCount: items.length,
-        shipmentDate,
-        cabinet,
-        matchResult,
-      };
-    });
+    return buildOzonGroups(externalShipments, skus, transactions);
   }, [externalShipments, transactions, skus]);
 
   const sortedGroups = useMemo(() => {
