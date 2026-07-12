@@ -4,6 +4,7 @@ import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
 import { ExternalShipment, SKUItem, Transaction } from '../types';
 import { MatchResult, matchOzonGroup } from './ozonMatch';
+import { isStockDeparted } from './ozonStatus';
 
 export interface OzonGroup {
   id: string;
@@ -13,6 +14,7 @@ export interface OzonGroup {
   shipmentDate: string;
   cabinet: string;
   matchResult: MatchResult;
+  needsExpense: boolean;
 }
 
 export function buildOzonGroups(
@@ -51,6 +53,8 @@ export function buildOzonGroups(
       ? matchOzonGroup(newPostings, cabinet, shipmentDate, skus, transactions, externalShipments)
       : { verdict: 'none' as const, candidates: [] };
     
+    const needsExpense = items.some(p => p.status === 'new' && isStockDeparted(p.ozonStatus));
+
     return {
       id: key,
       label,
@@ -59,6 +63,7 @@ export function buildOzonGroups(
       shipmentDate,
       cabinet,
       matchResult,
+      needsExpense,
     };
   });
 }
@@ -72,9 +77,11 @@ export function useProcessOzonGroup(): (group: OzonGroup) => void {
   const askConfirmation = useUIStore((state) => state.askConfirmation);
 
   const handleProcessOzonGroup = useCallback((group: OzonGroup) => {
-    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
+    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
+      p => p.status === 'new' && isStockDeparted(p.ozonStatus)
+    );
     if (newPostings.length === 0) {
-      toast.error('В заявке нет новых поставок для оформления');
+      toast.error('Заявка ещё не отгружена на Ozon — оформление станет доступно после приёмки на точке отгрузки');
       return;
     }
 

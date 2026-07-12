@@ -38,3 +38,15 @@ export const STATUS_FUNNEL_ORDER = [
   'COMPLETED',
   'CANCELLED'
 ];
+
+export const STOCK_DEPARTED_STATUSES = [
+  'ACCEPTED_AT_SUPPLY_WAREHOUSE',
+  'IN_TRANSIT',
+  'ACCEPTANCE_AT_STORAGE_WAREHOUSE',
+  'REPORTS_CONFIRMATION_AWAITING',
+  'REPORT_REJECTED',
+  'COMPLETED'
+];
+
+export const isStockDeparted = (ozonStatus?: string): boolean =>
+  !!ozonStatus && STOCK_DEPARTED_STATUSES.includes(String(ozonStatus).toUpperCase().trim());
