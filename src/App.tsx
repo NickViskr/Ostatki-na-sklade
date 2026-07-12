@@ -31,6 +31,7 @@ import { SkuModal } from './components/SkuModal';
 import { KitModal } from './components/KitModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { MarketplaceMismatchModal } from './components/MarketplaceMismatchModal';
+import { OzonNewSuppliesModal } from './components/OzonNewSuppliesModal';
 
 // Stores
 import { useUIStore } from './store/useUIStore';
@@ -115,6 +116,7 @@ export default function App() {
 
       {/* Modals */}
       <>
+        {isAdmin && <OzonNewSuppliesModal key="ozonNewSuppliesModal" />}
         <MarketplaceMismatchModal key="mismatchModal" />
         {showConfirmModal && <ConfirmModal key="confirmModal" />}
         {showEditTransModal && <EditTransModal key="editTransModal" />}
