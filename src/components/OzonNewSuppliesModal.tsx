@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGroups';
+import { isStockDeparted } from '../lib/ozonStatus';
 import { Calendar, Package, X } from 'lucide-react';
 
 export const OzonNewSuppliesModal: React.FC = () => {
@@ -46,7 +47,7 @@ export const OzonNewSuppliesModal: React.FC = () => {
 
   // Фильтруем группы, в которых есть хотя бы одна поставка в статусе 'new'
   const newGroups = useMemo(() => {
-    return groups.filter(g => g.items.some(item => item.status === 'new'));
+    return groups.filter(g => g.needsExpense);
   }, [groups]);
 
   // 2. Для каждой заявки со статусом new вычисляем флаг isNew: true,
@@ -54,7 +55,7 @@ export const OzonNewSuppliesModal: React.FC = () => {
   // 3. Заявки с isNew === true сортируются первыми для вывода вверху списка
   const processedGroups = useMemo(() => {
     const mapped = newGroups.map(group => {
-      const newItems = group.items.filter(item => item.status === 'new');
+      const newItems = group.items.filter(item => item.status === 'new' && isStockDeparted(item.ozonStatus));
       const isNew = newItems.some(item => !notifiedIds.includes(item.postingId));
       return {
         ...group,
@@ -86,7 +87,7 @@ export const OzonNewSuppliesModal: React.FC = () => {
       }
       const currentNewPostingIds = newGroups.flatMap(group =>
         group.items
-          .filter(item => item.status === 'new')
+          .filter(item => item.status === 'new' && isStockDeparted(item.ozonStatus))
           .map(item => item.postingId)
       );
       const combined = Array.from(new Set([...existingIds, ...currentNewPostingIds])).slice(-1000);
@@ -128,13 +129,15 @@ export const OzonNewSuppliesModal: React.FC = () => {
   const waitingGroupsCount = processedGroups.filter(g => !g.isNew).length;
 
   const title = newGroupsCount > 0 
-    ? "Обнаружены новые поставки Ozon" 
-    : "Заявки Ozon ждут оформления";
+    ? "Обнаружены отгрузки на Ozon" 
+    : "Отгрузки Ozon ждут оформления";
+
+  const countersText = waitingGroupsCount > 0 
+    ? `Новых заявок: ${newGroupsCount} · Ожидают оформления: ${waitingGroupsCount}` 
+    : `Новых заявок: ${newGroupsCount}`;
 
   const subtitle = newGroupsCount > 0
-    ? (waitingGroupsCount > 0 
-        ? `Новых заявок: ${newGroupsCount} · Ожидают оформления: ${waitingGroupsCount}` 
-        : `Новых заявок: ${newGroupsCount}`)
+    ? `Товар принят на точке отгрузки — оформите списание со склада · ${countersText}`
     : `Не оформлено и не отклонено заявок: ${waitingGroupsCount}`;
 
   return createPortal(
@@ -184,7 +187,7 @@ export const OzonNewSuppliesModal: React.FC = () => {
                       </span>
                     )}
                     <span className="text-[11px] font-semibold px-2.5 py-0.5 bg-indigo-50 text-indigo-700 rounded-full whitespace-nowrap">
-                      Новых поставок: {newPostingsCount}
+                      Отгружено поставок: {newPostingsCount}
                     </span>
                   </div>
                   

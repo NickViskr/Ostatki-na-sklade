@@ -356,6 +356,17 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       <span className="text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full">
                         Поставок в группе: {group.postingCount}
                       </span>
+                      {group.items.some(i => i.status === 'new') && (
+                        group.needsExpense ? (
+                          <span className="text-xs font-semibold px-2.5 py-1 bg-red-50 text-red-700 rounded-full border border-red-100">
+                            Отгружена — оформите списание
+                          </span>
+                        ) : (
+                          <span className="text-xs font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-full">
+                            Ожидает отгрузки на Ozon
+                          </span>
+                        )
+                      )}
                       {group.matchResult?.verdict === 'duplicate' && (
                         <span className="text-xs font-semibold px-2.5 py-1 bg-red-50 text-red-700 rounded-full border border-red-100">
                           Возможный дубль ручной отгрузки
@@ -392,7 +403,9 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                         )}
                         <button
                           onClick={(e) => { e.stopPropagation(); handleProcessOzonGroup(group); }}
-                          className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer"
+                          disabled={!group.needsExpense}
+                          title={!group.needsExpense ? 'Оформление доступно после приёмки товара на точке отгрузки Ozon' : undefined}
+                          className="bg-sky-500 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer disabled:bg-slate-300 disabled:shadow-none disabled:cursor-not-allowed"
                         >
                           Оформить
                         </button>
