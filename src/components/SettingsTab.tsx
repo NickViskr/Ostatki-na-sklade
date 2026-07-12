@@ -7,7 +7,8 @@ import {
   Cpu, 
   CheckCircle2, 
   Loader2,
-  Save
+  Save,
+  RefreshCw
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore, OzonCabinet } from '../store/useSettingsStore';
@@ -21,6 +22,12 @@ export const SettingsTab: React.FC = React.memo(() => {
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const devMode = useWarehouseStore((state) => state.devMode);
   const setDevMode = useWarehouseStore((state) => state.setDevMode);
+  
+  const ozonSyncStatus = useWarehouseStore((state) => state.ozonSyncStatus);
+  const fetchOzonSyncStatus = useWarehouseStore((state) => state.fetchOzonSyncStatus);
+  const setOzonSyncEnabled = useWarehouseStore((state) => state.setOzonSyncEnabled);
+  const runOzonSyncNow = useWarehouseStore((state) => state.runOzonSyncNow);
+  const isProcessing = useWarehouseStore((state) => state.isProcessing);
   
   const setGasUrl = useSettingsStore((state) => state.setGasUrl);
   const geminiModel = useSettingsStore((state) => state.geminiModel);
@@ -54,6 +61,10 @@ export const SettingsTab: React.FC = React.memo(() => {
     ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ozonCabinets, ozonClientId, ozonApiKey]);
+
+  useEffect(() => {
+    fetchOzonSyncStatus();
+  }, []);
 
   const updateCabinetDraft = (index: number, field: keyof OzonCabinet, value: string) => {
     setCabinetDrafts(prev => prev.map((c, i) => i === index ? { ...c, [field]: value } : c));
@@ -382,6 +393,124 @@ export const SettingsTab: React.FC = React.memo(() => {
                 </>
               )}
             </div>
+          </div>
+
+          {/* Автоопрос Ozon */}
+          <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-6">
+            <div className="flex items-center gap-3 text-sky-600">
+              <RefreshCw size={24} />
+              <h3 className="text-xl font-bold">Автоопрос Ozon</h3>
+            </div>
+
+            {!ozonSyncStatus ? (
+              <div className="text-slate-500 text-sm flex items-center gap-2">
+                <Loader2 size={16} className="animate-spin" />
+                Загрузка статуса…
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                    Статус автоопроса
+                  </label>
+                  {ozonSyncStatus.enabled ? (
+                    <span className="text-emerald-600 font-semibold text-sm block">
+                      Автоопрос включён: ежедневно в 05:00 и 17:00 МСК
+                    </span>
+                  ) : (
+                    <span className="text-slate-500 font-semibold text-sm block">
+                      Автоопрос выключен
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                    Назначение данных
+                  </label>
+                  <span className="text-slate-700 text-sm block">
+                    Данные пишутся в:{' '}
+                    {ozonSyncStatus.target === 'test'
+                      ? 'тестовую БД (режим разработки)'
+                      : 'боевую БД'}
+                  </span>
+                </div>
+
+                <div className="space-y-1 p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                    Последний запуск
+                  </label>
+                  {ozonSyncStatus.lastRun ? (
+                    <div className="space-y-1 text-sm">
+                      <div className="text-slate-500 font-mono text-xs">
+                        {new Date(ozonSyncStatus.lastRun.time).toLocaleString('ru-RU')}
+                      </div>
+                      {ozonSyncStatus.lastRun.ok ? (
+                        <div className="text-emerald-600 font-medium">
+                          Успешно: найдено {ozonSyncStatus.lastRun.found ?? 0}, добавлено{' '}
+                          {ozonSyncStatus.lastRun.added ?? 0}, обновлено{' '}
+                          {ozonSyncStatus.lastRun.updated ?? 0}
+                        </div>
+                      ) : (
+                        <div className="text-rose-600 font-medium break-words">
+                          {ozonSyncStatus.lastRun.message || 'Ошибка запуска'}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-slate-500 text-sm">Ещё не запускался</span>
+                  )}
+                </div>
+
+                {isAdmin ? (
+                  <div className="space-y-2 pt-2">
+                    {ozonSyncStatus.enabled ? (
+                      <button
+                        onClick={() => setOzonSyncEnabled(false)}
+                        disabled={isProcessing}
+                        className="w-full bg-slate-600 text-white py-3 rounded-xl font-bold hover:bg-slate-700 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                      >
+                        {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
+                        Отключить автоопрос
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setOzonSyncEnabled(true)}
+                        disabled={isProcessing}
+                        className="w-full bg-sky-500 text-white py-3 rounded-xl font-bold hover:bg-sky-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                      >
+                        {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
+                        Включить автоопрос (05:00 и 17:00 МСК)
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => runOzonSyncNow()}
+                      disabled={isProcessing}
+                      className="w-full bg-white border border-sky-500 text-sky-600 py-2.5 rounded-xl font-bold hover:bg-sky-50 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                    >
+                      {isProcessing ? (
+                        <>
+                          <Loader2 size={18} className="animate-spin" />
+                          Проверяю… (до минуты)
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw size={18} />
+                          Запустить проверку сейчас
+                        </>
+                      )}
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-sky-600 font-medium">Управлять автоопросом Ozon может только администратор.</p>
+                )}
+
+                <p className="text-[11px] text-slate-500 text-center leading-normal">
+                  Триггеры Google срабатывают в течение часа после указанного времени (5:00–6:00 и 17:00–18:00 МСК)
+                </p>
+              </div>
+            )}
           </div>
         </div>
 

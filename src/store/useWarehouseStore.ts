@@ -101,6 +101,10 @@ interface WarehouseState {
   getEffectiveAvgCost: (article: string) => number;
   devMode: boolean;
   setDevMode: (v: boolean) => void;
+  ozonSyncStatus: { enabled: boolean; triggersCount: number; target: string; lastRun: any | null } | null;
+  fetchOzonSyncStatus: () => Promise<void>;
+  setOzonSyncEnabled: (enabled: boolean) => Promise<void>;
+  runOzonSyncNow: () => Promise<void>;
 }
 
 export const useWarehouseStore = create<WarehouseState>()(
@@ -125,6 +129,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   externalShipments: [],
   pendingOzonPostingIds: [],
   devMode: typeof localStorage !== 'undefined' && localStorage.getItem('devMode') === 'true',
+  ozonSyncStatus: null,
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -1223,6 +1228,65 @@ export const useWarehouseStore = create<WarehouseState>()(
       toast.error('Ошибка сети при загрузке поставок Ozon: ' + e.message);
     } finally {
       set({ isProcessing: false });
+    }
+  },
+
+  fetchOzonSyncStatus: async () => {
+    try {
+      const result = await get().fetchGas('getOzonSyncStatus');
+      if (result.status === 'success') {
+        set({ ozonSyncStatus: result.data });
+      } else {
+        console.error('getOzonSyncStatus failed:', result.message);
+      }
+    } catch (e) {
+      console.error('getOzonSyncStatus error:', e);
+    }
+  },
+
+  setOzonSyncEnabled: async (enabled) => {
+    set({ isProcessing: true });
+    try {
+      const action = enabled ? 'setupOzonSyncTriggers' : 'removeOzonSyncTriggers';
+      const result = await get().fetchGas(action);
+      if (result.status === 'success') {
+        set({ ozonSyncStatus: result.data });
+        toast.success(enabled ? 'Автоопрос включён: 05:00 и 17:00 МСК' : 'Автоопрос отключён');
+      } else {
+        toast.error(result.message || 'Ошибка управления автоопросом');
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при настройке автоопроса: ' + e.message);
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  runOzonSyncNow: async () => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('runOzonSyncNow');
+      if (result.status === 'success' && result.data) {
+        const data = result.data;
+        if (data.ok === true) {
+          toast.success(`Проверка выполнена. Найдено: ${data.found || 0}, добавлено: ${data.added || 0}, обновлено: ${data.updated || 0}`);
+          const gasResult = await get().fetchGas('getExternalShipments');
+          if (gasResult.status === 'success' && Array.isArray(gasResult.data)) {
+            set({ externalShipments: gasResult.data });
+          }
+        } else {
+          toast.error(data.message || 'Ошибка при автоопросе Ozon');
+        }
+      } else {
+        toast.error(result.message || 'Не удалось выполнить проверку Ozon');
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при автоопросе Ozon: ' + e.message);
+    } finally {
+      set({ isProcessing: false });
+      await get().fetchOzonSyncStatus();
     }
   }
     })
