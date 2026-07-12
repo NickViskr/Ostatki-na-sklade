@@ -1,21 +1,25 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGroups';
 import { isStockDeparted } from '../lib/ozonStatus';
 import { Calendar, Package, X } from 'lucide-react';
+import { toast } from 'sonner';
 
 export const OzonNewSuppliesModal: React.FC = () => {
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
   const skus = useWarehouseStore((state) => state.skus);
   const transactions = useWarehouseStore((state) => state.transactions);
+  const markExternalShipment = useWarehouseStore((state) => state.markExternalShipment);
   
   const setActiveTab = useUIStore((state) => state.setActiveTab);
 
   const [isLoaded, setIsLoaded] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+
+  const autoLinkedRef = useRef<Set<string>>(new Set());
 
   // 1. Память показанных поставок — загрузка из localStorage (ключ 'ozon_notifiedPostingIds')
   // Чтение обернуто в try/catch для отказоустойчивости при битом JSON
@@ -45,9 +49,52 @@ export const OzonNewSuppliesModal: React.FC = () => {
     return buildOzonGroups(externalShipments, skus, transactions);
   }, [isLoaded, externalShipments, skus, transactions]);
 
+  useEffect(() => {
+    if (!isLoaded || groups.length === 0) return;
+
+    const autoLinkGroups = groups.filter(g => 
+      g.needsExpense === true &&
+      g.matchResult?.verdict === 'duplicate' &&
+      g.matchResult.candidates?.[0] &&
+      !autoLinkedRef.current.has(g.id)
+    );
+
+    if (autoLinkGroups.length === 0) return;
+
+    const runAutoLinking = async () => {
+      for (const g of autoLinkGroups) {
+        autoLinkedRef.current.add(g.id);
+        try {
+          const candidate = g.matchResult.candidates[0];
+          const linkInfo = JSON.stringify(candidate.txIds);
+          const newItems = g.items.filter(p => p.status === 'new');
+          
+          let success = true;
+          for (const p of newItems) {
+            const res = await markExternalShipment(p.postingId, 'processed', linkInfo);
+            if (!res) {
+              success = false;
+            }
+          }
+
+          if (success) {
+            toast.success(`Заявка № ${g.label} автоматически привязана к ручной отгрузке от ${candidate.date} — расход не создаётся`);
+          } else {
+            toast.error(`Не удалось автоматически привязать заявку № ${g.label} — привяжите вручную на вкладке Поставки Озон`);
+          }
+        } catch (e) {
+          console.error('Auto linking failed for group', g.id, e);
+          toast.error(`Не удалось автоматически привязать заявку № ${g.label} — привяжите вручную на вкладке Поставки Озон`);
+        }
+      }
+    };
+
+    runAutoLinking();
+  }, [isLoaded, groups, markExternalShipment]);
+
   // Фильтруем группы, в которых есть хотя бы одна поставка в статусе 'new'
   const newGroups = useMemo(() => {
-    return groups.filter(g => g.needsExpense);
+    return groups.filter(g => g.needsExpense && !(g.matchResult?.verdict === 'duplicate' && g.matchResult.candidates.length > 0));
   }, [groups]);
 
   // 2. Для каждой заявки со статусом new вычисляем флаг isNew: true,
