@@ -126,6 +126,15 @@ function doPost(e) {
        return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: { async: true, message: 'Процесс запущен в фоновом режиме. Это займет около минуты.' } })).setMimeType(ContentService.MimeType.JSON);
     }
     
+    if (action === 'runOzonSyncNow') {
+      assertAdmin(currentUser);
+      // КРИТИЧНО: этот action обязан выполняться БЕЗ захвата LockService. Внутри scheduledOzonCheck прокси делает
+      // обратные запросы к этому же doPost (saveExternalShipments), и если внешний запрос держит замок — внутренние
+      // упрутся в waitLock и всё упадёт по таймауту.
+      const syncResult = scheduledOzonCheck();
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: syncResult })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
     // For other actions, acquire the script lock
     lock = LockService.getScriptLock();
     lock.waitLock(10000);
@@ -277,6 +286,9 @@ function doPost(e) {
       case 'updateExternalShipmentStatus':
         result = updateExternalShipmentStatus(data.postingId, data.status, data.transGroupInfo);
         break;
+      case 'getOzonSyncStatus': assertAdmin(currentUser); result = getOzonSyncStatusInfo(); break;
+      case 'setupOzonSyncTriggers': assertAdmin(currentUser); setupOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
+      case 'removeOzonSyncTriggers': assertAdmin(currentUser); removeOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -3588,6 +3600,175 @@ function createOrUpdateTestDatabase() {
     name: copy.getName(),
     url: testSs.getUrl(),
     trashedOld: trashedCount
+  };
+}
+
+const PROXY_URL = 'https://service-415081166309.us-west1.run.app';
+
+function scheduledOzonCheck() {
+  // ВАЖНО: Работает только через SpreadsheetApp.getActiveSpreadsheet() для листа «Сессии» (НЕ через getSpreadsheet()!).
+  // Причина: сессии всегда живут в боевой таблице, прокси проверяет токен именно там.
+  const activeSs = SpreadsheetApp.getActiveSpreadsheet();
+  const sessionsSheet = activeSs.getSheetByName('Сессии');
+  if (!sessionsSheet) {
+    throw new Error('Лист «Сессии» не найден в активной таблице.');
+  }
+
+  const token = Utilities.getUuid();
+  const expiresAt = Date.now() + 10 * 60 * 1000;
+  
+  // Шаг 1: Удалить старые строки 'Автоопрос Ozon'
+  const data = sessionsSheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) {
+    if (String(data[i][1]).trim() === 'Автоопрос Ozon') {
+      sessionsSheet.deleteRow(i + 1);
+    }
+  }
+
+  // Шаг 2: Создать временную сессию
+  sessionsSheet.appendRow([token, 'Автоопрос Ozon', 'admin', expiresAt]);
+  SpreadsheetApp.flush();
+
+  // Шаг 3: Прочитать Script Property 'ozon_autoSyncTarget'
+  const props = PropertiesService.getScriptProperties();
+  const targetProperty = props.getProperty('ozon_autoSyncTarget');
+  const target = targetProperty === 'prod' ? 'prod' : 'test';
+  const devMode = target !== 'prod';
+
+  const result = {
+    time: new Date().toISOString(),
+    ok: false,
+    target: target,
+    found: 0,
+    added: 0,
+    updated: 0,
+    message: ''
+  };
+
+  try {
+    // Шаг 4: Вызвать UrlFetchApp.fetch
+    const payload = JSON.stringify({
+      sessionToken: token,
+      devMode: devMode
+    });
+
+    let response;
+    try {
+      response = UrlFetchApp.fetch(PROXY_URL + '/api/ozon/check', {
+        method: 'post',
+        contentType: 'application/json',
+        payload: payload,
+        muteHttpExceptions: true
+      });
+    } catch (fetchErr) {
+      result.ok = false;
+      result.message = 'Запрос отправлен, ответа не дождались (таймаут). Данные, скорее всего, записаны — проверьте лист.';
+      props.setProperty('ozon_lastAutoSync', JSON.stringify(result));
+      return result;
+    }
+
+    const code = response.getResponseCode();
+    const content = response.getContentText();
+
+    if (code >= 200 && code < 300) {
+      try {
+        const parsed = JSON.parse(content);
+        if (parsed.status === 'success') {
+          result.ok = true;
+          result.found = (parsed.data && parsed.data.found) || 0;
+          result.added = (parsed.data && parsed.data.added) || 0;
+          result.updated = (parsed.data && parsed.data.updated) || 0;
+          result.message = (parsed.data && parsed.data.message) || 'Синхронизация успешно завершена';
+        } else {
+          result.ok = false;
+          result.message = parsed.message || 'Ошибка API: статус неуспешен';
+        }
+      } catch (jsonErr) {
+        result.ok = false;
+        result.message = 'Не удалось разобрать JSON ответа. Ошибка: ' + jsonErr.toString() + ' (Ответ: ' + content.slice(0, 200) + ')';
+      }
+    } else {
+      result.ok = false;
+      result.message = 'HTTP ' + code + ': ' + content.slice(0, 200);
+    }
+
+  } catch (globalErr) {
+    result.ok = false;
+    result.message = globalErr.toString();
+  } finally {
+    // Шаг 6: Удалить временную сессию из листа «Сессии»
+    try {
+      const finalData = sessionsSheet.getDataRange().getValues();
+      for (let i = finalData.length - 1; i >= 1; i--) {
+        if (String(finalData[i][0]).trim() === token) {
+          sessionsSheet.deleteRow(i + 1);
+          break;
+        }
+      }
+      SpreadsheetApp.flush();
+    } catch (cleanupErr) {
+      Logger.log('Ошибка при удалении временной сессии: ' + cleanupErr.toString());
+    }
+  }
+
+  props.setProperty('ozon_lastAutoSync', JSON.stringify(result));
+  return result;
+}
+
+function setupOzonSyncTriggers() {
+  removeOzonSyncTriggers();
+  ScriptApp.newTrigger('scheduledOzonCheck')
+    .timeBased()
+    .everyDays(1)
+    .atHour(5)
+    .inTimezone('Europe/Moscow')
+    .create();
+  ScriptApp.newTrigger('scheduledOzonCheck')
+    .timeBased()
+    .everyDays(1)
+    .atHour(17)
+    .inTimezone('Europe/Moscow')
+    .create();
+}
+
+function removeOzonSyncTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'scheduledOzonCheck') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+}
+
+function getOzonSyncStatusInfo() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let triggersCount = 0;
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'scheduledOzonCheck') {
+      triggersCount++;
+    }
+  }
+  const enabled = triggersCount > 0;
+
+  const props = PropertiesService.getScriptProperties();
+  const targetProperty = props.getProperty('ozon_autoSyncTarget');
+  const target = targetProperty === 'prod' ? 'prod' : 'test';
+
+  const lastRunStr = props.getProperty('ozon_lastAutoSync');
+  let lastRun = null;
+  if (lastRunStr) {
+    try {
+      lastRun = JSON.parse(lastRunStr);
+    } catch (e) {
+      Logger.log('Error parsing ozon_lastAutoSync property: ' + e.toString());
+    }
+  }
+
+  return {
+    enabled: enabled,
+    triggersCount: triggersCount,
+    target: target,
+    lastRun: lastRun
   };
 }
 
