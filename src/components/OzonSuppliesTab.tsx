@@ -10,7 +10,7 @@ import {
   ChevronUp, 
   Calendar
 } from 'lucide-react';
-import { STATUS_DICT, getStatusDetails, getStatusLabel } from '../lib/ozonStatus';
+import { STATUS_DICT, getStatusDetails, getStatusLabel, isAcceptanceStage } from '../lib/ozonStatus';
 import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
 import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGroups';
@@ -33,7 +33,25 @@ const formatStatusDate = (dateStr?: string) => {
   }
 };
 
-const renderItemsTable = (itemsJSON?: string) => {
+const parseAcceptance = (acceptedJSON?: string): Map<string, number> => {
+  const map = new Map<string, number>();
+  if (!acceptedJSON) return map;
+  try {
+    const parsed = JSON.parse(acceptedJSON);
+    if (Array.isArray(parsed)) {
+      parsed.forEach((item: any) => {
+        if (item && typeof item.offerId === 'string' && typeof item.accepted === 'number') {
+          map.set(item.offerId, item.accepted);
+        }
+      });
+    }
+  } catch (e) {
+    console.error('Error parsing acceptedJSON:', e);
+  }
+  return map;
+};
+
+const renderItemsTable = (itemsJSON?: string, acceptedJSON?: string) => {
   if (!itemsJSON) {
     return <div className="text-slate-400 p-2 text-sm font-medium">Состав не загружен</div>;
   }
@@ -42,6 +60,9 @@ const renderItemsTable = (itemsJSON?: string) => {
     if (!Array.isArray(items) || items.length === 0) {
       return <div className="text-slate-400 p-2 text-sm font-medium">Состав не загружен</div>;
     }
+    const acceptanceMap = parseAcceptance(acceptedJSON);
+    const hasAcceptance = acceptedJSON !== undefined && acceptedJSON !== null && acceptedJSON !== '';
+
     return (
       <div className="overflow-x-auto mt-2 border border-slate-100 rounded-xl">
         <table className="min-w-full text-left border-collapse text-xs">
@@ -50,16 +71,38 @@ const renderItemsTable = (itemsJSON?: string) => {
               <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Артикул</th>
               <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Штрихкод</th>
               <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Кол-во</th>
+              {hasAcceptance && (
+                <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Принято</th>
+              )}
             </tr>
           </thead>
           <tbody>
-            {items.map((it: any, index: number) => (
-              <tr key={index} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
-                <td className="px-4 py-2 font-semibold text-slate-700">{it.offerId || it.offer_id || '-'}</td>
-                <td className="px-4 py-2 font-mono text-slate-500">{it.barcode || '-'}</td>
-                <td className="px-4 py-2 font-bold text-slate-900">{it.quantity || it.qty || 0}</td>
-              </tr>
-            ))}
+            {items.map((it: any, index: number) => {
+              const offerId = it.offerId || it.offer_id || '';
+              const quantity = it.quantity || it.qty || 0;
+              let acceptedVal = quantity;
+              let colorClass = '';
+
+              if (hasAcceptance) {
+                acceptedVal = acceptanceMap.has(offerId) ? acceptanceMap.get(offerId)! : quantity;
+                if (acceptedVal < quantity) {
+                  colorClass = 'text-red-600';
+                } else if (acceptedVal > quantity) {
+                  colorClass = 'text-amber-600';
+                }
+              }
+
+              return (
+                <tr key={index} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                  <td className="px-4 py-2 font-semibold text-slate-700">{offerId || '-'}</td>
+                  <td className="px-4 py-2 font-mono text-slate-500">{it.barcode || '-'}</td>
+                  <td className="px-4 py-2 font-bold text-slate-900">{quantity}</td>
+                  {hasAcceptance && (
+                    <td className={`px-4 py-2 font-bold ${colorClass}`}>{acceptedVal}</td>
+                  )}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -67,6 +110,174 @@ const renderItemsTable = (itemsJSON?: string) => {
   } catch (e) {
     return <div className="text-slate-400 p-2 text-sm font-medium">Состав не загружен</div>;
   }
+};
+
+interface AcceptanceModalProps {
+  shipment: ExternalShipment;
+  onClose: () => void;
+  saveShipmentAcceptance: (postingId: string, acceptedJSON: string) => Promise<boolean>;
+}
+
+const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, saveShipmentAcceptance }) => {
+  const [items, setItems] = useState<any[]>([]);
+  const [acceptedValues, setAcceptedValues] = useState<Record<string, number>>({});
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    try {
+      const parsedItems = JSON.parse(shipment.itemsJSON || '[]');
+      setItems(parsedItems);
+
+      const accMap = parseAcceptance(shipment.acceptedJSON);
+      const initialVals: Record<string, number> = {};
+      parsedItems.forEach((it: any) => {
+        const offerId = it.offerId || it.offer_id || '';
+        const qty = it.quantity || it.qty || 0;
+        if (shipment.acceptedJSON && accMap.has(offerId)) {
+          initialVals[offerId] = accMap.get(offerId)!;
+        } else {
+          initialVals[offerId] = qty;
+        }
+      });
+      setAcceptedValues(initialVals);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [shipment]);
+
+  const handleValueChange = (offerId: string, valueStr: string) => {
+    const val = parseInt(valueStr, 10);
+    setAcceptedValues(prev => ({
+      ...prev,
+      [offerId]: isNaN(val) ? 0 : val
+    }));
+  };
+
+  const handleSave = async () => {
+    const acceptedList: { offerId: string; accepted: number }[] = [];
+    for (const it of items) {
+      const offerId = it.offerId || it.offer_id || '';
+      const val = acceptedValues[offerId];
+      if (val === undefined || val === null || isNaN(val) || val < 0 || !Number.isInteger(val)) {
+        toast.error(`Некорректное значение приёмки для ${offerId}. Должно быть целым числом >= 0.`);
+        return;
+      }
+      acceptedList.push({ offerId, accepted: val });
+    }
+
+    setIsSaving(true);
+    const success = await saveShipmentAcceptance(shipment.postingId, JSON.stringify(acceptedList));
+    setIsSaving(false);
+    if (success) {
+      onClose();
+    }
+  };
+
+  const handleReset = async () => {
+    setIsSaving(true);
+    const success = await saveShipmentAcceptance(shipment.postingId, '');
+    setIsSaving(false);
+    if (success) {
+      onClose();
+    }
+  };
+
+  return (
+    <div id="acceptance-modal-overlay" className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 transition-all">
+      <div id="acceptance-modal-card" className="bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="p-6 border-b border-slate-100 shrink-0">
+          <h3 className="text-xl font-black text-slate-900 tracking-tight">
+            Приёмка поставки № {shipment.postingId}
+          </h3>
+          <p className="text-slate-500 text-sm font-medium mt-1">
+            Склад хранения: <span className="font-semibold text-indigo-600">{shipment.storageWarehouse || '—'}</span>
+          </p>
+        </div>
+
+        {/* Content */}
+        <div className="p-6 overflow-y-auto flex-1 space-y-4">
+          <table className="min-w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-100">
+                <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Артикул</th>
+                <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider text-center">Заявлено</th>
+                <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Принято</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it: any, index: number) => {
+                const offerId = it.offerId || it.offer_id || '';
+                const qty = it.quantity || it.qty || 0;
+                const acceptedVal = acceptedValues[offerId] ?? qty;
+                const isOver = acceptedVal > qty;
+
+                return (
+                  <tr key={index} className="border-b border-slate-50">
+                    <td className="px-4 py-3 font-semibold text-slate-700 align-middle">
+                      {offerId || '-'}
+                    </td>
+                    <td className="px-4 py-3 font-bold text-slate-900 text-center align-middle">
+                      {qty}
+                    </td>
+                    <td className="px-4 py-3 align-middle">
+                      <div className="space-y-1">
+                        <input
+                          id={`input-accepted-${offerId}`}
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={acceptedVal}
+                          onChange={(e) => handleValueChange(offerId, e.target.value)}
+                          disabled={isSaving}
+                          className="w-24 px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 disabled:opacity-50"
+                        />
+                        {isOver && (
+                          <div className="text-[10px] text-amber-600 font-medium">
+                            Больше заявленного — возможен пересорт
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Footer */}
+        <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex flex-wrap gap-2 justify-between items-center shrink-0">
+          <button
+            id="btn-acceptance-reset"
+            onClick={handleReset}
+            disabled={isSaving}
+            className="px-4 py-2.5 border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 font-bold text-sm rounded-xl transition-all cursor-pointer"
+          >
+            Сбросить (= заявлено)
+          </button>
+          <div className="flex gap-2">
+            <button
+              id="btn-acceptance-cancel"
+              onClick={onClose}
+              disabled={isSaving}
+              className="px-4 py-2.5 border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 font-bold text-sm rounded-xl transition-all cursor-pointer"
+            >
+              Отмена
+            </button>
+            <button
+              id="btn-acceptance-save"
+              onClick={handleSave}
+              disabled={isSaving}
+              className="px-5 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-100 cursor-pointer"
+            >
+              {isSaving ? 'Сохранение...' : 'Сохранить'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 export const OzonSuppliesTab: React.FC = React.memo(() => {
@@ -79,6 +290,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const skus = useWarehouseStore((state) => state.skus);
   const stock = useWarehouseStore((state) => state.stock);
   const markExternalShipment = useWarehouseStore((state) => state.markExternalShipment);
+  const saveShipmentAcceptance = useWarehouseStore((state) => state.saveShipmentAcceptance);
   const setPendingOzonPostingIds = useWarehouseStore((state) => state.setPendingOzonPostingIds);
   const setOpType = useUIStore((state) => state.setOpType);
   const setUploadDestination = useUIStore((state) => state.setUploadDestination);
@@ -89,6 +301,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [expandedPostings, setExpandedPostings] = useState<Set<string>>(new Set());
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
   const [showProcessed, setShowProcessed] = useState(false);
+  const [selectedAcceptanceShipment, setSelectedAcceptanceShipment] = useState<ExternalShipment | null>(null);
 
   useEffect(() => {
     setIsLoading(true);
@@ -523,6 +736,60 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                       <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${statusDetails.badgeClass}`}>
                                         {statusDetails.label}
                                       </span>
+                                      {isAcceptanceStage(s.ozonStatus) && (() => {
+                                        const isAcceptedEmpty = !s.acceptedJSON;
+                                        if (isAcceptedEmpty) {
+                                          return (
+                                            <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 text-slate-600">
+                                              Приёмка: = заявлено
+                                            </span>
+                                          );
+                                        } else {
+                                          let items: any[] = [];
+                                          try {
+                                            items = JSON.parse(s.itemsJSON || '[]');
+                                          } catch (e) {}
+                                          
+                                          const accMap = parseAcceptance(s.acceptedJSON);
+                                          let shortage = 0;
+                                          let surplus = 0;
+
+                                          items.forEach((it: any) => {
+                                            const offerId = it.offerId || it.offer_id || '';
+                                            const quantity = it.quantity || it.qty || 0;
+                                            const acceptedVal = accMap.has(offerId) ? accMap.get(offerId)! : quantity;
+                                            if (acceptedVal < quantity) {
+                                              shortage += (quantity - acceptedVal);
+                                            } else if (acceptedVal > quantity) {
+                                              surplus += (acceptedVal - quantity);
+                                            }
+                                          });
+
+                                          const badges: React.ReactNode[] = [];
+                                          if (shortage === 0 && surplus === 0) {
+                                            badges.push(
+                                              <span key="ok" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-700">
+                                                Принято полностью
+                                              </span>
+                                            );
+                                          }
+                                          if (shortage > 0) {
+                                            badges.push(
+                                              <span key="shortage" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-100 text-red-700">
+                                                Недостача {shortage} шт
+                                              </span>
+                                            );
+                                          }
+                                          if (surplus > 0) {
+                                            badges.push(
+                                              <span key="surplus" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-700">
+                                                Излишек {surplus} шт
+                                              </span>
+                                            );
+                                          }
+                                          return <>{badges}</>;
+                                        }
+                                      })()}
                                       {s.ozonStatusDate && (
                                         <span className="text-xs text-slate-400 font-bold whitespace-nowrap">
                                           {formatStatusDate(s.ozonStatusDate)}
@@ -546,8 +813,25 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                     className="border-t border-slate-100 bg-slate-50/50 overflow-hidden"
                                   >
                                     <div className="p-4 bg-slate-50/30">
-                                      <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Состав поставки</div>
-                                      {renderItemsTable(s.itemsJSON)}
+                                      <div className="flex items-center justify-between mb-2">
+                                        <div className="text-xs font-bold text-slate-400 uppercase tracking-wider">Состав поставки</div>
+                                        {isAcceptanceStage(s.ozonStatus) && s.itemsJSON && (() => {
+                                          const label = s.acceptedJSON ? 'Изменить приёмку' : 'Ввести приёмку';
+                                          return (
+                                            <button
+                                              id={`btn-acceptance-${s.postingId}`}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setSelectedAcceptanceShipment(s);
+                                              }}
+                                              className="bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                                            >
+                                              {label}
+                                            </button>
+                                          );
+                                        })()}
+                                      </div>
+                                      {renderItemsTable(s.itemsJSON, s.acceptedJSON)}
                                     </div>
                                   </motion.div>
                                 )}
@@ -563,6 +847,13 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
             );
           })}
         </div>
+      )}
+      {selectedAcceptanceShipment && (
+        <AcceptanceModal
+          shipment={selectedAcceptanceShipment}
+          onClose={() => setSelectedAcceptanceShipment(null)}
+          saveShipmentAcceptance={saveShipmentAcceptance}
+        />
       )}
     </div>
   );

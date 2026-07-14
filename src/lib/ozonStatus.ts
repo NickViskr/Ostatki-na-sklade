@@ -50,3 +50,13 @@ export const STOCK_DEPARTED_STATUSES = [
 
 export const isStockDeparted = (ozonStatus?: string): boolean =>
   !!ozonStatus && STOCK_DEPARTED_STATUSES.includes(String(ozonStatus).toUpperCase().trim());
+
+export const ACCEPTANCE_STAGE_STATUSES = [
+  'ACCEPTANCE_AT_STORAGE_WAREHOUSE',
+  'REPORTS_CONFIRMATION_AWAITING',
+  'REPORT_REJECTED',
+  'COMPLETED'
+];
+
+export const isAcceptanceStage = (ozonStatus?: string): boolean =>
+  !!ozonStatus && ACCEPTANCE_STAGE_STATUSES.includes(String(ozonStatus).toUpperCase().trim());
