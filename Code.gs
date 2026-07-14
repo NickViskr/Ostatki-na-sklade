@@ -289,6 +289,10 @@ function doPost(e) {
       case 'saveExternalShipmentAcceptance':
         result = saveExternalShipmentAcceptance(data.postingId, data.acceptedJSON);
         break;
+      case 'saveShipmentShortageRecalc':
+        assertAdmin(currentUser);
+        result = saveShipmentShortageRecalc(data.postingId, data.recalcJSON, data.historyNotes, currentUser.username);
+        break;
       case 'getOzonSyncStatus': assertAdmin(currentUser); result = getOzonSyncStatusInfo(); break;
       case 'setupOzonSyncTriggers': assertAdmin(currentUser); setupOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'removeOzonSyncTriggers': assertAdmin(currentUser); removeOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
@@ -328,7 +332,7 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON'
 ];
 
 function setupDatabase(targetSs) {
@@ -3398,6 +3402,7 @@ function getExternalShipments() {
   const timeslotIdx = headers.indexOf('Таймслот');
   const cabinetIdx = headers.indexOf('Кабинет');
   const acceptedJsonIdx = headers.indexOf('ПринятоJSON');
+  const recalcJsonIdx = headers.indexOf('ПерерасчётJSON');
   
   if (postingIdIdx === -1) return [];
   
@@ -3438,7 +3443,8 @@ function getExternalShipments() {
       storageWarehouse: getVal(storageWarehouseIdx, false),
       timeslot: getVal(timeslotIdx, false),
       cabinet: getVal(cabinetIdx, false),
-      acceptedJSON: getVal(acceptedJsonIdx, false)
+      acceptedJSON: getVal(acceptedJsonIdx, false),
+      recalcJSON: getVal(recalcJsonIdx, false)
     });
   }
   return shipments;
@@ -3529,6 +3535,124 @@ function saveExternalShipmentAcceptance(postingId, acceptedJSON) {
     }
   }
   throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+
+function saveShipmentShortageRecalc(postingId, recalcJSON, historyNotes, username) {
+  if (!postingId) {
+    throw new Error('PostingID is required');
+  }
+  
+  // Валидация recalcJSON
+  if (recalcJSON !== undefined && recalcJSON !== null && recalcJSON !== '') {
+    if (typeof recalcJSON !== 'string') {
+      throw new Error('recalcJSON must be a string');
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(recalcJSON);
+    } catch (e) {
+      throw new Error('Invalid JSON format in recalcJSON: ' + e.toString());
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error('recalcJSON must represent an array of items');
+    }
+    for (let i = 0; i < parsed.length; i++) {
+      const item = parsed[i];
+      if (!item || typeof item !== 'object') {
+        throw new Error('Each item in recalcJSON must be an object');
+      }
+      if (typeof item.article !== 'string' || !item.article.trim()) {
+        throw new Error('Each item in recalcJSON must have a non-empty string field article');
+      }
+      if (typeof item.declared !== 'number' || !Number.isInteger(item.declared) || item.declared < 0) {
+        throw new Error('Each item in recalcJSON must have an integer declared field >= 0');
+      }
+      if (typeof item.accepted !== 'number' || !Number.isInteger(item.accepted) || item.accepted < 0) {
+        throw new Error('Each item in recalcJSON must have an integer accepted field >= 0');
+      }
+      if (typeof item.baseUnitCost !== 'number' || isNaN(item.baseUnitCost) || item.baseUnitCost < 0) {
+        throw new Error('Each item in recalcJSON must have a number field baseUnitCost >= 0');
+      }
+      if (typeof item.adjustedUnitCost !== 'number' || isNaN(item.adjustedUnitCost) || item.adjustedUnitCost < 0) {
+        throw new Error('Each item in recalcJSON must have a number field adjustedUnitCost >= 0');
+      }
+      if (typeof item.redistributedCost !== 'number' || isNaN(item.redistributedCost) || item.redistributedCost < 0) {
+        throw new Error('Each item in recalcJSON must have a number field redistributedCost >= 0');
+      }
+    }
+  }
+
+  // Валидация historyNotes
+  if (historyNotes !== undefined && historyNotes !== null) {
+    if (!Array.isArray(historyNotes)) {
+      throw new Error('historyNotes must be an array');
+    }
+    for (let i = 0; i < historyNotes.length; i++) {
+      const hn = historyNotes[i];
+      if (!hn || typeof hn !== 'object') {
+        throw new Error('Each item in historyNotes must be an object');
+      }
+      if (typeof hn.article !== 'string' || !hn.article.trim()) {
+        throw new Error('Each item in historyNotes must have a non-empty string field article');
+      }
+      if (typeof hn.note !== 'string' || !hn.note.trim()) {
+        throw new Error('Each item in historyNotes must have a non-empty string field note');
+      }
+    }
+  }
+
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const recalcJsonIdx = headers.indexOf('ПерерасчётJSON');
+  if (postingIdIdx === -1 || recalcJsonIdx === -1) {
+    throw new Error('Required columns not found in Внешние отгрузки');
+  }
+  
+  const targetId = String(postingId).trim().toLowerCase();
+  let foundRowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    const currentId = String(data[i][postingIdIdx]).trim().toLowerCase();
+    if (currentId === targetId) {
+      foundRowIndex = i + 1;
+      break;
+    }
+  }
+  
+  if (foundRowIndex === -1) {
+    throw new Error('Shipment with PostingID ' + postingId + ' not found');
+  }
+  
+  sheet.getRange(foundRowIndex, recalcJsonIdx + 1).setValue(recalcJSON || '');
+  
+  let historyRowsAdded = 0;
+  if (historyNotes && historyNotes.length > 0) {
+    const transSheet = getTransactionSheet(getSpreadsheet());
+    for (let i = 0; i < historyNotes.length; i++) {
+      const element = historyNotes[i];
+      const row = buildTransactionRow({
+        id: Utilities.getUuid(),
+        date: new Date().toISOString(),
+        type: 'Корректировка',
+        article: element.article,
+        quantity: 0,
+        price: 0,
+        writeOffCost: 0,
+        total: 0,
+        destination: element.note,
+        deliveryDate: '',
+        user: username,
+        groupId: '',
+        isComponent: false
+      });
+      transSheet.appendRow(row);
+      historyRowsAdded++;
+    }
+  }
+  
+  SpreadsheetApp.flush();
+  return { success: true, historyRowsAdded: historyRowsAdded };
 }
 
 function recalcCapitalizationFromAvg() {
