@@ -286,6 +286,9 @@ function doPost(e) {
       case 'updateExternalShipmentStatus':
         result = updateExternalShipmentStatus(data.postingId, data.status, data.transGroupInfo);
         break;
+      case 'saveExternalShipmentAcceptance':
+        result = saveExternalShipmentAcceptance(data.postingId, data.acceptedJSON);
+        break;
       case 'getOzonSyncStatus': assertAdmin(currentUser); result = getOzonSyncStatusInfo(); break;
       case 'setupOzonSyncTriggers': assertAdmin(currentUser); setupOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'removeOzonSyncTriggers': assertAdmin(currentUser); removeOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
@@ -325,7 +328,7 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON'
 ];
 
 function setupDatabase(targetSs) {
@@ -3394,6 +3397,7 @@ function getExternalShipments() {
   const storageWarehouseIdx = headers.indexOf('Склад хранения');
   const timeslotIdx = headers.indexOf('Таймслот');
   const cabinetIdx = headers.indexOf('Кабинет');
+  const acceptedJsonIdx = headers.indexOf('ПринятоJSON');
   
   if (postingIdIdx === -1) return [];
   
@@ -3433,7 +3437,8 @@ function getExternalShipments() {
       dropOffWarehouse: getVal(dropOffWarehouseIdx, false),
       storageWarehouse: getVal(storageWarehouseIdx, false),
       timeslot: getVal(timeslotIdx, false),
-      cabinet: getVal(cabinetIdx, false)
+      cabinet: getVal(cabinetIdx, false),
+      acceptedJSON: getVal(acceptedJsonIdx, false)
     });
   }
   return shipments;
@@ -3465,6 +3470,60 @@ function updateExternalShipmentStatus(postingId, status, transGroupInfo) {
       if (transGroupInfo !== undefined && transGroupInfo !== null && transGroupInfoIdx >= 0) {
         sheet.getRange(i + 1, transGroupInfoIdx + 1).setValue(String(transGroupInfo));
       }
+      SpreadsheetApp.flush();
+      return { success: true };
+    }
+  }
+  throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+
+function saveExternalShipmentAcceptance(postingId, acceptedJSON) {
+  if (!postingId) {
+    throw new Error('PostingID is required');
+  }
+  
+  // Валидация acceptedJSON
+  if (acceptedJSON !== undefined && acceptedJSON !== null && acceptedJSON !== '') {
+    if (typeof acceptedJSON !== 'string') {
+      throw new Error('acceptedJSON must be a string');
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(acceptedJSON);
+    } catch (e) {
+      throw new Error('Invalid JSON format in acceptedJSON: ' + e.toString());
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error('acceptedJSON must represent an array of items');
+    }
+    for (let i = 0; i < parsed.length; i++) {
+      const item = parsed[i];
+      if (!item || typeof item !== 'object') {
+        throw new Error('Each item in acceptedJSON must be an object');
+      }
+      if (typeof item.offerId !== 'string' || !item.offerId.trim()) {
+        throw new Error('Each item in acceptedJSON must have a non-empty string field offerId');
+      }
+      if (typeof item.accepted !== 'number' || !Number.isInteger(item.accepted) || item.accepted < 0) {
+        throw new Error('Each item in acceptedJSON must have an integer accepted field >= 0');
+      }
+    }
+  }
+
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const acceptedJsonIdx = headers.indexOf('ПринятоJSON');
+  if (postingIdIdx === -1 || acceptedJsonIdx === -1) {
+    throw new Error('Required columns not found in Внешние отгрузки');
+  }
+  
+  const targetId = String(postingId).trim().toLowerCase();
+  for (let i = 1; i < data.length; i++) {
+    const currentId = String(data[i][postingIdIdx]).trim().toLowerCase();
+    if (currentId === targetId) {
+      sheet.getRange(i + 1, acceptedJsonIdx + 1).setValue(acceptedJSON || '');
       SpreadsheetApp.flush();
       return { success: true };
     }
