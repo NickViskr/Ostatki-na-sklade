@@ -93,6 +93,7 @@ interface WarehouseState {
   externalShipments: ExternalShipment[];
   checkOzonShipments: () => Promise<void>;
   markExternalShipment: (postingId: string, status: 'processed' | 'ignored' | 'new', transGroupInfo?: string) => Promise<boolean>;
+  saveShipmentAcceptance: (postingId: string, acceptedJSON: string) => Promise<boolean>;
   returnLinkedOzonSupplies: (deletedIds: string[]) => Promise<void>;
   fetchExternalShipments: () => Promise<void>;
   pendingOzonPostingIds: string[];
@@ -1185,6 +1186,31 @@ export const useWarehouseStore = create<WarehouseState>()(
     } catch (e: any) {
       console.error(e);
       toast.error('Ошибка сети при обновлении статуса: ' + e.message);
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  saveShipmentAcceptance: async (postingId, acceptedJSON) => {
+    set({ isProcessing: true });
+    try {
+      const res = await get().fetchGas('saveExternalShipmentAcceptance', { data: { postingId, acceptedJSON } });
+      if (res.status === 'success') {
+        // Refetch to be fully in sync
+        const gasResult = await get().fetchGas('getExternalShipments');
+        if (gasResult.status === 'success' && Array.isArray(gasResult.data)) {
+          set({ externalShipments: gasResult.data });
+        }
+        toast.success('Приёмка сохранена');
+        return true;
+      } else {
+        toast.error(res.message || 'Ошибка сохранения приёмки');
+        return false;
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при сохранении приёмки: ' + e.message);
       return false;
     } finally {
       set({ isProcessing: false });

@@ -9,6 +9,9 @@
   - Реализована строгая валидация входящих данных: разрешены пустая строка (для сброса поля) или корректно сериализованный JSON-массив объектов с непустым строковым `offerId` и целочисленным `accepted` >= 0.
   - Интегрировано действие `saveExternalShipmentAcceptance` в обработчик `doPost` с использованием LockService для предотвращения гонок данных.
   - Обновлено чтение в `getExternalShipments` для сбора и отдачи поля `acceptedJSON` клиенту.
+- Интегрирован проброс и сохранение принятых количеств на клиенте (`src/types.ts`, `src/store/useWarehouseStore.ts`):
+  - Добавлено необязательное поле `acceptedJSON?: string` в интерфейс `ExternalShipment`.
+  - В Zustand-стор `useWarehouseStore.ts` добавлен метод `saveShipmentAcceptance(postingId, acceptedJSON)` для сохранения приёмки с автоматической перезагрузкой списка поставок и выводом уведомлений.
 
 ## [2026-07-12]
 

@@ -107,4 +107,5 @@ export interface ExternalShipment {
   storageWarehouse?: string;
   timeslot?: string;
   cabinet?: string;
+  acceptedJSON?: string;
 }
