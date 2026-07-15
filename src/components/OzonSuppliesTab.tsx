@@ -14,6 +14,8 @@ import { STATUS_DICT, getStatusDetails, getStatusLabel, isAcceptanceStage } from
 import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
 import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGroups';
+import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
+import { formatCurrency } from '../lib/utils';
 
 
 const formatStatusDate = (dateStr?: string) => {
@@ -51,7 +53,7 @@ const parseAcceptance = (acceptedJSON?: string): Map<string, number> => {
   return map;
 };
 
-const renderItemsTable = (itemsJSON?: string, acceptedJSON?: string) => {
+const renderItemsTable = (itemsJSON?: string, acceptedJSON?: string, recalcJSON?: string) => {
   if (!itemsJSON) {
     return <div className="text-slate-400 p-2 text-sm font-medium">Состав не загружен</div>;
   }
@@ -62,6 +64,7 @@ const renderItemsTable = (itemsJSON?: string, acceptedJSON?: string) => {
     }
     const acceptanceMap = parseAcceptance(acceptedJSON);
     const hasAcceptance = acceptedJSON !== undefined && acceptedJSON !== null && acceptedJSON !== '';
+    const recalcItems = parseRecalcJSON(recalcJSON);
 
     return (
       <div className="overflow-x-auto mt-2 border border-slate-100 rounded-xl">
@@ -73,6 +76,12 @@ const renderItemsTable = (itemsJSON?: string, acceptedJSON?: string) => {
               <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Кол-во</th>
               {hasAcceptance && (
                 <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Принято</th>
+              )}
+              {recalcItems !== null && (
+                <>
+                  <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Себест. базовая</th>
+                  <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Себест. скорр.</th>
+                </>
               )}
             </tr>
           </thead>
@@ -100,6 +109,27 @@ const renderItemsTable = (itemsJSON?: string, acceptedJSON?: string) => {
                   {hasAcceptance && (
                     <td className={`px-4 py-2 font-bold ${colorClass}`}>{acceptedVal}</td>
                   )}
+                  {recalcItems !== null && (() => {
+                    const itemRecalc = recalcItems.find(ri => String(ri.offerId).toLowerCase() === String(offerId).toLowerCase());
+                    if (itemRecalc) {
+                      const isCostHigher = itemRecalc.adjustedUnitCost > itemRecalc.baseUnitCost;
+                      return (
+                        <>
+                          <td className="px-4 py-2 font-mono text-slate-900">{formatCurrency(itemRecalc.baseUnitCost)} ₽</td>
+                          <td className={`px-4 py-2 font-mono ${isCostHigher ? 'text-red-600 font-bold' : 'text-slate-900'}`}>
+                            {formatCurrency(itemRecalc.adjustedUnitCost)} ₽
+                          </td>
+                        </>
+                      );
+                    } else {
+                      return (
+                        <>
+                          <td className="px-4 py-2 text-slate-400">—</td>
+                          <td className="px-4 py-2 text-slate-400">—</td>
+                        </>
+                      );
+                    }
+                  })()}
                 </tr>
               );
             })}
@@ -123,6 +153,11 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
   const [acceptedValues, setAcceptedValues] = useState<Record<string, number>>({});
   const [isSaving, setIsSaving] = useState(false);
 
+  const externalShipments = useWarehouseStore((state) => state.externalShipments);
+  const transactions = useWarehouseStore((state) => state.transactions);
+  const skus = useWarehouseStore((state) => state.skus);
+  const saveShipmentShortageRecalc = useWarehouseStore((state) => state.saveShipmentShortageRecalc);
+
   useEffect(() => {
     try {
       const parsedItems = JSON.parse(shipment.itemsJSON || '[]');
@@ -145,6 +180,34 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
     }
   }, [shipment]);
 
+  const recalcPreview = useMemo(() => {
+    const acceptedList: { offerId: string; accepted: number }[] = [];
+    for (const it of items) {
+      const offerId = it.offerId || it.offer_id || '';
+      const val = acceptedValues[offerId];
+      if (val === undefined || val === null || isNaN(val) || val < 0 || !Number.isInteger(val)) {
+        return null;
+      }
+      acceptedList.push({ offerId, accepted: val });
+    }
+    return computeShortageRecalc(
+      { ...shipment, acceptedJSON: JSON.stringify(acceptedList) },
+      externalShipments,
+      transactions,
+      skus
+    );
+  }, [items, acceptedValues, shipment, externalShipments, transactions, skus]);
+
+  const buildCancelNotes = () => {
+    const parsed = parseRecalcJSON(shipment.recalcJSON);
+    if (!parsed) return [];
+    const filtered = parsed.filter(p => p.accepted < p.declared);
+    return filtered.map(p => ({
+      article: p.article,
+      note: `Перерасчёт недостачи отменён: заявка № ${shipment.orderNumber || shipment.orderId || '-'}, поставка ${shipment.postingId}, ${p.article}: приёмка изменена`
+    }));
+  };
+
   const handleValueChange = (offerId: string, valueStr: string) => {
     const val = parseInt(valueStr, 10);
     setAcceptedValues(prev => ({
@@ -166,19 +229,49 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
     }
 
     setIsSaving(true);
-    const success = await saveShipmentAcceptance(shipment.postingId, JSON.stringify(acceptedList));
-    setIsSaving(false);
-    if (success) {
-      onClose();
+    try {
+      const success = await saveShipmentAcceptance(shipment.postingId, JSON.stringify(acceptedList));
+      if (success) {
+        if (recalcPreview?.status === 'ok') {
+          await saveShipmentShortageRecalc(
+            shipment.postingId,
+            JSON.stringify(recalcPreview.items),
+            recalcPreview.historyNotes
+          );
+        } else if (shipment.recalcJSON) {
+          await saveShipmentShortageRecalc(
+            shipment.postingId,
+            '',
+            buildCancelNotes()
+          );
+        }
+        onClose();
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const handleReset = async () => {
     setIsSaving(true);
-    const success = await saveShipmentAcceptance(shipment.postingId, '');
-    setIsSaving(false);
-    if (success) {
-      onClose();
+    try {
+      const success = await saveShipmentAcceptance(shipment.postingId, '');
+      if (success) {
+        if (shipment.recalcJSON) {
+          await saveShipmentShortageRecalc(
+            shipment.postingId,
+            '',
+            buildCancelNotes()
+          );
+        }
+        onClose();
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -244,7 +337,81 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
               })}
             </tbody>
           </table>
+
+          {recalcPreview !== null && (
+            <div id="shortage-recalc-preview" className="mt-4 pt-4 border-t border-slate-100 space-y-3">
+              {recalcPreview.status === 'ok' && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                    Перераспределение стоимости недостачи
+                  </h4>
+                  <div className="overflow-x-auto border border-slate-100 rounded-xl">
+                    <table className="min-w-full text-left border-collapse text-[11px]">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-100">
+                          <th className="px-3 py-2 font-bold text-slate-400 uppercase">Артикул</th>
+                          <th className="px-3 py-2 font-bold text-slate-400 uppercase text-center">Заявлено → Принято</th>
+                          <th className="px-3 py-2 font-bold text-slate-400 uppercase text-right">Себест. базовая</th>
+                          <th className="px-3 py-2 font-bold text-slate-400 uppercase text-right">Себест. новая</th>
+                          <th className="px-3 py-2 font-bold text-slate-400 uppercase text-right">Доначислено</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recalcPreview.items.map((item, index) => {
+                          const isRedistributed = item.redistributedCost > 0;
+                          return (
+                            <tr
+                              key={index}
+                              className={`border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors ${
+                                isRedistributed ? 'text-red-600 font-semibold bg-red-50/10' : 'text-slate-700'
+                              }`}
+                            >
+                              <td className="px-3 py-1.5 font-bold">{item.article}</td>
+                              <td className="px-3 py-1.5 text-center font-mono">{item.declared} → {item.accepted}</td>
+                              <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(item.baseUnitCost)} ₽</td>
+                              <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(item.adjustedUnitCost)} ₽</td>
+                              <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(item.redistributedCost)} ₽</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 pt-1">
+                    <div className="text-xs font-bold text-slate-900">
+                      Итого перераспределено:{' '}
+                      <span className="text-red-600">
+                        {formatCurrency(recalcPreview.items.reduce((sum, i) => sum + i.redistributedCost, 0))} ₽
+                      </span>
+                    </div>
+                    <div className="text-slate-400 text-[10px] italic">
+                      Остатки склада не изменятся. При сохранении будет записан перерасчёт и след в Историю.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {recalcPreview.status === 'surplus' && (
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 text-xs font-medium">
+                  Есть излишек — похоже на пересорт (пункты 15–16 плана). Перерасчёт недостачи не будет проведён; приёмка сохранится как есть.
+                </div>
+              )}
+
+              {recalcPreview.status === 'error' && (
+                <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-xs font-medium">
+                  {recalcPreview.errorMsg} Приёмка сохранится, но перерасчёт проведён не будет.
+                </div>
+              )}
+
+              {recalcPreview.status === 'none' && shipment.recalcJSON && (
+                <div className="bg-slate-50 border border-slate-200 text-slate-600 rounded-xl p-3 text-xs font-medium">
+                  Недостачи нет — ранее сохранённый перерасчёт будет отменён.
+                </div>
+              )}
+            </div>
+          )}
         </div>
+
 
         {/* Footer */}
         <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex flex-wrap gap-2 justify-between items-center shrink-0">
@@ -790,6 +957,11 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           return <>{badges}</>;
                                         }
                                       })()}
+                                      {s.recalcJSON && (
+                                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-100 text-indigo-700">
+                                          Перерасчёт ✓
+                                        </span>
+                                      )}
                                       {s.ozonStatusDate && (
                                         <span className="text-xs text-slate-400 font-bold whitespace-nowrap">
                                           {formatStatusDate(s.ozonStatusDate)}
@@ -831,7 +1003,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           );
                                         })()}
                                       </div>
-                                      {renderItemsTable(s.itemsJSON, s.acceptedJSON)}
+                                      {renderItemsTable(s.itemsJSON, s.acceptedJSON, s.recalcJSON)}
                                     </div>
                                   </motion.div>
                                 )}
