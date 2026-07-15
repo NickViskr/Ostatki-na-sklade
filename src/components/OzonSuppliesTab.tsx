@@ -151,6 +151,7 @@ interface AcceptanceModalProps {
 const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, saveShipmentAcceptance }) => {
   const [items, setItems] = useState<any[]>([]);
   const [acceptedValues, setAcceptedValues] = useState<Record<string, number>>({});
+  const [extraItems, setExtraItems] = useState<{ article: string; accepted: number }[]>([]);
   const [isSaving, setIsSaving] = useState(false);
 
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
@@ -175,6 +176,30 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
         }
       });
       setAcceptedValues(initialVals);
+
+      // Загрузка extraItems, если в acceptedJSON есть записи с offerId, отсутствующим в itemsJSON (без учёта регистра)
+      const declaredOfferIdsLower = new Set(
+        parsedItems.map((it: any) => String(it.offerId || it.offer_id || '').trim().toLowerCase())
+      );
+      const extra: { article: string; accepted: number }[] = [];
+      if (shipment.acceptedJSON) {
+        try {
+          const parsedAccepted = JSON.parse(shipment.acceptedJSON);
+          if (Array.isArray(parsedAccepted)) {
+            parsedAccepted.forEach((it: any) => {
+              if (it && typeof it.offerId === 'string' && typeof it.accepted === 'number') {
+                const offIdTrim = it.offerId.trim();
+                if (!declaredOfferIdsLower.has(offIdTrim.toLowerCase())) {
+                  extra.push({ article: offIdTrim, accepted: it.accepted });
+                }
+              }
+            });
+          }
+        } catch (e) {
+          console.error('Error parsing acceptedJSON for extra items:', e);
+        }
+      }
+      setExtraItems(extra);
     } catch (e) {
       console.error(e);
     }
@@ -190,13 +215,46 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
       }
       acceptedList.push({ offerId, accepted: val });
     }
+
+    for (const extra of extraItems) {
+      const { article, accepted } = extra;
+      if (!article || !article.trim() || accepted < 1 || !Number.isInteger(accepted)) {
+        return null;
+      }
+      acceptedList.push({ offerId: article, accepted });
+    }
+
     return computeShortageRecalc(
       { ...shipment, acceptedJSON: JSON.stringify(acceptedList) },
       externalShipments,
       transactions,
       skus
     );
-  }, [items, acceptedValues, shipment, externalShipments, transactions, skus]);
+  }, [items, acceptedValues, extraItems, shipment, externalShipments, transactions, skus]);
+
+  const getAvailableSkusForIndex = (idx: number) => {
+    const declaredOfferIdsLower = new Set(
+      items.map((it: any) => String(it.offerId || it.offer_id || '').trim().toLowerCase())
+    );
+    const extraArticlesLower = new Set(
+      extraItems
+        .filter((_, i) => i !== idx)
+        .map((it) => it.article.trim().toLowerCase())
+    );
+    return skus.filter(s => {
+      const sLower = s.sku.trim().toLowerCase();
+      return !declaredOfferIdsLower.has(sLower) && !extraArticlesLower.has(sLower);
+    });
+  };
+
+  const handleAddExtraItem = () => {
+    const available = getAvailableSkusForIndex(-1);
+    if (available.length === 0) {
+      toast.error('Нет доступных артикулов для добавления');
+      return;
+    }
+    setExtraItems(prev => [...prev, { article: available[0].sku, accepted: 1 }]);
+  };
 
   const buildCancelNotes = () => {
     const parsed = parseRecalcJSON(shipment.recalcJSON);
@@ -226,6 +284,20 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
         return;
       }
       acceptedList.push({ offerId, accepted: val });
+    }
+
+    // Валидация и добавление extraItems
+    for (const extra of extraItems) {
+      const { article, accepted } = extra;
+      if (!article || !article.trim()) {
+        toast.error(`Не выбран артикул для позиции не из заявки.`);
+        return;
+      }
+      if (accepted === undefined || accepted === null || isNaN(accepted) || accepted < 1 || !Number.isInteger(accepted)) {
+        toast.error(`Количество для ${article} должно быть целым числом >= 1.`);
+        return;
+      }
+      acceptedList.push({ offerId: article, accepted });
     }
 
     setIsSaving(true);
@@ -338,6 +410,99 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
             </tbody>
           </table>
 
+          {/* Позиции не из заявки (пересорт) */}
+          <div className="mt-6 pt-4 border-t border-slate-100 space-y-3">
+            <h4 className="text-sm font-black text-slate-900 tracking-tight">
+              Позиции не из заявки (пересорт)
+            </h4>
+            
+            {extraItems.length === 0 ? (
+              <p className="text-slate-400 text-xs italic">Нет добавленных позиций.</p>
+            ) : (
+              <div className="overflow-x-auto border border-slate-100 rounded-xl">
+                <table className="min-w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-100">
+                      <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Артикул</th>
+                      <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider text-center w-24">Заявлено</th>
+                      <th className="px-4 py-2.5 font-bold text-slate-400 uppercase tracking-wider">Принято</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {extraItems.map((item, idx) => {
+                      const optSkus = getAvailableSkusForIndex(idx);
+                      return (
+                        <tr key={idx} className="border-b border-slate-50">
+                          <td className="px-4 py-2 align-middle">
+                            <select
+                              id="select-extra-article"
+                              value={item.article}
+                              onChange={(e) => {
+                                const newArt = e.target.value;
+                                setExtraItems(prev => prev.map((ex, i) => i === idx ? { ...ex, article: newArt } : ex));
+                              }}
+                              disabled={isSaving}
+                              className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 disabled:opacity-50"
+                            >
+                              {item.article && (
+                                <option value={item.article}>{item.article}</option>
+                              )}
+                              {optSkus.map(s => (
+                                <option key={s.sku} value={s.sku}>{s.sku}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-4 py-2 font-bold text-slate-400 text-center align-middle w-24">
+                            0
+                          </td>
+                          <td className="px-4 py-2 align-middle">
+                            <div className="flex items-center gap-2">
+                              <input
+                                id={`input-extra-accepted-${item.article}`}
+                                type="number"
+                                min="1"
+                                step="1"
+                                value={item.accepted}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10);
+                                  setExtraItems(prev => prev.map((ex, i) => i === idx ? { ...ex, accepted: isNaN(val) ? 1 : val } : ex));
+                                }}
+                                disabled={isSaving}
+                                className="w-24 px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 disabled:opacity-50"
+                              />
+                              <button
+                                id={`btn-remove-extra-${item.article}`}
+                                type="button"
+                                onClick={() => {
+                                  setExtraItems(prev => prev.filter((_, i) => i !== idx));
+                                }}
+                                disabled={isSaving}
+                                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+                                title="Удалить строку"
+                              >
+                                <span className="font-bold text-base leading-none">✕</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <button
+              id="btn-add-extra-item"
+              type="button"
+              onClick={handleAddExtraItem}
+              disabled={isSaving}
+              className="flex items-center gap-1.5 px-4 py-2 border border-dashed border-indigo-300 text-indigo-600 hover:bg-indigo-50 rounded-xl font-bold text-xs transition-all disabled:opacity-50 cursor-pointer"
+            >
+              + Добавить позицию не из заявки
+            </button>
+          </div>
+
           {recalcPreview !== null && (
             <div id="shortage-recalc-preview" className="mt-4 pt-4 border-t border-slate-100 space-y-3">
               {recalcPreview.status === 'ok' && (
@@ -388,6 +553,12 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
                       Остатки склада не изменятся. При сохранении будет записан перерасчёт и след в Историю.
                     </div>
                   </div>
+                </div>
+              )}
+
+              {recalcPreview.status === 'peresort' && (
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 text-xs font-medium">
+                  Приняты позиции не из заявки — похоже на пересорт. Перерасчёт недостачи не будет проведён; приёмка сохранится, подтверждение пересорта — отдельным шагом.
                 </div>
               )}
 

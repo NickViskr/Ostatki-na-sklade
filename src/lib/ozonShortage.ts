@@ -12,7 +12,7 @@ export interface ShortageRecalcItem {
 }
 
 export interface ShortageRecalcResult {
-  status: 'none' | 'surplus' | 'error' | 'ok';
+  status: 'none' | 'surplus' | 'error' | 'ok' | 'peresort';
   items: ShortageRecalcItem[];
   historyNotes: { article: string; note: string }[];
   errorMsg?: string;
@@ -65,6 +65,23 @@ export function computeShortageRecalc(
 
   if (!Array.isArray(acceptedList) || acceptedList.length === 0) {
     return { status: 'none', items: [], historyNotes: [] };
+  }
+
+  // Проверка на пересорт: есть ли в acceptedList записи с offerId, отсутствующим среди заявленных items (без учёта регистра)
+  const declaredOfferIds = new Set(
+    items.map((it: any) => String(it.offerId || it.offer_id || '').trim().toLowerCase())
+  );
+
+  const hasPeresort = acceptedList.some((it: any) => {
+    if (it && typeof it === 'object' && 'offerId' in it) {
+      const offerId = String(it.offerId).trim().toLowerCase();
+      return !declaredOfferIds.has(offerId);
+    }
+    return false;
+  });
+
+  if (hasPeresort) {
+    return { status: 'peresort', items: [], historyNotes: [] };
   }
 
   const acceptedMap = new Map<string, number>();
