@@ -108,4 +108,5 @@ export interface ExternalShipment {
   timeslot?: string;
   cabinet?: string;
   acceptedJSON?: string;
+  recalcJSON?: string;
 }
