@@ -15,6 +15,7 @@ import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
 import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGroups';
 import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
+import { detectPeresort } from '../lib/ozonPeresort';
 import { formatCurrency } from '../lib/utils';
 
 
@@ -1089,6 +1090,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           } catch (e) {}
                                           
                                           const accMap = parseAcceptance(s.acceptedJSON);
+                                          const peresort = detectPeresort(s, skus);
                                           let shortage = 0;
                                           let surplus = 0;
 
@@ -1104,7 +1106,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           });
 
                                           const badges: React.ReactNode[] = [];
-                                          if (shortage === 0 && surplus === 0) {
+                                          if (shortage === 0 && surplus === 0 && peresort.extras.length === 0) {
                                             badges.push(
                                               <span key="ok" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-700">
                                                 Принято полностью
@@ -1122,6 +1124,14 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                             badges.push(
                                               <span key="surplus" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-700">
                                                 Излишек {surplus} шт
+                                              </span>
+                                            );
+                                          }
+                                          if (peresort.extras.length > 0) {
+                                            const extrasQty = peresort.extras.reduce((sum, item) => sum + item.qty, 0);
+                                            badges.push(
+                                              <span key="peresort" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-700">
+                                                Возможен пересорт (не из заявки: {extrasQty} шт)
                                               </span>
                                             );
                                           }
