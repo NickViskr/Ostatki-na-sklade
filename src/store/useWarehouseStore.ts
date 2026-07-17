@@ -94,6 +94,7 @@ interface WarehouseState {
   checkOzonShipments: () => Promise<void>;
   markExternalShipment: (postingId: string, status: 'processed' | 'ignored' | 'new', transGroupInfo?: string) => Promise<boolean>;
   saveShipmentAcceptance: (postingId: string, acceptedJSON: string) => Promise<boolean>;
+  saveShipmentPeresort: (postingId: string, peresortJSON: string) => Promise<boolean>;
   saveShipmentShortageRecalc: (postingId: string, recalcJSON: string, historyNotes: { article: string; note: string }[]) => Promise<boolean>;
   returnLinkedOzonSupplies: (deletedIds: string[]) => Promise<void>;
   fetchExternalShipments: () => Promise<void>;
@@ -1212,6 +1213,31 @@ export const useWarehouseStore = create<WarehouseState>()(
     } catch (e: any) {
       console.error(e);
       toast.error('Ошибка сети при сохранении приёмки: ' + e.message);
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  saveShipmentPeresort: async (postingId, peresortJSON) => {
+    set({ isProcessing: true });
+    try {
+      const res = await get().fetchGas('saveShipmentPeresort', { data: { postingId, peresortJSON } });
+      if (res.status === 'success') {
+        // Refetch to be fully in sync
+        const gasResult = await get().fetchGas('getExternalShipments');
+        if (gasResult.status === 'success' && Array.isArray(gasResult.data)) {
+          set({ externalShipments: gasResult.data });
+        }
+        toast.success('Пересорт сохранён');
+        return true;
+      } else {
+        toast.error(res.message || 'Ошибка сохранения пересорта');
+        return false;
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при сохранении пересорта: ' + e.message);
       return false;
     } finally {
       set({ isProcessing: false });

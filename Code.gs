@@ -289,6 +289,9 @@ function doPost(e) {
       case 'saveExternalShipmentAcceptance':
         result = saveExternalShipmentAcceptance(data.postingId, data.acceptedJSON);
         break;
+      case 'saveShipmentPeresort':
+        result = saveShipmentPeresort(data.postingId, data.peresortJSON);
+        break;
       case 'saveShipmentShortageRecalc':
         assertAdmin(currentUser);
         result = saveShipmentShortageRecalc(data.postingId, data.recalcJSON, data.historyNotes, currentUser.username);
@@ -332,7 +335,7 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON'
 ];
 
 function setupDatabase(targetSs) {
@@ -3403,6 +3406,7 @@ function getExternalShipments() {
   const cabinetIdx = headers.indexOf('Кабинет');
   const acceptedJsonIdx = headers.indexOf('ПринятоJSON');
   const recalcJsonIdx = headers.indexOf('ПерерасчётJSON');
+  const peresortJsonIdx = headers.indexOf('ПересортJSON');
   
   if (postingIdIdx === -1) return [];
   
@@ -3444,7 +3448,8 @@ function getExternalShipments() {
       timeslot: getVal(timeslotIdx, false),
       cabinet: getVal(cabinetIdx, false),
       acceptedJSON: getVal(acceptedJsonIdx, false),
-      recalcJSON: getVal(recalcJsonIdx, false)
+      recalcJSON: getVal(recalcJsonIdx, false),
+      peresortJSON: getVal(peresortJsonIdx, false)
     });
   }
   return shipments;
@@ -3530,6 +3535,78 @@ function saveExternalShipmentAcceptance(postingId, acceptedJSON) {
     const currentId = String(data[i][postingIdIdx]).trim().toLowerCase();
     if (currentId === targetId) {
       sheet.getRange(i + 1, acceptedJsonIdx + 1).setValue(acceptedJSON || '');
+      SpreadsheetApp.flush();
+      return { success: true };
+    }
+  }
+  throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+
+function saveShipmentPeresort(postingId, peresortJSON) {
+  if (!postingId) {
+    throw new Error('PostingID is required');
+  }
+  
+  // Валидация peresortJSON
+  if (peresortJSON !== undefined && peresortJSON !== null && peresortJSON !== '') {
+    if (typeof peresortJSON !== 'string') {
+      throw new Error('peresortJSON must be a string');
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(peresortJSON);
+    } catch (e) {
+      throw new Error('Invalid JSON format in peresortJSON: ' + e.toString());
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('peresortJSON must represent an object');
+    }
+    if (!Array.isArray(parsed.pairs)) {
+      throw new Error('peresortJSON must contain a "pairs" array');
+    }
+    for (let i = 0; i < parsed.pairs.length; i++) {
+      const pair = parsed.pairs[i];
+      if (!pair || typeof pair !== 'object') {
+        throw new Error('Each pair in peresortJSON must be an object');
+      }
+      if (typeof pair.fromOfferId !== 'string' || !pair.fromOfferId.trim()) {
+        throw new Error('Each pair must have a non-empty string field fromOfferId');
+      }
+      if (typeof pair.fromArticle !== 'string' || !pair.fromArticle.trim()) {
+        throw new Error('Each pair must have a non-empty string field fromArticle');
+      }
+      if (typeof pair.toOfferId !== 'string' || !pair.toOfferId.trim()) {
+        throw new Error('Each pair must have a non-empty string field toOfferId');
+      }
+      if (typeof pair.toArticle !== 'string' || !pair.toArticle.trim()) {
+        throw new Error('Each pair must have a non-empty string field toArticle');
+      }
+      if (typeof pair.qty !== 'number' || !Number.isInteger(pair.qty) || pair.qty < 1) {
+        throw new Error('Each pair must have an integer qty field >= 1');
+      }
+    }
+    if (parsed.confirmedAt !== undefined && parsed.confirmedAt !== null && typeof parsed.confirmedAt !== 'string') {
+      throw new Error('confirmedAt must be a string');
+    }
+    if (parsed.confirmedBy !== undefined && parsed.confirmedBy !== null && typeof parsed.confirmedBy !== 'string') {
+      throw new Error('confirmedBy must be a string');
+    }
+  }
+
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const peresortJsonIdx = headers.indexOf('ПересортJSON');
+  if (postingIdIdx === -1 || peresortJsonIdx === -1) {
+    throw new Error('Required columns not found in Внешние отгрузки');
+  }
+  
+  const targetId = String(postingId).trim().toLowerCase();
+  for (let i = 1; i < data.length; i++) {
+    const currentId = String(data[i][postingIdIdx]).trim().toLowerCase();
+    if (currentId === targetId) {
+      sheet.getRange(i + 1, peresortJsonIdx + 1).setValue(peresortJSON || '');
       SpreadsheetApp.flush();
       return { success: true };
     }

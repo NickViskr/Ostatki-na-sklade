@@ -109,4 +109,5 @@ export interface ExternalShipment {
   cabinet?: string;
   acceptedJSON?: string;
   recalcJSON?: string;
+  peresortJSON?: string;
 }
