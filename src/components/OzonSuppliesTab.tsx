@@ -856,7 +856,7 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
                 type="button"
                 onClick={() => setShowConfirmReset(true)}
                 disabled={isProcessing}
-                className="px-3 py-1.5 bg-white border border-emerald-300 hover:bg-emerald-105 text-emerald-800 font-bold rounded-lg transition-all cursor-pointer disabled:opacity-50"
+                className="px-3 py-1.5 bg-white border border-emerald-300 hover:bg-emerald-100 text-emerald-800 font-bold rounded-lg transition-all cursor-pointer disabled:opacity-50"
               >
                 Сбросить пересорт
               </button>
@@ -1595,7 +1595,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           }
                                           if (s.peresortJSON && s.peresortJSON.trim() !== '') {
                                             badges.push(
-                                              <span key="peresort-confirmed" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-150 text-indigo-700">
+                                              <span key="peresort-confirmed" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-100 text-indigo-700">
                                                 Пересорт подтверждён — ожидает проведения
                                               </span>
                                             );
@@ -1665,7 +1665,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                                   }}
                                                   className="bg-amber-50 text-amber-700 hover:bg-amber-100 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer"
                                                 >
-                                                  Пересорт
+                                                  {s.peresortJSON && s.peresortJSON.trim() !== '' ? 'Пересорт ✓' : 'Пересорт'}
                                                 </button>
                                               )}
                                             </div>
