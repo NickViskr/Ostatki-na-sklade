@@ -17,6 +17,7 @@ import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGrou
 import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
 import { detectPeresort } from '../lib/ozonPeresort';
 import { formatCurrency } from '../lib/utils';
+import { ConfirmDialog } from './ConfirmDialog';
 
 
 const formatStatusDate = (dateStr?: string) => {
@@ -436,7 +437,7 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
                         <tr key={idx} className="border-b border-slate-50">
                           <td className="px-4 py-2 align-middle">
                             <select
-                              id="select-extra-article"
+                              id={`select-extra-article-${idx}`}
                               value={item.article}
                               onChange={(e) => {
                                 const newArt = e.target.value;
@@ -448,9 +449,11 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
                               {item.article && (
                                 <option value={item.article}>{item.article}</option>
                               )}
-                              {optSkus.map(s => (
-                                <option key={s.sku} value={s.sku}>{s.sku}</option>
-                              ))}
+                              {optSkus
+                                .filter(s => s.sku.trim().toLowerCase() !== item.article.trim().toLowerCase())
+                                .map(s => (
+                                  <option key={s.sku} value={s.sku}>{s.sku}</option>
+                                ))}
                             </select>
                           </td>
                           <td className="px-4 py-2 font-bold text-slate-400 text-center align-middle w-24">
@@ -619,6 +622,468 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
   );
 };
 
+interface PeresortModalProps {
+  shipment: ExternalShipment;
+  onClose: () => void;
+}
+
+interface PeresortPair {
+  fromOfferId: string;
+  fromArticle: string;
+  toOfferId: string;
+  toArticle: string;
+  qty: number;
+}
+
+const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
+  const skus = useWarehouseStore((state) => state.skus);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
+  const saveShipmentPeresort = useWarehouseStore((state) => state.saveShipmentPeresort);
+  const isProcessing = useWarehouseStore((state) => state.isProcessing);
+
+  const [pairs, setPairs] = useState<PeresortPair[]>([]);
+  const [selectedFromOfferId, setSelectedFromOfferId] = useState<string>('');
+  const [selectedToOfferId, setSelectedToOfferId] = useState<string>('');
+  const [inputQty, setInputQty] = useState<number>(1);
+
+  const [showConfirmSave, setShowConfirmSave] = useState(false);
+  const [showConfirmReset, setShowConfirmReset] = useState(false);
+
+  // a) Вычисли detection
+  const detection = useMemo(() => {
+    return detectPeresort(shipment, skus);
+  }, [shipment, skus]);
+
+  // b) При открытии загрузи пары из shipment.peresortJSON
+  useEffect(() => {
+    if (shipment.peresortJSON) {
+      try {
+        const parsed = JSON.parse(shipment.peresortJSON);
+        if (parsed && Array.isArray(parsed.pairs)) {
+          setPairs(parsed.pairs);
+          return;
+        }
+      } catch (e) {
+        console.error('Error parsing peresortJSON in modal:', e);
+      }
+    }
+    setPairs([]);
+  }, [shipment]);
+
+  // Расчёт остатка позиции
+  const remainingMissing = useMemo(() => {
+    return detection.missing.map(pos => {
+      const allocated = pairs
+        .filter(p => p.fromOfferId === pos.offerId)
+        .reduce((sum, p) => sum + p.qty, 0);
+      return {
+        ...pos,
+        remainingQty: pos.qty - allocated
+      };
+    });
+  }, [detection.missing, pairs]);
+
+  const remainingExtras = useMemo(() => {
+    return detection.extras.map(pos => {
+      const allocated = pairs
+        .filter(p => p.toOfferId === pos.offerId)
+        .reduce((sum, p) => sum + p.qty, 0);
+      return {
+        ...pos,
+        remainingQty: pos.qty - allocated
+      };
+    });
+  }, [detection.extras, pairs]);
+
+  // Списки с ненулевым остатком для конструктора
+  const availableFrom = useMemo(() => {
+    return remainingMissing.filter(item => item.remainingQty > 0);
+  }, [remainingMissing]);
+
+  const availableTo = useMemo(() => {
+    return remainingExtras.filter(item => item.remainingQty > 0);
+  }, [remainingExtras]);
+
+  // Синхронизация селектов
+  useEffect(() => {
+    if (availableFrom.length > 0) {
+      const exists = availableFrom.some(x => x.offerId === selectedFromOfferId);
+      if (!exists) {
+        setSelectedFromOfferId(availableFrom[0].offerId);
+      }
+    } else {
+      setSelectedFromOfferId('');
+    }
+  }, [availableFrom, selectedFromOfferId]);
+
+  useEffect(() => {
+    if (availableTo.length > 0) {
+      const exists = availableTo.some(x => x.offerId === selectedToOfferId);
+      if (!exists) {
+        setSelectedToOfferId(availableTo[0].offerId);
+      }
+    } else {
+      setSelectedToOfferId('');
+    }
+  }, [availableTo, selectedToOfferId]);
+
+  const maxQtyForSelected = useMemo(() => {
+    const fromItem = remainingMissing.find(x => x.offerId === selectedFromOfferId);
+    const toItem = remainingExtras.find(x => x.offerId === selectedToOfferId);
+    if (!fromItem || !toItem) return 0;
+    return Math.min(fromItem.remainingQty, toItem.remainingQty);
+  }, [remainingMissing, remainingExtras, selectedFromOfferId, selectedToOfferId]);
+
+  useEffect(() => {
+    setInputQty(maxQtyForSelected);
+  }, [maxQtyForSelected]);
+
+  const handleAddPair = () => {
+    const fromItem = remainingMissing.find(x => x.offerId === selectedFromOfferId);
+    const toItem = remainingExtras.find(x => x.offerId === selectedToOfferId);
+    if (!fromItem || !toItem) {
+      toast.error('Выберите товары для сопоставления');
+      return;
+    }
+    const maxAllowed = Math.min(fromItem.remainingQty, toItem.remainingQty);
+    if (inputQty < 1 || inputQty > maxAllowed || !Number.isInteger(inputQty)) {
+      toast.error(`Количество должно быть целым числом от 1 до ${maxAllowed}`);
+      return;
+    }
+
+    const newPair: PeresortPair = {
+      fromOfferId: fromItem.offerId,
+      fromArticle: fromItem.article,
+      toOfferId: toItem.offerId,
+      toArticle: toItem.article,
+      qty: inputQty
+    };
+
+    setPairs(prev => [...prev, newPair]);
+  };
+
+  const handleRemovePair = (index: number) => {
+    setPairs(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const initialInfo = useMemo(() => {
+    if (!shipment.peresortJSON) return null;
+    try {
+      const parsed = JSON.parse(shipment.peresortJSON);
+      if (parsed) {
+        return {
+          confirmedAt: parsed.confirmedAt || '',
+          confirmedBy: parsed.confirmedBy || '',
+          pairs: parsed.pairs || []
+        };
+      }
+    } catch (e) {
+      console.error('Error parsing initial peresortJSON:', e);
+    }
+    return null;
+  }, [shipment.peresortJSON]);
+
+  const formatConfirmedDate = (dateStr: string) => {
+    if (!dateStr) return '';
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return dateStr;
+      return d.toLocaleString('ru-RU');
+    } catch {
+      return dateStr;
+    }
+  };
+
+  const unassociatedMissing = useMemo(() => {
+    return remainingMissing.filter(item => item.remainingQty > 0);
+  }, [remainingMissing]);
+
+  const unassociatedExtras = useMemo(() => {
+    return remainingExtras.filter(item => item.remainingQty > 0);
+  }, [remainingExtras]);
+
+  const handleConfirmSave = async () => {
+    const peresortJSON = JSON.stringify({
+      pairs,
+      confirmedAt: new Date().toISOString(),
+      confirmedBy: currentUser?.username || ''
+    });
+    const success = await saveShipmentPeresort(shipment.postingId, peresortJSON);
+    if (success) {
+      onClose();
+    }
+  };
+
+  const handleConfirmReset = async () => {
+    const success = await saveShipmentPeresort(shipment.postingId, '');
+    if (success) {
+      onClose();
+    }
+  };
+
+  return (
+    <div id="peresort-modal-overlay" className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 transition-all">
+      <div id="peresort-modal-card" className="bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="p-6 border-b border-slate-100 shrink-0 flex justify-between items-center">
+          <div>
+            <h3 className="text-xl font-black text-slate-900 tracking-tight">
+              Пересорт поставки № {shipment.postingId}
+            </h3>
+            <p className="text-slate-500 text-sm font-medium mt-1">
+              Склад хранения: <span className="font-semibold text-indigo-600">{shipment.storageWarehouse || '—'}</span>
+            </p>
+          </div>
+          <button 
+            onClick={onClose}
+            className="p-2 hover:bg-slate-100 rounded-full transition-all text-slate-400 cursor-pointer"
+            title="Закрыть"
+          >
+            <span className="font-bold text-lg leading-none">✕</span>
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+          {/* h) Зелёная плашка подтверждения */}
+          {initialInfo && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl p-4 flex justify-between items-center gap-4 text-xs">
+              <div className="font-semibold">
+                Пересорт подтверждён {formatConfirmedDate(initialInfo.confirmedAt)} ({initialInfo.confirmedBy})
+              </div>
+              <button
+                id="btn-reset-peresort"
+                type="button"
+                onClick={() => setShowConfirmReset(true)}
+                disabled={isProcessing}
+                className="px-3 py-1.5 bg-white border border-emerald-300 hover:bg-emerald-105 text-emerald-800 font-bold rounded-lg transition-all cursor-pointer disabled:opacity-50"
+              >
+                Сбросить пересорт
+              </button>
+            </div>
+          )}
+
+          {/* c) Две колонки-списка */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Не хватает */}
+            <div className="border border-slate-150 rounded-2xl p-4 bg-slate-50/50">
+              <h4 className="text-xs font-bold text-red-600 uppercase tracking-wider mb-2">
+                Не хватает (заявлено, но не принято)
+              </h4>
+              {detection.missing.length === 0 ? (
+                <p className="text-slate-400 text-xs italic">Нет расхождений</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {remainingMissing.map((m) => (
+                    <li key={m.offerId} className="flex justify-between items-center text-xs text-slate-700">
+                      <span className="font-semibold truncate">{m.article}</span>
+                      <span className="font-bold text-slate-900 bg-red-50 text-red-700 px-2 py-0.5 rounded-md shrink-0">
+                        Осталось {m.remainingQty} из {m.qty} шт
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Лишнее */}
+            <div className="border border-slate-150 rounded-2xl p-4 bg-slate-50/50">
+              <h4 className="text-xs font-bold text-amber-600 uppercase tracking-wider mb-2">
+                Лишнее (принято не из заявки)
+              </h4>
+              {detection.extras.length === 0 ? (
+                <p className="text-slate-400 text-xs italic">Нет расхождений</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {remainingExtras.map((e) => (
+                    <li key={e.offerId} className="flex justify-between items-center text-xs text-slate-700">
+                      <span className="font-semibold truncate">{e.article}</span>
+                      <span className="font-bold text-slate-900 bg-amber-50 text-amber-700 px-2 py-0.5 rounded-md shrink-0">
+                        Осталось {e.remainingQty} из {e.qty} шт
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          {/* d) Конструктор пар */}
+          {availableFrom.length > 0 && availableTo.length > 0 ? (
+            <div className="border border-indigo-100 rounded-2xl p-4 bg-indigo-50/30 space-y-3">
+              <h4 className="text-xs font-bold text-indigo-700 uppercase tracking-wider">
+                Сопоставление пересорта
+              </h4>
+              <div className="flex flex-col sm:flex-row gap-2 items-end">
+                <div className="flex-1 space-y-1 w-full">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Не хватило:</label>
+                  <select
+                    id="select-peresort-from"
+                    value={selectedFromOfferId}
+                    onChange={(e) => setSelectedFromOfferId(e.target.value)}
+                    className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white"
+                  >
+                    {availableFrom.map(m => (
+                      <option key={m.offerId} value={m.offerId}>
+                        {m.article} — осталось {m.remainingQty} шт
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex-1 space-y-1 w-full">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Приехало вместо:</label>
+                  <select
+                    id="select-peresort-to"
+                    value={selectedToOfferId}
+                    onChange={(e) => setSelectedToOfferId(e.target.value)}
+                    className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white"
+                  >
+                    {availableTo.map(e => (
+                      <option key={e.offerId} value={e.offerId}>
+                        {e.article} — осталось {e.remainingQty} шт
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="w-24 space-y-1 shrink-0">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Кол-во:</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max={maxQtyForSelected}
+                    value={inputQty}
+                    onChange={(e) => setInputQty(parseInt(e.target.value, 10) || 0)}
+                    disabled={maxQtyForSelected === 0}
+                    className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white text-center"
+                  />
+                </div>
+
+                <button
+                  id="btn-add-peresort-pair"
+                  type="button"
+                  onClick={handleAddPair}
+                  className="px-4 py-2 bg-indigo-600 text-white hover:bg-indigo-700 font-bold text-xs rounded-lg transition-all h-9 shrink-0 cursor-pointer"
+                >
+                  + Добавить пару
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 bg-slate-50 border border-slate-200 text-slate-500 text-xs italic rounded-2xl text-center">
+              Нет доступных позиций для сопоставления пересорта (необходимы одновременно и недостающие, и лишние товары).
+            </div>
+          )}
+
+          {/* e) Список добавленных пар */}
+          {pairs.length > 0 && (
+            <div className="space-y-2">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                Сопоставленные пары:
+              </h4>
+              <div className="space-y-1.5">
+                {pairs.map((p, idx) => (
+                  <div key={idx} className="flex justify-between items-center bg-indigo-50/50 border border-indigo-100 p-2 px-3 rounded-xl text-xs">
+                    <span className="font-semibold text-slate-700">
+                      Вместо <span className="font-black text-red-600">{p.fromArticle}</span> уехал <span className="font-black text-amber-600">{p.toArticle}</span> — <span className="font-black text-slate-900">{p.qty} шт</span>
+                    </span>
+                    <button
+                      id={`btn-remove-peresort-pair-${idx}`}
+                      type="button"
+                      onClick={() => handleRemovePair(idx)}
+                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                      title="Удалить сопоставление"
+                    >
+                      <span className="font-bold text-xs">✕</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* f) Информационный блок */}
+          <div className="space-y-1.5 p-4 bg-slate-50 rounded-2xl border border-slate-100 text-xs text-slate-500 font-medium">
+            {unassociatedMissing.length > 0 && (
+              <div>
+                Останется обычной недостачей:{' '}
+                <span className="font-semibold text-slate-600">
+                  {unassociatedMissing.map(m => `${m.article} — ${m.remainingQty} шт`).join(', ')}
+                </span>
+              </div>
+            )}
+            {unassociatedExtras.length > 0 && (
+              <div>
+                Останется излишком:{' '}
+                <span className="font-semibold text-slate-600">
+                  {unassociatedExtras.map(e => `${e.article} — ${e.remainingQty} шт`).join(', ')}
+                </span>
+              </div>
+            )}
+            <div>
+              Обработка остатков и движение складских остатков — при проведении пересорта (следующий пункт плана)
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex gap-2 justify-end shrink-0">
+          <button
+            onClick={onClose}
+            className="px-4 py-2.5 border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 font-bold text-sm rounded-xl transition-all cursor-pointer"
+          >
+            Отмена
+          </button>
+          <button
+            id="btn-confirm-peresort"
+            onClick={() => setShowConfirmSave(true)}
+            disabled={pairs.length === 0 || isProcessing}
+            className="px-5 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-100 cursor-pointer"
+          >
+            Подтвердить пересорт
+          </button>
+        </div>
+      </div>
+
+      {/* Confirm Save Dialog */}
+      <ConfirmDialog
+        show={showConfirmSave}
+        title="Подтвердить пересорт?"
+        onConfirm={handleConfirmSave}
+        onCancel={() => setShowConfirmSave(false)}
+        confirmLabel="Подтвердить"
+        cancelLabel="Отмена"
+        message={
+          <div className="space-y-3">
+            <div className="text-sm font-semibold text-slate-700">Будут подтверждены следующие пары пересорта:</div>
+            <ul className="list-disc pl-5 text-sm text-slate-600 space-y-1">
+              {pairs.map((p, i) => (
+                <li key={i}>Вместо {p.fromArticle} уехал {p.toArticle} — {p.qty} шт</li>
+              ))}
+            </ul>
+            <p className="text-sm font-bold text-slate-800 mt-2">
+              Остатки склада сейчас НЕ изменятся. Движение остатков произойдёт при проведении пересорта.
+            </p>
+          </div>
+        }
+      />
+
+      {/* Confirm Reset Dialog */}
+      <ConfirmDialog
+        show={showConfirmReset}
+        title="Сбросить подтверждённый пересорт?"
+        onConfirm={handleConfirmReset}
+        onCancel={() => setShowConfirmReset(false)}
+        confirmLabel="Сбросить"
+        cancelLabel="Отмена"
+        message="Подтверждённый пересорт будет полностью удален. Остатки склада сейчас не изменятся. Продолжить?"
+      />
+    </div>
+  );
+};
+
+
 export const OzonSuppliesTab: React.FC = React.memo(() => {
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
@@ -641,6 +1106,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
   const [showProcessed, setShowProcessed] = useState(false);
   const [selectedAcceptanceShipment, setSelectedAcceptanceShipment] = useState<ExternalShipment | null>(null);
+  const [selectedPeresortShipment, setSelectedPeresortShipment] = useState<ExternalShipment | null>(null);
 
   useEffect(() => {
     setIsLoading(true);
@@ -1106,7 +1572,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           });
 
                                           const badges: React.ReactNode[] = [];
-                                          if (shortage === 0 && surplus === 0 && peresort.extras.length === 0) {
+                                          if (shortage === 0 && surplus === 0 && peresort.extras.length === 0 && (!s.peresortJSON || s.peresortJSON.trim() === '')) {
                                             badges.push(
                                               <span key="ok" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-700">
                                                 Принято полностью
@@ -1127,7 +1593,13 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                               </span>
                                             );
                                           }
-                                          if (peresort.extras.length > 0) {
+                                          if (s.peresortJSON && s.peresortJSON.trim() !== '') {
+                                            badges.push(
+                                              <span key="peresort-confirmed" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-150 text-indigo-700">
+                                                Пересорт подтверждён — ожидает проведения
+                                              </span>
+                                            );
+                                          } else if (peresort.extras.length > 0) {
                                             const extrasQty = peresort.extras.reduce((sum, item) => sum + item.qty, 0);
                                             badges.push(
                                               <span key="peresort" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-700">
@@ -1170,17 +1642,33 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                         <div className="text-xs font-bold text-slate-400 uppercase tracking-wider">Состав поставки</div>
                                         {isAcceptanceStage(s.ozonStatus) && s.itemsJSON && (() => {
                                           const label = s.acceptedJSON ? 'Изменить приёмку' : 'Ввести приёмку';
+                                          const peresort = detectPeresort(s, skus);
+                                          const showPeresortBtn = peresort.isCandidate || (s.peresortJSON && s.peresortJSON.trim() !== '');
                                           return (
-                                            <button
-                                              id={`btn-acceptance-${s.postingId}`}
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                setSelectedAcceptanceShipment(s);
-                                              }}
-                                              className="bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer"
-                                            >
-                                              {label}
-                                            </button>
+                                            <div className="flex gap-2">
+                                              <button
+                                                id={`btn-acceptance-${s.postingId}`}
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setSelectedAcceptanceShipment(s);
+                                                }}
+                                                className="bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                                              >
+                                                {label}
+                                              </button>
+                                              {showPeresortBtn && (
+                                                <button
+                                                  id={`btn-open-peresort-${s.postingId}`}
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setSelectedPeresortShipment(s);
+                                                  }}
+                                                  className="bg-amber-50 text-amber-700 hover:bg-amber-100 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                                                >
+                                                  Пересорт
+                                                </button>
+                                              )}
+                                            </div>
                                           );
                                         })()}
                                       </div>
@@ -1206,6 +1694,12 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
           shipment={selectedAcceptanceShipment}
           onClose={() => setSelectedAcceptanceShipment(null)}
           saveShipmentAcceptance={saveShipmentAcceptance}
+        />
+      )}
+      {selectedPeresortShipment && (
+        <PeresortModal
+          shipment={selectedPeresortShipment}
+          onClose={() => setSelectedPeresortShipment(null)}
         />
       )}
     </div>
