@@ -296,6 +296,10 @@ function doPost(e) {
         assertAdmin(currentUser);
         result = saveShipmentShortageRecalc(data.postingId, data.recalcJSON, data.historyNotes, currentUser.username);
         break;
+      case 'commitShipmentPeresort':
+        assertAdmin(currentUser);
+        result = commitShipmentPeresort(data.postingId, currentUser.username);
+        break;
       case 'getOzonSyncStatus': assertAdmin(currentUser); result = getOzonSyncStatusInfo(); break;
       case 'setupOzonSyncTriggers': assertAdmin(currentUser); setupOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'removeOzonSyncTriggers': assertAdmin(currentUser); removeOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
@@ -3912,6 +3916,244 @@ function computePeresortNetDeltas(mainTxItems, newComposition) {
   }
 
   return delta;
+}
+
+/**
+ * Проводит подтверждённый пересорт: пере-проводит транзакции отгрузки с новым фактическим составом.
+ * 
+ * @param {string} postingId - ID поставки Ozon
+ * @param {string} username - имя текущего пользователя
+ * @returns {Object} результат операции { success: true, stock: ..., transactions: ... }
+ */
+function commitShipmentPeresort(postingId, username) {
+  // Шаг 1. Если !postingId — throw new Error('PostingID is required').
+  if (!postingId) {
+    throw new Error('PostingID is required');
+  }
+
+  // Шаг 2. Лист «Внешние отгрузки» через getExternalShipmentsSheet().
+  var sheet = getExternalShipmentsSheet();
+  if (!sheet) {
+    throw new Error('Лист "Внешние отгрузки" не найден');
+  }
+  var dataRange = sheet.getDataRange();
+  var values = dataRange.getValues();
+  if (values.length <= 1) {
+    throw new Error('Лист "Внешние отгрузки" пуст');
+  }
+  
+  var headers = values[0].map(function(h) {
+    return String(h).trim();
+  });
+  
+  var postingIdIdx = headers.indexOf('PostingID');
+  var statusIdx = headers.indexOf('Статус');
+  var itemsJsonIdx = headers.indexOf('ПозицииJSON');
+  var transGroupInfoIdx = headers.indexOf('TransGroupInfo');
+  var orderIdIdx = headers.indexOf('OrderID');
+  var orderNoIdx = headers.indexOf('Номер заявки');
+  var peresortJsonIdx = headers.indexOf('ПересортJSON');
+  
+  if (postingIdIdx === -1 || statusIdx === -1 || itemsJsonIdx === -1 || 
+      transGroupInfoIdx === -1 || orderIdIdx === -1 || orderNoIdx === -1 || peresortJsonIdx === -1) {
+    throw new Error('Не найдены необходимые колонки в листе "Внешние отгрузки"');
+  }
+
+  // Найди строку, где String(PostingID).trim().toLowerCase() === String(postingId).trim().toLowerCase().
+  var rowIndex = -1;
+  var targetPostingIdLower = String(postingId).trim().toLowerCase();
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][postingIdIdx]).trim().toLowerCase() === targetPostingIdLower) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  if (rowIndex === -1) {
+    throw new Error('Поставка ' + postingId + ' не найдена');
+  }
+
+  var rowValues = values[rowIndex - 1];
+
+  // Шаг 3. Прочитай из строки ПересортJSON. Пустая — Error('Пересорт по поставке не подтверждён').
+  var peresortJSONStr = String(rowValues[peresortJsonIdx] || '').trim();
+  if (!peresortJSONStr) {
+    throw new Error('Пересорт по поставке не подтверждён');
+  }
+  
+  var peresortObj;
+  try {
+    peresortObj = JSON.parse(peresortJSONStr);
+  } catch (e) {
+    throw new Error('Ошибка парсинга ПересортJSON: ' + e.toString());
+  }
+  
+  if (!peresortObj || typeof peresortObj !== 'object' || Array.isArray(peresortObj)) {
+    throw new Error('Данные пересорта должны представлять объект');
+  }
+  
+  if (peresortObj.committedAt) {
+    throw new Error('Пересорт по этой поставке уже проведён');
+  }
+  
+  if (!Array.isArray(peresortObj.pairs) || peresortObj.pairs.length === 0) {
+    throw new Error('В пересорте нет ни одной пары');
+  }
+
+  // Шаг 4. Прочитай из строки: ПозицииJSON (в переменную originalItemsJSON), OrderID, Номер заявки, TransGroupInfo.
+  var originalItemsJSON = String(rowValues[itemsJsonIdx] || '').trim();
+  var orderId = String(rowValues[orderIdIdx] || '').trim();
+  var orderNo = String(rowValues[orderNoIdx] || '').trim();
+  var transGroupInfoStr = String(rowValues[transGroupInfoIdx] || '').trim();
+
+  // Распарси TransGroupInfo как JSON-массив ID транзакций; если пусто, не массив или массив пуст — Error('Заявка не оформлена: у поставки нет привязанных транзакций').
+  if (!transGroupInfoStr) {
+    throw new Error('Заявка не оформлена: у поставки нет привязанных транзакций');
+  }
+  var transGroupIds;
+  try {
+    transGroupIds = JSON.parse(transGroupInfoStr);
+  } catch (e) {
+    throw new Error('Ошибка парсинга TransGroupInfo: ' + e.toString());
+  }
+  if (!Array.isArray(transGroupIds) || transGroupIds.length === 0) {
+    throw new Error('Заявка не оформлена: у поставки нет привязанных транзакций');
+  }
+
+  // Шаг 5. Получи allTx = getTransactions().rows. Отбери mainTxRows: транзакции, чей String(id) входит в множество ID из TransGroupInfo, type === 'Расход' и isComponent !== true.
+  var allTx = getTransactions().rows;
+  var transGroupIdsStrSet = transGroupIds.map(String);
+  var mainTxRows = allTx.filter(function(tx) {
+    return transGroupIdsStrSet.indexOf(String(tx.id)) !== -1 && 
+           tx.type === 'Расход' && 
+           tx.isComponent !== true;
+  });
+  if (mainTxRows.length === 0) {
+    throw new Error('Транзакции отгрузки не найдены в Истории');
+  }
+
+  // Из ПЕРВОЙ строки mainTxRows возьми: originalDate = date, destination, deliveryDate (пустые значения заменяй на '').
+  var firstTx = mainTxRows[0];
+  var originalDate = firstTx.date || '';
+  var destination = firstTx.destination || '';
+  var deliveryDate = firstTx.deliveryDate || '';
+
+  // Построй mainTxItems = mainTxRows.map: {article, quantity: Number(quantity), price: Number(price)}.
+  var mainTxItems = mainTxRows.map(function(tx) {
+    return {
+      article: tx.article,
+      quantity: Number(tx.quantity) || 0,
+      price: Number(tx.price) || 0
+    };
+  });
+
+  // Шаг 6. Построй stockAvgMap из листа «Остатки»: ключ — String(колонка A).trim(), значение — Number(колонка C) (средняя себестоимость). Также построй stockQtyMap: ключ тот же, значение — Number(колонка B).
+  var stockSheet = getSheetByNameRobust(getSpreadsheet(), 'Остатки');
+  if (!stockSheet) {
+    throw new Error('Лист "Остатки" не найден');
+  }
+  var stockData = stockSheet.getDataRange().getValues();
+  var stockAvgMap = {};
+  var stockQtyMap = {};
+  for (var k = 1; k < stockData.length; k++) {
+    var articleKey = String(stockData[k][0]).trim();
+    if (articleKey) {
+      stockQtyMap[articleKey] = Number(stockData[k][1]) || 0;
+      stockAvgMap[articleKey] = Number(stockData[k][2]) || 0;
+    }
+  }
+
+  // Шаг 7. const peresortJSONStr = строковое значение ПересортJSON из шага 3; const newComposition = buildPeresortRecommitComposition(mainTxItems, peresortJSONStr, stockAvgMap);
+  var newComposition = buildPeresortRecommitComposition(mainTxItems, peresortJSONStr, stockAvgMap);
+
+  // Шаг 8. Предварительная проверка остатков: const deltas = computePeresortNetDeltas(mainTxItems, newComposition).
+  var deltas = computePeresortNetDeltas(mainTxItems, newComposition);
+  var errors = [];
+  for (var art in deltas) {
+    var deltaVal = deltas[art];
+    if (deltaVal < 0) {
+      var currentQty = Number(stockQtyMap[art]) || 0;
+      if (currentQty + deltaVal < 0) {
+        errors.push('Не хватает «' + art + '»: нужно дополнительно ' + Math.abs(deltaVal) + ' шт, на складе ' + currentQty + ' шт');
+      }
+    }
+  }
+  // Если массив ошибок непуст — Error('Проведение пересорта невозможно:\n' + ошибки.join('\n')). До этой проверки НИЧЕГО в таблицах не изменять.
+  if (errors.length > 0) {
+    throw new Error('Проведение пересорта невозможно:\n' + errors.join('\n'));
+  }
+
+  // Шаг 9. Пере-проведение: для каждого id из mainTxRows вызови deleteTransaction(String(id), username, true). Затем вызови const commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate).
+  for (var j = 0; j < mainTxRows.length; j++) {
+    deleteTransaction(String(mainTxRows[j].id), username, true);
+  }
+  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate);
+
+  // Шаг 10. Собери newTxIds: из commitResult.newTransactions возьми элементы с isComponent !== true, их String(id). const linkInfo = JSON.stringify(newTxIds).
+  var newTxIds = commitResult.newTransactions
+    .filter(function(tx) {
+      return tx.isComponent !== true;
+    })
+    .map(function(tx) {
+      return String(tx.id);
+    });
+  var linkInfo = JSON.stringify(newTxIds);
+
+  // Шаг 11. Обнови TransGroupInfo: если OrderID текущей строки непустой — пройди по ВСЕМ строкам листа «Внешние отгрузки» и в каждой строке, где String(OrderID).trim().toLowerCase() совпадает с текущим, Статус === 'processed' и TransGroupInfo непустой, запиши linkInfo. Если OrderID пустой — запиши linkInfo только в текущую строку.
+  if (orderId) {
+    var targetOrderIdLower = orderId.trim().toLowerCase();
+    for (var i = 1; i < values.length; i++) {
+      var currentRowValues = values[i];
+      var currentOrderId = String(currentRowValues[orderIdIdx] || '').trim().toLowerCase();
+      var currentStatus = String(currentRowValues[statusIdx] || '').trim();
+      var currentTransGroupInfo = String(currentRowValues[transGroupInfoIdx] || '').trim();
+      if (currentOrderId === targetOrderIdLower && currentStatus === 'processed' && currentTransGroupInfo) {
+        sheet.getRange(i + 1, transGroupInfoIdx + 1).setValue(linkInfo);
+      }
+    }
+  } else {
+    sheet.getRange(rowIndex, transGroupInfoIdx + 1).setValue(linkInfo);
+  }
+
+  // Шаг 12. Обнови ПозицииJSON текущей строки: значением buildPeresortAdjustedItemsJSON(originalItemsJSON, peresortJSONStr).
+  var newItemsJSON = buildPeresortAdjustedItemsJSON(originalItemsJSON, peresortJSONStr);
+  sheet.getRange(rowIndex, itemsJsonIdx + 1).setValue(newItemsJSON);
+
+  // Шаг 13. Обнови ПересортJSON текущей строки: возьми peresortObj, добавь поля committedAt = new Date().toISOString(), committedBy = username, originalItemsJSON = originalItemsJSON; запиши JSON.stringify(peresortObj).
+  peresortObj.committedAt = new Date().toISOString();
+  peresortObj.committedBy = username;
+  peresortObj.originalItemsJSON = originalItemsJSON;
+  sheet.getRange(rowIndex, peresortJsonIdx + 1).setValue(JSON.stringify(peresortObj));
+
+  // Шаг 14. След в Истории: для каждой пары pairs добавь через getTransactionSheet(getSpreadsheet()).appendRow(buildTransactionRow({...})) строку: id = Utilities.getUuid(), date = new Date().toISOString(), type = 'Корректировка', article = pair.fromArticle, quantity = 0, price = 0, writeOffCost = 0, total = 0, destination = 'Пересорт Ozon: заявка № ' + (orderNo || orderId || '-') + ', поставка ' + postingId + ': вместо «' + pair.fromArticle + '» ×' + pair.qty + ' уехал «' + pair.toArticle + '» ×' + pair.qty, deliveryDate = '', user = username, groupId = '', isComponent = false.
+  var transSheet = getTransactionSheet(getSpreadsheet());
+  var pairs = peresortObj.pairs;
+  for (var i = 0; i < pairs.length; i++) {
+    var pair = pairs[i];
+    var correctedRow = buildTransactionRow({
+      id: Utilities.getUuid(),
+      date: new Date().toISOString(),
+      type: 'Корректировка',
+      article: pair.fromArticle,
+      quantity: 0,
+      price: 0,
+      writeOffCost: 0,
+      total: 0,
+      destination: 'Пересорт Ozon: заявка № ' + (orderNo || orderId || '-') + ', поставка ' + postingId + ': вместо «' + pair.fromArticle + '» ×' + pair.qty + ' уехал «' + pair.toArticle + '» ×' + pair.qty,
+      deliveryDate: '',
+      user: username,
+      groupId: '',
+      isComponent: false
+    });
+    transSheet.appendRow(correctedRow);
+  }
+
+  // Шаг 15. SpreadsheetApp.flush(); верни { success: true, stock: getStock(), transactions: getTransactions().rows }.
+  SpreadsheetApp.flush();
+  return {
+    success: true,
+    stock: getStock(),
+    transactions: getTransactions().rows
+  };
 }
 
 function saveShipmentShortageRecalc(postingId, recalcJSON, historyNotes, username) {
