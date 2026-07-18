@@ -622,6 +622,26 @@ const AcceptanceModal: React.FC<AcceptanceModalProps> = ({ shipment, onClose, sa
   );
 };
 
+function parsePeresortMeta(peresortJSON?: string): { confirmed: boolean; committed: boolean; committedAt: string; committedBy: string } {
+  if (!peresortJSON || peresortJSON.trim() === '') {
+    return { confirmed: false, committed: false, committedAt: '', committedBy: '' };
+  }
+  try {
+    const parsed = JSON.parse(peresortJSON);
+    if (!parsed || !Array.isArray(parsed.pairs) || parsed.pairs.length === 0) {
+      return { confirmed: false, committed: false, committedAt: '', committedBy: '' };
+    }
+    return {
+      confirmed: true,
+      committed: !!parsed.committedAt,
+      committedAt: parsed.committedAt || '',
+      committedBy: parsed.committedBy || ''
+    };
+  } catch {
+    return { confirmed: false, committed: false, committedAt: '', committedBy: '' };
+  }
+}
+
 interface PeresortModalProps {
   shipment: ExternalShipment;
   onClose: () => void;
@@ -639,6 +659,7 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
   const skus = useWarehouseStore((state) => state.skus);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const saveShipmentPeresort = useWarehouseStore((state) => state.saveShipmentPeresort);
+  const commitShipmentPeresort = useWarehouseStore((state) => state.commitShipmentPeresort);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
 
   const [pairs, setPairs] = useState<PeresortPair[]>([]);
@@ -648,6 +669,13 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
 
   const [showConfirmSave, setShowConfirmSave] = useState(false);
   const [showConfirmReset, setShowConfirmReset] = useState(false);
+  const [showConfirmCommit, setShowConfirmCommit] = useState(false);
+
+  const meta = useMemo(() => {
+    return parsePeresortMeta(shipment.peresortJSON);
+  }, [shipment.peresortJSON]);
+
+  const isAdmin = (currentUser?.role || '').toLowerCase() === 'admin' || (currentUser?.role || '').toLowerCase() === 'администратор';
 
   // a) Вычисли detection
   const detection = useMemo(() => {
@@ -846,7 +874,13 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
         {/* Content */}
         <div className="p-6 overflow-y-auto flex-1 space-y-6">
           {/* h) Зелёная плашка подтверждения */}
-          {initialInfo && (
+          {meta.committed ? (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl p-4 flex items-center gap-4 text-xs">
+              <div className="font-semibold">
+                Пересорт проведён {formatConfirmedDate(meta.committedAt)} · {meta.committedBy}
+              </div>
+            </div>
+          ) : initialInfo ? (
             <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl p-4 flex justify-between items-center gap-4 text-xs">
               <div className="font-semibold">
                 Пересорт подтверждён {formatConfirmedDate(initialInfo.confirmedAt)} ({initialInfo.confirmedBy})
@@ -861,7 +895,7 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
                 Сбросить пересорт
               </button>
             </div>
-          )}
+          ) : null}
 
           {/* c) Две колонки-списка */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -909,71 +943,73 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
           </div>
 
           {/* d) Конструктор пар */}
-          {availableFrom.length > 0 && availableTo.length > 0 ? (
-            <div className="border border-indigo-100 rounded-2xl p-4 bg-indigo-50/30 space-y-3">
-              <h4 className="text-xs font-bold text-indigo-700 uppercase tracking-wider">
-                Сопоставление пересорта
-              </h4>
-              <div className="flex flex-col sm:flex-row gap-2 items-end">
-                <div className="flex-1 space-y-1 w-full">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Не хватило:</label>
-                  <select
-                    id="select-peresort-from"
-                    value={selectedFromOfferId}
-                    onChange={(e) => setSelectedFromOfferId(e.target.value)}
-                    className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white"
+          {!meta.committed && (
+            availableFrom.length > 0 && availableTo.length > 0 ? (
+              <div className="border border-indigo-100 rounded-2xl p-4 bg-indigo-50/30 space-y-3">
+                <h4 className="text-xs font-bold text-indigo-700 uppercase tracking-wider">
+                  Сопоставление пересорта
+                </h4>
+                <div className="flex flex-col sm:flex-row gap-2 items-end">
+                  <div className="flex-1 space-y-1 w-full">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Не хватило:</label>
+                    <select
+                      id="select-peresort-from"
+                      value={selectedFromOfferId}
+                      onChange={(e) => setSelectedFromOfferId(e.target.value)}
+                      className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white"
+                    >
+                      {availableFrom.map(m => (
+                        <option key={m.offerId} value={m.offerId}>
+                          {m.article} — осталось {m.remainingQty} шт
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex-1 space-y-1 w-full">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Приехало вместо:</label>
+                    <select
+                      id="select-peresort-to"
+                      value={selectedToOfferId}
+                      onChange={(e) => setSelectedToOfferId(e.target.value)}
+                      className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white"
+                    >
+                      {availableTo.map(e => (
+                        <option key={e.offerId} value={e.offerId}>
+                          {e.article} — осталось {e.remainingQty} шт
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="w-24 space-y-1 shrink-0">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Кол-во:</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max={maxQtyForSelected}
+                      value={inputQty}
+                      onChange={(e) => setInputQty(parseInt(e.target.value, 10) || 0)}
+                      disabled={maxQtyForSelected === 0}
+                      className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white text-center"
+                    />
+                  </div>
+
+                  <button
+                    id="btn-add-peresort-pair"
+                    type="button"
+                    onClick={handleAddPair}
+                    className="px-4 py-2 bg-indigo-600 text-white hover:bg-indigo-700 font-bold text-xs rounded-lg transition-all h-9 shrink-0 cursor-pointer"
                   >
-                    {availableFrom.map(m => (
-                      <option key={m.offerId} value={m.offerId}>
-                        {m.article} — осталось {m.remainingQty} шт
-                      </option>
-                    ))}
-                  </select>
+                    + Добавить пару
+                  </button>
                 </div>
-
-                <div className="flex-1 space-y-1 w-full">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Приехало вместо:</label>
-                  <select
-                    id="select-peresort-to"
-                    value={selectedToOfferId}
-                    onChange={(e) => setSelectedToOfferId(e.target.value)}
-                    className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white"
-                  >
-                    {availableTo.map(e => (
-                      <option key={e.offerId} value={e.offerId}>
-                        {e.article} — осталось {e.remainingQty} шт
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="w-24 space-y-1 shrink-0">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Кол-во:</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max={maxQtyForSelected}
-                    value={inputQty}
-                    onChange={(e) => setInputQty(parseInt(e.target.value, 10) || 0)}
-                    disabled={maxQtyForSelected === 0}
-                    className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white text-center"
-                  />
-                </div>
-
-                <button
-                  id="btn-add-peresort-pair"
-                  type="button"
-                  onClick={handleAddPair}
-                  className="px-4 py-2 bg-indigo-600 text-white hover:bg-indigo-700 font-bold text-xs rounded-lg transition-all h-9 shrink-0 cursor-pointer"
-                >
-                  + Добавить пару
-                </button>
               </div>
-            </div>
-          ) : (
-            <div className="p-3 bg-slate-50 border border-slate-200 text-slate-500 text-xs italic rounded-2xl text-center">
-              Нет доступных позиций для сопоставления пересорта (необходимы одновременно и недостающие, и лишние товары).
-            </div>
+            ) : (
+              <div className="p-3 bg-slate-50 border border-slate-200 text-slate-500 text-xs italic rounded-2xl text-center">
+                Нет доступных позиций для сопоставления пересорта (необходимы одновременно и недостающие, и лишние товары).
+              </div>
+            )
           )}
 
           {/* e) Список добавленных пар */}
@@ -988,15 +1024,17 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
                     <span className="font-semibold text-slate-700">
                       Вместо <span className="font-black text-red-600">{p.fromArticle}</span> уехал <span className="font-black text-amber-600">{p.toArticle}</span> — <span className="font-black text-slate-900">{p.qty} шт</span>
                     </span>
-                    <button
-                      id={`btn-remove-peresort-pair-${idx}`}
-                      type="button"
-                      onClick={() => handleRemovePair(idx)}
-                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
-                      title="Удалить сопоставление"
-                    >
-                      <span className="font-bold text-xs">✕</span>
-                    </button>
+                    {!meta.committed && (
+                      <button
+                        id={`btn-remove-peresort-pair-${idx}`}
+                        type="button"
+                        onClick={() => handleRemovePair(idx)}
+                        className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                        title="Удалить сопоставление"
+                      >
+                        <span className="font-bold text-xs">✕</span>
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1029,20 +1067,33 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
 
         {/* Footer */}
         <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex gap-2 justify-end shrink-0">
+          {meta.confirmed && !meta.committed && isAdmin && (
+            <button
+              id="btn-commit-peresort"
+              type="button"
+              onClick={() => setShowConfirmCommit(true)}
+              disabled={isProcessing}
+              className="px-5 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-100 cursor-pointer"
+            >
+              Провести пересорт
+            </button>
+          )}
           <button
             onClick={onClose}
             className="px-4 py-2.5 border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 font-bold text-sm rounded-xl transition-all cursor-pointer"
           >
-            Отмена
+            {meta.committed ? 'Закрыть' : 'Отмена'}
           </button>
-          <button
-            id="btn-confirm-peresort"
-            onClick={() => setShowConfirmSave(true)}
-            disabled={pairs.length === 0 || isProcessing}
-            className="px-5 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-100 cursor-pointer"
-          >
-            Подтвердить пересорт
-          </button>
+          {!meta.committed && (
+            <button
+              id="btn-confirm-peresort"
+              onClick={() => setShowConfirmSave(true)}
+              disabled={pairs.length === 0 || isProcessing}
+              className="px-5 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-100 cursor-pointer"
+            >
+              Подтвердить пересорт
+            </button>
+          )}
         </div>
       </div>
 
@@ -1078,6 +1129,31 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
         confirmLabel="Сбросить"
         cancelLabel="Отмена"
         message="Подтверждённый пересорт будет полностью удален. Остатки склада сейчас не изменятся. Продолжить?"
+      />
+
+      {/* Confirm Commit Dialog */}
+      <ConfirmDialog
+        show={showConfirmCommit}
+        title="Провести пересорт?"
+        onConfirm={async () => {
+          const success = await commitShipmentPeresort(shipment.postingId);
+          if (success) {
+            onClose();
+          }
+        }}
+        onCancel={() => setShowConfirmCommit(false)}
+        confirmLabel="Провести"
+        cancelLabel="Отмена"
+        message={
+          <div className="space-y-3 text-sm text-slate-600">
+            <p>
+              Операция изменит остатки склада в обе стороны: ошибочно уехавший товар будет списан, не уехавший — возвращён на склад по своей себестоимости.
+            </p>
+            <p className="font-semibold text-slate-700">
+              Пары: {pairs.map(p => `вместо ${p.fromArticle} ×${p.qty} уехал ${p.toArticle} ×${p.qty}`).join(', ')}
+            </p>
+          </div>
+        }
       />
     </div>
   );
@@ -1593,7 +1669,14 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                               </span>
                                             );
                                           }
-                                          if (s.peresortJSON && s.peresortJSON.trim() !== '') {
+                                          const meta = parsePeresortMeta(s.peresortJSON);
+                                          if (meta.committed) {
+                                            badges.push(
+                                              <span key="peresort-committed" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-700">
+                                                Пересорт проведён
+                                              </span>
+                                            );
+                                          } else if (meta.confirmed) {
                                             badges.push(
                                               <span key="peresort-confirmed" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-100 text-indigo-700">
                                                 Пересорт подтверждён — ожидает проведения
