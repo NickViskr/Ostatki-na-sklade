@@ -95,6 +95,7 @@ interface WarehouseState {
   markExternalShipment: (postingId: string, status: 'processed' | 'ignored' | 'new', transGroupInfo?: string) => Promise<boolean>;
   saveShipmentAcceptance: (postingId: string, acceptedJSON: string) => Promise<boolean>;
   saveShipmentPeresort: (postingId: string, peresortJSON: string) => Promise<boolean>;
+  commitShipmentPeresort: (postingId: string) => Promise<boolean>;
   saveShipmentShortageRecalc: (postingId: string, recalcJSON: string, historyNotes: { article: string; note: string }[]) => Promise<boolean>;
   returnLinkedOzonSupplies: (deletedIds: string[]) => Promise<void>;
   fetchExternalShipments: () => Promise<void>;
@@ -1238,6 +1239,31 @@ export const useWarehouseStore = create<WarehouseState>()(
     } catch (e: any) {
       console.error(e);
       toast.error('Ошибка сети при сохранении пересорта: ' + e.message);
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  commitShipmentPeresort: async (postingId) => {
+    set({ isProcessing: true });
+    try {
+      const res = await get().fetchGas('commitShipmentPeresort', { data: { postingId } });
+      if (res.status === 'success') {
+        set(state => ({
+          stock: normalizeStock(res.data.stock || []),
+          transactions: res.data.transactions || state.transactions
+        }));
+        await get().fetchExternalShipments();
+        toast.success('Пересорт проведён: остатки склада обновлены');
+        return true;
+      } else {
+        toast.error('Ошибка сервера: ' + res.message);
+        return false;
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка проведения пересорта');
       return false;
     } finally {
       set({ isProcessing: false });
