@@ -3614,6 +3614,306 @@ function saveShipmentPeresort(postingId, peresortJSON) {
   throw new Error('Shipment with PostingID ' + postingId + ' not found');
 }
 
+/**
+ * Строит новый состав поставки (itemsJSON) с учётом подтверждённого пересорта.
+ * 
+ * @param {string} itemsJSON - исходный состав поставки (JSON-строка массива items)
+ * @param {string} peresortJSON - подтверждённый пересорт (JSON-строка объекта с pairs)
+ * @returns {string} новый состав поставки в формате JSON-строки
+ */
+function buildPeresortAdjustedItemsJSON(itemsJSON, peresortJSON) {
+  let items;
+  try {
+    items = JSON.parse(itemsJSON);
+  } catch (e) {
+    throw new Error('Ошибка парсинга исходного состава поставки (itemsJSON): ' + e.toString());
+  }
+  if (!Array.isArray(items)) {
+    throw new Error('Исходный состав поставки (itemsJSON) должен быть массивом');
+  }
+
+  let peresort;
+  try {
+    if (!peresortJSON || peresortJSON.trim() === '') {
+      peresort = { pairs: [] };
+    } else {
+      peresort = JSON.parse(peresortJSON);
+    }
+  } catch (e) {
+    throw new Error('Ошибка парсинга пересорта (peresortJSON): ' + e.toString());
+  }
+  if (!peresort || typeof peresort !== 'object' || Array.isArray(peresort)) {
+    throw new Error('Данные пересорта должны представлять объект');
+  }
+  if (!Array.isArray(peresort.pairs)) {
+    throw new Error('Данные пересорта должны содержать массив pairs');
+  }
+
+  for (let i = 0; i < peresort.pairs.length; i++) {
+    const pair = peresort.pairs[i];
+    if (!pair || typeof pair !== 'object') {
+      throw new Error('Каждая пара пересорта должна быть объектом');
+    }
+    const qty = pair.qty;
+    if (typeof qty !== 'number' || !Number.isInteger(qty) || qty < 1) {
+      throw new Error('Количество в паре пересорта должно быть целым числом >= 1');
+    }
+
+    let fromItemIdx = -1;
+    for (let j = 0; j < items.length; j++) {
+      const item = items[j];
+      const currentOfferId = String(item.offerId || item.offer_id || '').trim().toLowerCase();
+      if (currentOfferId === String(pair.fromOfferId).trim().toLowerCase()) {
+        fromItemIdx = j;
+        break;
+      }
+    }
+
+    if (fromItemIdx === -1) {
+      throw new Error('Пересорт: позиция "' + pair.fromOfferId + '" не найдена в составе поставки');
+    }
+
+    const fromItem = items[fromItemIdx];
+    const currentQty = Number(fromItem.quantity !== undefined ? fromItem.quantity : fromItem.qty) || 0;
+    if (qty > currentQty) {
+      throw new Error('Пересорт: по позиции "' + pair.fromOfferId + '" нельзя перенести ' + qty + ' шт — в составе только ' + currentQty + ' шт');
+    }
+
+    const newQty = currentQty - qty;
+    if (newQty === 0) {
+      items.splice(fromItemIdx, 1);
+    } else {
+      if (fromItem.quantity !== undefined) {
+        fromItem.quantity = newQty;
+      }
+      if (fromItem.qty !== undefined) {
+        fromItem.qty = newQty;
+      }
+    }
+
+    let toItemIdx = -1;
+    for (let j = 0; j < items.length; j++) {
+      const item = items[j];
+      const currentOfferId = String(item.offerId || item.offer_id || '').trim().toLowerCase();
+      if (currentOfferId === String(pair.toOfferId).trim().toLowerCase()) {
+        toItemIdx = j;
+        break;
+      }
+    }
+
+    if (toItemIdx !== -1) {
+      const toItem = items[toItemIdx];
+      if (toItem.quantity !== undefined) {
+        toItem.quantity = (Number(toItem.quantity) || 0) + qty;
+      }
+      if (toItem.qty !== undefined) {
+        toItem.qty = (Number(toItem.qty) || 0) + qty;
+      }
+      if (toItem.quantity === undefined && toItem.qty === undefined) {
+        toItem.quantity = qty;
+      }
+    } else {
+      items.push({ offerId: pair.toOfferId, quantity: qty });
+    }
+  }
+
+  return JSON.stringify(items);
+}
+
+/**
+ * Строит новый состав транзакций отгрузки для пере-проведения с учётом пересорта.
+ * 
+ * @param {Array<Object>} mainTxItems - массив объектов {article, quantity, price} (главные строки транзакций отгрузки)
+ * @param {string} peresortJSON - подтверждённый пересорт (JSON-строка)
+ * @param {Object} stockAvgMap - объект {артикул: текущая средняя себестоимость}
+ * @returns {Array<Object>} новый состав транзакций
+ */
+function buildPeresortRecommitComposition(mainTxItems, peresortJSON, stockAvgMap) {
+  let peresort;
+  try {
+    if (!peresortJSON || peresortJSON.trim() === '') {
+      peresort = { pairs: [] };
+    } else {
+      peresort = JSON.parse(peresortJSON);
+    }
+  } catch (e) {
+    throw new Error('Ошибка парсинга пересорта (peresortJSON): ' + e.toString());
+  }
+  if (!peresort || typeof peresort !== 'object' || Array.isArray(peresort)) {
+    throw new Error('Данные пересорта должны представлять объект');
+  }
+  if (!Array.isArray(peresort.pairs)) {
+    throw new Error('Данные пересорта должны содержать массив pairs');
+  }
+
+  // Глубокая копия mainTxItems
+  const copy = mainTxItems.map(function(item) {
+    return {
+      article: item.article,
+      quantity: Number(item.quantity) || 0,
+      price: Number(item.price) || 0
+    };
+  });
+
+  // Уменьшаем quantity последовательно
+  for (let i = 0; i < peresort.pairs.length; i++) {
+    const pair = peresort.pairs[i];
+    const targetQty = pair.qty;
+    if (typeof targetQty !== 'number' || !Number.isInteger(targetQty) || targetQty < 1) {
+      throw new Error('Количество в паре пересорта должно быть целым числом >= 1');
+    }
+    let remainingToSubtract = targetQty;
+    const targetArticle = String(pair.fromArticle).trim().toLowerCase();
+    
+    for (let j = 0; j < copy.length; j++) {
+      const row = copy[j];
+      if (String(row.article || '').trim().toLowerCase() === targetArticle) {
+        if (row.quantity >= remainingToSubtract) {
+          row.quantity -= remainingToSubtract;
+          remainingToSubtract = 0;
+          break;
+        } else {
+          remainingToSubtract -= row.quantity;
+          row.quantity = 0;
+        }
+      }
+    }
+    if (remainingToSubtract > 0) {
+      throw new Error('Пересорт: в транзакциях отгрузки не найдено ' + pair.qty + ' шт «' + pair.fromArticle + '»');
+    }
+  }
+
+  // Удаляем строки с quantity === 0
+  const filteredCopy = copy.filter(function(row) {
+    return row.quantity > 0;
+  });
+
+  function getAvgPrice(map, article) {
+    if (!map || typeof map !== 'object') return 0;
+    if (map[article] !== undefined) {
+      return Number(map[article]) || 0;
+    }
+    const normArt = String(article).trim().toLowerCase();
+    for (const key in map) {
+      if (String(key).trim().toLowerCase() === normArt) {
+        return Number(map[key]) || 0;
+      }
+    }
+    return 0;
+  }
+
+  // Пересчитываем price у оставшихся исходных строк
+  for (let j = 0; j < filteredCopy.length; j++) {
+    const row = filteredCopy[j];
+    const avgPrice = getAvgPrice(stockAvgMap, row.article);
+    if (avgPrice > 0) {
+      row.price = avgPrice;
+    }
+  }
+
+  // Суммируем qty по toArticle
+  const toArticleSums = {};
+  for (let i = 0; i < peresort.pairs.length; i++) {
+    const pair = peresort.pairs[i];
+    const displayKey = pair.toArticle;
+    const normKey = displayKey.toLowerCase();
+    if (!toArticleSums[normKey]) {
+      toArticleSums[normKey] = { article: displayKey, quantity: 0 };
+    }
+    toArticleSums[normKey].quantity += pair.qty;
+  }
+
+  // Добавляем строки для toArticle в конец копии
+  for (const normKey in toArticleSums) {
+    const sumObj = toArticleSums[normKey];
+    const art = sumObj.article;
+    const qty = sumObj.quantity;
+    const avgPrice = getAvgPrice(stockAvgMap, art);
+    filteredCopy.push({
+      article: art,
+      quantity: qty,
+      price: avgPrice > 0 ? avgPrice : 0
+    });
+  }
+
+  return filteredCopy;
+}
+
+/**
+ * Вычисляет итоговое изменение остатка склада по каждому артикулу при пере-проведении.
+ * Возвращает объект delta: { артикул: количество_изменения } (возврат старого состава минус списание нового).
+ * 
+ * @param {Array<Object>} mainTxItems - массив объектов {article, quantity, price} (исходный состав)
+ * @param {Array<Object>} newComposition - массив объектов {article, quantity, price} (новый состав)
+ * @returns {Object} объект delta, где delta[артикул] = (returned[артикул] || 0) - (writtenOff[артикул] || 0)
+ */
+function computePeresortNetDeltas(mainTxItems, newComposition) {
+  function expand(items) {
+    var counts = {};
+    if (!items || !Array.isArray(items)) return counts;
+    
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (!item) continue;
+      var art = String(item.article || '').trim();
+      if (!art) continue;
+      var qty = Number(item.quantity) || 0;
+      if (qty === 0) continue;
+      
+      var kitData = getKitComponents(art);
+      var hasComponents = kitData && kitData.components && kitData.components.length > 0;
+      
+      if (hasComponents) {
+        if (kitData.type === 'virtual') {
+          // components непустой и type === 'virtual' — добавь в результат ТОЛЬКО компоненты: componentSku += comp.quantity * item.quantity;
+          for (var j = 0; j < kitData.components.length; j++) {
+            var comp = kitData.components[j];
+            var compSku = String(comp.componentSku || '').trim();
+            if (compSku) {
+              counts[compSku] = (counts[compSku] || 0) + (Number(comp.quantity) || 0) * qty;
+            }
+          }
+        } else if (kitData.type === 'legacy') {
+          // components непустой и type === 'legacy' — добавь и сам артикул (+= item.quantity), и компоненты (как выше);
+          counts[art] = (counts[art] || 0) + qty;
+          for (var j = 0; j < kitData.components.length; j++) {
+            var comp = kitData.components[j];
+            var compSku = String(comp.componentSku || '').trim();
+            if (compSku) {
+              counts[compSku] = (counts[compSku] || 0) + (Number(comp.quantity) || 0) * qty;
+            }
+          }
+        } else {
+          // fallback if type is unknown but components exist
+          counts[art] = (counts[art] || 0) + qty;
+        }
+      } else {
+        // components пустой — добавь только сам артикул (+= item.quantity)
+        counts[art] = (counts[art] || 0) + qty;
+      }
+    }
+    return counts;
+  }
+
+  var returned = expand(mainTxItems);
+  var writtenOff = expand(newComposition);
+
+  var delta = {};
+  var allKeys = {};
+  for (var k1 in returned) {
+    allKeys[k1] = true;
+  }
+  for (var k2 in writtenOff) {
+    allKeys[k2] = true;
+  }
+
+  for (var sku in allKeys) {
+    delta[sku] = (returned[sku] || 0) - (writtenOff[sku] || 0);
+  }
+
+  return delta;
+}
+
 function saveShipmentShortageRecalc(postingId, recalcJSON, historyNotes, username) {
   if (!postingId) {
     throw new Error('PostingID is required');
