@@ -1647,8 +1647,9 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                             }
                                           });
 
+                                          const meta = parsePeresortMeta(s.peresortJSON);
                                           const badges: React.ReactNode[] = [];
-                                          if (shortage === 0 && surplus === 0 && peresort.extras.length === 0 && (!s.peresortJSON || s.peresortJSON.trim() === '')) {
+                                          if (shortage === 0 && surplus === 0 && peresort.extras.length === 0 && (!meta.confirmed || meta.committed)) {
                                             badges.push(
                                               <span key="ok" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-700">
                                                 Принято полностью
@@ -1669,7 +1670,6 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                               </span>
                                             );
                                           }
-                                          const meta = parsePeresortMeta(s.peresortJSON);
                                           if (meta.committed) {
                                             badges.push(
                                               <span key="peresort-committed" className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-700">

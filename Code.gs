@@ -1508,10 +1508,12 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       }
     }
     
-    const shipmentAdditional = (type === 'Расход' && kitGroupId) ? parseAdditionalCostsFromDestination(destination) : 0;
+    const shipmentAdditional = (type === 'Расход') ? parseAdditionalCostsFromDestination(destination) : 0;
     const additionalCosts = (shipmentAdditional > 0 && shipmentTotalQty > 0) ? roundToTwo(shipmentAdditional * qty / shipmentTotalQty) : 0;
-    const mainTotal = (type === 'Расход' && kitGroupId) ? roundToTwo(writeOffCost + componentsTotal + additionalCosts) : total;
-    const mainPrice = (type === 'Расход' && kitGroupId && qty > 0) ? roundToTwo(mainTotal / qty) : price;
+    const mainTotal = (type === 'Расход')
+      ? (kitGroupId ? roundToTwo(writeOffCost + componentsTotal + additionalCosts) : roundToTwo(total + additionalCosts))
+      : total;
+    const mainPrice = (type === 'Расход' && qty > 0 && (kitGroupId || additionalCosts > 0)) ? roundToTwo(mainTotal / qty) : price;
     
     const transId = Utilities.getUuid();
     
