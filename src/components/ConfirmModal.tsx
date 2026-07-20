@@ -451,8 +451,10 @@ export const ConfirmModal: React.FC = () => {
         : `[${extrasStr}]`;
     }
 
+    // Для Расхода отправляем базовые цены (parsedItems): долю упаковки/услуг
+    // сервер распределяет сам по данным из destination. Для остальных типов — как раньше.
     const success = await commitTransaction(
-      finalItems,
+      opType === "Расход" ? parsedItems : finalItems,
       opType,
       finalDestination,
       deliveryDate,
