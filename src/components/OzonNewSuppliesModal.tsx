@@ -67,7 +67,7 @@ export const OzonNewSuppliesModal: React.FC = () => {
         try {
           const candidate = g.matchResult.candidates[0];
           const linkInfo = JSON.stringify(candidate.txIds);
-          const newItems = g.items.filter(p => p.status === 'new');
+          const newItems = g.items.filter(p => p.status === 'new' && isStockDeparted(p.ozonStatus));
           
           let success = true;
           for (const p of newItems) {
