@@ -135,6 +135,34 @@ function doPost(e) {
       return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: syncResult })).setMimeType(ContentService.MimeType.JSON);
     }
     
+    if (action === 'runOzonStocksSyncNow') {
+      assertAdmin(currentUser);
+      // КРИТИЧНО: без захвата LockService — прокси делает обратный запрос saveOzonStocks к этому же doPost,
+      // и если внешний запрос держит замок, внутренний упрётся в waitLock (тот же дедлок, что и у runOzonSyncNow).
+      const response = UrlFetchApp.fetch(PROXY_URL + '/api/ozon/stocks', {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+          sessionToken: sessionToken,
+          devMode: payload.devMode === true
+        }),
+        muteHttpExceptions: true
+      });
+      const code = response.getResponseCode();
+      const content = response.getContentText();
+      let parsed;
+      try {
+        parsed = JSON.parse(content);
+      } catch (jsonErr) {
+        throw new Error('Ошибка разбора ответа прокси при опросе остатков Ozon: ' + content);
+      }
+      if (code < 200 || code >= 300 || parsed.status !== 'success') {
+        throw new Error('Ошибка прокси-сервера при опросе остатков Ozon: ' + (parsed.message || content));
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: parsed.data }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
     // For other actions, acquire the script lock
     lock = LockService.getScriptLock();
     lock.waitLock(10000);
@@ -303,6 +331,8 @@ function doPost(e) {
       case 'getOzonSyncStatus': assertAdmin(currentUser); result = getOzonSyncStatusInfo(); break;
       case 'setupOzonSyncTriggers': assertAdmin(currentUser); setupOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'removeOzonSyncTriggers': assertAdmin(currentUser); removeOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
+      case 'saveOzonStocks': result = saveOzonStocks(data); break;
+      case 'getOzonStocks': result = getOzonStocks(); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -340,6 +370,11 @@ function getSpreadsheet() {
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
   'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON'
+];
+
+const OZON_STOCKS_HEADERS = [
+  'Кабинет', 'SKU', 'Артикул', 'Название', 'Склад', 'Кластер',
+  'Доступно', 'Готовим к продаже', 'В заявках', 'В пути', 'Излишки', 'Возвраты', 'Прочее', 'Обновлено'
 ];
 
 function setupDatabase(targetSs) {
@@ -548,6 +583,7 @@ function setupDatabase(targetSs) {
   getKitSheet(ss);
   getOrCreateSheet(ss, 'Тарифы услуг', ['ServiceID', 'Стоимость', 'ДействуетС']);
   getOrCreateSheet(ss, 'Внешние отгрузки', EXTERNAL_SHIPMENTS_HEADERS);
+  getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
   return true;
 }
 
@@ -3239,6 +3275,160 @@ function getExternalShipmentsSheet() {
   return sheet;
 }
 
+function getOzonStocksSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
+  ensureColumns(sheet, OZON_STOCKS_HEADERS);
+  return sheet;
+}
+
+function saveOzonStocks(payload) {
+  if (!payload || !payload.rows || !Array.isArray(payload.rows)) {
+    throw new Error('Некорректный payload: список строк rows обязателен и должен быть массивом');
+  }
+  const okCabinets = payload.okCabinets || [];
+  if (!Array.isArray(okCabinets)) {
+    throw new Error('Некорректный payload: okCabinets должен быть массивом');
+  }
+
+  const sheet = getOzonStocksSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_STOCKS_HEADERS.length);
+  
+  ensureColumns(sheet, OZON_STOCKS_HEADERS);
+  const data = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const cabinetIdx = headers.indexOf('Кабинет');
+  const skuIdx = headers.indexOf('SKU');
+  const articleIdx = headers.indexOf('Артикул');
+  const nameIdx = headers.indexOf('Название');
+  const warehouseIdx = headers.indexOf('Склад');
+  const clusterIdx = headers.indexOf('Кластер');
+  const availableIdx = headers.indexOf('Доступно');
+  const preparingIdx = headers.indexOf('Готовим к продаже');
+  const requestedIdx = headers.indexOf('В заявках');
+  const transitIdx = headers.indexOf('В пути');
+  const excessIdx = headers.indexOf('Излишки');
+  const returnsIdx = headers.indexOf('Возвраты');
+  const otherIdx = headers.indexOf('Прочее');
+  const updatedIdx = headers.indexOf('Обновлено');
+
+  if (cabinetIdx === -1 || skuIdx === -1 || articleIdx === -1 || nameIdx === -1 || warehouseIdx === -1 || clusterIdx === -1 || availableIdx === -1 || preparingIdx === -1 || requestedIdx === -1 || transitIdx === -1 || excessIdx === -1 || returnsIdx === -1 || otherIdx === -1 || updatedIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Остатки Ozon"');
+  }
+
+  const keptRows = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    const cabinetVal = String(row[cabinetIdx] || '').trim();
+    if (!okCabinets.includes(cabinetVal)) {
+      keptRows.push(row);
+    }
+  }
+
+  const nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const newRows = payload.rows.map(item => {
+    const row = new Array(headers.length).fill('');
+    row[cabinetIdx] = item.cabinet || '';
+    row[skuIdx] = item.sku || '';
+    row[articleIdx] = item.offerId || '';
+    row[nameIdx] = item.name || '';
+    row[warehouseIdx] = item.warehouseName || '';
+    row[clusterIdx] = item.clusterName || '';
+    row[availableIdx] = item.available !== undefined ? item.available : 0;
+    row[preparingIdx] = item.preparing !== undefined ? item.preparing : 0;
+    row[requestedIdx] = item.requested !== undefined ? item.requested : 0;
+    row[transitIdx] = item.transit !== undefined ? item.transit : 0;
+    row[excessIdx] = item.excess !== undefined ? item.excess : 0;
+    row[returnsIdx] = item.returns !== undefined ? item.returns : 0;
+    row[otherIdx] = item.other !== undefined ? item.other : 0;
+    row[updatedIdx] = nowStr;
+    return row;
+  });
+
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  }
+
+  const combinedRows = keptRows.concat(newRows);
+  if (combinedRows.length > 0) {
+    sheet.getRange(2, 1, combinedRows.length, headers.length).setValues(combinedRows);
+  }
+
+  return {
+    savedRows: newRows.length,
+    keptRows: keptRows.length,
+    cabinets: okCabinets
+  };
+}
+
+function getOzonStocks() {
+  const sheet = getOzonStocksSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+
+  const lastCol = sheet.getLastColumn();
+  const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const cabinetIdx = headers.indexOf('Кабинет');
+  const skuIdx = headers.indexOf('SKU');
+  const articleIdx = headers.indexOf('Артикул');
+  const nameIdx = headers.indexOf('Название');
+  const warehouseIdx = headers.indexOf('Склад');
+  const clusterIdx = headers.indexOf('Кластер');
+  const availableIdx = headers.indexOf('Доступно');
+  const preparingIdx = headers.indexOf('Готовим к продаже');
+  const requestedIdx = headers.indexOf('В заявках');
+  const transitIdx = headers.indexOf('В пути');
+  const excessIdx = headers.indexOf('Излишки');
+  const returnsIdx = headers.indexOf('Возвраты');
+  const otherIdx = headers.indexOf('Прочее');
+  const updatedIdx = headers.indexOf('Обновлено');
+
+  if (cabinetIdx === -1 || skuIdx === -1 || articleIdx === -1 || nameIdx === -1 || warehouseIdx === -1 || clusterIdx === -1 || availableIdx === -1 || preparingIdx === -1 || requestedIdx === -1 || transitIdx === -1 || excessIdx === -1 || returnsIdx === -1 || otherIdx === -1 || updatedIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Остатки Ozon"');
+  }
+
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+
+    let updatedVal = '';
+    if (row[updatedIdx] instanceof Date) {
+      try {
+        updatedVal = Utilities.formatDate(row[updatedIdx], Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+      } catch (e) {
+        updatedVal = String(row[updatedIdx] || '');
+      }
+    } else {
+      updatedVal = String(row[updatedIdx] || '');
+    }
+
+    rows.push({
+      cabinet: String(row[cabinetIdx] || ''),
+      sku: String(row[skuIdx] || ''),
+      offerId: String(row[articleIdx] || ''),
+      name: String(row[nameIdx] || ''),
+      warehouseName: String(row[warehouseIdx] || ''),
+      clusterName: String(row[clusterIdx] || ''),
+      available: parseNumber(row[availableIdx]),
+      preparing: parseNumber(row[preparingIdx]),
+      requested: parseNumber(row[requestedIdx]),
+      transit: parseNumber(row[transitIdx]),
+      excess: parseNumber(row[excessIdx]),
+      returns: parseNumber(row[returnsIdx]),
+      other: parseNumber(row[otherIdx]),
+      updatedAt: updatedVal
+    });
+  }
+
+  return rows;
+}
+
 function saveExternalShipments(shipments) {
   if (!shipments || !Array.isArray(shipments)) {
     throw new Error('Invalid shipments data: must be an array');
@@ -4494,6 +4684,39 @@ function scheduledOzonCheck() {
     } else {
       result.ok = false;
       result.message = 'HTTP ' + code + ': ' + content.slice(0, 200);
+    }
+
+    if (result.ok) {
+      try {
+        const stocksResponse = UrlFetchApp.fetch(PROXY_URL + '/api/ozon/stocks', {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify({
+            sessionToken: token,
+            devMode: devMode
+          }),
+          muteHttpExceptions: true
+        });
+        const stocksCode = stocksResponse.getResponseCode();
+        const stocksContent = stocksResponse.getContentText();
+        if (stocksCode >= 200 && stocksCode < 300) {
+          const stocksParsed = JSON.parse(stocksContent);
+          if (stocksParsed.status === 'success') {
+            result.stocksOk = true;
+            result.stocksRows = (stocksParsed.data && stocksParsed.data.savedRows) || 0;
+            result.stocksMessage = 'Остатки Ozon успешно синхронизированы';
+          } else {
+            result.stocksOk = false;
+            result.stocksMessage = stocksParsed.message || 'Ошибка прокси при опросе остатков Ozon';
+          }
+        } else {
+          result.stocksOk = false;
+          result.stocksMessage = 'HTTP ' + stocksCode + ': ' + stocksContent.slice(0, 200);
+        }
+      } catch (stocksErr) {
+        result.stocksOk = false;
+        result.stocksMessage = 'Ошибка вызова /api/ozon/stocks: ' + stocksErr.toString();
+      }
     }
 
   } catch (globalErr) {
