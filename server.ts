@@ -847,6 +847,194 @@ async function startServer() {
     }
   });
 
+  app.post("/api/ozon/stocks", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token) {
+        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
+      }
+
+      if (!isTokenCached(token)) {
+        const gasUrl = process.env.GAS_URL;
+        if (!gasUrl) {
+          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+        }
+        try {
+          const gasResponse = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
+          });
+          const gasData = await gasResponse.json();
+          if (gasData.status === "success") {
+            cacheToken(token);
+          } else {
+            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
+          }
+        } catch (e: any) {
+          console.error("Session verification failed:", e);
+          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
+        }
+      }
+
+      const devMode = req.body?.devMode === true;
+
+      // Get keys
+      const keys = await fetchOzonKeys();
+      if (!keys) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+
+      const cabinets = keys.cabinets;
+      const okCabinets: string[] = [];
+      const allRows: any[] = [];
+      const cabinetsReport: any[] = [];
+      let firstErrorMessage = "";
+
+      for (const cab of cabinets) {
+        const name = cab.name;
+        try {
+          const cabKeys = { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey };
+          const collectedSkus: string[] = [];
+          let lastId = "";
+          let pageCount = 0;
+
+          while (pageCount < 20) {
+            const body: any = {
+              filter: { visibility: "ALL" },
+              limit: 1000
+            };
+            if (lastId) {
+              body.last_id = lastId;
+            }
+
+            const listData = await fetchOzonApi("/v3/product/list", cabKeys, body);
+            const items = listData.result?.items || [];
+            for (const item of items) {
+              if (item && item.sku !== undefined && item.sku !== null && item.sku !== 0) {
+                collectedSkus.push(String(item.sku));
+              }
+            }
+
+            lastId = listData.result?.last_id || "";
+            if (!lastId) {
+              break;
+            }
+            pageCount++;
+          }
+
+          if (collectedSkus.length === 0) {
+            okCabinets.push(name);
+            cabinetsReport.push({ name, ok: true, rows: 0 });
+            continue;
+          }
+
+          const cabRows: any[] = [];
+          const batchSize = 100;
+          for (let i = 0; i < collectedSkus.length; i += batchSize) {
+            const batch = collectedSkus.slice(i, i + batchSize);
+            const stocksData = await fetchOzonApi("/v1/analytics/stocks", cabKeys, { skus: batch });
+            const items = stocksData.items || [];
+            for (const item of items) {
+              const available = Number(item.available_stock_count || 0);
+              const preparing = Number(item.valid_stock_count || 0);
+              const requested = Number(item.requested_stock_count || 0);
+              const transit = Number(item.transit_stock_count || 0);
+              const excess = Number(item.excess_stock_count || 0);
+              const returns = Number(item.return_from_customer_stock_count || 0) + Number(item.return_to_seller_stock_count || 0);
+              const other = Number(item.waiting_docs_stock_count || 0) + Number(item.expiring_stock_count || 0) + Number(item.transit_defect_stock_count || 0) + Number(item.stock_defect_stock_count || 0) + Number(item.other_stock_count || 0);
+
+              if (available === 0 && preparing === 0 && requested === 0 && transit === 0 && excess === 0 && returns === 0 && other === 0) {
+                continue;
+              }
+
+              cabRows.push({
+                cabinet: name,
+                sku: String(item.sku || ''),
+                offerId: String(item.offer_id || ''),
+                name: String(item.name || ''),
+                warehouseName: (item.warehouse_id && item.warehouse_name) ? String(item.warehouse_name) : 'Без склада (агрегат кластера)',
+                clusterName: String(item.cluster_name || ''),
+                available,
+                preparing,
+                requested,
+                transit,
+                excess,
+                returns,
+                other
+              });
+            }
+          }
+
+          okCabinets.push(name);
+          allRows.push(...cabRows);
+          cabinetsReport.push({ name, ok: true, rows: cabRows.length });
+
+        } catch (err: any) {
+          console.error(`Ошибка при опросе кабинета Ozon ${name}:`, err);
+          let message = err.message || String(err);
+          if (err.httpStatus === 403 || message.includes("403") || message.toLowerCase().includes("forbidden")) {
+            message = "Кабинет пропущен: нет доступа (проверьте ключи или подписку Premium)";
+          }
+          if (!firstErrorMessage) {
+            firstErrorMessage = message;
+          }
+          cabinetsReport.push({ name, ok: false, message });
+        }
+      }
+
+      if (okCabinets.length === 0) {
+        return res.status(502).json({
+          status: "error",
+          stage: "ozon_api",
+          message: firstErrorMessage || "Не удалось получить остатки ни по одному кабинету Ozon"
+        });
+      }
+
+      const gasUrl = process.env.GAS_URL;
+      if (!gasUrl) {
+        return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+      }
+
+      const gasResponse2 = await fetch(gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "saveOzonStocks",
+          sessionToken: token,
+          ...(devMode ? { devMode: true } : {}),
+          data: {
+            okCabinets,
+            rows: allRows
+          }
+        })
+      });
+
+      const gasData = await gasResponse2.json();
+      if (gasData.status !== "success") {
+        return res.status(500).json({ status: "error", message: gasData.message || "Failed to save Ozon stocks in GAS" });
+      }
+
+      return res.json({
+        status: "success",
+        data: {
+          savedRows: gasData.data?.savedRows || 0,
+          keptRows: gasData.data?.keptRows || 0,
+          cabinets: cabinetsReport
+        }
+      });
+
+    } catch (error: any) {
+      console.error("Ozon stocks endpoint failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
   // API Endpoint for Gemini Invoice Parsing
   app.post("/api/parse-invoice", async (req, res) => {
     try {
