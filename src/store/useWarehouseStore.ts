@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow } from '../types';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
@@ -109,6 +109,9 @@ interface WarehouseState {
   fetchOzonSyncStatus: () => Promise<void>;
   setOzonSyncEnabled: (enabled: boolean) => Promise<void>;
   runOzonSyncNow: () => Promise<void>;
+  ozonStocks: OzonStockRow[];
+  fetchOzonStocks: () => Promise<void>;
+  runOzonStocksSync: () => Promise<void>;
 }
 
 export const useWarehouseStore = create<WarehouseState>()(
@@ -134,6 +137,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   pendingOzonPostingIds: [],
   devMode: typeof localStorage !== 'undefined' && localStorage.getItem('devMode') === 'true',
   ozonSyncStatus: null,
+  ozonStocks: [],
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -1391,6 +1395,45 @@ export const useWarehouseStore = create<WarehouseState>()(
     } finally {
       set({ isProcessing: false });
       await get().fetchOzonSyncStatus();
+    }
+  },
+
+  fetchOzonStocks: async () => {
+    try {
+      const result = await get().fetchGas('getOzonStocks');
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ ozonStocks: result.data });
+      } else {
+        console.error('getOzonStocks failed:', result.message);
+      }
+    } catch (e) {
+      console.error('getOzonStocks error:', e);
+    }
+  },
+
+  runOzonStocksSync: async () => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('runOzonStocksSyncNow');
+      if (result.status === 'success') {
+        const savedRows = result.data?.savedRows || 0;
+        toast.success(`Остатки Ozon обновлены: строк ${savedRows}`);
+        if (Array.isArray(result.data?.cabinets)) {
+          for (const cab of result.data.cabinets) {
+            if (cab.ok === false) {
+              toast.error(`Кабинет ${cab.name}: ${cab.message || 'Ошибка'}`);
+            }
+          }
+        }
+        await get().fetchOzonStocks();
+      } else {
+        toast.error(result.message || 'Ошибка обновления остатков Ozon');
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при обновлении остатков Ozon: ' + (e.message || String(e)));
+    } finally {
+      set({ isProcessing: false });
     }
   }
     })

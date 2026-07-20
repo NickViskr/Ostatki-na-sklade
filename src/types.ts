@@ -111,3 +111,20 @@ export interface ExternalShipment {
   recalcJSON?: string;
   peresortJSON?: string;
 }
+
+export interface OzonStockRow {
+  cabinet: string;
+  sku: string;
+  offerId: string;
+  name: string;
+  warehouseName: string;
+  clusterName: string;
+  available: number;
+  preparing: number;
+  requested: number;
+  transit: number;
+  excess: number;
+  returns: number;
+  other: number;
+  updatedAt: string;
+}
