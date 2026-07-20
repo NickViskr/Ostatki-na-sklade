@@ -15,7 +15,8 @@ import {
   HelpCircle,
   ChevronLeft,
   ChevronRight,
-  RefreshCw
+  RefreshCw,
+  X
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -24,6 +25,7 @@ import { DashSettingsModal } from './DashSettingsModal';
 import { formatCurrency } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
 import { OzonStockRow } from '../types';
+import { buildOzonAlerts, OzonAlert } from '../lib/ozonAlerts';
 
 export const Dashboard: React.FC = React.memo(() => {
   const stock = useWarehouseStore((state) => state.stock);
@@ -94,6 +96,36 @@ export const Dashboard: React.FC = React.memo(() => {
 
   const [isOzonStocksCollapsed, setIsOzonStocksCollapsed] = useState(false);
   const [expandedOfferKeys, setExpandedOfferKeys] = useState<Record<string, boolean>>({});
+
+  const [dismissedAlerts, setDismissedAlerts] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('ozon_dismissedAlerts');
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [isAlertsCollapsed, setIsAlertsCollapsed] = useState(false);
+
+  const dismissAlert = (key: string) => {
+    setDismissedAlerts((prev) => {
+      const next = prev.includes(key) ? prev : [...prev, key];
+      const trimmed = next.slice(-1000);
+      try {
+        localStorage.setItem('ozon_dismissedAlerts', JSON.stringify(trimmed));
+      } catch (e) {}
+      return trimmed;
+    });
+  };
+
+  const alerts = useMemo(() => {
+    if (!isAdmin) return [];
+    const all = buildOzonAlerts(externalShipments || [], skus || []);
+    const hidden = new Set(dismissedAlerts);
+    return all.filter(a => !hidden.has(a.key));
+  }, [isAdmin, externalShipments, skus, dismissedAlerts]);
 
   useEffect(() => {
     if (isAdmin) {
@@ -575,6 +607,93 @@ export const Dashboard: React.FC = React.memo(() => {
           </div>
         </div>
       </div>
+
+      {/* Ozon Alerts Block */}
+      {isAdmin && alerts.length > 0 && (
+        <div className="space-y-3 bg-slate-50/50 p-6 rounded-3xl border border-slate-200/60 shadow-sm" id="ozon-alerts-block">
+          <div
+            className="flex justify-between items-center cursor-pointer select-none"
+            onClick={() => setIsAlertsCollapsed(prev => !prev)}
+          >
+            <div className="flex items-center gap-3">
+              <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                <span>⚠️</span> Алерты Ozon
+              </h3>
+              <span className="text-xs px-2.5 py-0.5 rounded-full font-bold bg-indigo-50 text-indigo-600 border border-indigo-100">
+                {alerts.length}
+              </span>
+            </div>
+            <button
+              type="button"
+              aria-label={isAlertsCollapsed ? 'Развернуть алерты' : 'Свернуть алерты'}
+              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition-colors"
+              onClick={(e) => { e.stopPropagation(); setIsAlertsCollapsed(prev => !prev); }}
+            >
+              <ChevronDown
+                size={20}
+                className={`transition-transform duration-200 ${isAlertsCollapsed ? '-rotate-90' : ''}`}
+              />
+            </button>
+          </div>
+
+          {!isAlertsCollapsed && (
+            <div className="flex flex-col gap-3 mt-3">
+              {alerts.map((alert) => {
+                let severityClasses = '';
+                let titleClasses = '';
+                if (alert.severity === 'red') {
+                  severityClasses = 'bg-red-50 border-red-200 text-red-800';
+                  titleClasses = 'text-red-800';
+                } else if (alert.severity === 'amber') {
+                  severityClasses = 'bg-amber-50 border-amber-200 text-amber-800';
+                  titleClasses = 'text-amber-800';
+                } else if (alert.severity === 'violet') {
+                  severityClasses = 'bg-violet-50 border-violet-200 text-violet-800';
+                  titleClasses = 'text-violet-800';
+                }
+
+                return (
+                  <div
+                    key={alert.key}
+                    className={`p-4 rounded-2xl border flex items-center justify-between gap-4 transition-all hover:shadow-xs ${severityClasses}`}
+                    id={`ozon-alert-${alert.key}`}
+                  >
+                    <div className="flex flex-col gap-1 min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`font-bold text-sm ${titleClasses}`}>{alert.title}</span>
+                        {alert.cabinet && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-white/80 border border-current opacity-80">
+                            {alert.cabinet}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-600 font-medium break-words leading-relaxed">{alert.description}</span>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('ozon')}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-white border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 transition-all shadow-xs"
+                      >
+                        Открыть
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Скрыть алерт"
+                        onClick={() => dismissAlert(alert.key)}
+                        className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-white/80 transition-colors"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Ozon Supply Funnel */}
       {isAdmin && funnelData && (
