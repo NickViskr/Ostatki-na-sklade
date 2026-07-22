@@ -24,6 +24,7 @@ interface PendingItem {
 export const ManualTab: React.FC = React.memo(() => {
   const stock = useWarehouseStore((state) => state.stock);
   const skus = useWarehouseStore((state) => state.skus);
+  const kits = useWarehouseStore((state) => state.kits);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const commitTransaction = useWarehouseStore((state) => state.commitTransaction);
   
@@ -112,7 +113,12 @@ export const ManualTab: React.FC = React.memo(() => {
     let itemsToSubmit = [...pendingItems];
     
     // Auto-add current form if completely valid but not added yet
-    if (manualForm.article && Number(manualForm.quantity) > 0) {
+    const isCorrectionType = manualForm.type === 'Корректировка остатка';
+    const isValidQty = isCorrectionType
+      ? manualForm.quantity !== '' && Number(manualForm.quantity) >= 0
+      : Number(manualForm.quantity) > 0;
+
+    if (manualForm.article && isValidQty) {
       itemsToSubmit.push({
         article: manualForm.article,
         quantity: Number(manualForm.quantity),
@@ -122,6 +128,68 @@ export const ManualTab: React.FC = React.memo(() => {
 
     if (itemsToSubmit.length === 0) {
       toast.error('Добавьте хотя бы одну позицию для сохранения');
+      return;
+    }
+
+    if (manualForm.type === 'Корректировка остатка') {
+      const incomingItems: any[] = [];
+      const outgoingItems: any[] = [];
+
+      for (const item of itemsToSubmit) {
+        const kit = kits.find(k => k.kitSku === item.article);
+        if (kit && kit.type === 'virtual') {
+          toast.error('Нельзя корректировать остаток виртуального комплекта «' + item.article + '»: у него нет собственного остатка, корректируйте компоненты');
+          return;
+        }
+        const st = stock.find(s => s.article === item.article);
+        const currentQty = st ? Number(st.quantity) : 0;
+        const targetQty = Number(item.quantity);
+        const delta = targetQty - currentQty;
+        const unitCost = st ? Number(st.avgCost) : 0;
+
+        if (delta > 0) {
+          incomingItems.push({
+            article: item.article,
+            quantity: delta,
+            price: unitCost,
+            status: 'ok' as const,
+          });
+        } else if (delta < 0) {
+          outgoingItems.push({
+            article: item.article,
+            quantity: Math.abs(delta),
+            price: unitCost,
+            status: 'ok' as const,
+          });
+        }
+      }
+
+      if (incomingItems.length === 0 && outgoingItems.length === 0) {
+        toast.error('Новое количество совпадает с текущим остатком — корректировать нечего');
+        return;
+      }
+
+      const { destination, deliveryDate } = manualForm;
+      const labeledDestination = destination ? `${destination} [Корректировка остатка]` : '[Корректировка остатка]';
+
+      let ok = true;
+      if (incomingItems.length > 0) {
+        ok = await commitTransaction(incomingItems, 'Приход', labeledDestination, deliveryDate);
+      }
+      if (ok && outgoingItems.length > 0) {
+        ok = await commitTransaction(outgoingItems, 'Расход', labeledDestination, deliveryDate);
+      }
+
+      if (ok === true) {
+        setPendingItems([]);
+        setManualForm({
+          ...manualForm,
+          article: '',
+          quantity: '',
+          price: ''
+        });
+        setArticleSearch('');
+      }
       return;
     }
 
@@ -162,7 +230,7 @@ export const ManualTab: React.FC = React.memo(() => {
       });
       setArticleSearch('');
     }
-  }, [manualForm, commitTransaction, setManualForm, pendingItems]);
+  }, [manualForm, commitTransaction, setManualForm, pendingItems, kits, stock]);
 
   const removePendingItem = (index: number) => {
     setPendingItems(prev => prev.filter((_, i) => i !== index));
@@ -302,11 +370,16 @@ export const ManualTab: React.FC = React.memo(() => {
               <label className="text-sm font-bold text-slate-500 uppercase">Количество</label>
               <input 
                 type="number"
-                min="1"
+                min={manualForm.type === 'Корректировка остатка' ? "0" : "1"}
                 value={manualForm.quantity}
                 onChange={(e) => setManualForm({...manualForm, quantity: e.target.value === '' ? '' : parseInt(e.target.value)})}
                 className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
               />
+              {manualForm.type === 'Корректировка остатка' && manualForm.article && (
+                <p className="text-xs text-slate-500 mt-1">
+                  Текущий остаток: {stock.find(s => s.article === manualForm.article)?.quantity ?? 0} шт. Введите НОВОЕ количество — разница будет проведена автоматически.
+                </p>
+              )}
             </div>
             
             <div className={`space-y-2 ${manualForm.type.includes('Оприходование') ? 'md:col-span-3' : 'hidden'}`}>
