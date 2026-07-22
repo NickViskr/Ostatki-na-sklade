@@ -228,7 +228,17 @@ export const useWarehouseStore = create<WarehouseState>()(
       const text = await response.text();
       try {
         const json = JSON.parse(text);
-        set({ gasError: false });
+        if (json.status === 'error' && typeof json.message === 'string' && (
+          json.message.includes('Unauthorized') ||
+          json.message.includes('Недействительная сессия') ||
+          json.message.includes('sessionToken')
+        )) {
+          sessionStorage.removeItem('sessionToken');
+          localStorage.removeItem('sessionToken');
+          set({ sessionToken: null, currentUser: null });
+        } else {
+          set({ gasError: false });
+        }
         return json;
       } catch (e) {
         set({ gasError: true });
@@ -1399,6 +1409,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   fetchOzonStocks: async () => {
+    if (!get().sessionToken) return;
     try {
       const result = await get().fetchGas('getOzonStocks');
       if (result.status === 'success' && Array.isArray(result.data)) {

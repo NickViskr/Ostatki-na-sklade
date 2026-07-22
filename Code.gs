@@ -17,6 +17,15 @@ function verifyServerSignature(payloadForCheck, signature) {
   return expectedHex === signature;
 }
 
+function doGet(e) {
+  return ContentService
+    .createTextOutput(JSON.stringify({
+      status: 'ok',
+      message: 'Google Apps Script Web App is operational. Use POST for API requests.'
+    }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
 function doPost(e) {
   _transHeadersCache = null;
   _devModeSpreadsheet = null;

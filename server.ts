@@ -150,8 +150,15 @@ async function startServer() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...payloadObject, signature })
        });
-       const gasData = await gasResponse.json();
-       if (gasData.status === "success" && gasData.data?.ozonClientId && gasData.data?.ozonApiKey) {
+       const rawText = await gasResponse.text();
+       let gasData: any;
+       try {
+         gasData = JSON.parse(rawText);
+       } catch {
+         console.warn("GAS returned non-JSON response in fetchOzonKeys:", rawText.substring(0, 200));
+         return null;
+       }
+       if (gasData && gasData.status === "success" && gasData.data?.ozonClientId && gasData.data?.ozonApiKey) {
          const rawCabinets = Array.isArray(gasData.data.cabinets) ? gasData.data.cabinets : [];
          const cabinets: OzonCabinetKeys[] = rawCabinets
            .filter((c: any) => c && String(c.clientId || '').trim() && String(c.apiKey || '').trim())
@@ -200,8 +207,15 @@ async function startServer() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...payloadObject, signature })
        });
-       const gasData = await gasResponse.json();
-       if (gasData.status === "success" && gasData.data?.geminiKey) {
+       const rawText = await gasResponse.text();
+       let gasData: any;
+       try {
+         gasData = JSON.parse(rawText);
+       } catch {
+         console.warn("GAS returned non-JSON response in fetchOrgApiKey:", rawText.substring(0, 200));
+         return null;
+       }
+       if (gasData && gasData.status === "success" && gasData.data?.geminiKey) {
          return gasData.data.geminiKey;
        }
     } catch (e) {
@@ -443,35 +457,40 @@ async function startServer() {
   }
 
   // Проверка ключей Ozon и получение названия кабинета (пункт 8в плана).
+  async function verifyGasSession(token: string): Promise<boolean> {
+    if (!token) return false;
+    if (isTokenCached(token)) return true;
+    const gasUrl = process.env.GAS_URL;
+    if (!gasUrl) return false;
+    try {
+      const gasResponse = await fetch(gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: 'verifySession', sessionToken: token })
+      });
+      const rawText = await gasResponse.text();
+      let gasData: any;
+      try {
+        gasData = JSON.parse(rawText);
+      } catch {
+        return false;
+      }
+      if (gasData && gasData.status === "success") {
+        cacheToken(token);
+        return true;
+      }
+    } catch (e: any) {
+      console.error("Session verification failed:", e);
+    }
+    return false;
+  }
+
   // Ключи приходят в теле запроса — Настройки проверяют их до сохранения.
   app.post("/api/ozon/seller-info", async (req, res) => {
     try {
       const token = req.body?.sessionToken;
-      if (!token) {
-        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
-      }
-
-      if (!isTokenCached(token)) {
-        const gasUrl = process.env.GAS_URL;
-        if (!gasUrl) {
-          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
-        }
-        try {
-          const gasResponse = await fetch(gasUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
-          });
-          const gasData = await gasResponse.json();
-          if (gasData.status === "success") {
-            cacheToken(token);
-          } else {
-            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
-          }
-        } catch (e: any) {
-          console.error("Session verification failed:", e);
-          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
-        }
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
       }
 
       const clientId = String(req.body?.clientId || '').trim();
@@ -517,31 +536,8 @@ async function startServer() {
   app.post("/api/ozon/check", async (req, res) => {
     try {
       const token = req.body?.sessionToken;
-      if (!token) {
-        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
-      }
-
-      if (!isTokenCached(token)) {
-        const gasUrl = process.env.GAS_URL;
-        if (!gasUrl) {
-          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
-        }
-        try {
-          const gasResponse = await fetch(gasUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
-          });
-          const gasData = await gasResponse.json();
-          if (gasData.status === "success") {
-            cacheToken(token);
-          } else {
-            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
-          }
-        } catch (e: any) {
-          console.error("Session verification failed:", e);
-          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
-        }
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
       }
 
       const devMode = req.body?.devMode === true;
@@ -615,7 +611,13 @@ async function startServer() {
           ...(devMode ? { devMode: true } : {})
         })
       });
-      const gasResult1 = await gasResponse1.json();
+      const rawText1 = await gasResponse1.text();
+      let gasResult1: any;
+      try {
+        gasResult1 = JSON.parse(rawText1);
+      } catch {
+        return res.status(502).json({ status: "error", message: "GAS returned non-JSON response when getting external shipments" });
+      }
       if (gasResult1.status !== "success") {
         return res.status(500).json({ status: "error", message: gasResult1.message || "Failed to get external shipments from GAS" });
       }
@@ -821,7 +823,13 @@ async function startServer() {
         })
       });
 
-      const gasData = await gasResponse2.json();
+      const rawText2 = await gasResponse2.text();
+      let gasData: any;
+      try {
+        gasData = JSON.parse(rawText2);
+      } catch {
+        return res.status(502).json({ status: "error", message: "GAS returned non-JSON response when saving external shipments" });
+      }
       if (gasData.status !== "success") {
         return res.status(500).json({ status: "error", message: gasData.message || "Failed to save external shipments in GAS" });
       }
@@ -850,31 +858,8 @@ async function startServer() {
   app.post("/api/ozon/stocks", async (req, res) => {
     try {
       const token = req.body?.sessionToken;
-      if (!token) {
-        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
-      }
-
-      if (!isTokenCached(token)) {
-        const gasUrl = process.env.GAS_URL;
-        if (!gasUrl) {
-          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
-        }
-        try {
-          const gasResponse = await fetch(gasUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
-          });
-          const gasData = await gasResponse.json();
-          if (gasData.status === "success") {
-            cacheToken(token);
-          } else {
-            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
-          }
-        } catch (e: any) {
-          console.error("Session verification failed:", e);
-          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
-        }
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
       }
 
       const devMode = req.body?.devMode === true;
@@ -1010,7 +995,13 @@ async function startServer() {
         })
       });
 
-      const gasData = await gasResponse2.json();
+      const rawText2 = await gasResponse2.text();
+      let gasData: any;
+      try {
+        gasData = JSON.parse(rawText2);
+      } catch {
+        return res.status(502).json({ status: "error", message: "GAS returned non-JSON response when saving Ozon stocks" });
+      }
       if (gasData.status !== "success") {
         return res.status(500).json({ status: "error", message: gasData.message || "Failed to save Ozon stocks in GAS" });
       }
@@ -1039,31 +1030,8 @@ async function startServer() {
   app.post("/api/parse-invoice", async (req, res) => {
     try {
       const token = req.body?.sessionToken;
-      if (!token) {
-        return res.status(401).json({ status: "error", message: "Missing sessionToken" });
-      }
-
-      if (!isTokenCached(token)) {
-        const gasUrl = process.env.GAS_URL;
-        if (!gasUrl) {
-          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
-        }
-        try {
-          const gasResponse = await fetch(gasUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: 'verifySession', sessionToken: token })
-          });
-          const gasData = await gasResponse.json();
-          if (gasData.status === "success") {
-            cacheToken(token);
-          } else {
-            return res.status(401).json({ status: "error", message: "Invalid sessionToken" });
-          }
-        } catch (e: any) {
-          console.error("Session verification failed:", e);
-          return res.status(401).json({ status: "error", message: "Session verification failed: " + e.message });
-        }
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
       }
 
       // Receive full SKU list to build mapping dictionary and table
