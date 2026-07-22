@@ -228,11 +228,9 @@ export const useWarehouseStore = create<WarehouseState>()(
       const text = await response.text();
       try {
         const json = JSON.parse(text);
-        if (json.status === 'error' && typeof json.message === 'string' && (
-          json.message.includes('Unauthorized') ||
-          json.message.includes('Недействительная сессия') ||
-          json.message.includes('sessionToken')
-        )) {
+        if (json.status === 'error' && typeof json.message === 'string' &&
+          json.message.includes('Недействительная сессия')
+        ) {
           sessionStorage.removeItem('sessionToken');
           localStorage.removeItem('sessionToken');
           set({ sessionToken: null, currentUser: null });
