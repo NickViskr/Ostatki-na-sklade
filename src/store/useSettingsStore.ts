@@ -150,7 +150,7 @@ export const useSettingsStore = create<SettingsState>()(
       geminiModel: 'gemini-2.5-flash',
       geminiKey: '',
       notificationEmail: '',
-      destinations: ['Ozon', 'Wildberries'],
+      destinations: ['Склад', 'Ozon', 'Wildberries'],
       customPrompt: DEFAULT_PROMPT,
       serviceOrderIds: [],
       storageRatePerLiterDay: 0,
@@ -178,13 +178,22 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'warehouse-settings',
-      version: 5,
+      version: 6,
       migrate: (persistedState: any, version: number) => {
         if ([0, 1, 2, 3].includes(version) || !version) {
           // If migrating from an older version, update the customPrompt to our new DEFAULT_PROMPT
           // We assume they didn't really write a custom one if it starts with the old string, 
           // or we just force it to fix the current issue
           persistedState.customPrompt = DEFAULT_PROMPT;
+        }
+        if (version <= 5) {
+          if (Array.isArray(persistedState.destinations)) {
+            if (!persistedState.destinations.includes('Склад')) {
+              persistedState.destinations = ['Склад', ...persistedState.destinations];
+            }
+          } else {
+            persistedState.destinations = ['Склад', 'Ozon', 'Wildberries'];
+          }
         }
         return persistedState as SettingsState;
       },
