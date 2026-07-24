@@ -1311,108 +1311,7 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
         for (let j = 1; j < stockData.length; j++) {
            if (String(stockData[j][0]) === String(transDataAll[k][3])) {
               let nQty = Number(stockData[j][1]) + Number(transDataAll[k][4]);
-              const componentWoc = Number(transDataAll[k][wocIdx !== -1 ? wocIdx : 6]) || 0;
-              const componentDest = String(transDataAll[k][destIdx] || '');
-              let nCap;
-              if (isWriteOffDestination(componentDest)) {
-                nCap = Number(stockData[j][3]);
-              } else {
-                nCap = roundToTwo(Number(stockData[j][3]) + componentWoc);
-              }
-              let nAvg = nQty > 0 ? roundToTwo(nCap / nQty) : 0;
-              stockSheet.getRange(j + 1, 2, 1, 3).setValues([[nQty, nAvg, nCap]]);
-              break;
-           }
-        }
-        transSheet.deleteRow(k + 1);
-        if (k + 1 < rowIndex) { rowIndex = rowIndex - 1; }
-      }
-    }
-  }
-
-  transSheet.deleteRow(rowIndex);
-  SpreadsheetApp.flush();
-  return { stock: getStock(), transactions: getTransactions().rows };
-}
-
-function updateTransaction(id, data, username) {
-  deleteTransaction(id, username, true);
-  const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '');
-  return {
-    stock: getStock(),
-    newTransactions: getTransactions().rows,
-    skus: getSkus()
-  };
-}
-
-function isWriteOffDestination(dest) {
-  return String(dest || '').indexOf('Списание') !== -1;
-}
-
-function commitTransaction(data, type, destination, deliveryDate, username, originalDate) {
-  const items = Array.isArray(data) ? data : [data];
-  const dateStr = originalDate || new Date().toISOString();
-  const ss = getSpreadsheet();
-  const transSheet = getTransactionSheet(ss);
-  const stockSheet = getSheetByNameRobust(ss, 'Остатки');
-  
-  const stockData = stockSheet.getDataRange().getValues();
-  const stockMap = {};
-  for (let i = 1; i < stockData.length; i++) {
-    const row = stockData[i];
-    stockMap[String(row[0])] = {
-      rowIdx: i + 1,
-      quantity: Number(row[1]),
-      avgCost: Number(row[2]),
-      capitalization: Number(row[3])
-    };
-  }
-
-  if (type === 'Расход') {
-    const requestedQty = {};
-    items.forEach(item => {
-      if (item.status && item.status !== 'ok') return;
-      requestedQty[item.article] = (requestedQty[item.article] || 0) + Number(item.quantity);
-    });
-    
-    // Validate main kits components
-    const errors = [];
-    const componentDemand = {};
-    for (const article in requestedQty) {
-      const kitData = getKitComponents(article);
-      const isKit = kitData.components && kitData.components.length > 0;
-      if (isKit) {
-        for (const comp of kitData.components) {
-          const needed = comp.quantity * requestedQty[article];
-          componentDemand[comp.componentSku] = (componentDemand[comp.componentSku] || 0) + needed;
-        }
-        if (kitData.type === 'legacy') {
-          const available = stockMap[article] ? stockMap[article].quantity : 0;
-          if (requestedQty[article] > available) {
-            errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
-          }
-        }
-      } else {
-        const available = stockMap[article] ? stockMap[article].quantity : 0;
-        if (requestedQty[article] > available) {
-          errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
-        }
-      }
-    }
-    
-    for (const compSku in componentDemand) {
-      const needed = componentDemand[compSku];
-      const available = stockMap[compSku] ? stockMap[compSku].quantity : 0;
-      if (available < needed) {
-        errors.push('Нет ' + compSku + ': нужно ' + needed + ' шт., есть ' + available + ' шт.');
-      }
-    }
-    if (errors.length > 0) {
-      throw new Error('Недостаточно наличия на складе:\n' + errors.join('\n'));
-    }
-  }
-  
-  const newTransactions = [];
+              const compone  const newTransactions = [];
   const shipmentTotalQty = items.reduce(function(s, it){ if (it.status && it.status !== 'ok') return s; return s + (Number(it.quantity) || 0); }, 0);
   
   const rowsToAppend = [];
@@ -1604,6 +1503,130 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     SpreadsheetApp.flush();
   }
 
+  return {�омплект ' + article,
+            user:        username,
+            groupId:     kitGroupId,
+            isComponent: true
+          });
+          
+          transSheet.appendRow(compRow);
+          
+          newTransactions.push({
+            id: compTransId,
+            date: dateStr,
+            type: 'Расход',
+            article: comp.componentSku,
+            quantity: compQty,
+            price: compAvg,
+            writeOffCost: compTotal,
+            total: compTotal,
+            destination: destination,
+            deliveryDate: '',
+            user: username,
+            groupId: kitGroupId,
+            isComponent: true
+          });
+        }
+      }
+    }
+    
+    if (type === 'Приход') {
+      ensureSkuExists(article);
+      if (stockMap[article]) {
+        const curr = stockMap[article];
+        const newQty = curr.quantity + qty;
+        const newCap = roundToTwo(curr.capitalization + total);
+        const newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
+        
+        stockMap[article].quantity = newQty;
+        stockMap[article].capitalization = newCap;
+        stockMap[article].avgCost = newAvgCost;
+        
+        stockSheet.getRange(curr.rowIdx, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
+      } else {
+        stockSheet.appendRow([article, qty, price, total, 0, 0]);
+        stockMap[article] = {
+          rowIdx: stockSheet.getLastRow(),
+          quantity: qty,
+          avgCost: price,
+          capitalization: total,
+          sales120: 0,
+          turnover: 0
+        };
+      }
+    } else if (type === 'Расход') {
+      if (isVirtualKit) {
+        writeOffCost = 0;
+      } else {
+        if (stockMap[article]) {
+          const curr = stockMap[article];
+          writeOffCost = roundToTwo(curr.avgCost * qty);
+          
+          const newQty = curr.quantity - qty;
+          let newCap;
+          let newAvgCost;
+          if (isWriteOffDestination(destination)) {
+            newCap = newQty === 0 ? 0 : curr.capitalization;
+            newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
+          } else {
+            newCap = roundToTwo(curr.capitalization - writeOffCost);
+            newAvgCost = curr.avgCost;
+          }
+          
+          stockMap[article].quantity = newQty;
+          stockMap[article].capitalization = newCap;
+          stockMap[article].avgCost = newAvgCost;
+          
+          stockSheet.getRange(curr.rowIdx, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
+        }
+      }
+    }
+    
+    const shipmentAdditional = (type === 'Расход') ? parseAdditionalCostsFromDestination(destination) : 0;
+    const additionalCosts = (shipmentAdditional > 0 && shipmentTotalQty > 0) ? roundToTwo(shipmentAdditional * qty / shipmentTotalQty) : 0;
+    const mainTotal = (type === 'Расход')
+      ? (kitGroupId ? roundToTwo(writeOffCost + componentsTotal + additionalCosts) : roundToTwo(total + additionalCosts))
+      : total;
+    const mainPrice = (type === 'Расход' && qty > 0 && (kitGroupId || additionalCosts > 0)) ? roundToTwo(mainTotal / qty) : price;
+    
+    const transId = Utilities.getUuid();
+    
+    const mainRow = buildTransactionRow({
+      id: transId,
+      date: dateStr,
+      type: type,
+      article: article,
+      quantity: qty,
+      price: mainPrice,
+      writeOffCost: writeOffCost,
+      total: mainTotal,
+      destination: destination,
+      deliveryDate: deliveryDate,
+      user: username,
+      groupId: kitGroupId || '',
+      isComponent: false
+    });
+    
+    transSheet.appendRow(mainRow);
+    
+    newTransactions.push({
+      id: transId,
+      date: dateStr,
+      type,
+      article,
+      quantity: qty,
+      price: mainPrice,
+      writeOffCost,
+      total: mainTotal,
+      destination,
+      deliveryDate,
+      user: username,
+      groupId: kitGroupId || '',
+      isComponent: false
+    });
+  });
+
+  
   return {
     stock: getStock(),
     newTransactions: newTransactions,
