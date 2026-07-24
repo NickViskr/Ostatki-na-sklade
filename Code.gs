@@ -1216,46 +1216,205 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
 
   const headers = transDataAll[0].map(h => String(h).trim());
   const gIdx = headers.indexOf('groupId');
-  const cIdx = headers.indexOf              let nQty = Number(stockData[j][1]) + Number(transDataAll[k][4]);
-              let compWoc = wocIdx !== -1 ? Number(transDataAll[k][wocIdx]) : Number(transDataAll[k][7]);
-              let nCap = isWriteOffDestination(dest) ? Number(stockData[j][3]) : roundToTwo(Number(stockData[j][3]) + compWoc);
+  const cIdx = headers.indexOf('isComponent');
+  const wocIdx = headers.indexOf('Себестоимость списания');
+  const destIdx = headers.indexOf('Объект') !== -1 ? headers.indexOf('Объект') : 8;
+
+  let rowIndex = -1;
+  let transData = null;
+  
+  for (let i = 1; i < transDataAll.length; i++) {
+    if (String(transDataAll[i][0]) === String(id)) {
+      rowIndex = i + 1;
+      transData = transDataAll[i];
+      break;
+    }
+  }
+  
+  if (rowIndex === -1 || !transData) throw new Error('Транзакция не найдена.');
+  
+  const type = transData[2];
+  const article = String(transData[3]);
+  const qty = Number(transData[4]);
+  const price = Number(transData[5]);
+  const writeOffCost = Number(transData[6]);
+  const total = Number(transData[7]);
+  const dest = String(transData[destIdx] || '');
+  
+  let dateStr = '';
+  if (transData[1] instanceof Date) {
+    dateStr = transData[1].toISOString();
+  } else {
+    dateStr = String(transData[1]);
+  }
+  let deliveryDateStr = '';
+  if (transData[9] instanceof Date) {
+    deliveryDateStr = transData[9].toISOString();
+  } else {
+    deliveryDateStr = String(transData[9] || '');
+  }
+
+  if (typeof archiveItem === 'function') {
+    archiveItem('Transaction', {
+      id: String(transData[0]),
+      date: dateStr,
+      type: isUpdate ? 'UpdatedVersion' : type,
+      article: article,
+      quantity: qty,
+      price: price,
+      writeOffCost: writeOffCost,
+      total: total,
+      destination: dest,
+      deliveryDate: deliveryDateStr,
+      user: String(transData[10] || '')
+    }, deletedBy);
+  }
+  
+  const stockData = stockSheet.getDataRange().getValues();
+  const isVirtualKitMainRowRefund = (type === 'Расход' && writeOffCost === 0 && (gIdx !== -1 && transData[gIdx]));
+  if (!isVirtualKitMainRowRefund) {
+    for (let i = 1; i < stockData.length; i++) {
+      // Indexes: 0=article, 1=qty, 2=avgCost, 3=cap, 4=sales, 5=turnover
+      if (String(stockData[i][0]) === article) {
+        let newQty = Number(stockData[i][1]);
+        let newAvgCost = Number(stockData[i][2]);
+        let newCap = Number(stockData[i][3]);
+        
+        if (type === 'Приход') {
+          newQty -= qty;
+          if (newQty < 0) {
+            throw new Error(`Удаление этого прихода приведёт к отрицательному остатку товара "${article}". Доступно: ${newQty + qty}, нужно удалить: ${qty}. Сначала отмените расходы, ссылающиеся на этот товар.`);
+          }
+          newCap = roundToTwo(newCap - total);
+          newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
+        } else if (type === 'Расход') {
+          newQty += qty;
+          if (isWriteOffDestination(dest)) {
+            // Капитализация НЕ увеличивается при удалении списания
+          } else {
+            newCap = roundToTwo(newCap + writeOffCost);
+          }
+          newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
+        }
+        
+        stockSheet.getRange(i + 1, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
+        break;
+      }
+    }
+  }
+
+  // Check for components of a kit
+  if (gIdx !== -1 && cIdx !== -1 && type === 'Расход' && transData[gIdx]) {
+    const groupId = transData[gIdx];
+    for (let k = transDataAll.length - 1; k >= 1; k--) {
+      if (String(transDataAll[k][gIdx]) === String(groupId) && transDataAll[k][2] === 'Расход' && (transDataAll[k][cIdx] === true || String(transDataAll[k][cIdx]).toLowerCase() === 'true')) {
+        for (let j = 1; j < stockData.length; j++) {
+           if (String(stockData[j][0]) === String(transDataAll[k][3])) {
+              let nQty = Number(stockData[j][1]) + Number(transDataAll[k][4]);
+              const componentWoc = Number(transDataAll[k][wocIdx !== -1 ? wocIdx : 6]) || 0;
+              const componentDest = String(transDataAll[k][destIdx] || '');
+              let nCap;
+              if (isWriteOffDestination(componentDest)) {
+                nCap = Number(stockData[j][3]);
+              } else {
+                nCap = roundToTwo(Number(stockData[j][3]) + componentWoc);
+              }
               let nAvg = nQty > 0 ? roundToTwo(nCap / nQty) : 0;
               stockSheet.getRange(j + 1, 2, 1, 3).setValues([[nQty, nAvg, nCap]]);
               break;
            }
         }
         transSheet.deleteRow(k + 1);
-        if (k + 1 < rowIndex) rowIndex--;
+        if (k + 1 < rowIndex) { rowIndex = rowIndex - 1; }
       }
     }
   }
 
   transSheet.deleteRow(rowIndex);
-  return { status: 'success' };
+  SpreadsheetApp.flush();
+  return { stock: getStock(), transactions: getTransactions().rows };
+}
+
+function updateTransaction(id, data, username) {
+  deleteTransaction(id, username, true);
+  const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '');
+  return {
+    stock: getStock(),
+    newTransactions: getTransactions().rows,
+    skus: getSkus()
+  };
+}
+
+function isWriteOffDestination(dest) {
+  return String(dest || '').indexOf('Списание') !== -1;
 }
 
 function commitTransaction(data, type, destination, deliveryDate, username, originalDate) {
+  const items = Array.isArray(data) ? data : [data];
+  const dateStr = originalDate || new Date().toISOString();
   const ss = getSpreadsheet();
   const transSheet = getTransactionSheet(ss);
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
-  if (!transSheet || !stockSheet) throw new Error('База данных не инициализирована');
-
-  const items = Array.isArray(data) ? data : [data];
-  const dateStr = originalDate || getTodayDateString();
+  
   const stockData = stockSheet.getDataRange().getValues();
   const stockMap = {};
   for (let i = 1; i < stockData.length; i++) {
-    stockMap[String(stockData[i][0])] = {
+    const row = stockData[i];
+    stockMap[String(row[0])] = {
       rowIdx: i + 1,
-      quantity: Number(stockData[i][1]),
-      avgCost: Number(stockData[i][2]),
-      capitalization: Number(stockData[i][3])
+      quantity: Number(row[1]),
+      avgCost: Number(row[2]),
+      capitalization: Number(row[3])
     };
   }
 
+  if (type === 'Расход') {
+    const requestedQty = {};
+    items.forEach(item => {
+      if (item.status && item.status !== 'ok') return;
+      requestedQty[item.article] = (requestedQty[item.article] || 0) + Number(item.quantity);
+    });
+    
+    // Validate main kits components
+    const errors = [];
+    const componentDemand = {};
+    for (const article in requestedQty) {
+      const kitData = getKitComponents(article);
+      const isKit = kitData.components && kitData.components.length > 0;
+      if (isKit) {
+        for (const comp of kitData.components) {
+          const needed = comp.quantity * requestedQty[article];
+          componentDemand[comp.componentSku] = (componentDemand[comp.componentSku] || 0) + needed;
+        }
+        if (kitData.type === 'legacy') {
+          const available = stockMap[article] ? stockMap[article].quantity : 0;
+          if (requestedQty[article] > available) {
+            errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
+          }
+        }
+      } else {
+        const available = stockMap[article] ? stockMap[article].quantity : 0;
+        if (requestedQty[article] > available) {
+          errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
+        }
+      }
+    }
+    
+    for (const compSku in componentDemand) {
+      const needed = componentDemand[compSku];
+      const available = stockMap[compSku] ? stockMap[compSku].quantity : 0;
+      if (available < needed) {
+        errors.push('Нет ' + compSku + ': нужно ' + needed + ' шт., есть ' + available + ' шт.');
+      }
+    }
+    if (errors.length > 0) {
+      throw new Error('Недостаточно наличия на складе:\n' + errors.join('\n'));
+    }
+  }
+  
   const newTransactions = [];
   const shipmentTotalQty = items.reduce(function(s, it){ if (it.status && it.status !== 'ok') return s; return s + (Number(it.quantity) || 0); }, 0);
-
+  
   const rowsToAppend = [];
   items.forEach(item => {
     if (item.status && item.status !== 'ok') return;
