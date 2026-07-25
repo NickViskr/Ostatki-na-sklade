@@ -828,7 +828,7 @@ export const HistoryTab: React.FC = React.memo(() => {
       <ConfirmDialog 
         show={transToDelete !== null}
         title="Удаление операции"
-        message="Вы действительно хотите удалить эту операцию из истории? Действие нельзя отменить, и остатки товара могут измениться."
+        message="Вы действительно хотите удалить эту операцию из истории? Операция переместится в раздел «Удаленное», откуда её можно восстановить. Остатки товара изменятся."
         onConfirm={async () => {
           if (transToDeleteIds.length > 1) {
             await handleDeleteMultipleTransactions(transToDeleteIds);

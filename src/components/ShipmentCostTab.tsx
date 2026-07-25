@@ -31,7 +31,10 @@ const extractDestinationName = (destination: string): string => {
 
 const isNonShipmentDestination = (destination: string): boolean => {
   const dest = (destination || "").toLowerCase();
-  return dest.includes("списание") || dest.includes("миграция") || dest.includes("корректировка остатка");
+  if (dest.includes("списание") || dest.includes("миграция") || dest.includes("корректировка остатка")) {
+    return true;
+  }
+  return extractDestinationName(destination).toLowerCase() === "склад";
 };
 
 // Helper to parse costs from destination string
@@ -1439,7 +1442,7 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
       <ConfirmDialog
         show={bulkDeleteConfirm}
         title="Удаление выбранных отгрузок"
-        message={`Вы действительно хотите удалить ${currentSelectionCount} строк отгрузки из истории? Действие нельзя отменить. Товары будут соответственно удалены из истории.`}
+        message={`Вы действительно хотите удалить ${currentSelectionCount} строк отгрузки из истории? Строки переместятся в раздел «Удаленное», откуда их можно восстановить. Остатки товаров изменятся.`}
         onConfirm={handleBulkDelete}
         onCancel={() => setBulkDeleteConfirm(false)}
       />

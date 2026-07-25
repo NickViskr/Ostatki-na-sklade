@@ -3,6 +3,14 @@ import { Trash2, RotateCcw, Box, User, History, Archive, Loader2, Calendar, Chev
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
+const pluralizeItems = (n: number): string => {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "элемент";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "элемента";
+  return "элементов";
+};
+
 export const DeletedItemsTab: React.FC = React.memo(() => {
   const archivedItems = useWarehouseStore((state) => state.archivedItems);
   const fetchArchivedItems = useWarehouseStore((state) => state.fetchArchivedItems);
@@ -473,7 +481,7 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
       <ConfirmDialog 
         show={bulkDeleteConfirm}
         title="Безвозвратное удаление"
-        message={`Вы действительно хотите навсегда удалить ${currentSelectionCount} элементов из архива? Это действие невозможно отменить.`}
+        message={`Вы действительно хотите навсегда удалить ${currentSelectionCount} ${pluralizeItems(currentSelectionCount)} из архива? Это действие невозможно отменить.`}
         onConfirm={handleBulkDelete}
         onCancel={() => setBulkDeleteConfirm(false)}
         confirmLabel="Удалить навсегда"
@@ -483,7 +491,7 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
       <ConfirmDialog 
         show={bulkRestoreConfirm}
         title="Массовое восстановление"
-        message={`Вы действительно хотите восстановить ${currentSelectionCount} элементов из архива? Они вернутся в основной раздел.`}
+        message={`Вы действительно хотите восстановить ${currentSelectionCount} ${pluralizeItems(currentSelectionCount)} из архива? Они вернутся в основной раздел.`}
         onConfirm={handleBulkRestore}
         onCancel={() => setBulkRestoreConfirm(false)}
         confirmLabel="Восстановить все"

@@ -805,13 +805,16 @@ export const ConfirmModal: React.FC = () => {
                         e.target.value === "" ? "" : Number(e.target.value),
                       )
                     }
-                    placeholder="0 ₽"
+                    placeholder=""
                     className={`w-full px-4 py-3 rounded-xl bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium border ${
                       missingFieldsError.includes("«Стоимость упаковки»")
                         ? "border-red-400 focus:ring-red-500"
                         : "border-indigo-100"
                     }`}
                   />
+                  <p className="text-[10px] text-slate-400 font-medium mt-1.5">
+                    Обязательное поле. Если упаковки не было — введите 0.
+                  </p>
                 </div>
                 <div className="space-y-2 bg-white p-4 rounded-2xl border border-indigo-50 shadow-sm">
                   <div className="flex justify-between items-center mb-2">
