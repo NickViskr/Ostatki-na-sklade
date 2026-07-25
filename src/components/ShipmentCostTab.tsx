@@ -29,6 +29,11 @@ const extractDestinationName = (destination: string): string => {
   return bracketIdx > 0 ? destination.slice(0, bracketIdx).trim() : destination.trim();
 };
 
+const isNonShipmentDestination = (destination: string): boolean => {
+  const dest = (destination || "").toLowerCase();
+  return dest.includes("списание") || dest.includes("миграция") || dest.includes("корректировка остатка");
+};
+
 // Helper to parse costs from destination string
 const parseExtraCostsFromDestination = (destination: string) => {
   if (!destination) return { destinationName: '', packagingCost: 0, packagingDist: 'batch' as 'unit' | 'batch', otherCost: 0, otherDist: 'batch' as 'unit' | 'batch', totalServicesCost: 0 };
@@ -328,8 +333,7 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     return transactions
       .filter((t) => t.type === "Расход")
       .filter((t) => {
-        const dest = (t.destination || "").toLowerCase();
-        if (dest.includes("списание") || dest.includes("миграция")) return false;
+        if (isNonShipmentDestination(t.destination)) return false;
 
         if (destinationFilter && extractDestinationName(t.destination) !== destinationFilter)
           return false;
@@ -533,6 +537,7 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
       new Set(
         transactions
           .filter((t) => t.type === "Расход")
+          .filter((t) => !isNonShipmentDestination(t.destination))
           .map((t) => extractDestinationName(t.destination)),
       ),
     )
