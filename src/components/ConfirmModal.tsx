@@ -44,6 +44,7 @@ export const ConfirmModal: React.FC = () => {
   const kits = useWarehouseStore((state) => state.kits);
   const stock = useWarehouseStore((state) => state.stock);
   const skus = useWarehouseStore((state) => state.skus);
+  const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
 
   // Additional costs state for 'Расход'
   const [packagingCost, setPackagingCost] = useState<number | "">("");
@@ -175,7 +176,27 @@ export const ConfirmModal: React.FC = () => {
     );
   }, [kitPreviews]);
 
+  const validatedItems = useMemo(() => {
+    if (!parsedItems) return null;
+    if (opType !== "Расход") return parsedItems;
+    return parsedItems.map((item) => {
+      if (item.status === "unknown") return item;
+      const available = getEffectiveAvailability(item.article);
+      if (available < item.quantity) {
+        return {
+          ...item,
+          status: "error" as const,
+          errorMsg: `Недостаточно на складе (доступно ${available})`,
+        };
+      }
+      return { ...item, status: "ok" as const, errorMsg: "" };
+    });
+  }, [parsedItems, opType, stock, kits, getEffectiveAvailability]);
+
   const finalItems = useMemo(() => {
+    // Источник — позиции с актуальными статусами, пересчитанными по текущим остаткам
+    const parsedItems = validatedItems;
+
     if (!parsedItems) return [];
 
     // Подсчитываем общую стоимость выбранных услуг
@@ -255,6 +276,7 @@ export const ConfirmModal: React.FC = () => {
     });
   }, [
     parsedItems,
+    validatedItems,
     opType,
     packagingCost,
     packagingDist,
