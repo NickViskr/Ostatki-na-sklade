@@ -110,6 +110,7 @@ interface WarehouseState {
   setOzonSyncEnabled: (enabled: boolean) => Promise<void>;
   runOzonSyncNow: () => Promise<void>;
   ozonStocks: OzonStockRow[];
+  ozonStocksSyncIssues: { name: string; message: string }[];
   fetchOzonStocks: () => Promise<void>;
   runOzonStocksSync: () => Promise<void>;
 }
@@ -138,6 +139,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   devMode: typeof localStorage !== 'undefined' && localStorage.getItem('devMode') === 'true',
   ozonSyncStatus: null,
   ozonStocks: [],
+  ozonStocksSyncIssues: [],
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -1427,13 +1429,16 @@ export const useWarehouseStore = create<WarehouseState>()(
       if (result.status === 'success') {
         const savedRows = result.data?.savedRows || 0;
         toast.success(`Остатки Ozon обновлены: строк ${savedRows}`);
+        const issues: { name: string; message: string }[] = [];
         if (Array.isArray(result.data?.cabinets)) {
           for (const cab of result.data.cabinets) {
             if (cab.ok === false) {
+              issues.push({ name: String(cab.name || ''), message: String(cab.message || 'Ошибка') });
               toast.error(`Кабинет ${cab.name}: ${cab.message || 'Ошибка'}`);
             }
           }
         }
+        set({ ozonStocksSyncIssues: issues });
         await get().fetchOzonStocks();
       } else {
         toast.error(result.message || 'Ошибка обновления остатков Ozon');

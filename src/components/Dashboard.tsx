@@ -90,6 +90,7 @@ export const Dashboard: React.FC = React.memo(() => {
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
 
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
+  const ozonStocksSyncIssues = useWarehouseStore((state) => state.ozonStocksSyncIssues);
   const fetchOzonStocks = useWarehouseStore((state) => state.fetchOzonStocks);
   const runOzonStocksSync = useWarehouseStore((state) => state.runOzonStocksSync);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
@@ -155,6 +156,11 @@ export const Dashboard: React.FC = React.memo(() => {
       }
     }
     return max;
+  }, [ozonStocks]);
+
+  const ozonStocksCabinets = useMemo(() => {
+    if (!ozonStocks || ozonStocks.length === 0) return [];
+    return Array.from(new Set(ozonStocks.map(s => s.cabinet).filter(Boolean)));
   }, [ozonStocks]);
 
   const ozonTotals = useMemo(() => {
@@ -794,6 +800,16 @@ export const Dashboard: React.FC = React.memo(() => {
 
           {!isOzonStocksCollapsed && (
             <div className="space-y-4" id="ozon-stocks-content">
+              {ozonStocksSyncIssues.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl p-4 text-sm font-semibold" id="ozon-stocks-partial-warning">
+                  Данные неполные: не удалось обновить {ozonStocksSyncIssues.map(i => i.name).join(', ')}. Показаны последние успешно полученные данные по остальным кабинетам.
+                </div>
+              )}
+              {ozonStocksCabinets.length > 0 && (
+                <div className="text-xs text-slate-500 font-medium" id="ozon-stocks-cabinets-info">
+                  Данные по кабинетам: {ozonStocksCabinets.join(', ')}
+                </div>
+              )}
               {/* Summary Cards */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3" id="ozon-stocks-summary-cards">
                 <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-col gap-1">
