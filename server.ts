@@ -959,6 +959,7 @@ async function startServer() {
                 name: String(item.name || ''),
                 warehouseName: (item.warehouse_id && item.warehouse_name) ? String(item.warehouse_name) : 'Без склада (агрегат кластера)',
                 clusterName: String(item.cluster_name || ''),
+                clusterId: String(item.macrolocal_cluster_id || ''),
                 available,
                 preparing,
                 requested,

@@ -3,6 +3,8 @@
 ## [2026-07-26]
 
 ### Изменено
+- Добавление поля `clusterId` в объект строки ответа `/api/ozon/stocks` (`server.ts`):
+  - В `cabRows.push({...})` обработчика `POST /api/ozon/stocks` добавлено новое поле `clusterId: String(item.macrolocal_cluster_id || '')` сразу после `clusterName`.
 - Добавление endpoint `/api/ozon/sales` и функции `getMskWeekMonday` (`server.ts`):
   - Реализован обработчик `POST /api/ozon/sales` по образцу `/api/ozon/stocks`.
   - Добавлена вспомогательная функция `getMskWeekMonday(dateStr)` для вычисления даты понедельника ISO-недели по MSK (+3h).
