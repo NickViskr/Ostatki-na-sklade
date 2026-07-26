@@ -341,7 +341,7 @@ function doPost(e) {
         assertAdmin(currentUser);
         result = commitShipmentPeresort(data.postingId, currentUser.username);
         break;
-      case 'getOzonSyncStatus': assertAdmin(currentUser); result = getOzonSyncStatusInfo(); break;
+      case 'getOzonSyncStatus': result = getOzonSyncStatusInfo(); break;
       case 'setupOzonSyncTriggers': assertAdmin(currentUser); setupOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'removeOzonSyncTriggers': assertAdmin(currentUser); removeOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'saveOzonStocks': result = saveOzonStocks(data); break;
@@ -4977,6 +4977,8 @@ function scheduledOzonCheck() {
             result.salesMode = salesMode;
             result.salesRows = (salesParsed.data && salesParsed.data.savedRows) || 0;
             result.salesDeleted = (salesParsed.data && salesParsed.data.deletedRows) || 0;
+            result.salesTotal = (salesParsed.data && salesParsed.data.totalRows) || 0;
+            result.salesCompacted = (salesParsed.data && salesParsed.data.compactedRows) || 0;
             result.salesMessage = 'Продажи Ozon успешно синхронизированы';
           } else {
             result.salesOk = false;
