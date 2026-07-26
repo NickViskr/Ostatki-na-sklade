@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { X, HelpCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 
@@ -16,6 +16,15 @@ interface OzonSettingsData {
   returnsToSalePct: number;
   salesRetentionWeeks: number;
 }
+
+const FieldHint: React.FC<{ text: string }> = ({ text }) => (
+  <span className="relative inline-flex group align-middle ml-1.5">
+    <HelpCircle size={14} className="text-slate-400 hover:text-indigo-500 cursor-help" />
+    <span className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-10 hidden group-hover:block w-64 bg-slate-800 text-white text-xs font-normal normal-case rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-normal">
+      {text}
+    </span>
+  </span>
+);
 
 export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
@@ -110,6 +119,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Полных недель для скорости продаж
+                  <FieldHint text="Сколько последних ПОЛНЫХ недель продаж берётся для расчёта скорости. Текущая незавершённая неделя не учитывается. Например, 4 — скорость = продажи за 4 полные недели ÷ 28 дней. Больше недель — стабильнее оценка, но медленнее реакция на изменение спроса." />
                 </label>
                 <input
                   type="number"
@@ -126,6 +136,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Неснижаемый остаток, дней
+                  <FieldHint text="Страховой запас в днях продаж, который всегда должен оставаться на складах Ozon. Вычитается при расчёте покрытия: покрытие = (расчётный остаток − скорость × эти дни) ÷ скорость. Чем больше значение, тем раньше появится рекомендация сделать поставку." />
                 </label>
                 <input
                   type="number"
@@ -142,6 +153,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Целевой запас на Ozon, дней
+                  <FieldHint text="На сколько дней продаж пополняется запас при поставке. Рекомендация поставки = скорость × (целевой запас + неснижаемые дни) − расчётный остаток кластера. Чем больше значение, тем крупнее и реже поставки." />
                 </label>
                 <input
                   type="number"
@@ -158,6 +170,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Объём заказа на фабрике, дней
+                  <FieldHint text="Размер одного заказа на фабрике в днях продаж: рекомендуемый объём = скорость продаж × это число дней. Сигнал «пора заказывать» появляется, когда общего запаса (Ozon + Мой склад) не хватает на срок поставки товара плюс неснижаемые дни." />
                 </label>
                 <input
                   type="number"
@@ -174,6 +187,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   % возвратов, возвращающихся в продажу
+                  <FieldHint text="Какая доля возвратов реально возвращается в продажу. Возвраты входят в расчётный остаток с этим коэффициентом: расчётный остаток = Доступно + В пути + Возвраты × этот %." />
                 </label>
                 <input
                   type="number"
@@ -191,6 +205,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Срок хранения продаж, недель
+                  <FieldHint text="Сколько недель истории продаж хранится в листе «Продажи Ozon». Строки старше удаляются автоматически при синхронизации. 78 недель = 18 месяцев — запас для будущего анализа сезонности." />
                 </label>
                 <input
                   type="number"
