@@ -96,6 +96,23 @@ export const SkuModal: React.FC = () => {
             />
           </div>
 
+          <div className="space-y-2">
+            <label className="text-sm font-bold text-slate-500 uppercase">Срок поставки, дн</label>
+            <input 
+              type="number"
+              step="1"
+              min="0"
+              max="365"
+              placeholder="Необяз."
+              value={skuForm.leadTimeDays === 0 || skuForm.leadTimeDays === undefined ? '' : skuForm.leadTimeDays}
+              onChange={(e) => {
+                const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
+                setSkuForm({...skuForm, leadTimeDays: isNaN(val) ? 0 : Math.min(365, Math.max(0, val))});
+              }}
+              className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-500 uppercase">ШК товара (Ozon)</label>

@@ -62,6 +62,7 @@ export interface SKUItem {
   wbBarcode?: string;
   boxesPerPallet: number;
   volumeLiters: number;
+  leadTimeDays: number;
 }
 
 export interface User {
