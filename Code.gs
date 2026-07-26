@@ -1034,7 +1034,7 @@ function getSkus() {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) return [];
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)']);
   
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
@@ -1047,6 +1047,7 @@ function getSkus() {
   const wbIdx = headers.indexOf('Баркод WB') !== -1 ? headers.indexOf('Баркод WB') : 4;
   const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
   const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
+  const leadIdx = headers.indexOf('Срок поставки (дни)') !== -1 ? headers.indexOf('Срок поставки (дни)') : 7;
   
   const rows = data.slice(1);
   
@@ -1060,7 +1061,8 @@ function getSkus() {
       ozonBarcode: ozon === '0' ? '' : ozon,
       wbBarcode: wb === '0' ? '' : wb,
       boxesPerPallet: bppIdx !== -1 && bppIdx < row.length ? Number(row[bppIdx]) || 0 : 0,
-      volumeLiters: volIdx !== -1 && volIdx < row.length ? Number(row[volIdx]) || 0 : 0
+      volumeLiters: volIdx !== -1 && volIdx < row.length ? Number(row[volIdx]) || 0 : 0,
+      leadTimeDays: leadIdx !== -1 && leadIdx < row.length ? Number(row[leadIdx]) || 0 : 0
     };
   });
 }
@@ -1070,7 +1072,7 @@ function addSku(skuData) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден. Выполните инициализацию.');
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)']);
   
   const data = sheet.getDataRange().getValues();
   const headers = data[0].map(h => String(h).trim());
@@ -1081,6 +1083,7 @@ function addSku(skuData) {
   const minStockIdx = headers.indexOf('Мин. остаток') !== -1 ? headers.indexOf('Мин. остаток') : 2;
   const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
   const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
+  const leadIdx = headers.indexOf('Срок поставки (дни)') !== -1 ? headers.indexOf('Срок поставки (дни)') : 7;
 
   for (let i = 1; i < data.length; i++) {
     const existingOzon = ozonIdx !== -1 && ozonIdx < data[i].length ? String(data[i][ozonIdx]) : '';
@@ -1103,6 +1106,7 @@ function addSku(skuData) {
   if (wbIdx !== -1) newRow[wbIdx] = skuData.wbBarcode || '';
   if (bppIdx !== -1) newRow[bppIdx] = skuData.boxesPerPallet || 0;
   if (volIdx !== -1) newRow[volIdx] = skuData.volumeLiters || 0;
+  if (leadIdx !== -1) newRow[leadIdx] = skuData.leadTimeDays || 0;
   
   sheet.appendRow(newRow);
   
@@ -1114,7 +1118,7 @@ function updateSku(skuData, oldSku) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден.');
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)']);
   
   const data = sheet.getDataRange().getValues();
   const headers = data[0].map(h => String(h).trim());
@@ -1126,6 +1130,7 @@ function updateSku(skuData, oldSku) {
   const wbIdx = headers.indexOf('Баркод WB') !== -1 ? headers.indexOf('Баркод WB') : 4;
   const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
   const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
+  const leadIdx = headers.indexOf('Срок поставки (дни)') !== -1 ? headers.indexOf('Срок поставки (дни)') : 7;
   
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][skuIdx]) !== String(oldSku)) {
@@ -1154,6 +1159,7 @@ function updateSku(skuData, oldSku) {
       if (wbIdx !== -1) updatedRow[wbIdx] = skuData.wbBarcode || '';
       if (bppIdx !== -1) updatedRow[bppIdx] = skuData.boxesPerPallet || 0;
       if (volIdx !== -1) updatedRow[volIdx] = skuData.volumeLiters || 0;
+      if (leadIdx !== -1) updatedRow[leadIdx] = skuData.leadTimeDays || 0;
       
       sheet.getRange(i + 1, 1, 1, updatedRow.length).setValues([updatedRow]);
       
