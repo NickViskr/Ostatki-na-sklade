@@ -391,8 +391,11 @@ const OZON_STOCKS_HEADERS = [
   'Доступно', 'Готовим к продаже', 'В заявках', 'В пути', 'Излишки', 'Возвраты', 'Прочее', 'Обновлено', 'КластерID'
 ];
 
-const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено'];
+const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено', 'Дней'];
 const OZON_SALES_RETENTION_WEEKS = 78; // срок хранения; на этапе C будет привязан к листу «Настройки Ozon»
+const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
+const OZON_SALES_PERIOD_ANCHOR_MS = Date.parse('2024-01-01T00:00:00Z'); // понедельник — якорь 28-дневных блоков
+const OZON_SALES_PERIOD_MS = 28 * 24 * 60 * 60 * 1000;
 
 function setupDatabase(targetSs) {
   const ss = targetSs || getSpreadsheet();
@@ -3429,8 +3432,9 @@ function saveOzonSales(payload) {
   const clusterIdx = headers.indexOf('Кластер');
   const qtyIdx = headers.indexOf('Количество');
   const updatedIdx = headers.indexOf('Обновлено');
+  const daysIdx = headers.indexOf('Дней');
 
-  if (weekIdx === -1 || cabinetIdx === -1 || articleIdx === -1 || clusterIdx === -1 || qtyIdx === -1 || updatedIdx === -1) {
+  if (weekIdx === -1 || cabinetIdx === -1 || articleIdx === -1 || clusterIdx === -1 || qtyIdx === -1 || updatedIdx === -1 || daysIdx === -1) {
     throw new Error('Некоторые обязательные колонки не найдены в листе "Продажи Ozon"');
   }
 
@@ -3496,15 +3500,70 @@ function saveOzonSales(payload) {
     row[clusterIdx] = item.cluster || '';
     row[qtyIdx] = Number(item.qty || 0);
     row[updatedIdx] = nowStr;
+    row[daysIdx] = 7;
 
     newRows.push(row);
   }
 
+  // 4.1. Граница уплотнения, выровненная по блокам
+  const nowShifted = new Date(Date.now() + 3 * 60 * 60 * 1000); // МСК
+  const day = nowShifted.getUTCDay();
+  const diff = (day + 6) % 7;
+  const currentMondayMs = Date.UTC(nowShifted.getUTCFullYear(), nowShifted.getUTCMonth(), nowShifted.getUTCDate()) - diff * 24 * 60 * 60 * 1000;
+  const weeklyZoneStartMs = currentMondayMs - OZON_SALES_WEEKLY_ZONE_WEEKS * 7 * 24 * 60 * 60 * 1000;
+  const alignedCutoffMs = OZON_SALES_PERIOD_ANCHOR_MS + Math.floor((weeklyZoneStartMs - OZON_SALES_PERIOD_ANCHOR_MS) / OZON_SALES_PERIOD_MS) * OZON_SALES_PERIOD_MS;
+
+  // 4.2. Объединение keptRows и newRows, разделение на passRows и уплотнение старых в Map
+  const passRows = [];
+  const aggMap = new Map();
+
+  const allRows = keptRows.concat(newRows);
+  for (const row of allRows) {
+    const week = normWeek(row[weekIdx]);
+    const weekMs = (week && /^\d{4}-\d{2}-\d{2}$/.test(week)) ? new Date(week + 'T00:00:00Z').getTime() : NaN;
+
+    if (!week || isNaN(weekMs) || weekMs >= alignedCutoffMs) {
+      if (row[daysIdx] === '' || row[daysIdx] === null || row[daysIdx] === undefined) {
+        row[daysIdx] = 7;
+      }
+      passRows.push(row);
+    } else {
+      const periodStartMs = OZON_SALES_PERIOD_ANCHOR_MS + Math.floor((weekMs - OZON_SALES_PERIOD_ANCHOR_MS) / OZON_SALES_PERIOD_MS) * OZON_SALES_PERIOD_MS;
+      const periodKey = Utilities.formatDate(new Date(periodStartMs), 'UTC', 'yyyy-MM-dd');
+      const cabinet = String(row[cabinetIdx] || '').trim();
+      const article = String(row[articleIdx] || '').trim();
+      const cluster = String(row[clusterIdx] || '').trim();
+      const qty = Number(row[qtyIdx] || 0);
+
+      const aggKey = periodKey + '|' + cabinet + '|' + article + '|' + cluster;
+      if (!aggMap.has(aggKey)) {
+        aggMap.set(aggKey, { periodKey, cabinet, article, cluster, sum: qty });
+      } else {
+        aggMap.get(aggKey).sum += qty;
+      }
+    }
+  }
+
+  // 4.3. Сборка compactedRows из Map
+  const compactedRows = [];
+  aggMap.forEach(item => {
+    const row = new Array(headers.length).fill('');
+    row[weekIdx] = item.periodKey;
+    row[cabinetIdx] = item.cabinet;
+    row[articleIdx] = item.article;
+    row[clusterIdx] = item.cluster;
+    row[qtyIdx] = item.sum;
+    row[updatedIdx] = nowStr;
+    row[daysIdx] = 28;
+    compactedRows.push(row);
+  });
+
+  // 4.4. Запись в лист
   if (lastRow > 1) {
     sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
   }
 
-  const combinedRows = keptRows.concat(newRows);
+  const combinedRows = passRows.concat(compactedRows);
   if (combinedRows.length > 0) {
     sheet.getRange(2, 1, combinedRows.length, headers.length).setValues(combinedRows);
   }
@@ -3512,7 +3571,9 @@ function saveOzonSales(payload) {
   return {
     savedRows: newRows.length,
     deletedRows: deletedRows,
-    keptRows: keptRows.length
+    keptRows: keptRows.length,
+    compactedRows: compactedRows.length,
+    totalRows: combinedRows.length
   };
 }
 
