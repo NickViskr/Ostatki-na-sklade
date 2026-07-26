@@ -1045,6 +1045,225 @@ async function startServer() {
     }
   });
 
+  function getMskWeekMonday(dateStr: string): string {
+    const shifted = new Date(new Date(dateStr).getTime() + 3 * 60 * 60 * 1000);
+    const day = shifted.getUTCDay();
+    const diff = (day + 6) % 7;
+    const monday = new Date(shifted.getTime() - diff * 24 * 60 * 60 * 1000);
+    const yyyy = monday.getUTCFullYear();
+    const mm = String(monday.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(monday.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  app.post("/api/ozon/sales", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const devMode = req.body?.devMode === true;
+      const modeParam = String(req.body?.mode || '').toLowerCase();
+      const mode = modeParam === 'full' ? 'full' : 'recent';
+
+      const keys = await fetchOzonKeys();
+      if (!keys) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+
+      const now = new Date();
+      const nowIso = now.toISOString();
+
+      let since: string;
+      let to: string;
+      let replacedWeeks: string[] = [];
+
+      if (mode === 'recent') {
+        const currentWeekMon = getMskWeekMonday(nowIso);
+        const prev1WeekMon = getMskWeekMonday(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString());
+        const prev2WeekMon = getMskWeekMonday(new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString());
+        replacedWeeks = [currentWeekMon, prev1WeekMon, prev2WeekMon];
+
+        const earliestMon = prev2WeekMon;
+        since = new Date(`${earliestMon}T00:00:00+03:00`).toISOString();
+        to = nowIso;
+      } else {
+        since = new Date(now.getTime() - 380 * 24 * 60 * 60 * 1000).toISOString();
+        to = nowIso;
+      }
+
+      const sinceMs = new Date(since).getTime();
+      const toMs = new Date(to).getTime();
+      const WINDOW_MS = 56 * 24 * 60 * 60 * 1000;
+
+      const windows: Array<{ since: string; to: string }> = [];
+      let windowStartMs = sinceMs;
+      while (windowStartMs < toMs) {
+        const windowEndMs = Math.min(windowStartMs + WINDOW_MS, toMs);
+        windows.push({
+          since: new Date(windowStartMs).toISOString(),
+          to: new Date(windowEndMs).toISOString()
+        });
+        windowStartMs = windowEndMs;
+      }
+
+      const cabinets = keys.cabinets;
+      const okCabinets: string[] = [];
+      const allRows: any[] = [];
+      const cabinetsReport: any[] = [];
+      let firstErrorMessage = "";
+
+      for (const cab of cabinets) {
+        const name = cab.name;
+        try {
+          const cabKeys = { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey };
+          const whClusterMap = await loadWarehouseClusterMap(cabKeys);
+          const salesMap = new Map<string, { week: string; offerId: string; cluster: string; qty: number }>();
+
+          for (const win of windows) {
+            let offset = 0;
+            while (offset <= 19000) {
+              const body = {
+                dir: 'ASC',
+                filter: {
+                  since: win.since,
+                  to: win.to
+                },
+                limit: 1000,
+                offset,
+                with: { analytics_data: true }
+              };
+
+              const apiRes = await fetchOzonApi("/v2/posting/fbo/list", cabKeys, body);
+              const postings = Array.isArray(apiRes?.result) ? apiRes.result : [];
+
+              for (const posting of postings) {
+                if (!posting || posting.status === 'cancelled') {
+                  continue;
+                }
+
+                const week = getMskWeekMonday(posting.created_at);
+                if (mode === 'recent' && !replacedWeeks.includes(week)) {
+                  continue;
+                }
+
+                const warehouseId = String(posting.analytics_data?.warehouse_id || '').trim();
+                const cluster = whClusterMap.get(warehouseId) || 'Без кластера';
+
+                const products = Array.isArray(posting.products) ? posting.products : [];
+                for (const p of products) {
+                  const offerId = String(p?.offer_id || '').trim();
+                  if (!offerId) {
+                    continue;
+                  }
+                  const quantity = Number(p?.quantity || 0);
+
+                  const key = `${week}|${offerId}|${cluster}`;
+                  const existing = salesMap.get(key);
+                  if (existing) {
+                    existing.qty += quantity;
+                  } else {
+                    salesMap.set(key, { week, offerId, cluster, qty: quantity });
+                  }
+                }
+              }
+
+              if (postings.length < 1000) {
+                break;
+              }
+              offset += 1000;
+            }
+          }
+
+          const cabRows: any[] = [];
+          for (const item of salesMap.values()) {
+            cabRows.push({
+              cabinet: name,
+              week: item.week,
+              offerId: item.offerId,
+              cluster: item.cluster,
+              qty: item.qty
+            });
+          }
+
+          okCabinets.push(name);
+          allRows.push(...cabRows);
+          cabinetsReport.push({ name, ok: true, rows: cabRows.length });
+
+        } catch (err: any) {
+          console.error(`Ошибка при опросе продаж кабинета Ozon ${name}:`, err);
+          let message = err.message || String(err);
+          if (err.httpStatus === 403 || message.includes("403") || message.toLowerCase().includes("forbidden")) {
+            message = "Кабинет пропущен: нет доступа (проверьте ключи или подписку Premium)";
+          }
+          if (!firstErrorMessage) {
+            firstErrorMessage = message;
+          }
+          cabinetsReport.push({ name, ok: false, message });
+        }
+      }
+
+      if (okCabinets.length === 0) {
+        return res.status(502).json({
+          status: "error",
+          stage: "ozon_api",
+          message: firstErrorMessage || "Не удалось получить продажи ни по одному кабинету Ozon"
+        });
+      }
+
+      const gasUrl = process.env.GAS_URL;
+      if (!gasUrl) {
+        return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+      }
+
+      const gasResponse2 = await fetch(gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "saveOzonSales",
+          sessionToken: token,
+          ...(devMode ? { devMode: true } : {}),
+          data: {
+            mode,
+            replacedWeeks: mode === 'recent' ? replacedWeeks : [],
+            okCabinets,
+            rows: allRows
+          }
+        })
+      });
+
+      const rawText2 = await gasResponse2.text();
+      let gasData: any;
+      try {
+        gasData = JSON.parse(rawText2);
+      } catch {
+        return res.status(502).json({ status: "error", message: "GAS returned non-JSON response when saving Ozon sales" });
+      }
+      if (gasData.status !== "success") {
+        return res.status(500).json({ status: "error", message: gasData.message || "Failed to save Ozon sales in GAS" });
+      }
+
+      return res.json({
+        status: "success",
+        data: {
+          savedRows: gasData.data?.savedRows || 0,
+          deletedRows: gasData.data?.deletedRows || 0,
+          cabinets: cabinetsReport
+        }
+      });
+
+    } catch (error: any) {
+      console.error("Ozon sales endpoint failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
   // API Endpoint for Gemini Invoice Parsing
   app.post("/api/parse-invoice", async (req, res) => {
     try {

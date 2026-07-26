@@ -3,6 +3,12 @@
 ## [2026-07-26]
 
 ### Изменено
+- Добавление endpoint `/api/ozon/sales` и функции `getMskWeekMonday` (`server.ts`):
+  - Реализован обработчик `POST /api/ozon/sales` по образцу `/api/ozon/stocks`.
+  - Добавлена вспомогательная функция `getMskWeekMonday(dateStr)` для вычисления даты понедельника ISO-недели по MSK (+3h).
+  - Реализовано разделение периода на 56-дневные окна для `mode === 'recent'` (текущая и 2 предыдущие недели) и `mode === 'full'` (380 дней).
+  - Считывание и агрегация FBO-продаж из `POST /v2/posting/fbo/list`, исключение отменённых заказов, маппинг `warehouse_id` в кластер через `loadWarehouseClusterMap`, агрегирование по составному ключу `week|offerId|cluster`.
+  - Передача агрегатов в GAS с действием `saveOzonSales` и форматированный ответ клиенту.
 - Расширение кэша кластеров Ozon для построения маппинга складов в кластеры (`server.ts`):
   - Добавлена карта `cachedWarehouseClusterMap` (`warehouse_id` → `cluster.name`).
   - В `loadClusterMap` функция `processClusters` расширена обходом `cluster.logistic_clusters` и `warehouses` с валидацией `Array.isArray` и существующих полей для привязки складов к кластеру.
