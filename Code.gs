@@ -4871,6 +4871,62 @@ function scheduledOzonCheck() {
       }
     }
 
+    // Синхронизация FBO-продаж Ozon
+    {
+      let salesMode = 'recent';
+      try {
+        let targetSs = null;
+        if (devMode) {
+          const testDbId = props.getProperty('test_dbSpreadsheetId');
+          if (testDbId) targetSs = SpreadsheetApp.openById(testDbId);
+        } else {
+          targetSs = activeSs;
+        }
+        if (targetSs) {
+          const salesSheet = targetSs.getSheetByName('Продажи Ozon');
+          if (!salesSheet || salesSheet.getLastRow() <= 1) {
+            salesMode = 'full'; // лист пуст или отсутствует — первичная загрузка всей истории
+          }
+        }
+      } catch (modeErr) {
+        salesMode = 'recent';
+      }
+
+      try {
+        const salesResponse = UrlFetchApp.fetch(PROXY_URL + '/api/ozon/sales', {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify({
+            sessionToken: token,
+            devMode: devMode,
+            mode: salesMode
+          }),
+          muteHttpExceptions: true
+        });
+        const salesCode = salesResponse.getResponseCode();
+        const salesContent = salesResponse.getContentText();
+        if (salesCode >= 200 && salesCode < 300) {
+          const salesParsed = JSON.parse(salesContent);
+          if (salesParsed.status === 'success') {
+            result.salesOk = true;
+            result.salesMode = salesMode;
+            result.salesRows = (salesParsed.data && salesParsed.data.savedRows) || 0;
+            result.salesDeleted = (salesParsed.data && salesParsed.data.deletedRows) || 0;
+            result.salesMessage = 'Продажи Ozon успешно синхронизированы';
+          } else {
+            result.salesOk = false;
+            result.salesMessage = salesParsed.message || 'Ошибка прокси при опросе продаж Ozon';
+          }
+        } else {
+          result.salesOk = false;
+          result.salesMessage = 'HTTP ' + salesCode + ': ' + salesContent.slice(0, 200);
+        }
+      } catch (salesErr) {
+        result.salesOk = false;
+        result.salesMessage = 'Ошибка вызова /api/ozon/sales: ' + salesErr.toString() + '. Если это таймаут при первичной загрузке — данные, скорее всего, записаны, проверьте лист.';
+      }
+    }
+
   } catch (globalErr) {
     result.ok = false;
     result.message = globalErr.toString();

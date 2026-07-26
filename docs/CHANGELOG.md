@@ -3,6 +3,10 @@
 ## [2026-07-26]
 
 ### Изменено
+- Интеграция синхронизации продаж Ozon в автоматический опрос `scheduledOzonCheck` (`Code.gs`):
+  - Сразу после блока остатков Ozon добавлен новый изолированный try/catch блок опроса продаж Ozon `/api/ozon/sales`.
+  - Реализовано определение режима `salesMode`: `'full'` (если целевой лист «Продажи Ozon» пуст или отсутствует) или `'recent'` (при наличии существующих записей).
+  - Формируется запрос с `mode: salesMode` к `/api/ozon/sales` и сохраняются поля результата (`salesOk`, `salesMode`, `salesRows`, `salesDeleted`, `salesMessage`) в итоговом `ozon_lastAutoSync`.
 - Создание листа «Продажи Ozon» и функции `saveOzonSales` в Google Apps Script (`Code.gs`):
   - Добавлены константы `OZON_SALES_HEADERS` (['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено']) и `OZON_SALES_RETENTION_WEEKS` (78 недель).
   - В `setupDatabase` и функцию `getOzonSalesSheet` включено создание и проверка листа «Продажи Ozon».
