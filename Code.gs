@@ -137,11 +137,15 @@ function doPost(e) {
     
     if (action === 'runOzonSyncNow') {
       assertAdmin(currentUser);
-      // КРИТИЧНО: этот action обязан выполняться БЕЗ захвата LockService. Внутри scheduledOzonCheck прокси делает
-      // обратные запросы к этому же doPost (saveExternalShipments), и если внешний запрос держит замок — внутренние
-      // упрутся в waitLock и всё упадёт по таймауту.
-      const syncResult = scheduledOzonCheck();
-      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: syncResult })).setMimeType(ContentService.MimeType.JSON);
+      // Запуск в фоне через одноразовый триггер: клиент получает мгновенный ответ и не падает по таймауту; сам прогон выполняется в runOzonSyncOnce вне контекста этого запроса, поэтому конфликтов с LockService нет
+      const triggers = ScriptApp.getProjectTriggers();
+      for (let i = 0; i < triggers.length; i++) {
+        if (triggers[i].getHandlerFunction() === 'runOzonSyncOnce') {
+          ScriptApp.deleteTrigger(triggers[i]);
+        }
+      }
+      ScriptApp.newTrigger('runOzonSyncOnce').timeBased().after(100).create();
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: { async: true, message: 'Синхронизация Ozon запущена в фоновом режиме. Статус обновится ниже через 1–2 минуты (первичная загрузка истории может занять дольше).' } })).setMimeType(ContentService.MimeType.JSON);
     }
     
     if (action === 'runOzonStocksSyncNow') {
@@ -4948,6 +4952,17 @@ function scheduledOzonCheck() {
 
   props.setProperty('ozon_lastAutoSync', JSON.stringify(result));
   return result;
+}
+
+function runOzonSyncOnce() {
+  // Самоочистка: удалить все одноразовые триггеры этого обработчика, чтобы они не накапливались
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'runOzonSyncOnce') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  scheduledOzonCheck();
 }
 
 function setupOzonSyncTriggers() {
