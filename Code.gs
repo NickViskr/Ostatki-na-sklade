@@ -401,8 +401,10 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'targetStockDays',     value: 30, desc: 'Целевой запас на Ozon, дней' },
   { key: 'factoryOrderDays',    value: 60, desc: 'Объём заказа на фабрике, дней' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
-  { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' }
+  { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
+  { key: 'excludedClusters',    value: '', desc: 'КластерID без поставок, через запятую' }
 ];
+const OZON_SETTINGS_STRING_KEYS = ['excludedClusters'];
 const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
 const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
 const OZON_SALES_PERIOD_ANCHOR_MS = Date.parse('2024-01-01T00:00:00Z'); // понедельник — якорь 28-дневных блоков
@@ -2992,9 +2994,13 @@ function getOzonSettings() {
     const k = String(row[keyIdx] || '').trim();
     if (!k) continue;
     const rawVal = row[valIdx];
-    const numVal = Number(rawVal);
-    if (!isNaN(numVal) && rawVal !== '' && rawVal !== null) {
-      result[k] = numVal;
+    if (OZON_SETTINGS_STRING_KEYS.includes(k)) {
+      result[k] = String(rawVal || '').trim();
+    } else {
+      const numVal = Number(rawVal);
+      if (!isNaN(numVal) && rawVal !== '' && rawVal !== null) {
+        result[k] = numVal;
+      }
     }
   }
 
@@ -3028,6 +3034,23 @@ function saveOzonSettings(data) {
   for (const k in data) {
     if (!validKeys.includes(k)) continue;
     const rawVal = data[k];
+
+    if (OZON_SETTINGS_STRING_KEYS.includes(k)) {
+      const strVal = String(rawVal || '').trim();
+      if (!strVal) {
+        keysToSave[k] = '';
+      } else {
+        const parts = strVal.split(',').map(s => s.trim()).filter(Boolean);
+        for (let p = 0; p < parts.length; p++) {
+          if (!/^\d+$/.test(parts[p])) {
+            throw new Error('Значение настройки "' + k + '" должно быть списком числовых КластерID через запятую');
+          }
+        }
+        keysToSave[k] = parts.join(',');
+      }
+      continue;
+    }
+
     const numVal = Number(rawVal);
 
     if (!Number.isFinite(numVal) || numVal < 0) {
