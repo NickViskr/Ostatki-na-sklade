@@ -1387,7 +1387,21 @@ export const useWarehouseStore = create<WarehouseState>()(
       const result = await get().fetchGas('runOzonSyncNow');
       if (result.status === 'success' && result.data) {
         const data = result.data;
-        if (data.ok === true) {
+        if (data.async === true) {
+          toast.success(data.message || 'Синхронизация Ozon запущена в фоновом режиме');
+          // Через 90 секунд подтянуть результат фонового прогона: статус и обновлённый список внешних отгрузок
+          setTimeout(async () => {
+            try {
+              await get().fetchOzonSyncStatus();
+              const gasResult = await get().fetchGas('getExternalShipments');
+              if (gasResult.status === 'success' && Array.isArray(gasResult.data)) {
+                set({ externalShipments: gasResult.data });
+              }
+            } catch (err) {
+              console.error('Отложенное обновление статуса Ozon:', err);
+            }
+          }, 90000);
+        } else if (data.ok === true) {
           toast.success(`Проверка выполнена. Найдено: ${data.found || 0}, добавлено: ${data.added || 0}, обновлено: ${data.updated || 0}`);
           const gasResult = await get().fetchGas('getExternalShipments');
           if (gasResult.status === 'success' && Array.isArray(gasResult.data)) {
