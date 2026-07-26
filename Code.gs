@@ -4701,7 +4701,9 @@ function scheduledOzonCheck() {
       result.message = 'HTTP ' + code + ': ' + content.slice(0, 200);
     }
 
-    if (result.ok) {
+    // Остатки складов Ozon опрашиваются ВСЕГДА, независимо от результата опроса заявок:
+    // сбой /api/ozon/check не должен отменять обновление зеркала остатков.
+    {
       try {
         const stocksResponse = UrlFetchApp.fetch(PROXY_URL + '/api/ozon/stocks', {
           method: 'post',
