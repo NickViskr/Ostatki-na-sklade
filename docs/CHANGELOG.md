@@ -3,6 +3,10 @@
 ## [2026-07-26]
 
 ### Добавлено
+- Модальное окно и кнопка «Настройки» Ozon-планирования (`src/components/OzonSettingsModal.tsx`, `src/components/OzonStocksTab.tsx`):
+  - Создан компонент `OzonSettingsModal.tsx` с шестью числовыми полями (скорость продаж в неделях, неснижаемый остаток, целевой запас, объем заказа на фабрике, % возвратов, срок хранения продаж).
+  - Настроена загрузка значений через `getOzonSettings`, локальный `useState`, валидация диапазона/типов при сохранении через `saveOzonSettings` и вызов тостов `sonner`.
+  - В тулбаре вкладки «Остатки Озон» (`OzonStocksTab.tsx`) перед кнопкой «Обновить» добавлена кнопка «Настройки» (`#btn-ozon-settings`) с иконкой `Settings` из `lucide-react`.
 - Отображение и редактирование «Срок поставки, дн» (leadTimeDays) в пользовательском интерфейсе SKU (`src/types.ts`, `src/components/SkusTab.tsx`, `src/components/SkuModal.tsx`):
   - Поле `leadTimeDays: number` добавлено в клиентский тип `SKUItem`.
   - В таблице справочника SKU (`SkusTab.tsx`) добавлена сортируемая колонка «Срок поставки, дн» (ключ сортировки `leadTimeDays`) с выводом числа или прочерка «—».

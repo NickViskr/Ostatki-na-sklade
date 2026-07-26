@@ -1,7 +1,8 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { ChevronDown, RefreshCw } from 'lucide-react';
+import { ChevronDown, RefreshCw, Settings } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
+import { OzonSettingsModal } from './OzonSettingsModal';
 
 export const OzonStocksTab: React.FC = React.memo(() => {
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -14,6 +15,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
 
   const [isOzonStocksCollapsed, setIsOzonStocksCollapsed] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [expandedOfferKeys, setExpandedOfferKeys] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -122,16 +124,27 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           </div>
           <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
             {!isOzonStocksCollapsed && (
-              <button
-                type="button"
-                id="btn-refresh-ozon-stocks"
-                disabled={isProcessing}
-                onClick={runOzonStocksSync}
-                className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs disabled:opacity-50"
-              >
-                <RefreshCw size={14} className={`transition-transform ${isProcessing ? 'animate-spin' : ''}`} />
-                Обновить
-              </button>
+              <>
+                <button
+                  type="button"
+                  id="btn-ozon-settings"
+                  onClick={() => setShowSettings(true)}
+                  className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
+                >
+                  <Settings size={14} />
+                  Настройки
+                </button>
+                <button
+                  type="button"
+                  id="btn-refresh-ozon-stocks"
+                  disabled={isProcessing}
+                  onClick={runOzonStocksSync}
+                  className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs disabled:opacity-50"
+                >
+                  <RefreshCw size={14} className={`transition-transform ${isProcessing ? 'animate-spin' : ''}`} />
+                  Обновить
+                </button>
+              </>
             )}
             <button
               type="button"
@@ -315,6 +328,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           </div>
         )}
       </div>
+      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
     </div>
   );
 });
