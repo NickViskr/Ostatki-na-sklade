@@ -3,6 +3,11 @@
 ## [2026-07-26]
 
 ### Изменено
+- Создание листа «Продажи Ozon» и функции `saveOzonSales` в Google Apps Script (`Code.gs`):
+  - Добавлены константы `OZON_SALES_HEADERS` (['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено']) и `OZON_SALES_RETENTION_WEEKS` (78 недель).
+  - В `setupDatabase` и функцию `getOzonSalesSheet` включено создание и проверка листа «Продажи Ozon».
+  - В `doPost` добавлен обработчик `case 'saveOzonSales': result = saveOzonSales(data); break;`.
+  - Реализована функция `saveOzonSales(payload)` для атомарного сохранения недельных агрегатов FBO-продаж с нормированием дат, очисткой устаревших строк (>78 недель) и удалением перезаписываемых недель в зависимости от режима `recent` / `full`.
 - Поддержка колонки `КластерID` в листе «Остатки Ozon» Google Apps Script (`Code.gs`):
   - В константу `OZON_STOCKS_HEADERS` добавлена колонка `'КластерID'` в конец массива.
   - В функции `saveOzonStocks` добавлен поиск индекса `clusterIdIdx`, его включение в проверку обязательных колонок и сохранение `row[clusterIdIdx] = item.clusterId || ''`.

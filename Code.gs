@@ -341,6 +341,7 @@ function doPost(e) {
       case 'setupOzonSyncTriggers': assertAdmin(currentUser); setupOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'removeOzonSyncTriggers': assertAdmin(currentUser); removeOzonSyncTriggers(); result = getOzonSyncStatusInfo(); break;
       case 'saveOzonStocks': result = saveOzonStocks(data); break;
+      case 'saveOzonSales': result = saveOzonSales(data); break;
       case 'getOzonStocks': result = getOzonStocks(); break;
       default:
         throw new Error('Unknown action: ' + action);
@@ -385,6 +386,9 @@ const OZON_STOCKS_HEADERS = [
   'Кабинет', 'SKU', 'Артикул', 'Название', 'Склад', 'Кластер',
   'Доступно', 'Готовим к продаже', 'В заявках', 'В пути', 'Излишки', 'Возвраты', 'Прочее', 'Обновлено', 'КластерID'
 ];
+
+const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено'];
+const OZON_SALES_RETENTION_WEEKS = 78; // срок хранения; на этапе C будет привязан к листу «Настройки Ozon»
 
 function setupDatabase(targetSs) {
   const ss = targetSs || getSpreadsheet();
@@ -593,6 +597,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Тарифы услуг', ['ServiceID', 'Стоимость', 'ДействуетС']);
   getOrCreateSheet(ss, 'Внешние отгрузки', EXTERNAL_SHIPMENTS_HEADERS);
   getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
+  getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
   return true;
 }
 
@@ -3297,6 +3302,13 @@ function getOzonStocksSheet() {
   return sheet;
 }
 
+function getOzonSalesSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
+  ensureColumns(sheet, OZON_SALES_HEADERS);
+  return sheet;
+}
+
 function saveOzonStocks(payload) {
   if (!payload || !payload.rows || !Array.isArray(payload.rows)) {
     throw new Error('Некорректный payload: список строк rows обязателен и должен быть массивом');
@@ -3378,6 +3390,125 @@ function saveOzonStocks(payload) {
     savedRows: newRows.length,
     keptRows: keptRows.length,
     cabinets: okCabinets
+  };
+}
+
+function saveOzonSales(payload) {
+  if (!payload || !payload.rows || !Array.isArray(payload.rows)) {
+    throw new Error('Некорректный payload: список строк rows обязателен и должен быть массивом');
+  }
+  const okCabinets = payload.okCabinets || [];
+  if (!Array.isArray(okCabinets)) {
+    throw new Error('Некорректный payload: okCabinets должен быть массивом');
+  }
+  const mode = payload.mode === 'full' ? 'full' : 'recent';
+  const replacedWeeks = Array.isArray(payload.replacedWeeks) ? payload.replacedWeeks : [];
+
+  function normWeek(v) {
+    if (v instanceof Date) {
+      return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    }
+    return String(v || '').trim();
+  }
+
+  const sheet = getOzonSalesSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_SALES_HEADERS.length);
+
+  ensureColumns(sheet, OZON_SALES_HEADERS);
+  const data = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const weekIdx = headers.indexOf('Неделя');
+  const cabinetIdx = headers.indexOf('Кабинет');
+  const articleIdx = headers.indexOf('Артикул');
+  const clusterIdx = headers.indexOf('Кластер');
+  const qtyIdx = headers.indexOf('Количество');
+  const updatedIdx = headers.indexOf('Обновлено');
+
+  if (weekIdx === -1 || cabinetIdx === -1 || articleIdx === -1 || clusterIdx === -1 || qtyIdx === -1 || updatedIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Продажи Ozon"');
+  }
+
+  const cutoffMs = Date.now() - OZON_SALES_RETENTION_WEEKS * 7 * 24 * 60 * 60 * 1000;
+
+  const keptRows = [];
+  let existingNonEmptyCount = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    existingNonEmptyCount++;
+
+    const week = normWeek(row[weekIdx]);
+    const cabinet = String(row[cabinetIdx] || '').trim();
+
+    let deleteRow = false;
+
+    if (week) {
+      const weekDate = new Date(week + 'T00:00:00Z');
+      if (!isNaN(weekDate.getTime()) && weekDate.getTime() < cutoffMs) {
+        deleteRow = true;
+      }
+    }
+
+    if (!deleteRow) {
+      if (mode === 'full') {
+        if (okCabinets.includes(cabinet)) {
+          deleteRow = true;
+        }
+      } else if (mode === 'recent') {
+        if (okCabinets.includes(cabinet) && replacedWeeks.includes(week)) {
+          deleteRow = true;
+        }
+      }
+    }
+
+    if (!deleteRow) {
+      keptRows.push(row);
+    }
+  }
+
+  const deletedRows = existingNonEmptyCount - keptRows.length;
+
+  const nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const newRows = [];
+
+  for (const item of payload.rows) {
+    if (!item) continue;
+    const itemWeek = String(item.week || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(itemWeek)) {
+      continue;
+    }
+    const itemWeekDate = new Date(itemWeek + 'T00:00:00Z');
+    if (isNaN(itemWeekDate.getTime()) || itemWeekDate.getTime() < cutoffMs) {
+      continue;
+    }
+
+    const row = new Array(headers.length).fill('');
+    row[weekIdx] = itemWeek;
+    row[cabinetIdx] = item.cabinet || '';
+    row[articleIdx] = item.offerId || '';
+    row[clusterIdx] = item.cluster || '';
+    row[qtyIdx] = Number(item.qty || 0);
+    row[updatedIdx] = nowStr;
+
+    newRows.push(row);
+  }
+
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  }
+
+  const combinedRows = keptRows.concat(newRows);
+  if (combinedRows.length > 0) {
+    sheet.getRange(2, 1, combinedRows.length, headers.length).setValues(combinedRows);
+  }
+
+  return {
+    savedRows: newRows.length,
+    deletedRows: deletedRows,
+    keptRows: keptRows.length
   };
 }
 
