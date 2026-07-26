@@ -1046,6 +1046,77 @@ async function startServer() {
     }
   });
 
+  app.post("/api/ozon/clusters", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const devMode = req.body?.devMode === true;
+
+      const keys = await fetchOzonKeys();
+      if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+
+      const cab = keys.cabinets[0];
+
+      await loadClusterMap({ ozonClientId: cab.clientId, ozonApiKey: cab.apiKey });
+      const clusters = Array.from(cachedClusterMap.entries()).map(([clusterId, clusterName]) => ({ clusterId, clusterName }));
+
+      if (clusters.length === 0) {
+        return res.status(500).json({ status: "error", message: "Справочник кластеров Ozon пуст — не удалось загрузить /v1/cluster/list" });
+      }
+
+      const gasUrl = process.env.GAS_URL;
+      if (!gasUrl) {
+        return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+      }
+
+      const gasResponse = await fetch(gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "saveOzonClusters",
+          sessionToken: token,
+          ...(devMode ? { devMode: true } : {}),
+          data: {
+            clusters
+          }
+        })
+      });
+
+      const rawText = await gasResponse.text();
+      let gasData: any;
+      try {
+        gasData = JSON.parse(rawText);
+      } catch {
+        return res.status(502).json({ status: "error", message: "GAS returned non-JSON response when saving Ozon clusters" });
+      }
+      if (gasData.status !== "success") {
+        return res.status(500).json({ status: "error", message: gasData.message || "Failed to save Ozon clusters in GAS" });
+      }
+
+      return res.json({
+        status: "success",
+        data: {
+          totalClusters: clusters.length,
+          newClusters: gasData.data?.newClusters || 0
+        }
+      });
+
+    } catch (error: any) {
+      console.error("Ozon clusters endpoint failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
   function getMskWeekMonday(dateStr: string): string {
     const shifted = new Date(new Date(dateStr).getTime() + 3 * 60 * 60 * 1000);
     const day = shifted.getUTCDay();
