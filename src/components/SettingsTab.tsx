@@ -441,21 +441,67 @@ export const SettingsTab: React.FC = React.memo(() => {
                     Последний запуск
                   </label>
                   {ozonSyncStatus.lastRun ? (
-                    <div className="space-y-1 text-sm">
+                    <div className="space-y-2 text-sm">
                       <div className="text-slate-500 font-mono text-xs">
                         {new Date(ozonSyncStatus.lastRun.time).toLocaleString('ru-RU')}
                       </div>
-                      {ozonSyncStatus.lastRun.ok ? (
-                        <div className="text-emerald-600 font-medium">
-                          Успешно: найдено {ozonSyncStatus.lastRun.found ?? 0}, добавлено{' '}
-                          {ozonSyncStatus.lastRun.added ?? 0}, обновлено{' '}
-                          {ozonSyncStatus.lastRun.updated ?? 0}
+
+                      {/* Заявки */}
+                      <div className="space-y-0.5">
+                        <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                          Заявки
                         </div>
-                      ) : (
-                        <div className="text-rose-600 font-medium break-words">
-                          {ozonSyncStatus.lastRun.message || 'Ошибка запуска'}
+                        {ozonSyncStatus.lastRun.ok === true ? (
+                          <div className="text-emerald-600 font-medium">
+                            найдено {ozonSyncStatus.lastRun.found ?? 0}, добавлено{' '}
+                            {ozonSyncStatus.lastRun.added ?? 0}, обновлено{' '}
+                            {ozonSyncStatus.lastRun.updated ?? 0}
+                          </div>
+                        ) : ozonSyncStatus.lastRun.ok === false ? (
+                          <div className="text-rose-600 font-medium break-words">
+                            {ozonSyncStatus.lastRun.message || 'Ошибка запуска'}
+                          </div>
+                        ) : (
+                          <div className="text-slate-500">нет данных</div>
+                        )}
+                      </div>
+
+                      {/* Остатки */}
+                      <div className="space-y-0.5">
+                        <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                          Остатки
                         </div>
-                      )}
+                        {ozonSyncStatus.lastRun.stocksOk === true ? (
+                          <div className="text-emerald-600 font-medium">
+                            строк сохранено: {ozonSyncStatus.lastRun.stocksRows ?? 0}
+                          </div>
+                        ) : ozonSyncStatus.lastRun.stocksOk === false ? (
+                          <div className="text-rose-600 font-medium break-words">
+                            {ozonSyncStatus.lastRun.stocksMessage || 'Ошибка'}
+                          </div>
+                        ) : (
+                          <div className="text-slate-500">нет данных</div>
+                        )}
+                      </div>
+
+                      {/* Продажи */}
+                      <div className="space-y-0.5">
+                        <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                          Продажи
+                        </div>
+                        {ozonSyncStatus.lastRun.salesOk === true ? (
+                          <div className="text-emerald-600 font-medium">
+                            режим {ozonSyncStatus.lastRun.salesMode === 'full' ? 'полная история' : 'последние 3 недели'}, новых строк {ozonSyncStatus.lastRun.salesRows ?? 0}, удалено {ozonSyncStatus.lastRun.salesDeleted ?? 0}, всего в листе {ozonSyncStatus.lastRun.salesTotal ?? 0}
+                            {(ozonSyncStatus.lastRun.salesCompacted ?? 0) > 0 ? ` (уплотнено блоков: ${ozonSyncStatus.lastRun.salesCompacted})` : ''}
+                          </div>
+                        ) : ozonSyncStatus.lastRun.salesOk === false ? (
+                          <div className="text-rose-600 font-medium break-words">
+                            {ozonSyncStatus.lastRun.salesMessage || 'Ошибка'}
+                          </div>
+                        ) : (
+                          <div className="text-slate-500">нет данных</div>
+                        )}
+                      </div>
                     </div>
                   ) : (
                     <span className="text-slate-500 text-sm">Ещё не запускался</span>
