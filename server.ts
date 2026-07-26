@@ -419,6 +419,7 @@ async function startServer() {
 
   // ── Ozon Cluster Сache ────────────────────────────────────────────────────────
   let cachedClusterMap = new Map<string, string>();
+  let cachedWarehouseClusterMap = new Map<string, string>();
   let clusterMapLastUpdatedAt = 0;
   const CLUSTER_MAP_TTL_MS = 24 * 60 * 60 * 1000; // 24 часа
 
@@ -430,6 +431,7 @@ async function startServer() {
 
     try {
       const newMap = new Map<string, string>();
+      const newWhMap = new Map<string, string>();
 
       const ozonResponse = await fetchOzonApi("/v1/cluster/list", keys, { cluster_type: "CLUSTER_TYPE_OZON" });
       const cisResponse = await fetchOzonApi("/v1/cluster/list", keys, { cluster_type: "CLUSTER_TYPE_CIS" });
@@ -440,6 +442,17 @@ async function startServer() {
             if (cluster && cluster.macrolocal_cluster_id !== undefined && cluster.macrolocal_cluster_id !== null && cluster.name) {
               newMap.set(String(cluster.macrolocal_cluster_id), String(cluster.name));
             }
+            if (cluster && cluster.name && Array.isArray(cluster.logistic_clusters)) {
+              for (const logCluster of cluster.logistic_clusters) {
+                if (logCluster && Array.isArray(logCluster.warehouses)) {
+                  for (const wh of logCluster.warehouses) {
+                    if (wh && wh.warehouse_id !== undefined && wh.warehouse_id !== null && String(wh.warehouse_id).trim() !== "") {
+                      newWhMap.set(String(wh.warehouse_id), String(cluster.name));
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       };
@@ -448,12 +461,18 @@ async function startServer() {
       processClusters(cisResponse);
 
       cachedClusterMap = newMap;
+      cachedWarehouseClusterMap = newWhMap;
       clusterMapLastUpdatedAt = now;
       return cachedClusterMap;
     } catch (err: any) {
       console.error("Ошибка при загрузке справочника кластеров Ozon:", err);
       return cachedClusterMap;
     }
+  }
+
+  async function loadWarehouseClusterMap(keys: { ozonClientId: string; ozonApiKey: string }): Promise<Map<string, string>> {
+    await loadClusterMap(keys);
+    return cachedWarehouseClusterMap;
   }
 
   // Проверка ключей Ozon и получение названия кабинета (пункт 8в плана).
