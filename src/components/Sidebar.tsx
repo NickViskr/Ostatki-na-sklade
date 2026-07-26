@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, 
   FileUp, 
@@ -14,7 +14,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Package,
-  Warehouse
+  Warehouse,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -30,6 +32,25 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const isSidebarCollapsed = useUIStore((state) => state.isSidebarCollapsed);
   const setIsSidebarCollapsed = useUIStore((state) => state.setIsSidebarCollapsed);
   const gasError = useWarehouseStore((state) => state.gasError);
+  const ozonSyncStatus = useWarehouseStore((state) => state.ozonSyncStatus);
+  const fetchOzonSyncStatus = useWarehouseStore((state) => state.fetchOzonSyncStatus);
+
+  const [isStatusExpanded, setIsStatusExpanded] = useState(false);
+
+  useEffect(() => {
+    fetchOzonSyncStatus();
+    const interval = setInterval(() => {
+      fetchOzonSyncStatus();
+    }, 10 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [fetchOzonSyncStatus]);
+
+  const lastRun = ozonSyncStatus?.lastRun;
+  const lastRunFresh = !!lastRun && (Date.now() - new Date(lastRun.time).getTime()) < 14 * 60 * 60 * 1000;
+  const syncEnabled = ozonSyncStatus?.enabled === true;
+  const syncHealthy = syncEnabled && lastRunFresh && lastRun?.ok === true && lastRun?.stocksOk !== false && lastRun?.salesOk !== false;
+  const allOk = !gasError && (!ozonSyncStatus || syncHealthy);
+  const syncStatusReason = !syncEnabled ? 'Автоопрос выключен' : !lastRun ? 'Ещё не запускался' : !lastRunFresh ? 'Данные устарели (нет прогона > 14 ч)' : '';
 
 
 
@@ -197,12 +218,83 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             )}
           </div>
         )}
-        <div className={`bg-slate-50 border border-slate-100 flex ${isSidebarCollapsed ? 'p-3 justify-center rounded-2xl cursor-help' : 'p-4 rounded-2xl flex-col'}`} title={isSidebarCollapsed ? "Статус системы: " + (gasError ? "Ошибка GAS" : "Подключено к GAS") : undefined}>
-          {!isSidebarCollapsed && <p className="text-xs text-slate-500 mb-2">Статус системы</p>}
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 shrink-0 rounded-full ${gasError ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`} />
-            {!isSidebarCollapsed && <span className={`text-xs font-bold whitespace-nowrap ${gasError ? 'text-red-600' : 'text-slate-700'}`}>{gasError ? 'Ошибка GAS' : 'Подключено к GAS'}</span>}
-          </div>
+        <div 
+          className={`bg-slate-50 border border-slate-100 flex ${isSidebarCollapsed ? 'p-3 justify-center rounded-2xl cursor-help' : 'p-4 rounded-2xl flex-col'}`} 
+          title={isSidebarCollapsed ? "Статус системы: " + (allOk ? "в норме" : (gasError ? "ошибка GAS" : "сбой синхронизации Ozon")) : undefined}
+        >
+          {!isSidebarCollapsed && (
+            <>
+              <p className="text-xs text-slate-500 mb-2">Статус системы</p>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <div className={`w-2 h-2 shrink-0 rounded-full ${allOk ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+                  <span className={`text-xs font-bold whitespace-nowrap ${allOk ? 'text-slate-700' : 'text-red-600'}`}>
+                    {allOk ? 'Система в норме' : (gasError ? 'Ошибка GAS' : 'Сбой синхронизации Ozon')}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsStatusExpanded(!isStatusExpanded)}
+                  className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors"
+                  title={isStatusExpanded ? "Свернуть" : "Подробнее"}
+                >
+                  {isStatusExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </button>
+              </div>
+
+              {isStatusExpanded && (
+                <div className="mt-3 pt-3 border-t border-slate-200/60 space-y-1.5">
+                  {/* a) Связь с GAS */}
+                  <div className="flex items-center gap-2">
+                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${gasError ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                    <span className={`text-xs ${gasError ? 'text-red-600 font-medium' : 'text-slate-600'}`}>
+                      {gasError ? 'Ошибка GAS' : 'Связь с GAS'}
+                    </span>
+                  </div>
+
+                  {/* b) Заявки Ozon */}
+                  <div className="flex items-center gap-2" title={lastRun?.ok === false ? (lastRun?.message || 'Ошибка') : undefined}>
+                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${lastRun?.ok === true ? 'bg-emerald-500' : lastRun?.ok === false ? 'bg-red-500' : 'bg-slate-300'}`} />
+                    <span className={`text-xs ${lastRun?.ok === true ? 'text-slate-600' : lastRun?.ok === false ? 'text-red-600 font-medium' : 'text-slate-500'}`}>
+                      Заявки Ozon{lastRun?.ok === undefined ? ': нет данных' : ''}
+                    </span>
+                  </div>
+
+                  {/* c) Остатки Ozon */}
+                  <div className="flex items-center gap-2" title={lastRun?.stocksOk === false ? (lastRun?.stocksMessage || 'Ошибка') : undefined}>
+                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${lastRun?.stocksOk === true ? 'bg-emerald-500' : lastRun?.stocksOk === false ? 'bg-red-500' : 'bg-slate-300'}`} />
+                    <span className={`text-xs ${lastRun?.stocksOk === true ? 'text-slate-600' : lastRun?.stocksOk === false ? 'text-red-600 font-medium' : 'text-slate-500'}`}>
+                      Остатки Ozon{lastRun?.stocksOk === undefined ? ': нет данных' : ''}
+                    </span>
+                  </div>
+
+                  {/* d) Продажи Ozon */}
+                  <div className="flex items-center gap-2" title={lastRun?.salesOk === false ? (lastRun?.salesMessage || 'Ошибка') : undefined}>
+                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${lastRun?.salesOk === true ? 'bg-emerald-500' : lastRun?.salesOk === false ? 'bg-red-500' : 'bg-slate-300'}`} />
+                    <span className={`text-xs ${lastRun?.salesOk === true ? 'text-slate-600' : lastRun?.salesOk === false ? 'text-red-600 font-medium' : 'text-slate-500'}`}>
+                      Продажи Ozon{lastRun?.salesOk === undefined ? ': нет данных' : ''}
+                    </span>
+                  </div>
+
+                  {lastRun?.time && (
+                    <div className="text-slate-400 font-mono text-[10px] pt-1">
+                      {new Date(lastRun.time).toLocaleString('ru-RU')}
+                    </div>
+                  )}
+
+                  {syncStatusReason && (
+                    <div className="text-red-600 text-[10px] pt-0.5 break-words">
+                      {syncStatusReason}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {isSidebarCollapsed && (
+            <div className={`w-2 h-2 shrink-0 rounded-full ${allOk ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+          )}
         </div>
       </div>
 
