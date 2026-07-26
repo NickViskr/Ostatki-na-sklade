@@ -2,6 +2,16 @@
 
 ## [2026-07-26]
 
+### Добавлено
+- Добавлено хранение настроек Ozon-планирования и привязка срока хранения продаж (`Code.gs`):
+  - Добавлены константы `OZON_SETTINGS_HEADERS` (['Ключ', 'Значение', 'Описание']) и `OZON_SETTINGS_DEFAULTS` с 6 ключевыми параметрами планирования (`speedWeeks`, `minStockDays`, `targetStockDays`, `factoryOrderDays`, `returnsToSalePct`, `salesRetentionWeeks`).
+  - Создана функция `getOzonSettingsSheet()` для работы с листом «Настройки Ozon».
+  - Создана функция `getOzonSettings()` с идемпотентным автозаполнением дефолтами при отсутствии ключей в листе.
+  - Создана функция `saveOzonSettings(data)` с полной валидацией числовых диапазонов, целых чисел для недель и ограничением доступа администраторами (`assertAdmin`).
+  - В `doPost` зарегистрированы экшены `getOzonSettings` и `saveOzonSettings`.
+  - В `setupDatabase` включена автоинициализация листа «Настройки Ozon».
+  - В `saveOzonSales` расчет ретенции продаж (`cutoffMs`) переведен на динамический параметр `salesRetentionWeeks` из настроек с безопасным фоллбэком на дефолтную константу `OZON_SALES_RETENTION_WEEKS`.
+
 ### Удалено
 - Очистка устаревшего и мёртвого кода миграций в `Code.gs`:
   - Полностью удалены 6 функций (`recalculateStockFully`, `migrateKitCosts`, `cleanupZeroCostRows`, `migrateDatesToISO`, `migrateBowlKitsToVirtual`, `migrateComponentWriteOffCosts`), являвшихся однократными миграциями и рискованным полным пересчётом склада.

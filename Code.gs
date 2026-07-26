@@ -347,6 +347,8 @@ function doPost(e) {
       case 'saveOzonStocks': result = saveOzonStocks(data); break;
       case 'saveOzonSales': result = saveOzonSales(data); break;
       case 'getOzonStocks': result = getOzonStocks(); break;
+      case 'getOzonSettings': result = getOzonSettings(); break;
+      case 'saveOzonSettings': assertAdmin(currentUser); result = saveOzonSettings(data); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -392,7 +394,16 @@ const OZON_STOCKS_HEADERS = [
 ];
 
 const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено', 'Дней'];
-const OZON_SALES_RETENTION_WEEKS = 78; // срок хранения; на этапе C будет привязан к листу «Настройки Ozon»
+const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
+const OZON_SETTINGS_DEFAULTS = [
+  { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
+  { key: 'minStockDays',        value: 7,  desc: 'Неснижаемый остаток, дней продаж' },
+  { key: 'targetStockDays',     value: 30, desc: 'Целевой запас на Ozon, дней' },
+  { key: 'factoryOrderDays',    value: 60, desc: 'Объём заказа на фабрике, дней' },
+  { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
+  { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' }
+];
+const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
 const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
 const OZON_SALES_PERIOD_ANCHOR_MS = Date.parse('2024-01-01T00:00:00Z'); // понедельник — якорь 28-дневных блоков
 const OZON_SALES_PERIOD_MS = 28 * 24 * 60 * 60 * 1000;
@@ -605,6 +616,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Внешние отгрузки', EXTERNAL_SHIPMENTS_HEADERS);
   getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
   getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
+  getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
   return true;
 }
 
@@ -2943,6 +2955,126 @@ function getOzonSalesSheet() {
   return sheet;
 }
 
+function getOzonSettingsSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
+  ensureColumns(sheet, OZON_SETTINGS_HEADERS);
+  return sheet;
+}
+
+function getOzonSettings() {
+  const sheet = getOzonSettingsSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_SETTINGS_HEADERS.length);
+
+  ensureColumns(sheet, OZON_SETTINGS_HEADERS);
+  const data = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const keyIdx = headers.indexOf('Ключ');
+  const valIdx = headers.indexOf('Значение');
+  const descIdx = headers.indexOf('Описание');
+
+  if (keyIdx === -1 || valIdx === -1 || descIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Настройки Ozon"');
+  }
+
+  const result = {};
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    const k = String(row[keyIdx] || '').trim();
+    if (!k) continue;
+    const rawVal = row[valIdx];
+    const numVal = Number(rawVal);
+    if (!isNaN(numVal) && rawVal !== '' && rawVal !== null) {
+      result[k] = numVal;
+    }
+  }
+
+  let appended = false;
+  for (let d = 0; d < OZON_SETTINGS_DEFAULTS.length; d++) {
+    const def = OZON_SETTINGS_DEFAULTS[d];
+    if (result[def.key] === undefined) {
+      sheet.appendRow([def.key, def.value, def.desc]);
+      result[def.key] = def.value;
+      appended = true;
+    }
+  }
+
+  if (appended) {
+    SpreadsheetApp.flush();
+  }
+
+  return result;
+}
+
+function saveOzonSettings(data) {
+  if (!data || typeof data !== 'object') {
+    throw new Error('Некорректные данные для сохранения настроек Ozon');
+  }
+
+  const validKeys = OZON_SETTINGS_DEFAULTS.map(d => d.key);
+  const defaultsMap = {};
+  OZON_SETTINGS_DEFAULTS.forEach(d => { defaultsMap[d.key] = d; });
+
+  const keysToSave = {};
+  for (const k in data) {
+    if (!validKeys.includes(k)) continue;
+    const rawVal = data[k];
+    const numVal = Number(rawVal);
+
+    if (!Number.isFinite(numVal) || numVal < 0) {
+      throw new Error('Значение настройки "' + k + '" должно быть числом не меньше 0');
+    }
+
+    if (k === 'speedWeeks' || k === 'salesRetentionWeeks') {
+      if (!Number.isInteger(numVal) || numVal < 1) {
+        throw new Error('Значение настройки "' + k + '" должно быть целым числом не меньше 1');
+      }
+    }
+
+    keysToSave[k] = numVal;
+  }
+
+  const sheet = getOzonSettingsSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_SETTINGS_HEADERS.length);
+
+  ensureColumns(sheet, OZON_SETTINGS_HEADERS);
+  const sheetData = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = sheetData[0].map(h => String(h).trim());
+
+  const keyIdx = headers.indexOf('Ключ');
+  const valIdx = headers.indexOf('Значение');
+
+  if (keyIdx === -1 || valIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Настройки Ozon"');
+  }
+
+  const keyToRowIndex = {};
+  for (let i = 1; i < sheetData.length; i++) {
+    const keyVal = String(sheetData[i][keyIdx] || '').trim();
+    if (keyVal) {
+      keyToRowIndex[keyVal] = i + 1;
+    }
+  }
+
+  for (const k in keysToSave) {
+    const val = keysToSave[k];
+    if (keyToRowIndex[k]) {
+      const rowIndex = keyToRowIndex[k];
+      sheet.getRange(rowIndex, valIdx + 1).setValue(val);
+    } else {
+      const def = defaultsMap[k];
+      sheet.appendRow([k, val, def ? def.desc : '']);
+    }
+  }
+
+  SpreadsheetApp.flush();
+  return getOzonSettings();
+}
+
 function saveOzonStocks(payload) {
   if (!payload || !payload.rows || !Array.isArray(payload.rows)) {
     throw new Error('Некорректный payload: список строк rows обязателен и должен быть массивом');
@@ -3065,7 +3197,16 @@ function saveOzonSales(payload) {
     throw new Error('Некоторые обязательные колонки не найдены в листе "Продажи Ozon"');
   }
 
-  const cutoffMs = Date.now() - OZON_SALES_RETENTION_WEEKS * 7 * 24 * 60 * 60 * 1000;
+  let retentionWeeks = OZON_SALES_RETENTION_WEEKS;
+  try {
+    const ozonSettings = getOzonSettings();
+    if (Number.isFinite(ozonSettings.salesRetentionWeeks) && ozonSettings.salesRetentionWeeks >= 1) {
+      retentionWeeks = ozonSettings.salesRetentionWeeks;
+    }
+  } catch (e) {
+    Logger.log('Не удалось прочитать Настройки Ozon, использую дефолт ретенции: ' + e);
+  }
+  const cutoffMs = Date.now() - retentionWeeks * 7 * 24 * 60 * 60 * 1000;
 
   const keptRows = [];
   let existingNonEmptyCount = 0;
