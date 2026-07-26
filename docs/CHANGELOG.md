@@ -3,6 +3,12 @@
 ## [2026-07-26]
 
 ### Добавлено
+- Блок «Кластеры без поставок» с чекбоксами в модальном окне «Настройки Ozon» (`src/types.ts`, `src/components/OzonSettingsModal.tsx`):
+  - Поле `clusterId: string` добавлено в интерфейс `OzonStockRow`.
+  - В интерфейс `OzonSettingsData` и локальное состояние формы добавлено поле `excludedClusters: string`.
+  - Динамическое формирование отсортированного списка уникальных кластеров с непустым `clusterId` из `ozonStocks` через `useMemo` (с заглушкой «Кластер {clusterId}» при отсутствии имени).
+  - Вертикальный список чекбоксов для выбора кластеров без поставок с подсказкой `FieldHint position="top"`.
+  - Переключение чекбоксов обновляет `form.excludedClusters` (список ID через запятую), а в `handleSave` строка отправляется без числовых преобразований.
 - Поддержка строкового параметра `excludedClusters` в листе «Настройки Ozon» и бэкенд-функциях `getOzonSettings` / `saveOzonSettings` (`Code.gs`):
   - Значение по умолчанию `{ key: 'excludedClusters', value: '', desc: 'КластерID без поставок, через запятую' }` добавлено в `OZON_SETTINGS_DEFAULTS`.
   - Зарегистрирован массив строковых ключей `OZON_SETTINGS_STRING_KEYS = ['excludedClusters']`.

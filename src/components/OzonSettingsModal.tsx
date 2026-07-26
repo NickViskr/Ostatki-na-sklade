@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { X, HelpCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -15,6 +15,7 @@ interface OzonSettingsData {
   factoryOrderDays: number;
   returnsToSalePct: number;
   salesRetentionWeeks: number;
+  excludedClusters: string;
 }
 
 const FieldHint: React.FC<{ text: string; position?: 'top' | 'bottom' }> = ({ text, position = 'top' }) => (
@@ -32,6 +33,7 @@ const FieldHint: React.FC<{ text: string; position?: 'top' | 'bottom' }> = ({ te
 
 export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
+  const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -42,7 +44,36 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     factoryOrderDays: 60,
     returnsToSalePct: 80,
     salesRetentionWeeks: 78,
+    excludedClusters: '',
   });
+
+  const clusters = useMemo(() => {
+    const map = new Map<string, string>();
+    (ozonStocks || []).forEach((item) => {
+      const cid = String(item.clusterId || '').trim();
+      if (cid) {
+        if (!map.has(cid)) {
+          const cname = String(item.clusterName || '').trim();
+          map.set(cid, cname || `Кластер ${cid}`);
+        }
+      }
+    });
+    return Array.from(map.entries())
+      .map(([clusterId, clusterName]) => ({ clusterId, clusterName }))
+      .sort((a, b) => a.clusterName.localeCompare(b.clusterName, 'ru'));
+  }, [ozonStocks]);
+
+  const excludedSet = useMemo(() => {
+    return new Set((form.excludedClusters || '').split(',').map((s) => s.trim()).filter(Boolean));
+  }, [form.excludedClusters]);
+
+  const handleToggleCluster = (clusterId: string) => {
+    const currentList = (form.excludedClusters || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const nextList = currentList.includes(clusterId)
+      ? currentList.filter((id) => id !== clusterId)
+      : [...currentList, clusterId];
+    setForm({ ...form, excludedClusters: nextList.join(',') });
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -57,6 +88,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
               returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
               salesRetentionWeeks: Number(res.data.salesRetentionWeeks) || 78,
+              excludedClusters: String(res.data.excludedClusters || ''),
             });
           } else if (res?.status === 'error') {
             toast.error(res.message || 'Ошибка загрузки настроек Ozon');
@@ -83,6 +115,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         factoryOrderDays: Math.max(0, parseFloat(String(form.factoryOrderDays)) || 0),
         returnsToSalePct: Math.min(100, Math.max(0, parseFloat(String(form.returnsToSalePct)) || 0)),
         salesRetentionWeeks: Math.max(1, parseInt(String(form.salesRetentionWeeks), 10) || 1),
+        excludedClusters: form.excludedClusters,
       };
 
       const res = await fetchGas('saveOzonSettings', { data: payload });
@@ -221,6 +254,41 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Кластеры без поставок
+                  <FieldHint
+                    position="top"
+                    text="Отметь кластеры, в которые ты НЕ возишь товар (дорогая доставка). Для них не будут считаться рекомендации поставок и неснижаемый запас. Остатки и продажи этих кластеров продолжают учитываться в общих итогах и в сигнале «пора заказать на фабрике»."
+                  />
+                </label>
+                {clusters.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">
+                    Кластеры появятся после первой загрузки остатков Ozon
+                  </p>
+                ) : (
+                  <div className="space-y-2 mt-2">
+                    {clusters.map((c) => {
+                      const isChecked = excludedSet.has(c.clusterId);
+                      return (
+                        <label
+                          key={c.clusterId}
+                          className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer select-none hover:text-slate-900"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleCluster(c.clusterId)}
+                            className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 accent-indigo-600 cursor-pointer"
+                          />
+                          <span>{c.clusterName}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </>
           )}

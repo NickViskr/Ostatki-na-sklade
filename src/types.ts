@@ -120,6 +120,7 @@ export interface OzonStockRow {
   name: string;
   warehouseName: string;
   clusterName: string;
+  clusterId: string;
   available: number;
   preparing: number;
   requested: number;
