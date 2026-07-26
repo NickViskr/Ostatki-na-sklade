@@ -23,6 +23,7 @@ const UsersTab = React.lazy(() => import('./components/UsersTab').then(m => ({ d
 const DeletedItemsTab = React.lazy(() => import('./components/DeletedItemsTab').then(m => ({ default: m.DeletedItemsTab })));
 const DirectoryTab = React.lazy(() => import('./components/DirectoryTab').then(m => ({ default: m.DirectoryTab })));
 const OzonSuppliesTab = React.lazy(() => import('./components/OzonSuppliesTab').then(m => ({ default: m.OzonSuppliesTab })));
+const OzonStocksTab = React.lazy(() => import('./components/OzonStocksTab').then(m => ({ default: m.OzonStocksTab })));
 
 // Modals
 import { ConfirmModal } from './components/ConfirmModal';
@@ -75,7 +76,7 @@ export default function App() {
   }, [fetchStock, fetchArchivedItems, currentUser, isAdmin]);
 
   useEffect(() => {
-    if ((activeTab === 'settings' || activeTab === 'users' || activeTab === 'deleted' || activeTab === 'ozon') && !isAdmin) {
+    if ((activeTab === 'settings' || activeTab === 'users' || activeTab === 'deleted' || activeTab === 'ozon' || activeTab === 'ozonStocks') && !isAdmin) {
       setActiveTab('dashboard');
     }
   }, [activeTab, isAdmin, setActiveTab]);
@@ -111,6 +112,7 @@ export default function App() {
           {activeTab === 'deleted' && isAdmin && <DeletedItemsTab key="deleted" />}
           {activeTab === 'settings' && isAdmin && <SettingsTab key="settings" />}
           {activeTab === 'ozon' && isAdmin && <OzonSuppliesTab key="ozon" />}
+          {activeTab === 'ozonStocks' && isAdmin && <OzonStocksTab key="ozonStocks" />}
         </Suspense>
       </main>
 
