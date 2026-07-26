@@ -549,3 +549,36 @@
 3. По каждой пачке `/v1/analytics/stocks` → строки sku × склад.
 4. Строки с `warehouse_id = 0` обособить как агрегаты кластера.
 5. `macrolocal_cluster_id` → название кластера через `/v1/cluster/list`.
+
+---
+
+## Разведка для пункта 22 (26.07.2026): продажи FBO и черновики поставок
+
+### Продажи FBO — `POST /v2/posting/fbo/list`
+
+- Запрос: `filter.since` и `filter.to` (UTC, обязательны, период ≤ 1 года), `filter.status` (опционально), `limit` 1..1000 (обязателен), `offset` 0..20000, `dir` ASC/DESC, `with.analytics_data` / `with.financial_data`.
+- Пагинация: offset/limit (НЕ last_id). Если за период > 20000 отправлений — сужать окно дат.
+- Ответ `result[]`: `posting_number`, `order_id`, `status`, `substatus`, `created_at`, `in_process_at`, `products[]` (`sku`, `offer_id`, `name`, `quantity`, `price`), `analytics_data{}`, `financial_data{}`.
+- КРИТИЧНО: склад отгрузки — `analytics_data.warehouse_id` и `analytics_data.warehouse_name`. Блок приходит ТОЛЬКО при `with.analytics_data: true`.
+- Статусы: `awaiting_packaging`, `awaiting_deliver`, `delivering` — заказ в работе; `delivered` — продажа; `cancelled` — отмена.
+- Глубина истории: проверено вживую, данные доступны минимум за 10–11 месяцев назад.
+- Решения для листа «Продажи Ozon»: продажей считаем отправление с любым статусом, кроме `cancelled`, по дате `created_at`; при каждой синхронизации перезапрашиваются и перезаписываются последние 14 дней (подхват отмен задним числом); кластер определяется по `warehouse_id` через справочник кластеров.
+
+### Черновики заявок на поставку FBO (для кнопки «Создать поставку», пункт 22, этап H)
+
+Флоу: создать черновик → расчёт → создать заявку. Методы:
+
+| Метод | Путь | Класс | Ключевые поля |
+|---|---|---|---|
+| Черновик (прямая) | /v1/draft/direct/create | write | `cluster_info{macrolocal_cluster_id, items[]}` |
+| Черновик (кросс-док) | /v1/draft/crossdock/create | write | + `delivery_info{type, drop_off_warehouse{warehouse_id, warehouse_type}}` |
+| Инфо/расчёт | /v2/draft/create/info | read | `draft_id` → `clusters[].warehouses[]` (склады размещения) |
+| Таймслоты | /v2/draft/timeslot/info | read | по draft_id/складу |
+| Заявка по черновику | /v2/draft/supply/create | write | `draft_id`, `selected_cluster_warehouses[]{macrolocal_cluster_id, storage_warehouse_id}`, `supply_type`, `timeslot` |
+| Статус создания | /v2/draft/supply/create/status | read | draft_id → id созданной заявки |
+
+- Состав: `cluster_info.items[]` = `{sku, quantity}`, до 5000 позиций. Принимается ТОЛЬКО Ozon-SKU (int64), offer_id не принимается.
+- Кластер назначения: `macrolocal_cluster_id` (4-значный id из /v1/cluster/list; он же приходит в /v1/analytics/stocks как `macrolocal_cluster_id`).
+- Черновик живёт 30 минут, метода удаления FBO-черновика нет (самоуничтожается). Лимиты: 2/мин, 50/час, 500/день.
+- Отмена уже созданной заявки: /v1/supply-order/cancel (+ /v1/supply-order/cancel/status).
+- Вывод для этапа H: «только черновик» как отдельный шаг бессмыслен (30 минут, в ЛК не виден) — кнопка должна вести полный мастер до создания заявки, с подтверждением пользователя на каждом шаге.
