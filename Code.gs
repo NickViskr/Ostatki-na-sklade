@@ -383,7 +383,7 @@ const EXTERNAL_SHIPMENTS_HEADERS = [
 
 const OZON_STOCKS_HEADERS = [
   'Кабинет', 'SKU', 'Артикул', 'Название', 'Склад', 'Кластер',
-  'Доступно', 'Готовим к продаже', 'В заявках', 'В пути', 'Излишки', 'Возвраты', 'Прочее', 'Обновлено'
+  'Доступно', 'Готовим к продаже', 'В заявках', 'В пути', 'Излишки', 'Возвраты', 'Прочее', 'Обновлено', 'КластерID'
 ];
 
 function setupDatabase(targetSs) {
@@ -3328,8 +3328,9 @@ function saveOzonStocks(payload) {
   const returnsIdx = headers.indexOf('Возвраты');
   const otherIdx = headers.indexOf('Прочее');
   const updatedIdx = headers.indexOf('Обновлено');
+  const clusterIdIdx = headers.indexOf('КластерID');
 
-  if (cabinetIdx === -1 || skuIdx === -1 || articleIdx === -1 || nameIdx === -1 || warehouseIdx === -1 || clusterIdx === -1 || availableIdx === -1 || preparingIdx === -1 || requestedIdx === -1 || transitIdx === -1 || excessIdx === -1 || returnsIdx === -1 || otherIdx === -1 || updatedIdx === -1) {
+  if (cabinetIdx === -1 || skuIdx === -1 || articleIdx === -1 || nameIdx === -1 || warehouseIdx === -1 || clusterIdx === -1 || availableIdx === -1 || preparingIdx === -1 || requestedIdx === -1 || transitIdx === -1 || excessIdx === -1 || returnsIdx === -1 || otherIdx === -1 || updatedIdx === -1 || clusterIdIdx === -1) {
     throw new Error('Некоторые обязательные колонки не найдены в листе "Остатки Ozon"');
   }
 
@@ -3360,6 +3361,7 @@ function saveOzonStocks(payload) {
     row[returnsIdx] = item.returns !== undefined ? item.returns : 0;
     row[otherIdx] = item.other !== undefined ? item.other : 0;
     row[updatedIdx] = nowStr;
+    row[clusterIdIdx] = item.clusterId || '';
     return row;
   });
 
@@ -3402,8 +3404,9 @@ function getOzonStocks() {
   const returnsIdx = headers.indexOf('Возвраты');
   const otherIdx = headers.indexOf('Прочее');
   const updatedIdx = headers.indexOf('Обновлено');
+  const clusterIdIdx = headers.indexOf('КластерID');
 
-  if (cabinetIdx === -1 || skuIdx === -1 || articleIdx === -1 || nameIdx === -1 || warehouseIdx === -1 || clusterIdx === -1 || availableIdx === -1 || preparingIdx === -1 || requestedIdx === -1 || transitIdx === -1 || excessIdx === -1 || returnsIdx === -1 || otherIdx === -1 || updatedIdx === -1) {
+  if (cabinetIdx === -1 || skuIdx === -1 || articleIdx === -1 || nameIdx === -1 || warehouseIdx === -1 || clusterIdx === -1 || availableIdx === -1 || preparingIdx === -1 || requestedIdx === -1 || transitIdx === -1 || excessIdx === -1 || returnsIdx === -1 || otherIdx === -1 || updatedIdx === -1 || clusterIdIdx === -1) {
     throw new Error('Некоторые обязательные колонки не найдены в листе "Остатки Ozon"');
   }
 
@@ -3430,6 +3433,7 @@ function getOzonStocks() {
       name: String(row[nameIdx] || ''),
       warehouseName: String(row[warehouseIdx] || ''),
       clusterName: String(row[clusterIdx] || ''),
+      clusterId: String(row[clusterIdIdx] || ''),
       available: parseNumber(row[availableIdx]),
       preparing: parseNumber(row[preparingIdx]),
       requested: parseNumber(row[requestedIdx]),

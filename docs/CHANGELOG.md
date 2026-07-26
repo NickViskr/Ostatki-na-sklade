@@ -3,6 +3,10 @@
 ## [2026-07-26]
 
 ### Изменено
+- Поддержка колонки `КластерID` в листе «Остатки Ozon» Google Apps Script (`Code.gs`):
+  - В константу `OZON_STOCKS_HEADERS` добавлена колонка `'КластерID'` в конец массива.
+  - В функции `saveOzonStocks` добавлен поиск индекса `clusterIdIdx`, его включение в проверку обязательных колонок и сохранение `row[clusterIdIdx] = item.clusterId || ''`.
+  - В функции `getOzonStocks` добавлен поиск индекса `clusterIdIdx`, его включение в проверку обязательных колонок и отдача `clusterId: String(row[clusterIdIdx] || '')` сразу после `clusterName`.
 - Добавление поля `clusterId` в объект строки ответа `/api/ozon/stocks` (`server.ts`):
   - В `cabRows.push({...})` обработчика `POST /api/ozon/stocks` добавлено новое поле `clusterId: String(item.macrolocal_cluster_id || '')` сразу после `clusterName`.
 - Добавление endpoint `/api/ozon/sales` и функции `getMskWeekMonday` (`server.ts`):
