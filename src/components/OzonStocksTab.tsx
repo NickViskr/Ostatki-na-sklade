@@ -108,14 +108,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     setExpandedClusters((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const fmtInt = (v: number | null | undefined) => (v && v > 0 ? v.toLocaleString('ru-RU') : '—');
-  const fmtSpeed = (v: number | null | undefined) => (v && v > 0 ? v.toFixed(1) : '—');
-  const fmtDays = (v: number | null | undefined) => (v !== null && v !== undefined ? `${Math.round(v)} дн.` : '—');
-
-  const coverageColor = (coverageDays: number | null, minDays: number, targetDays: number) => {
-    if (coverageDays === null) return 'text-slate-400';
-    if (coverageDays < minDays) return 'text-red-600 font-bold';
-    if (coverageDays <= targetDays) return 'text-amber-600 font-semibold';
+  const fmtInt = (v: number | null | undefined) => Math.round(Number(v) || 0).toLocaleString('ru-RU');
+  const fmtSpeed = (v: number | null | undefined) => (Number(v) || 0).toFixed(2);
+  const fmtDays = (v: number | null | undefined, estimated: number) => {
+    if (v === null || v === undefined) return estimated > 0 ? '∞' : '—';
+    return `${Math.round(v)}`;
+  };
+  const coverageColor = (coverageDays: number | null | undefined, targetDays: number) => {
+    if (coverageDays === null || coverageDays === undefined) return 'text-slate-400';
+    if (coverageDays < 0) return 'text-red-600 font-bold';
+    if (coverageDays < targetDays) return 'text-amber-600 font-semibold';
     return 'text-emerald-600 font-semibold';
   };
 
@@ -179,42 +181,40 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];
-    return coverage.articles.map((art) => {
+    const sumBy = (list: OzonStockRow[]) => ({
+      available: list.reduce((s, w) => s + (w.available || 0), 0),
+      preparing: list.reduce((s, w) => s + (w.preparing || 0), 0),
+      requested: list.reduce((s, w) => s + (w.requested || 0), 0),
+      transit: list.reduce((s, w) => s + (w.transit || 0), 0),
+      excess: list.reduce((s, w) => s + (w.excess || 0), 0),
+      returns: list.reduce((s, w) => s + (w.returns || 0), 0),
+      other: list.reduce((s, w) => s + (w.other || 0), 0),
+    });
+    const rows = coverage.articles.map((art) => {
+      const stockRows = (ozonStocks || []).filter(
+        (s) => resolveOzonArticle(skus, s.offerId, s.sku) === art.article
+      );
+      const unboundRows = stockRows.filter((s) => !String(s.clusterId || '').trim());
       const artCoverageDays = art.perDay > 0
         ? (art.totalEstimated - art.perDay * ozonSettings.minStockDays) / art.perDay
         : null;
-
-      const artRecommendedQty = art.clusters.reduce(
-        (sum, c) => sum + (c.recommendation?.qty || 0),
-        0
-      );
-
-      const clustersWithDetails = art.clusters.map((cls) => {
-        const clsRecommendedQty = cls.recommendation?.qty || 0;
-
-        const warehouses = (ozonStocks || []).filter((s) => {
-          const matchArt = resolveOzonArticle(skus, s.offerId, s.sku) === art.article;
-          const matchCls = String(s.clusterId || '').trim() === cls.clusterId;
-          return matchArt && matchCls;
-        });
-
-        return {
-          ...cls,
-          recommendedQty: clsRecommendedQty,
-          warehouses,
-        };
-      });
-
       return {
         ...art,
+        name: stockRows.length > 0 ? (stockRows[0].name || '') : '',
+        cabinets: Array.from(new Set(stockRows.map((s) => s.cabinet).filter(Boolean))),
+        totals: sumBy(stockRows),
+        unboundRows,
+        unboundTotals: sumBy(unboundRows),
         coverageDays: artCoverageDays,
-        recommendedQty: artRecommendedQty,
-        factory: art.factory
-          ? { ...art.factory, neededQty: art.factory.orderQty }
-          : { neededQty: 0 },
-        clusters: clustersWithDetails,
+        recommendedQty: art.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0),
+        clusters: art.clusters.map((cls) => ({
+          ...cls,
+          warehouses: stockRows.filter((s) => String(s.clusterId || '').trim() === cls.clusterId),
+        })),
       };
     });
+    rows.sort((a, b) => (b.perDay - a.perDay) || (b.totals.available - a.totals.available));
+    return rows;
   }, [coverage, ozonStocks, skus, ozonSettings.minStockDays]);
 
   if (!isAdmin) return null;
@@ -335,99 +335,171 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                     <thead>
                       <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-semibold">
                         <th className="p-3 min-w-[220px]">Товар / Кластер / Склад</th>
-                        <th className="p-3 text-right">Продажи шт/дн</th>
+                        <th className="p-3 text-right">Продано</th>
+                        <th className="p-3 text-right">Скорость</th>
+                        <th className="p-3 text-right">Доля</th>
                         <th className="p-3 text-right">Доступно</th>
-                        <th className="p-3 text-right">В пути</th>
+                        <th className="p-3 text-right">Готовим</th>
                         <th className="p-3 text-right">В заявках</th>
-                        <th className="p-3 text-right">Покрытие, дн</th>
-                        <th className="p-3 text-right">Реком. Ozon</th>
+                        <th className="p-3 text-right">В пути</th>
+                        <th className="p-3 text-right">Излишки</th>
+                        <th className="p-3 text-right">Возвраты</th>
+                        <th className="p-3 text-right">Прочее</th>
+                        <th className="p-3 text-right">Расчётный</th>
+                        <th className="p-3 text-right">Покрытие</th>
                         <th className="p-3 text-right">Мой склад</th>
-                        <th className="p-3 text-right">Заказ Завод</th>
+                        <th className="p-3 text-right">Рекомендация</th>
                       </tr>
                     </thead>
                     <tbody>
                       {coverageRows.map((art: any) => {
                         const isArtExpanded = !!expandedArticles[art.article];
-
                         return (
                           <React.Fragment key={art.article}>
-                            {/* LEVEL 1: ARTICLE ROW */}
+                            {/* LEVEL 1: ARTICLE */}
                             <tr
-                              className="border-b border-slate-200 bg-slate-100/80 hover:bg-slate-200/60 cursor-pointer font-semibold transition-colors"
+                              className="border-b border-slate-200 bg-slate-100/80 hover:bg-slate-200/60 cursor-pointer transition-colors"
                               onClick={() => toggleArticle(art.article)}
                               id={`ozon-art-row-${art.article}`}
                             >
-                              <td className="p-3">
-                                <div className="flex items-center gap-2">
-                                  {isArtExpanded ? <ChevronDown size={16} className="text-slate-500" /> : <ChevronRight size={16} className="text-slate-500" />}
-                                  <span className="font-mono text-sm font-bold text-slate-800">{art.article}</span>
+                              <td className="p-3 max-w-[350px]">
+                                <div className="flex flex-col gap-1">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {isArtExpanded ? <ChevronDown size={14} className="text-slate-500" /> : <ChevronRight size={14} className="text-slate-500" />}
+                                    {uniqueCabinetsCount > 1 && art.cabinets.map((cab: string) => (
+                                      <span key={cab} className="text-[10px] px-1.5 py-0.5 rounded-md font-bold tracking-wide bg-indigo-50 text-indigo-600 border border-indigo-100">{cab}</span>
+                                    ))}
+                                    <span className="font-mono font-bold text-slate-800">{art.article}</span>
+                                  </div>
+                                  <span className="text-slate-500 truncate block text-[11px]" title={art.name}>{art.name}</span>
                                 </div>
                               </td>
-                              <td className="p-3 text-right font-medium text-slate-700">{fmtSpeed(art.perDay)}</td>
-                              <td className="p-3 text-right font-bold text-slate-900">{fmtInt(art.totalEstimated)}</td>
-                              <td className="p-3 text-right text-slate-500">—</td>
-                              <td className="p-3 text-right text-slate-500">—</td>
-                              <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.minStockDays, ozonSettings.targetStockDays)}`}>
-                                {fmtDays(art.coverageDays)}
+                              <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.qtySold)}</td>
+                              <td className="p-3 text-right font-semibold text-slate-800">{fmtSpeed(art.perDay)}</td>
+                              <td className="p-3 text-right text-slate-300">—</td>
+                              <td className={`p-3 text-right font-semibold ${art.totals.available === 0 ? 'text-slate-300' : 'text-slate-900'}`}>{fmtInt(art.totals.available)}</td>
+                              <td className={`p-3 text-right ${art.totals.preparing === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.preparing)}</td>
+                              <td className={`p-3 text-right ${art.totals.requested === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.requested)}</td>
+                              <td className={`p-3 text-right ${art.totals.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.transit)}</td>
+                              <td className={`p-3 text-right ${art.totals.excess === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.excess)}</td>
+                              <td className={`p-3 text-right ${art.totals.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.returns)}</td>
+                              <td className={`p-3 text-right ${art.totals.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.other)}</td>
+                              <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.totalEstimated)}</td>
+                              <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>
+                              <td className="p-3 text-right text-slate-600">{fmtInt(art.myStockAvailable)}</td>
+                              <td className="p-3 text-right">
+                                {art.recommendedQty > 0 ? (
+                                  <span className="text-indigo-600 font-bold">{fmtInt(art.recommendedQty)} шт</span>
+                                ) : (
+                                  <span className="text-slate-300">—</span>
+                                )}
                               </td>
-                              <td className="p-3 text-right font-bold text-indigo-600">{fmtInt(art.recommendedQty)}</td>
-                              <td className="p-3 text-right font-medium text-slate-800">{fmtInt(art.myStockAvailable)}</td>
-                              <td className="p-3 text-right font-bold text-amber-600">{fmtInt(art.factory?.neededQty)}</td>
                             </tr>
 
-                            {/* LEVEL 2: CLUSTERS ROWS */}
-                            {isArtExpanded &&
-                              art.clusters.map((cls: any) => {
-                                const clusterKey = `${art.article}:::${cls.clusterId}`;
-                                const isClsExpanded = !!expandedClusters[clusterKey];
+                            {/* LEVEL 2: CLUSTERS */}
+                            {isArtExpanded && art.clusters.map((cls: any) => {
+                              const clusterKey = `${art.article}:::${cls.clusterId}`;
+                              const isClsExpanded = !!expandedClusters[clusterKey];
+                              return (
+                                <React.Fragment key={clusterKey}>
+                                  <tr
+                                    className="border-b border-slate-100 bg-slate-50/70 hover:bg-slate-100/60 cursor-pointer transition-colors"
+                                    onClick={() => toggleCluster(clusterKey)}
+                                    id={`ozon-cls-row-${art.article}-${cls.clusterId}`}
+                                  >
+                                    <td className="p-2.5 pl-8">
+                                      <div className="flex items-center gap-1.5">
+                                        {isClsExpanded ? <ChevronDown size={12} className="text-slate-400" /> : <ChevronRight size={12} className="text-slate-400" />}
+                                        <span className="font-semibold text-slate-700 text-[11px]">{cls.clusterName}</span>
+                                        {cls.excluded && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-slate-200 text-slate-600">без поставок</span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="p-2.5 text-right text-slate-700">{fmtInt(cls.qtySold)}</td>
+                                    <td className="p-2.5 text-right text-slate-700">{fmtSpeed(cls.perDay)}</td>
+                                    <td className="p-2.5 text-right text-slate-600">{cls.sharePct > 0 ? `${cls.sharePct.toFixed(1)}%` : '—'}</td>
+                                    <td className={`p-2.5 text-right ${cls.available === 0 ? 'text-slate-300' : 'text-slate-800 font-medium'}`}>{fmtInt(cls.available)}</td>
+                                    <td className="p-2.5 text-right text-slate-300">—</td>
+                                    <td className="p-2.5 text-right text-slate-300">—</td>
+                                    <td className={`p-2.5 text-right ${cls.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.transit)}</td>
+                                    <td className="p-2.5 text-right text-slate-300">—</td>
+                                    <td className={`p-2.5 text-right ${cls.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.returns)}</td>
+                                    <td className="p-2.5 text-right text-slate-300">—</td>
+                                    <td className="p-2.5 text-right font-medium text-slate-800">{fmtInt(cls.estimated)}</td>
+                                    <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>
+                                    <td className="p-2.5 text-right text-slate-300">—</td>
+                                    <td className="p-2.5 text-right">
+                                      {cls.recommendation && cls.recommendation.boxes > 0 ? (
+                                        <span className={cls.recommendation.limitedByMyStock ? 'text-amber-600 font-semibold' : 'text-indigo-600 font-semibold'}>
+                                          {fmtInt(cls.recommendation.boxes)} кор ({fmtInt(cls.recommendation.qty)} шт)
+                                        </span>
+                                      ) : (
+                                        <span className="text-slate-300">—</span>
+                                      )}
+                                    </td>
+                                  </tr>
 
-                                return (
-                                  <React.Fragment key={clusterKey}>
+                                  {/* LEVEL 3: WAREHOUSES */}
+                                  {isClsExpanded && cls.warehouses.map((wh: OzonStockRow, idx: number) => (
                                     <tr
-                                      className="border-b border-slate-100 bg-slate-50/70 hover:bg-slate-100/60 cursor-pointer transition-colors"
-                                      onClick={() => toggleCluster(clusterKey)}
-                                      id={`ozon-cls-row-${cls.clusterId}`}
+                                      key={`${clusterKey}-wh-${idx}`}
+                                      className="border-b border-slate-100/50 bg-white hover:bg-slate-50 transition-colors"
+                                      id={`ozon-wh-row-${art.article}-${cls.clusterId}-${idx}`}
                                     >
-                                      <td className="p-2.5 pl-8">
+                                      <td className="p-2 pl-14">
                                         <div className="flex items-center gap-1.5">
-                                          {isClsExpanded ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
-                                          <span className="font-semibold text-slate-700">{cls.clusterName}</span>
+                                          {uniqueCabinetsCount > 1 && (
+                                            <span className="text-[10px] px-1 py-0.5 rounded font-bold bg-slate-100 text-slate-500">{wh.cabinet}</span>
+                                          )}
+                                          <span className="text-slate-600 text-[11px]">{wh.warehouseName}</span>
                                         </div>
                                       </td>
-                                      <td className="p-2.5 text-right text-slate-600">{fmtSpeed(cls.perDay)}</td>
-                                      <td className="p-2.5 text-right font-semibold text-slate-800">{fmtInt(cls.available)}</td>
-                                      <td className="p-2.5 text-right text-slate-600">{fmtInt(cls.transit)}</td>
-                                      <td className="p-2.5 text-right text-slate-600">{fmtInt(cls.requested)}</td>
-                                      <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.minStockDays, ozonSettings.targetStockDays)}`}>
-                                        {fmtDays(cls.coverageDays)}
-                                      </td>
-                                      <td className="p-2.5 text-right font-bold text-indigo-600">{fmtInt(cls.recommendedQty)}</td>
-                                      <td className="p-2.5 text-right text-slate-400">—</td>
-                                      <td className="p-2.5 text-right text-slate-400">—</td>
+                                      <td className="p-2 text-right text-slate-300">—</td>
+                                      <td className="p-2 text-right text-slate-300">—</td>
+                                      <td className="p-2 text-right text-slate-300">—</td>
+                                      <td className={`p-2 text-right ${(wh.available || 0) === 0 ? 'text-slate-300' : 'text-slate-700'}`}>{fmtInt(wh.available)}</td>
+                                      <td className={`p-2 text-right ${(wh.preparing || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.preparing)}</td>
+                                      <td className={`p-2 text-right ${(wh.requested || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.requested)}</td>
+                                      <td className={`p-2 text-right ${(wh.transit || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.transit)}</td>
+                                      <td className={`p-2 text-right ${(wh.excess || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.excess)}</td>
+                                      <td className={`p-2 text-right ${(wh.returns || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.returns)}</td>
+                                      <td className={`p-2 text-right ${(wh.other || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.other)}</td>
+                                      <td className="p-2 text-right text-slate-300">—</td>
+                                      <td className="p-2 text-right text-slate-300">—</td>
+                                      <td className="p-2 text-right text-slate-300">—</td>
+                                      <td className="p-2 text-right text-slate-300">—</td>
                                     </tr>
+                                  ))}
+                                </React.Fragment>
+                              );
+                            })}
 
-                                    {/* LEVEL 3: WAREHOUSES ROWS */}
-                                    {isClsExpanded &&
-                                      cls.warehouses.map((wh: any, idx: number) => (
-                                        <tr
-                                          key={`${clusterKey}-wh-${idx}`}
-                                          className="border-b border-slate-100/50 bg-white hover:bg-slate-50 transition-colors text-slate-600"
-                                          id={`ozon-wh-row-${cls.clusterId}-${idx}`}
-                                        >
-                                          <td className="p-2 pl-14 text-slate-500 font-normal">{wh.warehouseName}</td>
-                                          <td className="p-2 text-right text-slate-300">—</td>
-                                          <td className="p-2 text-right font-medium text-slate-700">{fmtInt(wh.available)}</td>
-                                          <td className="p-2 text-right text-slate-500">{fmtInt(wh.transit)}</td>
-                                          <td className="p-2 text-right text-slate-500">{fmtInt(wh.requested)}</td>
-                                          <td className="p-2 text-right text-slate-300">—</td>
-                                          <td className="p-2 text-right text-slate-300">—</td>
-                                          <td className="p-2 text-right text-slate-300">—</td>
-                                          <td className="p-2 text-right text-slate-300">—</td>
-                                        </tr>
-                                      ))}
-                                  </React.Fragment>
-                                );
-                              })}
+                            {/* LEVEL 2: UNBOUND (без кластера) */}
+                            {isArtExpanded && art.unboundRows.length > 0 && (
+                              <tr className="border-b border-slate-100 bg-slate-50/70" id={`ozon-unbound-row-${art.article}`}>
+                                <td className="p-2.5 pl-8">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-semibold text-slate-500 text-[11px]">Без кластера (агрегат)</span>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-slate-200 text-slate-600">не в рекомендациях</span>
+                                  </div>
+                                </td>
+                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundQtySold)}</td>
+                                <td className="p-2.5 text-right text-slate-300">—</td>
+                                <td className="p-2.5 text-right text-slate-300">—</td>
+                                <td className="p-2.5 text-right text-slate-700">{fmtInt(art.unboundTotals.available)}</td>
+                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.preparing)}</td>
+                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.requested)}</td>
+                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.transit)}</td>
+                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.excess)}</td>
+                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.returns)}</td>
+                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.other)}</td>
+                                <td className="p-2.5 text-right font-medium text-slate-700">{fmtInt(art.unboundEstimated)}</td>
+                                <td className="p-2.5 text-right text-slate-300">—</td>
+                                <td className="p-2.5 text-right text-slate-300">—</td>
+                                <td className="p-2.5 text-right text-slate-300">—</td>
+                              </tr>
+                            )}
                           </React.Fragment>
                         );
                       })}
