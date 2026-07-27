@@ -347,6 +347,7 @@ function doPost(e) {
       case 'saveOzonStocks': result = saveOzonStocks(data); break;
       case 'saveOzonSales': result = saveOzonSales(data); break;
       case 'getOzonStocks': result = getOzonStocks(); break;
+      case 'getOzonSales': result = getOzonSales(); break;
       case 'getOzonSettings': result = getOzonSettings(); break;
       case 'saveOzonSettings': assertAdmin(currentUser); result = saveOzonSettings(data); break;
       case 'saveOzonClusters': result = saveOzonClusters(data); break;
@@ -3521,6 +3522,69 @@ function saveOzonSales(payload) {
     compactedRows: compactedRows.length,
     totalRows: combinedRows.length
   };
+}
+
+function getOzonSales() {
+  const sheet = getOzonSalesSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+
+  const lastCol = sheet.getLastColumn();
+  const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const weekIdx = headers.indexOf('Неделя');
+  const cabinetIdx = headers.indexOf('Кабинет');
+  const articleIdx = headers.indexOf('Артикул');
+  const clusterIdx = headers.indexOf('Кластер');
+  const qtyIdx = headers.indexOf('Количество');
+  const updatedIdx = headers.indexOf('Обновлено');
+  const daysIdx = headers.indexOf('Дней');
+
+  if (weekIdx === -1 || cabinetIdx === -1 || articleIdx === -1 || clusterIdx === -1 || qtyIdx === -1 || updatedIdx === -1 || daysIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Продажи Ozon"');
+  }
+
+  const tz = Session.getScriptTimeZone();
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+
+    let weekVal = '';
+    if (row[weekIdx] instanceof Date) {
+      try {
+        weekVal = Utilities.formatDate(row[weekIdx], tz, 'yyyy-MM-dd');
+      } catch (e) {
+        weekVal = String(row[weekIdx] || '');
+      }
+    } else {
+      weekVal = String(row[weekIdx] || '').trim();
+    }
+
+    let updatedVal = '';
+    if (row[updatedIdx] instanceof Date) {
+      try {
+        updatedVal = Utilities.formatDate(row[updatedIdx], tz, 'yyyy-MM-dd HH:mm:ss');
+      } catch (e) {
+        updatedVal = String(row[updatedIdx] || '');
+      }
+    } else {
+      updatedVal = String(row[updatedIdx] || '');
+    }
+
+    rows.push({
+      week: weekVal,
+      cabinet: String(row[cabinetIdx] || ''),
+      offerId: String(row[articleIdx] || ''),
+      clusterName: String(row[clusterIdx] || ''),
+      qty: parseNumber(row[qtyIdx]),
+      updatedAt: updatedVal,
+      days: parseNumber(row[daysIdx])
+    });
+  }
+
+  return rows;
 }
 
 function getOzonStocks() {

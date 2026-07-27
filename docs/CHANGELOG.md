@@ -1,5 +1,13 @@
 # История изменений
 
+## [2026-07-27]
+
+### Добавлено
+- Функция `getOzonSales()` и роут `getOzonSales` в Google Apps Script (`Code.gs`):
+  - Чтение данных листа «Продажи Ozon» с возвратом массива объектов `{ week, cabinet, offerId, clusterName, qty, updatedAt, days }`.
+  - Форматирование дат и защита от отсутствия обязательных колонок.
+  - Регистрация действия `case 'getOzonSales'` в `doPost`.
+
 ## [2026-07-26]
 
 ### Добавлено
