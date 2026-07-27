@@ -23,6 +23,7 @@ const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
   { key: 'coverage', label: 'Покрытие' },
   { key: 'myStock', label: 'Мой склад' },
   { key: 'recommendation', label: 'Рекомендация' },
+  { key: 'factory', label: 'Заказ на фабрике' },
 ];
 
 const OZON_DEFAULT_HIDDEN_COLS = ['preparing', 'requested', 'excess', 'other'];
@@ -632,6 +633,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Всегда кратно коробке. Оранжевый цвет означает, что поставка урезана нехваткой на твоём складе. У товара показана сумма по всем его кластерам." />
                           </th>
                         )}
+                        {isColVisible('factory') && (
+                          <th className="p-3 text-right">
+                            Заказ на фабрике
+                            <ColHint text="Сигнал «пора заказывать новую партию»: складов Ozon и твоего склада вместе хватит меньше, чем на срок поставки от фабрики плюс неснижаемый запас. Объём заказа считается по настройке «Объём заказа на фабрике, дней». Срок поставки берётся из колонки «Срок поставки (дни)» в SKU Базе: если он не заполнен, сигнал сработает только при падении ниже неснижаемого запаса." />
+                          </th>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
@@ -678,6 +685,23 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       title={art.recLimited ? 'Рекомендация урезана: на Моём складе не хватает товара на полную потребность' : undefined}
                                     >
                                       {fmtInt(art.recommendedQty)} шт
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-300">—</span>
+                                  )}
+                                </td>
+                              )}
+                              {isColVisible('factory') && (
+                                <td className="p-3 text-right">
+                                  {art.factory ? (
+                                    <span
+                                      className="text-rose-600 font-bold"
+                                      title={`Хватит на ${Math.round(art.factory.daysLeft)} дн. при сроке поставки ${art.leadTimeDays || 0} дн.`}
+                                    >
+                                      {fmtInt(art.factory.orderQty)} шт
+                                      <span className="block text-[10px] font-semibold text-rose-400">
+                                        {fmtInt(art.factory.orderBoxes)} кор
+                                      </span>
                                     </span>
                                   ) : (
                                     <span className="text-slate-300">—</span>
@@ -735,6 +759,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         )}
                                       </td>
                                     )}
+                                    {isColVisible('factory') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                   </tr>
 
                                   {/* LEVEL 3: WAREHOUSES */}
@@ -766,6 +791,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       {isColVisible('coverage') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('myStock') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('recommendation') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('factory') && <td className="p-2 text-right text-slate-300">—</td>}
                                     </tr>
                                   ))}
                                 </React.Fragment>
@@ -795,6 +821,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 {isColVisible('coverage') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('recommendation') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('factory') && <td className="p-2.5 text-right text-slate-300">—</td>}
                               </tr>
                             )}
                           </React.Fragment>
