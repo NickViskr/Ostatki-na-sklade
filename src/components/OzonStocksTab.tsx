@@ -1,10 +1,31 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, RefreshCw, Settings } from 'lucide-react';
+import { ChevronDown, ChevronRight, Columns3, RefreshCw, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
-import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, ArticleCoverage, resolveOzonArticle } from '../lib/ozonCoverage';
+import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, resolveOzonArticle } from '../lib/ozonCoverage';
+
+const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
+
+const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
+  { key: 'sold', label: 'Продано' },
+  { key: 'speed', label: 'Скорость' },
+  { key: 'share', label: 'Доля' },
+  { key: 'available', label: 'Доступно' },
+  { key: 'preparing', label: 'Готовим' },
+  { key: 'requested', label: 'В заявках' },
+  { key: 'transit', label: 'В пути' },
+  { key: 'excess', label: 'Излишки' },
+  { key: 'returns', label: 'Возвраты' },
+  { key: 'other', label: 'Прочее' },
+  { key: 'estimated', label: 'Расчётный' },
+  { key: 'coverage', label: 'Покрытие' },
+  { key: 'myStock', label: 'Мой склад' },
+  { key: 'recommendation', label: 'Рекомендация' },
+];
+
+const OZON_DEFAULT_HIDDEN_COLS = ['preparing', 'requested', 'excess', 'other'];
 
 export const OzonStocksTab: React.FC = React.memo(() => {
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -36,6 +57,31 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     excludedClusters: '',
   });
   const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
+
+  const [showColsMenu, setShowColsMenu] = useState(false);
+  const [hiddenCols, setHiddenCols] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(OZON_COLS_STORAGE_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error('Ошибка чтения настроек колонок Ozon:', e);
+    }
+    return OZON_DEFAULT_HIDDEN_COLS;
+  });
+
+  const toggleCol = (key: string) => {
+    setHiddenCols((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      try {
+        localStorage.setItem(OZON_COLS_STORAGE_KEY, JSON.stringify(next));
+      } catch (e) {
+        console.error('Ошибка сохранения настроек колонок Ozon:', e);
+      }
+      return next;
+    });
+  };
+
+  const isColVisible = (key: string) => !hiddenCols.includes(key);
 
   const notifyCheckDone = useRef(false);
 
@@ -239,6 +285,33 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
             {!isOzonStocksCollapsed && (
               <>
+                <div className="relative">
+                  <button
+                    type="button"
+                    id="btn-ozon-columns"
+                    onClick={() => setShowColsMenu((prev) => !prev)}
+                    className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
+                  >
+                    <Columns3 size={14} />
+                    Колонки
+                  </button>
+                  {showColsMenu && (
+                    <div className="absolute right-0 mt-2 z-20 bg-white border border-slate-200 rounded-2xl shadow-lg p-3 w-56 max-h-80 overflow-y-auto" id="ozon-columns-menu">
+                      <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400 mb-2">Показывать колонки</div>
+                      {OZON_TOGGLEABLE_COLS.map((col) => (
+                        <label key={col.key} className="flex items-center gap-2 py-1 cursor-pointer text-xs text-slate-700 hover:text-slate-900">
+                          <input
+                            type="checkbox"
+                            checked={isColVisible(col.key)}
+                            onChange={() => toggleCol(col.key)}
+                            className="rounded border-slate-300"
+                          />
+                          {col.label}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <button
                   type="button"
                   id="btn-ozon-settings"
@@ -335,20 +408,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                     <thead>
                       <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-semibold">
                         <th className="p-3 min-w-[220px]">Товар / Кластер / Склад</th>
-                        <th className="p-3 text-right">Продано</th>
-                        <th className="p-3 text-right">Скорость</th>
-                        <th className="p-3 text-right">Доля</th>
-                        <th className="p-3 text-right">Доступно</th>
-                        <th className="p-3 text-right">Готовим</th>
-                        <th className="p-3 text-right">В заявках</th>
-                        <th className="p-3 text-right">В пути</th>
-                        <th className="p-3 text-right">Излишки</th>
-                        <th className="p-3 text-right">Возвраты</th>
-                        <th className="p-3 text-right">Прочее</th>
-                        <th className="p-3 text-right">Расчётный</th>
-                        <th className="p-3 text-right">Покрытие</th>
-                        <th className="p-3 text-right">Мой склад</th>
-                        <th className="p-3 text-right">Рекомендация</th>
+                        {isColVisible('sold') && <th className="p-3 text-right">Продано</th>}
+                        {isColVisible('speed') && <th className="p-3 text-right">Скорость</th>}
+                        {isColVisible('share') && <th className="p-3 text-right">Доля</th>}
+                        {isColVisible('available') && <th className="p-3 text-right">Доступно</th>}
+                        {isColVisible('preparing') && <th className="p-3 text-right">Готовим</th>}
+                        {isColVisible('requested') && <th className="p-3 text-right">В заявках</th>}
+                        {isColVisible('transit') && <th className="p-3 text-right">В пути</th>}
+                        {isColVisible('excess') && <th className="p-3 text-right">Излишки</th>}
+                        {isColVisible('returns') && <th className="p-3 text-right">Возвраты</th>}
+                        {isColVisible('other') && <th className="p-3 text-right">Прочее</th>}
+                        {isColVisible('estimated') && <th className="p-3 text-right">Расчётный</th>}
+                        {isColVisible('coverage') && <th className="p-3 text-right">Покрытие</th>}
+                        {isColVisible('myStock') && <th className="p-3 text-right">Мой склад</th>}
+                        {isColVisible('recommendation') && <th className="p-3 text-right">Рекомендация</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -374,26 +447,28 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   <span className="text-slate-500 truncate block text-[11px]" title={art.name}>{art.name}</span>
                                 </div>
                               </td>
-                              <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.qtySold)}</td>
-                              <td className="p-3 text-right font-semibold text-slate-800">{fmtSpeed(art.perDay)}</td>
-                              <td className="p-3 text-right text-slate-300">—</td>
-                              <td className={`p-3 text-right font-semibold ${art.totals.available === 0 ? 'text-slate-300' : 'text-slate-900'}`}>{fmtInt(art.totals.available)}</td>
-                              <td className={`p-3 text-right ${art.totals.preparing === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.preparing)}</td>
-                              <td className={`p-3 text-right ${art.totals.requested === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.requested)}</td>
-                              <td className={`p-3 text-right ${art.totals.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.transit)}</td>
-                              <td className={`p-3 text-right ${art.totals.excess === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.excess)}</td>
-                              <td className={`p-3 text-right ${art.totals.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.returns)}</td>
-                              <td className={`p-3 text-right ${art.totals.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.other)}</td>
-                              <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.totalEstimated)}</td>
-                              <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>
-                              <td className="p-3 text-right text-slate-600">{fmtInt(art.myStockAvailable)}</td>
-                              <td className="p-3 text-right">
-                                {art.recommendedQty > 0 ? (
-                                  <span className="text-indigo-600 font-bold">{fmtInt(art.recommendedQty)} шт</span>
-                                ) : (
-                                  <span className="text-slate-300">—</span>
-                                )}
-                              </td>
+                              {isColVisible('sold') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.qtySold)}</td>}
+                              {isColVisible('speed') && <td className="p-3 text-right font-semibold text-slate-800">{fmtSpeed(art.perDay)}</td>}
+                              {isColVisible('share') && <td className="p-3 text-right text-slate-300">—</td>}
+                              {isColVisible('available') && <td className={`p-3 text-right font-semibold ${art.totals.available === 0 ? 'text-slate-300' : 'text-slate-900'}`}>{fmtInt(art.totals.available)}</td>}
+                              {isColVisible('preparing') && <td className={`p-3 text-right ${art.totals.preparing === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.preparing)}</td>}
+                              {isColVisible('requested') && <td className={`p-3 text-right ${art.totals.requested === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.requested)}</td>}
+                              {isColVisible('transit') && <td className={`p-3 text-right ${art.totals.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.transit)}</td>}
+                              {isColVisible('excess') && <td className={`p-3 text-right ${art.totals.excess === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.excess)}</td>}
+                              {isColVisible('returns') && <td className={`p-3 text-right ${art.totals.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.returns)}</td>}
+                              {isColVisible('other') && <td className={`p-3 text-right ${art.totals.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.other)}</td>}
+                              {isColVisible('estimated') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.totalEstimated)}</td>}
+                              {isColVisible('coverage') && <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>}
+                              {isColVisible('myStock') && <td className="p-3 text-right text-slate-600">{fmtInt(art.myStockAvailable)}</td>}
+                              {isColVisible('recommendation') && (
+                                <td className="p-3 text-right">
+                                  {art.recommendedQty > 0 ? (
+                                    <span className="text-indigo-600 font-bold">{fmtInt(art.recommendedQty)} шт</span>
+                                  ) : (
+                                    <span className="text-slate-300">—</span>
+                                  )}
+                                </td>
+                              )}
                             </tr>
 
                             {/* LEVEL 2: CLUSTERS */}
@@ -416,28 +491,30 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         )}
                                       </div>
                                     </td>
-                                    <td className="p-2.5 text-right text-slate-700">{fmtInt(cls.qtySold)}</td>
-                                    <td className="p-2.5 text-right text-slate-700">{fmtSpeed(cls.perDay)}</td>
-                                    <td className="p-2.5 text-right text-slate-600">{cls.sharePct > 0 ? `${cls.sharePct.toFixed(1)}%` : '—'}</td>
-                                    <td className={`p-2.5 text-right ${cls.available === 0 ? 'text-slate-300' : 'text-slate-800 font-medium'}`}>{fmtInt(cls.available)}</td>
-                                    <td className="p-2.5 text-right text-slate-300">—</td>
-                                    <td className="p-2.5 text-right text-slate-300">—</td>
-                                    <td className={`p-2.5 text-right ${cls.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.transit)}</td>
-                                    <td className="p-2.5 text-right text-slate-300">—</td>
-                                    <td className={`p-2.5 text-right ${cls.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.returns)}</td>
-                                    <td className="p-2.5 text-right text-slate-300">—</td>
-                                    <td className="p-2.5 text-right font-medium text-slate-800">{fmtInt(cls.estimated)}</td>
-                                    <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>
-                                    <td className="p-2.5 text-right text-slate-300">—</td>
-                                    <td className="p-2.5 text-right">
-                                      {cls.recommendation && cls.recommendation.boxes > 0 ? (
-                                        <span className={cls.recommendation.limitedByMyStock ? 'text-amber-600 font-semibold' : 'text-indigo-600 font-semibold'}>
-                                          {fmtInt(cls.recommendation.boxes)} кор ({fmtInt(cls.recommendation.qty)} шт)
-                                        </span>
-                                      ) : (
-                                        <span className="text-slate-300">—</span>
-                                      )}
-                                    </td>
+                                    {isColVisible('sold') && <td className="p-2.5 text-right text-slate-700">{fmtInt(cls.qtySold)}</td>}
+                                    {isColVisible('speed') && <td className="p-2.5 text-right text-slate-700">{fmtSpeed(cls.perDay)}</td>}
+                                    {isColVisible('share') && <td className="p-2.5 text-right text-slate-600">{cls.sharePct > 0 ? `${cls.sharePct.toFixed(1)}%` : '—'}</td>}
+                                    {isColVisible('available') && <td className={`p-2.5 text-right ${cls.available === 0 ? 'text-slate-300' : 'text-slate-800 font-medium'}`}>{fmtInt(cls.available)}</td>}
+                                    {isColVisible('preparing') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                    {isColVisible('requested') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                    {isColVisible('transit') && <td className={`p-2.5 text-right ${cls.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.transit)}</td>}
+                                    {isColVisible('excess') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                    {isColVisible('returns') && <td className={`p-2.5 text-right ${cls.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.returns)}</td>}
+                                    {isColVisible('other') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                    {isColVisible('estimated') && <td className="p-2.5 text-right font-medium text-slate-800">{fmtInt(cls.estimated)}</td>}
+                                    {isColVisible('coverage') && <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>}
+                                    {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                    {isColVisible('recommendation') && (
+                                      <td className="p-2.5 text-right">
+                                        {cls.recommendation && cls.recommendation.boxes > 0 ? (
+                                          <span className={cls.recommendation.limitedByMyStock ? 'text-amber-600 font-semibold' : 'text-indigo-600 font-semibold'}>
+                                            {fmtInt(cls.recommendation.boxes)} кор ({fmtInt(cls.recommendation.qty)} шт)
+                                          </span>
+                                        ) : (
+                                          <span className="text-slate-300">—</span>
+                                        )}
+                                      </td>
+                                    )}
                                   </tr>
 
                                   {/* LEVEL 3: WAREHOUSES */}
@@ -455,20 +532,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                           <span className="text-slate-600 text-[11px]">{wh.warehouseName}</span>
                                         </div>
                                       </td>
-                                      <td className="p-2 text-right text-slate-300">—</td>
-                                      <td className="p-2 text-right text-slate-300">—</td>
-                                      <td className="p-2 text-right text-slate-300">—</td>
-                                      <td className={`p-2 text-right ${(wh.available || 0) === 0 ? 'text-slate-300' : 'text-slate-700'}`}>{fmtInt(wh.available)}</td>
-                                      <td className={`p-2 text-right ${(wh.preparing || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.preparing)}</td>
-                                      <td className={`p-2 text-right ${(wh.requested || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.requested)}</td>
-                                      <td className={`p-2 text-right ${(wh.transit || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.transit)}</td>
-                                      <td className={`p-2 text-right ${(wh.excess || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.excess)}</td>
-                                      <td className={`p-2 text-right ${(wh.returns || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.returns)}</td>
-                                      <td className={`p-2 text-right ${(wh.other || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.other)}</td>
-                                      <td className="p-2 text-right text-slate-300">—</td>
-                                      <td className="p-2 text-right text-slate-300">—</td>
-                                      <td className="p-2 text-right text-slate-300">—</td>
-                                      <td className="p-2 text-right text-slate-300">—</td>
+                                      {isColVisible('sold') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('speed') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('share') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('available') && <td className={`p-2 text-right ${(wh.available || 0) === 0 ? 'text-slate-300' : 'text-slate-700'}`}>{fmtInt(wh.available)}</td>}
+                                      {isColVisible('preparing') && <td className={`p-2 text-right ${(wh.preparing || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.preparing)}</td>}
+                                      {isColVisible('requested') && <td className={`p-2 text-right ${(wh.requested || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.requested)}</td>}
+                                      {isColVisible('transit') && <td className={`p-2 text-right ${(wh.transit || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.transit)}</td>}
+                                      {isColVisible('excess') && <td className={`p-2 text-right ${(wh.excess || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.excess)}</td>}
+                                      {isColVisible('returns') && <td className={`p-2 text-right ${(wh.returns || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.returns)}</td>}
+                                      {isColVisible('other') && <td className={`p-2 text-right ${(wh.other || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.other)}</td>}
+                                      {isColVisible('estimated') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('coverage') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('myStock') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('recommendation') && <td className="p-2 text-right text-slate-300">—</td>}
                                     </tr>
                                   ))}
                                 </React.Fragment>
@@ -484,20 +561,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-slate-200 text-slate-600">не в рекомендациях</span>
                                   </div>
                                 </td>
-                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundQtySold)}</td>
-                                <td className="p-2.5 text-right text-slate-300">—</td>
-                                <td className="p-2.5 text-right text-slate-300">—</td>
-                                <td className="p-2.5 text-right text-slate-700">{fmtInt(art.unboundTotals.available)}</td>
-                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.preparing)}</td>
-                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.requested)}</td>
-                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.transit)}</td>
-                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.excess)}</td>
-                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.returns)}</td>
-                                <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.other)}</td>
-                                <td className="p-2.5 text-right font-medium text-slate-700">{fmtInt(art.unboundEstimated)}</td>
-                                <td className="p-2.5 text-right text-slate-300">—</td>
-                                <td className="p-2.5 text-right text-slate-300">—</td>
-                                <td className="p-2.5 text-right text-slate-300">—</td>
+                                {isColVisible('sold') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundQtySold)}</td>}
+                                {isColVisible('speed') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('share') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('available') && <td className="p-2.5 text-right text-slate-700">{fmtInt(art.unboundTotals.available)}</td>}
+                                {isColVisible('preparing') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.preparing)}</td>}
+                                {isColVisible('requested') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.requested)}</td>}
+                                {isColVisible('transit') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.transit)}</td>}
+                                {isColVisible('excess') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.excess)}</td>}
+                                {isColVisible('returns') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.returns)}</td>}
+                                {isColVisible('other') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.other)}</td>}
+                                {isColVisible('estimated') && <td className="p-2.5 text-right font-medium text-slate-700">{fmtInt(art.unboundEstimated)}</td>}
+                                {isColVisible('coverage') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('recommendation') && <td className="p-2.5 text-right text-slate-300">—</td>}
                               </tr>
                             )}
                           </React.Fragment>
