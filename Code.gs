@@ -3059,15 +3059,33 @@ function saveOzonSettings(data) {
       const strVal = String(rawVal || '').trim();
       if (!strVal) {
         keysToSave[k] = '';
-      } else {
-        const parts = strVal.split(',').map(s => s.trim()).filter(Boolean);
-        for (let p = 0; p < parts.length; p++) {
-          if (!/^\d+$/.test(parts[p])) {
-            throw new Error('Значение настройки "' + k + '" должно быть списком числовых КластерID через запятую');
-          }
-        }
-        keysToSave[k] = parts.join(',');
+        continue;
       }
+      const parts = strVal.split(',').map(s => s.trim()).filter(Boolean);
+      if (k === 'priorityClusters') {
+        // Формат элемента: «КластерID:коэффициент», коэффициент — число не меньше 1
+        const normalized = [];
+        for (let p = 0; p < parts.length; p++) {
+          const pair = parts[p].split(':');
+          const id = String(pair[0] || '').trim();
+          const coef = Number(String(pair[1] || '').trim());
+          if (!/^\d+$/.test(id)) {
+            throw new Error('Настройка "priorityClusters": КластерID должен быть числом, получено "' + parts[p] + '"');
+          }
+          if (!Number.isFinite(coef) || coef < 1) {
+            throw new Error('Настройка "priorityClusters": коэффициент должен быть числом не меньше 1, получено "' + parts[p] + '"');
+          }
+          normalized.push(id + ':' + coef);
+        }
+        keysToSave[k] = normalized.join(',');
+        continue;
+      }
+      for (let p = 0; p < parts.length; p++) {
+        if (!/^\d+$/.test(parts[p])) {
+          throw new Error('Значение настройки "' + k + '" должно быть списком числовых КластерID через запятую');
+        }
+      }
+      keysToSave[k] = parts.join(',');
       continue;
     }
 
