@@ -3,6 +3,10 @@
 ## [2026-07-27]
 
 ### Добавлено
+- Создание модуля чистых функций планирования поставок Ozon (`src/lib/ozonCoverage.ts`):
+  - Хелперы для работы с неделями по московскому времени (`getMskWeekMonday`, `getLastFullWeeks`).
+  - Функция сопоставления артикула Ozon с внутренним SKU (`resolveOzonArticle`).
+  - Расчёт общей и потоваровной скорости продаж, а также долей кластеров (`buildSalesSpeed`).
 - Загрузка данных продаж Ozon на фронтенде (`src/types.ts`, `src/store/useWarehouseStore.ts`):
   - Добавлен интерфейс `OzonSalesRow` для представления записи продаж Ozon.
   - В Zustand-стор `useWarehouseStore` добавлены поле `ozonSales: OzonSalesRow[]` и асинхронный метод `fetchOzonSales()`.
