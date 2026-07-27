@@ -1,15 +1,17 @@
 import { ExternalShipment, SKUItem } from '../types';
 import { detectPeresort } from './ozonPeresort';
+import { OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
 
-export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit';
+export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit' | 'supply_needed' | 'factory_order';
 
 export interface OzonAlert {
   key: string;            // `${postingId}:${type}` — уникальный ключ для скрытия
-  postingId: string;
+  postingId?: string;
+  article?: string;
   orderNumber?: string;
   cabinet?: string;
   type: OzonAlertType;
-  severity: 'red' | 'amber' | 'violet';
+  severity: 'red' | 'amber' | 'violet' | 'sky' | 'orange';
   title: string;          // короткий заголовок по-русски
   description: string;    // детали по-русски
 }
@@ -198,3 +200,124 @@ export function buildOzonAlerts(shipments: ExternalShipment[], skus: SKUItem[]):
 
   return [...redAlerts, ...violetAlerts, ...amberAlerts];
 }
+
+export function buildCoverageAlerts(
+  coverage: OzonCoverageResult | null,
+  settings: OzonCoverageSettings,
+  orderedArticles: string[],
+  namesByArticle: Record<string, string>
+): OzonAlert[] {
+  if (!coverage || !coverage.articles || !Array.isArray(coverage.articles) || coverage.articles.length === 0) {
+    return [];
+  }
+
+  const orderedSet = new Set(
+    (orderedArticles || []).map(a => String(a || '').trim().toLowerCase())
+  );
+
+  const factoryItems: { alert: OzonAlert; daysLeft: number }[] = [];
+  const supplyItems: { alert: OzonAlert; minCoverageDays: number }[] = [];
+
+  for (const art of coverage.articles) {
+    const artKey = String(art.article || '').trim().toLowerCase();
+    const name = namesByArticle && namesByArticle[art.article] ? String(namesByArticle[art.article]).trim() : '';
+    const namePart = name ? `${art.article} — ${name}` : art.article;
+
+    // АЛЕРТ «ПОРА ЗАКАЗАТЬ НА ФАБРИКЕ»
+    if (art.factory && !orderedSet.has(artKey)) {
+      let reasonText = '';
+      if (art.factory.reason === 'total') {
+        const threshold = Math.round((Number(art.leadTimeDays) || 0) + settings.minStockDays);
+        reasonText = `хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${threshold} дн.`;
+      } else if (art.factory.reason === 'clusterDeficit') {
+        reasonText = `кластерам нужно ${Math.round(art.factory.unmetDeficitQty)} шт, на своём складе нет`;
+      }
+
+      const orderText = `заказать ${Math.round(art.factory.orderQty)} шт (${art.factory.orderBoxes} кор.)`;
+      const description = `${namePart} · ${reasonText} · ${orderText}`;
+
+      factoryItems.push({
+        alert: {
+          key: `factory:${art.article}:${art.factory.orderQty}`,
+          article: art.article,
+          type: 'factory_order',
+          severity: 'orange',
+          title: 'Пора заказать на фабрике',
+          description
+        },
+        daysLeft: art.factory.daysLeft
+      });
+    }
+
+    // АЛЕРТ «ПОРА СДЕЛАТЬ ПОСТАВКУ»
+    if (art.clusters && Array.isArray(art.clusters)) {
+      const selectedClusters = art.clusters.filter(cls =>
+        cls.recommendation !== null &&
+        (cls.recommendation.boxes > 0 || cls.unmetQty > 0)
+      );
+
+      if (selectedClusters.length > 0) {
+        let totalQty = 0;
+        let totalUnmet = 0;
+
+        for (const cls of selectedClusters) {
+          if (cls.recommendation) {
+            totalQty += cls.recommendation.qty;
+          }
+          totalUnmet += (cls.unmetQty || 0);
+        }
+
+        const sortedClusters = [...selectedClusters].sort((a, b) => {
+          const ca = a.coverageDays === null ? Number.POSITIVE_INFINITY : a.coverageDays;
+          const cb = b.coverageDays === null ? Number.POSITIVE_INFINITY : b.coverageDays;
+          return ca - cb;
+        });
+
+        const top3 = sortedClusters.slice(0, 3);
+        const clusterTexts = top3.map(cls => {
+          if (cls.recommendation && cls.recommendation.boxes > 0) {
+            let t = `${cls.clusterName}: ${cls.recommendation.boxes} кор. (${Math.round(cls.recommendation.qty)} шт)`;
+            if (cls.unmetQty > 0) {
+              t += `, не хватает ${Math.round(cls.unmetQty)} шт`;
+            }
+            return t;
+          } else {
+            return `${cls.clusterName}: нужно ${Math.round(cls.unmetQty)} шт — нет на своём складе`;
+          }
+        });
+
+        let clusterStr = clusterTexts.join('; ');
+        if (selectedClusters.length > 3) {
+          clusterStr += ` и ещё ${selectedClusters.length - 3} кластер(ов)`;
+        }
+
+        const description = `${namePart} · ${clusterStr}`;
+
+        const minCoverageDays = Math.min(
+          ...selectedClusters.map(cls => cls.coverageDays === null ? Number.POSITIVE_INFINITY : cls.coverageDays)
+        );
+
+        supplyItems.push({
+          alert: {
+            key: `supply:${art.article}:${Math.round(totalQty)}:${Math.round(totalUnmet)}`,
+            article: art.article,
+            type: 'supply_needed',
+            severity: 'sky',
+            title: 'Пора сделать поставку на Ozon',
+            description
+          },
+          minCoverageDays
+        });
+      }
+    }
+  }
+
+  factoryItems.sort((a, b) => a.daysLeft - b.daysLeft);
+  supplyItems.sort((a, b) => a.minCoverageDays - b.minCoverageDays);
+
+  return [
+    ...factoryItems.map(item => item.alert),
+    ...supplyItems.map(item => item.alert)
+  ];
+}
+
