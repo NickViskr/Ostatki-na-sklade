@@ -178,12 +178,13 @@ function doPost(e) {
     
     // Читающие Ozon-экшены обслуживаются без LockService: они только читают листы,
     // а захват общего замка приводил к таймаутам при параллельной загрузке вкладки «Остатки Озон».
-    if (action === 'getOzonStocks' || action === 'getOzonSales' || action === 'getOzonSyncStatus' || action === 'getOzonSettings' || action === 'getOzonClusters') {
+    if (action === 'getOzonStocks' || action === 'getOzonSales' || action === 'getOzonSyncStatus' || action === 'getOzonSettings' || action === 'getOzonClusters' || action === 'getFactoryOrders') {
       let readResult;
       if (action === 'getOzonStocks') readResult = getOzonStocks();
       else if (action === 'getOzonSales') readResult = getOzonSales();
       else if (action === 'getOzonSyncStatus') readResult = getOzonSyncStatusInfo();
       else if (action === 'getOzonSettings') readResult = getOzonSettings();
+      else if (action === 'getFactoryOrders') readResult = getFactoryOrders();
       else readResult = getOzonClusters();
       return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: readResult }))
         .setMimeType(ContentService.MimeType.JSON);
@@ -366,6 +367,8 @@ function doPost(e) {
       case 'saveOzonClusters': result = saveOzonClusters(data); break;
       case 'getOzonClusters': result = getOzonClusters(); break;
       case 'markOzonClustersNotified': result = markOzonClustersNotified(); break;
+      case 'saveFactoryOrder': assertAdmin(currentUser); result = saveFactoryOrder(data, currentUser.username); break;
+      case 'setFactoryOrderReceived': assertAdmin(currentUser); result = setFactoryOrderReceived(data, currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -413,6 +416,7 @@ const OZON_STOCKS_HEADERS = [
 const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено', 'Дней'];
 const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
 const OZON_CLUSTERS_HEADERS = ['КластерID', 'Название', 'Добавлен', 'Уведомлён'];
+const FACTORY_ORDERS_HEADERS = ['ID', 'Артикул', 'Дата заказа', 'Количество', 'Ожидаемое прибытие', 'Комментарий', 'Кто', 'Статус', 'Дата получения'];
 const OZON_SETTINGS_DEFAULTS = [
   { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
   { key: 'minStockDays',        value: 7,  desc: 'Неснижаемый остаток, дней продаж' },
@@ -5160,6 +5164,143 @@ function getOzonSyncStatusInfo() {
     target: target,
     lastRun: lastRun
   };
+}
+
+// ===== Заказы на фабрике (пункт 22, этап F) =====
+// Лист хранит факт размещения заказа у производителя. На остатки и себестоимость
+// не влияет: заказанный товар физически не лежит ни на Ozon, ни на своём складе.
+
+function getFactoryOrdersSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Заказы на фабрике', FACTORY_ORDERS_HEADERS);
+  ensureColumns(sheet, FACTORY_ORDERS_HEADERS);
+  return sheet;
+}
+
+function readFactoryOrdersSheet() {
+  const sheet = getFactoryOrdersSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), FACTORY_ORDERS_HEADERS.length);
+  const values = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = values[0].map(function (h) { return String(h).trim(); });
+  const idx = {};
+  FACTORY_ORDERS_HEADERS.forEach(function (h) {
+    idx[h] = headers.indexOf(h);
+    if (idx[h] === -1) {
+      throw new Error('Колонка "' + h + '" не найдена в листе "Заказы на фабрике"');
+    }
+  });
+  return { sheet: sheet, values: values, idx: idx };
+}
+
+function normalizeFactoryDate(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd');
+  }
+  const str = String(value).trim();
+  if (!str) return '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    throw new Error('Дата должна быть в формате ГГГГ-ММ-ДД, получено "' + str + '"');
+  }
+  return str;
+}
+
+function getFactoryOrders() {
+  const ctx = readFactoryOrdersSheet();
+  const result = [];
+  for (let i = 1; i < ctx.values.length; i++) {
+    const row = ctx.values[i];
+    if (row.join('').trim() === '') continue;
+    const id = String(row[ctx.idx['ID']] || '').trim();
+    if (!id) continue;
+    result.push({
+      id: id,
+      article: String(row[ctx.idx['Артикул']] || '').trim(),
+      orderedAt: normalizeFactoryDate(row[ctx.idx['Дата заказа']]),
+      qty: Number(row[ctx.idx['Количество']]) || 0,
+      expectedAt: normalizeFactoryDate(row[ctx.idx['Ожидаемое прибытие']]),
+      comment: String(row[ctx.idx['Комментарий']] || '').trim(),
+      user: String(row[ctx.idx['Кто']] || '').trim(),
+      status: String(row[ctx.idx['Статус']] || '').trim() || 'active',
+      receivedAt: normalizeFactoryDate(row[ctx.idx['Дата получения']])
+    });
+  }
+  return result;
+}
+
+function saveFactoryOrder(data, username) {
+  if (!data || typeof data !== 'object') throw new Error('Некорректные данные заказа на фабрике');
+  const article = String(data.article || '').trim();
+  if (!article) throw new Error('Не указан артикул заказа на фабрике');
+  const qty = Number(data.qty);
+  if (!isFinite(qty) || qty <= 0) throw new Error('Количество заказа должно быть больше нуля');
+  const expectedAt = normalizeFactoryDate(data.expectedAt);
+  const orderedAt = normalizeFactoryDate(data.orderedAt) || getTodayDateString();
+  const comment = String(data.comment || '').trim();
+  const requestedId = String(data.id || '').trim();
+
+  const ctx = readFactoryOrdersSheet();
+  let targetRow = -1;
+  for (let i = 1; i < ctx.values.length; i++) {
+    const row = ctx.values[i];
+    if (row.join('').trim() === '') continue;
+    const rowId = String(row[ctx.idx['ID']] || '').trim();
+    if (!rowId) continue;
+    if (requestedId) {
+      if (rowId === requestedId) { targetRow = i + 1; break; }
+    } else {
+      const rowArticle = String(row[ctx.idx['Артикул']] || '').trim();
+      const rowStatus = String(row[ctx.idx['Статус']] || '').trim() || 'active';
+      if (rowArticle === article && rowStatus === 'active') { targetRow = i + 1; break; }
+    }
+  }
+
+  if (requestedId && targetRow === -1) throw new Error('Заказ на фабрике не найден: ' + requestedId);
+
+  if (targetRow === -1) {
+    const width = Math.max(ctx.values[0].length, FACTORY_ORDERS_HEADERS.length);
+    const newRow = [];
+    for (let c = 0; c < width; c++) newRow.push('');
+    newRow[ctx.idx['ID']] = Utilities.getUuid();
+    newRow[ctx.idx['Артикул']] = article;
+    newRow[ctx.idx['Дата заказа']] = orderedAt;
+    newRow[ctx.idx['Количество']] = qty;
+    newRow[ctx.idx['Ожидаемое прибытие']] = expectedAt;
+    newRow[ctx.idx['Комментарий']] = comment;
+    newRow[ctx.idx['Кто']] = username || '';
+    newRow[ctx.idx['Статус']] = 'active';
+    newRow[ctx.idx['Дата получения']] = '';
+    ctx.sheet.appendRow(newRow);
+  } else {
+    ctx.sheet.getRange(targetRow, ctx.idx['Артикул'] + 1).setValue(article);
+    ctx.sheet.getRange(targetRow, ctx.idx['Дата заказа'] + 1).setValue(orderedAt);
+    ctx.sheet.getRange(targetRow, ctx.idx['Количество'] + 1).setValue(qty);
+    ctx.sheet.getRange(targetRow, ctx.idx['Ожидаемое прибытие'] + 1).setValue(expectedAt);
+    ctx.sheet.getRange(targetRow, ctx.idx['Комментарий'] + 1).setValue(comment);
+    ctx.sheet.getRange(targetRow, ctx.idx['Кто'] + 1).setValue(username || '');
+    ctx.sheet.getRange(targetRow, ctx.idx['Статус'] + 1).setValue('active');
+    ctx.sheet.getRange(targetRow, ctx.idx['Дата получения'] + 1).setValue('');
+  }
+
+  SpreadsheetApp.flush();
+  return getFactoryOrders();
+}
+
+function setFactoryOrderReceived(data, username) {
+  const id = data ? String(data.id || '').trim() : '';
+  if (!id) throw new Error('Не указан идентификатор заказа на фабрике');
+  const ctx = readFactoryOrdersSheet();
+  let targetRow = -1;
+  for (let i = 1; i < ctx.values.length; i++) {
+    const rowId = String(ctx.values[i][ctx.idx['ID']] || '').trim();
+    if (rowId === id) { targetRow = i + 1; break; }
+  }
+  if (targetRow === -1) throw new Error('Заказ на фабрике не найден: ' + id);
+  ctx.sheet.getRange(targetRow, ctx.idx['Статус'] + 1).setValue('received');
+  ctx.sheet.getRange(targetRow, ctx.idx['Дата получения'] + 1).setValue(getTodayDateString());
+  SpreadsheetApp.flush();
+  return getFactoryOrders();
 }
 
 
