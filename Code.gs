@@ -176,6 +176,19 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
     
+    // Читающие Ozon-экшены обслуживаются без LockService: они только читают листы,
+    // а захват общего замка приводил к таймаутам при параллельной загрузке вкладки «Остатки Озон».
+    if (action === 'getOzonStocks' || action === 'getOzonSales' || action === 'getOzonSyncStatus' || action === 'getOzonSettings' || action === 'getOzonClusters') {
+      let readResult;
+      if (action === 'getOzonStocks') readResult = getOzonStocks();
+      else if (action === 'getOzonSales') readResult = getOzonSales();
+      else if (action === 'getOzonSyncStatus') readResult = getOzonSyncStatusInfo();
+      else if (action === 'getOzonSettings') readResult = getOzonSettings();
+      else readResult = getOzonClusters();
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: readResult }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // For other actions, acquire the script lock
     lock = LockService.getScriptLock();
     lock.waitLock(10000);

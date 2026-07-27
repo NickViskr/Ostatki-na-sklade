@@ -3,6 +3,9 @@
 ## [2026-07-27]
 
 ### Добавлено
+- Оптимизация параллельной загрузки вкладки «Остатки Озон» в `Code.gs`:
+  - Добавлена прямая обработка читающих экшенов (`getOzonStocks`, `getOzonSales`, `getOzonSyncStatus`, `getOzonSettings`, `getOzonClusters`) без захвата `LockService.getScriptLock()`.
+  - Устранены таймауты при одновременной отправке читающих запросов клиентом во время работы фоновой синхронизации Ozon.
 - Панель фильтров и сводка долей кластеров таблицы «Остатки Озон» (`src/components/OzonStocksTab.tsx`):
   - Панель фильтров (`#ozon-stocks-filters`): текстовый поиск по артикулу/названию (`#ozon-search-input`), селектор фильтрации по кабинету Ozon (`#ozon-cabinet-filter`), чекбокс «Только с рекомендациями» (`#ozon-only-rec-toggle`) и счётчик товаров.
   - Предварительная фильтрация остатков и продаж по кабинету в `filteredOzonStocks` и `filteredOzonSales` до расчёта покрытия `buildOzonCoverage`.
