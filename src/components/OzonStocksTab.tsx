@@ -2,8 +2,9 @@ import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronRight, Columns3, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { OzonStockRow } from '../types';
+import { OzonStockRow, FactoryOrder } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
+import { FactoryOrderModal } from './FactoryOrderModal';
 import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, resolveOzonArticle } from '../lib/ozonCoverage';
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
@@ -53,6 +54,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const kits = useWarehouseStore((state) => state.kits);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
   const rawStocks = useWarehouseStore((state) => state.stock);
+  const factoryOrders = useWarehouseStore((state) => state.factoryOrders);
+  const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
 
   const [showSettings, setShowSettings] = useState(false);
   const [expandedArticles, setExpandedArticles] = useState<Record<string, boolean>>({});
@@ -72,6 +75,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyWithRecommendations, setOnlyWithRecommendations] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [factoryModalArticle, setFactoryModalArticle] = useState<string | null>(null);
 
   const [showColsMenu, setShowColsMenu] = useState(false);
   const [hiddenCols, setHiddenCols] = useState<string[]>(() => {
@@ -134,8 +138,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     if (isAdmin) {
       fetchOzonStocks();
       fetchOzonSales();
+      fetchFactoryOrders();
     }
-  }, [isAdmin, fetchOzonStocks, fetchOzonSales]);
+  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -354,6 +359,29 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       .sort((a, b) => b.qty - a.qty);
     return { list, total };
   }, [coverageRows]);
+
+  const fmtDateShort = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}` : '');
+  const fmtDateFull = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : '—');
+
+  const todayIso = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }, []);
+
+  const activeFactoryOrders = useMemo(() => {
+    const map: Record<string, FactoryOrder> = {};
+    for (const o of factoryOrders || []) {
+      if (String(o.status || '').trim() === 'received') continue;
+      const key = String(o.article || '').trim();
+      if (key) map[key] = o;
+    }
+    return map;
+  }, [factoryOrders]);
+
+  const factoryModalRow = useMemo(() => {
+    if (!factoryModalArticle) return null;
+    return (coverageRows as any[]).find((r) => r.article === factoryModalArticle) || null;
+  }, [coverageRows, factoryModalArticle]);
 
   if (!isAdmin) return null;
 
@@ -654,6 +682,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                     <tbody>
                       {visibleRows.map((art: any) => {
                         const isArtExpanded = !!expandedArticles[art.article];
+                        const factoryOrder = activeFactoryOrders[art.article] || null;
+                        const factoryOverdue = !!(factoryOrder && factoryOrder.expectedAt && factoryOrder.expectedAt < todayIso);
+                        const factoryBox = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
                         return (
                           <React.Fragment key={art.article}>
                             {/* LEVEL 1: ARTICLE */}
@@ -712,20 +743,40 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               )}
                               {isColVisible('factory') && (
                                 <td className="p-3 text-right">
-                                  {art.factory ? (
-                                    <span
-                                      className="text-rose-600 font-bold"
+                                  {factoryOrder ? (
+                                    <span className="relative inline-flex group justify-end">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
+                                        className={`text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors ${factoryOverdue ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}
+                                      >
+                                        {factoryOverdue ? `ждали ${fmtDateShort(factoryOrder.expectedAt)}` : `заказ · ${fmtDateShort(factoryOrder.expectedAt)}`}
+                                      </button>
+                                      <span className="pointer-events-none absolute right-0 top-full mt-1 z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal normal-case text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-normal">
+                                        Заказано {fmtInt(factoryOrder.qty)} шт ({fmtInt(Math.ceil(factoryOrder.qty / factoryBox))} кор)<br />
+                                        Размещён: {fmtDateFull(factoryOrder.orderedAt)}<br />
+                                        Ожидается: {fmtDateFull(factoryOrder.expectedAt)}{factoryOverdue ? ' — срок прошёл' : ''}<br />
+                                        {factoryOrder.comment ? <>Комментарий: {factoryOrder.comment}<br /></> : null}
+                                        {factoryOrder.user ? <>Отметил: {factoryOrder.user}<br /></> : null}
+                                        Нажми, чтобы изменить заказ или отметить приход партии.
+                                      </span>
+                                    </span>
+                                  ) : art.factory ? (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
+                                      className="text-rose-600 font-bold text-right hover:underline"
                                       title={
-                                        art.factory.reason === 'clusterDeficit'
+                                        (art.factory.reason === 'clusterDeficit'
                                           ? `Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, а на Моём складе товара нет: между кластерами Ozon остаток не перебросить, взять можно только с фабрики. Общего запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при сроке поставки ${art.leadTimeDays || 0} дн.`
-                                          : `Товар кончается везде: общего запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас).`
+                                          : `Товар кончается везде: общего запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас).`) + ' Нажми, чтобы отметить размещённый заказ.'
                                       }
                                     >
                                       {fmtInt(art.factory.orderQty)} шт
                                       <span className="block text-[10px] font-semibold text-rose-400">
                                         {fmtInt(art.factory.orderBoxes)} кор · {art.factory.reason === 'clusterDeficit' ? 'нечем пополнить' : 'кончается везде'}
                                       </span>
-                                    </span>
+                                    </button>
                                   ) : (Number(art.leadTimeDays) || 0) === 0 ? (
                                     <span
                                       className="text-[10px] font-semibold text-slate-400"
@@ -910,6 +961,18 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           </div>
       </div>
       <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
+      {factoryModalArticle && (
+        <FactoryOrderModal
+          isOpen={true}
+          onClose={() => setFactoryModalArticle(null)}
+          article={factoryModalArticle}
+          productName={factoryModalRow ? factoryModalRow.name : ''}
+          suggestedQty={factoryModalRow && factoryModalRow.factory ? factoryModalRow.factory.orderQty : 0}
+          pcsPerBox={factoryModalRow ? factoryModalRow.pcsPerBox : 1}
+          leadTimeDays={factoryModalRow ? factoryModalRow.leadTimeDays : 0}
+          order={activeFactoryOrders[factoryModalArticle] || null}
+        />
+      )}
     </div>
   );
 });
