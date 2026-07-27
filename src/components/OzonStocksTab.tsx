@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Columns3, RefreshCw, Search, Settings } from 'lucide-react';
+import { ChevronDown, ChevronRight, Columns3, HelpCircle, RefreshCw, Search, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
@@ -26,6 +26,15 @@ const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
 ];
 
 const OZON_DEFAULT_HIDDEN_COLS = ['preparing', 'requested', 'excess', 'other'];
+
+const ColHint: React.FC<{ text: string }> = ({ text }) => (
+  <span className="relative inline-flex group align-middle ml-1">
+    <HelpCircle size={12} className="text-slate-300 hover:text-indigo-500 cursor-help" />
+    <span className="pointer-events-none absolute right-0 top-full mt-2 z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal normal-case text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-normal">
+      {text}
+    </span>
+  </span>
+);
 
 export const OzonStocksTab: React.FC = React.memo(() => {
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -483,21 +492,94 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                   <table className="w-full text-left border-collapse text-xs" id="ozon-stocks-table">
                     <thead>
                       <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-semibold">
-                        <th className="p-3 min-w-[220px]">Товар / Кластер / Склад</th>
-                        {isColVisible('sold') && <th className="p-3 text-right">Продано</th>}
-                        {isColVisible('speed') && <th className="p-3 text-right">Скорость</th>}
-                        {isColVisible('share') && <th className="p-3 text-right">Доля</th>}
-                        {isColVisible('available') && <th className="p-3 text-right">Доступно</th>}
-                        {isColVisible('preparing') && <th className="p-3 text-right">Готовим</th>}
-                        {isColVisible('requested') && <th className="p-3 text-right">В заявках</th>}
-                        {isColVisible('transit') && <th className="p-3 text-right">В пути</th>}
-                        {isColVisible('excess') && <th className="p-3 text-right">Излишки</th>}
-                        {isColVisible('returns') && <th className="p-3 text-right">Возвраты</th>}
-                        {isColVisible('other') && <th className="p-3 text-right">Прочее</th>}
-                        {isColVisible('estimated') && <th className="p-3 text-right">Расчётный</th>}
-                        {isColVisible('coverage') && <th className="p-3 text-right">Покрытие</th>}
-                        {isColVisible('myStock') && <th className="p-3 text-right">Мой склад</th>}
-                        {isColVisible('recommendation') && <th className="p-3 text-right">Рекомендация</th>}
+                        <th className="p-3 min-w-[220px]">
+                          Товар / Кластер / Склад
+                          <ColHint text="Три уровня: строка товара — итог по всем складам Ozon; строка кластера — регион доставки; строка склада — конкретный склад Ozon внутри кластера. Нажми на строку, чтобы раскрыть уровень ниже." />
+                        </th>
+                        {isColVisible('sold') && (
+                          <th className="p-3 text-right">
+                            Продано
+                            <ColHint text="Сколько штук продано за расчётное окно. Длина окна задаётся в настройках Ozon полем «Недель для расчёта скорости». Продажи берутся из отчёта Ozon, не из твоих отгрузок." />
+                          </th>
+                        )}
+                        {isColVisible('speed') && (
+                          <th className="p-3 text-right">
+                            Скорость
+                            <ColHint text="Средние продажи в штуках за день: продано за окно ÷ число дней окна. На этой скорости строятся покрытие и рекомендации." />
+                          </th>
+                        )}
+                        {isColVisible('share') && (
+                          <th className="p-3 text-right">
+                            Доля
+                            <ColHint text="Какую часть продаж товара даёт этот кластер. Показывает, куда реально уходит товар и где запас нужен в первую очередь." />
+                          </th>
+                        )}
+                        {isColVisible('available') && (
+                          <th className="p-3 text-right">
+                            Доступно
+                            <ColHint text="Товар лежит на складе Ozon и продаётся прямо сейчас." />
+                          </th>
+                        )}
+                        {isColVisible('preparing') && (
+                          <th className="p-3 text-right">
+                            Готовим
+                            <ColHint text="Ozon готовит товар к отгрузке покупателю: он уже зарезервирован и в продаже не участвует." />
+                          </th>
+                        )}
+                        {isColVisible('requested') && (
+                          <th className="p-3 text-right">
+                            В заявках
+                            <ColHint text="Товар заявлен к вывозу или перемещению по заявке в личном кабинете Ozon." />
+                          </th>
+                        )}
+                        {isColVisible('transit') && (
+                          <th className="p-3 text-right">
+                            В пути
+                            <ColHint text="Товар едет на склад Ozon и скоро встанет в продажу. Учитывается в расчётном остатке." />
+                          </th>
+                        )}
+                        {isColVisible('excess') && (
+                          <th className="p-3 text-right">
+                            Излишки
+                            <ColHint text="Товар, найденный складом Ozon сверх принятого количества. В расчётный остаток не входит." />
+                          </th>
+                        )}
+                        {isColVisible('returns') && (
+                          <th className="p-3 text-right">
+                            Возвраты
+                            <ColHint text="Возвраты от покупателей на складе Ozon. В расчётный остаток попадает не весь объём, а доля, заданная в настройках полем «% возвратов, возвращающихся в продажу»." />
+                          </th>
+                        )}
+                        {isColVisible('other') && (
+                          <th className="p-3 text-right">
+                            Прочее
+                            <ColHint text="Остальные состояния товара на складе Ozon: брак, утилизация, разбирательства. В расчётный остаток не входит." />
+                          </th>
+                        )}
+                        {isColVisible('estimated') && (
+                          <th className="p-3 text-right">
+                            Расчётный
+                            <ColHint text="На сколько штук реально можно рассчитывать: доступно + в пути + доля возвратов. Именно эта величина сравнивается с целевым запасом." />
+                          </th>
+                        )}
+                        {isColVisible('coverage') && (
+                          <th className="p-3 text-right">
+                            Покрытие
+                            <ColHint text="На сколько дней хватит расчётного остатка сверх неснижаемого запаса. Красный — запас уже ниже неснижаемого, жёлтый — ниже целевого, зелёный — норма. «∞» означает, что продаж нет, а остаток есть." />
+                          </th>
+                        )}
+                        {isColVisible('myStock') && (
+                          <th className="p-3 text-right">
+                            Мой склад
+                            <ColHint text="Свободный остаток этого артикула на твоём складе. Это потолок поставки: рекомендация не может превышать то, что есть в наличии. Для виртуальных комплектов — доступность по компонентам." />
+                          </th>
+                        )}
+                        {isColVisible('recommendation') && (
+                          <th className="p-3 text-right">
+                            Рекомендация
+                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Всегда кратно коробке. Оранжевый цвет означает, что поставка урезана нехваткой на твоём складе. У товара показана сумма по всем его кластерам." />
+                          </th>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
