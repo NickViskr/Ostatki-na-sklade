@@ -420,9 +420,10 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'factoryOrderDays',    value: 60, desc: 'Объём заказа на фабрике, дней' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
-  { key: 'excludedClusters',    value: '', desc: 'КластерID без поставок, через запятую' }
+  { key: 'excludedClusters',    value: '', desc: 'КластерID без поставок, через запятую' },
+  { key: 'priorityClusters',    value: '', desc: 'Приоритетные кластеры в формате КластерID:коэффициент, через запятую' }
 ];
-const OZON_SETTINGS_STRING_KEYS = ['excludedClusters'];
+const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters'];
 const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
 const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
 const OZON_SALES_PERIOD_ANCHOR_MS = Date.parse('2024-01-01T00:00:00Z'); // понедельник — якорь 28-дневных блоков
