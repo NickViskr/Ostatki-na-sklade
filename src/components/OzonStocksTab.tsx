@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
+import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
 
 export const OzonStocksTab: React.FC = React.memo(() => {
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -15,10 +16,24 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const runOzonStocksSync = useWarehouseStore((state) => state.runOzonStocksSync);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
+  const ozonSales = useWarehouseStore((state) => state.ozonSales);
+  const fetchOzonSales = useWarehouseStore((state) => state.fetchOzonSales);
+  const skus = useWarehouseStore((state) => state.skus);
+  const kits = useWarehouseStore((state) => state.kits);
+  const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
 
   const [isOzonStocksCollapsed, setIsOzonStocksCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [expandedOfferKeys, setExpandedOfferKeys] = useState<Record<string, boolean>>({});
+  const [ozonSettings, setOzonSettings] = useState<OzonCoverageSettings>({
+    speedWeeks: 4,
+    minStockDays: 7,
+    targetStockDays: 30,
+    factoryOrderDays: 60,
+    returnsToSalePct: 80,
+    excludedClusters: '',
+  });
+  const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
 
   const notifyCheckDone = useRef(false);
 
@@ -55,8 +70,33 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   useEffect(() => {
     if (isAdmin) {
       fetchOzonStocks();
+      fetchOzonSales();
     }
-  }, [isAdmin, fetchOzonStocks]);
+  }, [isAdmin, fetchOzonStocks, fetchOzonSales]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    fetchGas('getOzonSettings').then((res) => {
+      if (res?.status === 'success' && res.data) {
+        setOzonSettings({
+          speedWeeks: Number(res.data.speedWeeks) || 4,
+          minStockDays: Number(res.data.minStockDays) || 7,
+          targetStockDays: Number(res.data.targetStockDays) || 30,
+          factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
+          returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
+          excludedClusters: String(res.data.excludedClusters || ''),
+        });
+      }
+    }).catch((err) => console.error('getOzonSettings error:', err));
+    fetchGas('getOzonClusters').then((res) => {
+      if (res?.status === 'success' && Array.isArray(res.data)) {
+        setClusterRefs(res.data.map((item: any) => ({
+          clusterId: String(item.clusterId || '').trim(),
+          clusterName: String(item.clusterName || '').trim(),
+        })).filter((item: any) => Boolean(item.clusterId)));
+      }
+    }).catch((err) => console.error('getOzonClusters error:', err));
+  }, [isAdmin, fetchGas]);
 
   const toggleOfferKey = (key: string) => {
     setExpandedOfferKeys(prev => ({
@@ -136,6 +176,26 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
     return Object.values(map).sort((a: any, b: any) => b.available - a.available);
   }, [ozonStocks]);
+
+  const coverage = useMemo<OzonCoverageResult | null>(() => {
+    if (!ozonStocks || ozonStocks.length === 0) return null;
+    const articleSet = new Set<string>();
+    for (const s of ozonStocks) {
+      if (s.offerId) articleSet.add(String(s.offerId));
+    }
+    const myStockAvailability: Record<string, number> = {};
+    for (const s of skus) {
+      myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
+    }
+    return buildOzonCoverage({
+      stocks: ozonStocks,
+      sales: ozonSales,
+      skus,
+      clusters: clusterRefs,
+      settings: ozonSettings,
+      myStockAvailability,
+    });
+  }, [ozonStocks, ozonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability]);
 
   if (!isAdmin) return null;
 
