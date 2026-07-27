@@ -1,10 +1,10 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, RefreshCw, Settings } from 'lucide-react';
+import { ChevronDown, ChevronRight, RefreshCw, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
-import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
+import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, ArticleCoverage, resolveOzonArticle } from '../lib/ozonCoverage';
 
 export const OzonStocksTab: React.FC = React.memo(() => {
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -21,10 +21,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const skus = useWarehouseStore((state) => state.skus);
   const kits = useWarehouseStore((state) => state.kits);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
+  const rawStocks = useWarehouseStore((state) => state.stock);
 
   const [isOzonStocksCollapsed, setIsOzonStocksCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [expandedOfferKeys, setExpandedOfferKeys] = useState<Record<string, boolean>>({});
+  const [expandedArticles, setExpandedArticles] = useState<Record<string, boolean>>({});
+  const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
   const [ozonSettings, setOzonSettings] = useState<OzonCoverageSettings>({
     speedWeeks: 4,
     minStockDays: 7,
@@ -98,11 +100,23 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     }).catch((err) => console.error('getOzonClusters error:', err));
   }, [isAdmin, fetchGas]);
 
-  const toggleOfferKey = (key: string) => {
-    setExpandedOfferKeys(prev => ({
-      ...prev,
-      [key]: !prev[key]
-    }));
+  const toggleArticle = (article: string) => {
+    setExpandedArticles((prev) => ({ ...prev, [article]: !prev[article] }));
+  };
+
+  const toggleCluster = (key: string) => {
+    setExpandedClusters((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const fmtInt = (v: number | null | undefined) => (v && v > 0 ? v.toLocaleString('ru-RU') : '—');
+  const fmtSpeed = (v: number | null | undefined) => (v && v > 0 ? v.toFixed(1) : '—');
+  const fmtDays = (v: number | null | undefined) => (v !== null && v !== undefined ? `${Math.round(v)} дн.` : '—');
+
+  const coverageColor = (coverageDays: number | null, minDays: number, targetDays: number) => {
+    if (coverageDays === null) return 'text-slate-400';
+    if (coverageDays < minDays) return 'text-red-600 font-bold';
+    if (coverageDays <= targetDays) return 'text-amber-600 font-semibold';
+    return 'text-emerald-600 font-semibold';
   };
 
   const maxUpdatedAt = useMemo(() => {
@@ -143,40 +157,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return cabs.size;
   }, [ozonStocks]);
 
-  const groupedStocks = useMemo(() => {
-    if (!ozonStocks) return [];
-    const map: Record<string, any> = {};
-    for (const s of ozonStocks) {
-      const key = `${s.cabinet}:::${s.offerId}`;
-      if (!map[key]) {
-        map[key] = {
-          key,
-          cabinet: s.cabinet,
-          offerId: s.offerId,
-          name: s.name || '',
-          available: 0,
-          preparing: 0,
-          requested: 0,
-          transit: 0,
-          excess: 0,
-          returns: 0,
-          other: 0,
-          items: []
-        };
-      }
-      map[key].available += s.available || 0;
-      map[key].preparing += s.preparing || 0;
-      map[key].requested += s.requested || 0;
-      map[key].transit += s.transit || 0;
-      map[key].excess += s.excess || 0;
-      map[key].returns += s.returns || 0;
-      map[key].other += s.other || 0;
-      map[key].items.push(s);
-    }
-
-    return Object.values(map).sort((a: any, b: any) => b.available - a.available);
-  }, [ozonStocks]);
-
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (!ozonStocks || ozonStocks.length === 0) return null;
     const articleSet = new Set<string>();
@@ -195,7 +175,47 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       settings: ozonSettings,
       myStockAvailability,
     });
-  }, [ozonStocks, ozonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability]);
+  }, [ozonStocks, ozonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks]);
+
+  const coverageRows = useMemo(() => {
+    if (!coverage || !coverage.articles) return [];
+    return coverage.articles.map((art) => {
+      const artCoverageDays = art.perDay > 0
+        ? (art.totalEstimated - art.perDay * ozonSettings.minStockDays) / art.perDay
+        : null;
+
+      const artRecommendedQty = art.clusters.reduce(
+        (sum, c) => sum + (c.recommendation?.qty || 0),
+        0
+      );
+
+      const clustersWithDetails = art.clusters.map((cls) => {
+        const clsRecommendedQty = cls.recommendation?.qty || 0;
+
+        const warehouses = (ozonStocks || []).filter((s) => {
+          const matchArt = resolveOzonArticle(skus, s.offerId, s.sku) === art.article;
+          const matchCls = String(s.clusterId || '').trim() === cls.clusterId;
+          return matchArt && matchCls;
+        });
+
+        return {
+          ...cls,
+          recommendedQty: clsRecommendedQty,
+          warehouses,
+        };
+      });
+
+      return {
+        ...art,
+        coverageDays: artCoverageDays,
+        recommendedQty: artRecommendedQty,
+        factory: art.factory
+          ? { ...art.factory, neededQty: art.factory.orderQty }
+          : { neededQty: 0 },
+        clusters: clustersWithDetails,
+      };
+    });
+  }, [coverage, ozonStocks, skus, ozonSettings.minStockDays]);
 
   if (!isAdmin) return null;
 
@@ -304,7 +324,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
             </div>
 
             {/* Table / List */}
-            {!ozonStocks || ozonStocks.length === 0 ? (
+            {!coverageRows || coverageRows.length === 0 ? (
               <div className="bg-white p-6 rounded-2xl border border-slate-200 text-center text-sm text-slate-500" id="ozon-stocks-empty">
                 Данных пока нет. Нажмите „Обновить", чтобы загрузить остатки со складов Ozon.
               </div>
@@ -314,103 +334,100 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                   <table className="w-full text-left border-collapse text-xs" id="ozon-stocks-table">
                     <thead>
                       <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-semibold">
-                        <th className="p-3">Артикул / Название</th>
+                        <th className="p-3 min-w-[220px]">Товар / Кластер / Склад</th>
+                        <th className="p-3 text-right">Продажи шт/дн</th>
                         <th className="p-3 text-right">Доступно</th>
-                        <th className="p-3 text-right">Готовим</th>
-                        <th className="p-3 text-right">В заявках</th>
                         <th className="p-3 text-right">В пути</th>
-                        <th className="p-3 text-right">Излишки</th>
-                        <th className="p-3 text-right">Возвраты</th>
-                        <th className="p-3 text-right">Прочее</th>
+                        <th className="p-3 text-right">В заявках</th>
+                        <th className="p-3 text-right">Покрытие, дн</th>
+                        <th className="p-3 text-right">Реком. Ozon</th>
+                        <th className="p-3 text-right">Мой склад</th>
+                        <th className="p-3 text-right">Заказ Завод</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {groupedStocks.map((group) => {
-                        const isExpanded = !!expandedOfferKeys[group.key];
+                      {coverageRows.map((art: any) => {
+                        const isArtExpanded = !!expandedArticles[art.article];
+
                         return (
-                          <React.Fragment key={group.key}>
-                            {/* Main Article Row */}
+                          <React.Fragment key={art.article}>
+                            {/* LEVEL 1: ARTICLE ROW */}
                             <tr
-                              className="border-b border-slate-100 hover:bg-slate-50/50 cursor-pointer transition-colors"
-                              onClick={() => toggleOfferKey(group.key)}
-                              id={`ozon-stock-row-${group.offerId}`}
+                              className="border-b border-slate-200 bg-slate-100/80 hover:bg-slate-200/60 cursor-pointer font-semibold transition-colors"
+                              onClick={() => toggleArticle(art.article)}
+                              id={`ozon-art-row-${art.article}`}
                             >
-                              <td className="p-3 min-w-[200px] max-w-[350px]">
-                                <div className="flex flex-col gap-1">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    {uniqueCabinetsCount > 1 && (
-                                      <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold tracking-wide bg-indigo-50 text-indigo-600 border border-indigo-100">
-                                        {group.cabinet}
-                                      </span>
-                                    )}
-                                    <span className="font-mono font-bold text-slate-700">{group.offerId}</span>
-                                  </div>
-                                  <span className="text-slate-500 truncate block text-[11px]" title={group.name}>
-                                    {group.name}
-                                  </span>
+                              <td className="p-3">
+                                <div className="flex items-center gap-2">
+                                  {isArtExpanded ? <ChevronDown size={16} className="text-slate-500" /> : <ChevronRight size={16} className="text-slate-500" />}
+                                  <span className="font-mono text-sm font-bold text-slate-800">{art.article}</span>
                                 </div>
                               </td>
-                              <td className={`p-3 text-right font-semibold ${group.available === 0 ? 'text-slate-300' : 'text-slate-900'}`}>
-                                {group.available.toLocaleString('ru-RU')}
+                              <td className="p-3 text-right font-medium text-slate-700">{fmtSpeed(art.perDay)}</td>
+                              <td className="p-3 text-right font-bold text-slate-900">{fmtInt(art.totalEstimated)}</td>
+                              <td className="p-3 text-right text-slate-500">—</td>
+                              <td className="p-3 text-right text-slate-500">—</td>
+                              <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.minStockDays, ozonSettings.targetStockDays)}`}>
+                                {fmtDays(art.coverageDays)}
                               </td>
-                              <td className={`p-3 text-right ${group.preparing === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                {group.preparing.toLocaleString('ru-RU')}
-                              </td>
-                              <td className={`p-3 text-right ${group.requested === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                {group.requested.toLocaleString('ru-RU')}
-                              </td>
-                              <td className={`p-3 text-right ${group.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                {group.transit.toLocaleString('ru-RU')}
-                              </td>
-                              <td className={`p-3 text-right ${group.excess === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                {group.excess.toLocaleString('ru-RU')}
-                              </td>
-                              <td className={`p-3 text-right ${group.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                {group.returns.toLocaleString('ru-RU')}
-                              </td>
-                              <td className={`p-3 text-right ${group.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                {group.other.toLocaleString('ru-RU')}
-                              </td>
+                              <td className="p-3 text-right font-bold text-indigo-600">{fmtInt(art.recommendedQty)}</td>
+                              <td className="p-3 text-right font-medium text-slate-800">{fmtInt(art.myStockAvailable)}</td>
+                              <td className="p-3 text-right font-bold text-amber-600">{fmtInt(art.factory?.neededQty)}</td>
                             </tr>
 
-                            {/* Warehouse Details Rows */}
-                            {isExpanded && group.items.map((item: OzonStockRow, idx: number) => (
-                              <tr
-                                key={`${group.key}-item-${idx}`}
-                                className="bg-slate-50/30 border-b border-slate-100/50 hover:bg-slate-50 transition-colors"
-                                id={`ozon-stock-subrow-${group.offerId}-${idx}`}
-                              >
-                                <td className="p-2.5 pl-6">
-                                  <div className="flex flex-col gap-0.5 border-l-2 border-indigo-200 pl-3">
-                                    <span className="font-semibold text-slate-700 text-[11px]">{item.warehouseName}</span>
-                                    {item.clusterName && (
-                                      <span className="text-[10px] text-slate-400 font-medium">Кластер: {item.clusterName}</span>
-                                    )}
-                                  </div>
-                                </td>
-                                <td className={`p-2.5 text-right font-medium ${item.available === 0 ? 'text-slate-300 font-normal' : 'text-slate-800'}`}>
-                                  {item.available.toLocaleString('ru-RU')}
-                                </td>
-                                <td className={`p-2.5 text-right ${item.preparing === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                  {item.preparing.toLocaleString('ru-RU')}
-                                </td>
-                                <td className={`p-2.5 text-right ${item.requested === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                  {item.requested.toLocaleString('ru-RU')}
-                                </td>
-                                <td className={`p-2.5 text-right ${item.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                  {item.transit.toLocaleString('ru-RU')}
-                                </td>
-                                <td className={`p-2.5 text-right ${item.excess === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                  {item.excess.toLocaleString('ru-RU')}
-                                </td>
-                                <td className={`p-2.5 text-right ${item.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                  {item.returns.toLocaleString('ru-RU')}
-                                </td>
-                                <td className={`p-2.5 text-right ${item.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                                  {item.other.toLocaleString('ru-RU')}
-                                </td>
-                              </tr>
-                            ))}
+                            {/* LEVEL 2: CLUSTERS ROWS */}
+                            {isArtExpanded &&
+                              art.clusters.map((cls: any) => {
+                                const clusterKey = `${art.article}:::${cls.clusterId}`;
+                                const isClsExpanded = !!expandedClusters[clusterKey];
+
+                                return (
+                                  <React.Fragment key={clusterKey}>
+                                    <tr
+                                      className="border-b border-slate-100 bg-slate-50/70 hover:bg-slate-100/60 cursor-pointer transition-colors"
+                                      onClick={() => toggleCluster(clusterKey)}
+                                      id={`ozon-cls-row-${cls.clusterId}`}
+                                    >
+                                      <td className="p-2.5 pl-8">
+                                        <div className="flex items-center gap-1.5">
+                                          {isClsExpanded ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
+                                          <span className="font-semibold text-slate-700">{cls.clusterName}</span>
+                                        </div>
+                                      </td>
+                                      <td className="p-2.5 text-right text-slate-600">{fmtSpeed(cls.perDay)}</td>
+                                      <td className="p-2.5 text-right font-semibold text-slate-800">{fmtInt(cls.available)}</td>
+                                      <td className="p-2.5 text-right text-slate-600">{fmtInt(cls.transit)}</td>
+                                      <td className="p-2.5 text-right text-slate-600">{fmtInt(cls.requested)}</td>
+                                      <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.minStockDays, ozonSettings.targetStockDays)}`}>
+                                        {fmtDays(cls.coverageDays)}
+                                      </td>
+                                      <td className="p-2.5 text-right font-bold text-indigo-600">{fmtInt(cls.recommendedQty)}</td>
+                                      <td className="p-2.5 text-right text-slate-400">—</td>
+                                      <td className="p-2.5 text-right text-slate-400">—</td>
+                                    </tr>
+
+                                    {/* LEVEL 3: WAREHOUSES ROWS */}
+                                    {isClsExpanded &&
+                                      cls.warehouses.map((wh: any, idx: number) => (
+                                        <tr
+                                          key={`${clusterKey}-wh-${idx}`}
+                                          className="border-b border-slate-100/50 bg-white hover:bg-slate-50 transition-colors text-slate-600"
+                                          id={`ozon-wh-row-${cls.clusterId}-${idx}`}
+                                        >
+                                          <td className="p-2 pl-14 text-slate-500 font-normal">{wh.warehouseName}</td>
+                                          <td className="p-2 text-right text-slate-300">—</td>
+                                          <td className="p-2 text-right font-medium text-slate-700">{fmtInt(wh.available)}</td>
+                                          <td className="p-2 text-right text-slate-500">{fmtInt(wh.transit)}</td>
+                                          <td className="p-2 text-right text-slate-500">{fmtInt(wh.requested)}</td>
+                                          <td className="p-2 text-right text-slate-300">—</td>
+                                          <td className="p-2 text-right text-slate-300">—</td>
+                                          <td className="p-2 text-right text-slate-300">—</td>
+                                          <td className="p-2 text-right text-slate-300">—</td>
+                                        </tr>
+                                      ))}
+                                  </React.Fragment>
+                                );
+                              })}
                           </React.Fragment>
                         );
                       })}
