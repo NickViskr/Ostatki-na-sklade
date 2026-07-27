@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { X, Save, Loader2, PackageCheck } from 'lucide-react';
+import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
+import { useUIStore } from '../store/useUIStore';
+import { useSettingsStore } from '../store/useSettingsStore';
 import { FactoryOrder } from '../types';
 
 interface FactoryOrderModalProps {
@@ -37,6 +40,13 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
   const setFactoryOrderReceived = useWarehouseStore((state) => state.setFactoryOrderReceived);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
 
+  const setActiveTab = useUIStore((state) => state.setActiveTab);
+  const setOpType = useUIStore((state) => state.setOpType);
+  const setUploadDestination = useUIStore((state) => state.setUploadDestination);
+  const setRawText = useUIStore((state) => state.setRawText);
+  const destinations = useSettingsStore((state) => state.destinations);
+  const addDestination = useSettingsStore((state) => state.addDestination);
+
   const [qty, setQty] = useState(0);
   const [expectedAt, setExpectedAt] = useState('');
   const [comment, setComment] = useState('');
@@ -72,7 +82,17 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
   const handleReceived = async () => {
     if (!order) return;
     const ok = await setFactoryOrderReceived(order.id);
-    if (ok) onClose();
+    if (!ok) return;
+
+    // Приход проводится существующим маршрутом «Загрузка» → распознавание → подтверждение.
+    // Здесь только предзаполняем форму: тип операции, объект и текст накладной.
+    if (!destinations.includes('Склад')) addDestination('Склад');
+    setOpType('Приход');
+    setUploadDestination('Склад');
+    setRawText(`Приход партии с фабрики\n${article}  количество ${order.qty} шт`);
+    setActiveTab('upload');
+    onClose();
+    toast.info('Заказ закрыт. Оформи приход партии — себестоимость укажешь на шаге подтверждения.', { duration: 8000 });
   };
 
   return (
@@ -143,6 +163,9 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
 
           <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-2xl p-3 leading-snug">
             Отметка не меняет остатки и себестоимость: заказанный товар пока не лежит ни на складах Ozon, ни на твоём складе. Она гасит красный сигнал «Заказ на фабрике» до ожидаемой даты прибытия.
+            <span className="block mt-2">
+              Когда партия приедет, нажми «Партия пришла»: заказ закроется и откроется вкладка «Загрузка» с предзаполненным приходом на склад. Остатки поднимутся после обычного подтверждения прихода.
+            </span>
           </div>
 
           <div className="flex flex-col gap-3">
@@ -164,15 +187,20 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
               </button>
             </div>
             {order && (
-              <button
-                type="button"
-                onClick={handleReceived}
-                disabled={isProcessing}
-                className="w-full py-3 rounded-2xl font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
-              >
-                <PackageCheck size={18} />
-                Партия пришла
-              </button>
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={handleReceived}
+                  disabled={isProcessing}
+                  className="w-full py-3 rounded-2xl font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                >
+                  <PackageCheck size={18} />
+                  Партия пришла
+                </button>
+                <span className="text-[10px] text-slate-400 text-center">
+                  Закроет заказ и откроет «Загрузка» с приходом {order.qty} шт на склад
+                </span>
+              </div>
             )}
           </div>
         </form>

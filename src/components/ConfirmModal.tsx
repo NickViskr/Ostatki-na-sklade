@@ -381,13 +381,29 @@ export const ConfirmModal: React.FC = () => {
 
   if (!parsedItems) return null;
 
+  // Приход с нулевой себестоимостью запрещён: количество выросло бы, а капитализация нет,
+  // из-за чего средняя себестоимость артикула обрушилась бы. Проверяется базовая цена,
+  // введённая пользователем; надбавка за услуги считается поверх неё и на проверку не влияет.
+  const zeroPriceIndexes =
+    opType === "Приход"
+      ? parsedItems
+          .map((item, idx) => (Number(item.price) > 0 ? -1 : idx))
+          .filter((idx) => idx !== -1)
+      : [];
+
   const isConfirmDisabled =
     isProcessing ||
     finalItems.length === 0 ||
     finalItems.some((item) => item.status === "error") ||
-    hasKitShortage;
+    hasKitShortage ||
+    zeroPriceIndexes.length > 0;
 
   const handleConfirm = async () => {
+    if (opType === "Приход" && zeroPriceIndexes.length > 0) {
+      toast.error("Укажите себестоимость больше нуля для каждой позиции прихода");
+      return;
+    }
+
     if (opType === "Расход") {
       const missingFields = [];
       if (!deliveryDate) missingFields.push("«Дата поставки на маркетплейс»");
@@ -612,7 +628,11 @@ export const ConfirmModal: React.FC = () => {
                                   price: val < 0 ? 0 : val,
                                 });
                               }}
-                              className="w-28 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                              className={`w-28 text-right bg-transparent border-b outline-none transition-colors ${
+                                Number(parsedItems[idx].price) > 0
+                                  ? "border-transparent hover:border-indigo-200 focus:border-indigo-500"
+                                  : "border-red-400 bg-red-50/60 focus:border-red-500"
+                              }`}
                             />
                             <span>₽</span>
                           </div>
@@ -970,6 +990,15 @@ export const ConfirmModal: React.FC = () => {
           <div className="mx-8 mb-4 p-4 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-sm font-medium flex items-center gap-2">
             <AlertCircle className="text-red-500 shrink-0" size={16} />
             <span>Заполните обязательные поля: {missingFieldsError.join(", ")}</span>
+          </div>
+        )}
+
+        {zeroPriceIndexes.length > 0 && (
+          <div className="mx-8 mb-4 p-4 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-sm font-medium flex items-center gap-2">
+            <AlertCircle className="text-red-500 shrink-0" size={16} />
+            <span>
+              Укажите себестоимость: приход нельзя провести с нулевой ценой. Позиций без цены: {zeroPriceIndexes.length}.
+            </span>
           </div>
         )}
 

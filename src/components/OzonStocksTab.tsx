@@ -76,7 +76,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [onlyWithRecommendations, setOnlyWithRecommendations] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [factoryModalArticle, setFactoryModalArticle] = useState<string | null>(null);
-  const [showRecommendations, setShowRecommendations] = useState(true);
+  const [showRecommendations, setShowRecommendations] = useState(false);
 
   const [showColsMenu, setShowColsMenu] = useState(false);
   const [hiddenCols, setHiddenCols] = useState<string[]>(() => {
