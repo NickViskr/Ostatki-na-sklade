@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Columns3, HelpCircle, RefreshCw, Search, Settings } from 'lucide-react';
+import { ChevronDown, ChevronRight, Columns3, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
@@ -70,6 +70,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyWithRecommendations, setOnlyWithRecommendations] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [showColsMenu, setShowColsMenu] = useState(false);
   const [hiddenCols, setHiddenCols] = useState<string[]>(() => {
@@ -171,6 +172,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showColsMenu]);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsFullscreen(false);
+    };
+    document.addEventListener('keydown', handleEsc);
+    return () => document.removeEventListener('keydown', handleEsc);
+  }, [isFullscreen]);
 
   const toggleArticle = (article: string) => {
     setExpandedArticles((prev) => ({ ...prev, [article]: !prev[article] }));
@@ -353,6 +363,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
             )}
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              id="btn-ozon-fullscreen"
+              onClick={() => setIsFullscreen(true)}
+              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
+            >
+              <Maximize2 size={14} />
+              Развернуть
+            </button>
             <div className="relative">
               <button
                 type="button"
@@ -494,8 +513,34 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                 Данных пока нет. Нажмите „Обновить", чтобы загрузить остатки со складов Ozon.
               </div>
             ) : (
-              <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm" id="ozon-stocks-table-container">
-                <div className="overflow-x-auto">
+              <div
+                className={`bg-white border border-slate-200 shadow-sm ${isFullscreen ? 'fixed inset-0 z-50 rounded-none overflow-hidden flex flex-col' : 'rounded-2xl overflow-hidden'}`}
+                id="ozon-stocks-table-container"
+              >
+                {isFullscreen && (
+                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-slate-50 shrink-0">
+                    <span className="text-sm font-bold text-slate-800">Остатки на складах Ozon</span>
+                    <button
+                      type="button"
+                      id="btn-ozon-fullscreen-exit"
+                      onClick={() => setIsFullscreen(false)}
+                      className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all"
+                    >
+                      <Minimize2 size={14} />
+                      Свернуть (Esc)
+                    </button>
+                  </div>
+                )}
+                <div className={`overflow-auto ${isFullscreen ? 'flex-1 min-h-0' : 'max-h-[70vh]'}`}>
+                  <style>{`
+                    #ozon-stocks-table thead th {
+                      position: sticky;
+                      top: 0;
+                      z-index: 20;
+                      background-color: #f1f5f9;
+                      box-shadow: inset 0 -1px 0 #e2e8f0;
+                    }
+                  `}</style>
                   <table className="w-full text-left border-collapse text-xs" id="ozon-stocks-table">
                     <thead>
                       <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-semibold">
