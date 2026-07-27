@@ -291,6 +291,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         unboundTotals: sumBy(unboundRows),
         coverageDays: artCoverageDays,
         recommendedQty: art.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0),
+        recLimited: art.clusters.some((c) => c.recommendation !== null && c.recommendation.limitedByMyStock),
         clusters: art.clusters.map((cls) => ({
           ...cls,
           warehouses: stockRows.filter((s) => String(s.clusterId || '').trim() === cls.clusterId),
@@ -627,7 +628,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {isColVisible('recommendation') && (
                                 <td className="p-3 text-right">
                                   {art.recommendedQty > 0 ? (
-                                    <span className="text-indigo-600 font-bold">{fmtInt(art.recommendedQty)} шт</span>
+                                    <span
+                                      className={art.recLimited ? 'text-amber-600 font-bold' : 'text-indigo-600 font-bold'}
+                                      title={art.recLimited ? 'Рекомендация урезана: на Моём складе не хватает товара на полную потребность' : undefined}
+                                    >
+                                      {fmtInt(art.recommendedQty)} шт
+                                    </span>
                                   ) : (
                                     <span className="text-slate-300">—</span>
                                   )}
