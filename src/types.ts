@@ -140,3 +140,21 @@ export interface OzonSalesRow {
   updatedAt: string;
   days: number;
 }
+
+/** Заказ партии товара у производителя. На остатки и себестоимость не влияет. */
+export interface FactoryOrder {
+  id: string;
+  article: string;
+  /** Дата размещения заказа, 'yyyy-MM-dd'. */
+  orderedAt: string;
+  qty: number;
+  /** Ожидаемая дата прибытия, 'yyyy-MM-dd'; пустая строка — дата не задана. */
+  expectedAt: string;
+  comment: string;
+  user: string;
+  /** 'active' — партия в пути; 'received' — партия получена. */
+  status: string;
+  /** Дата отметки о получении, 'yyyy-MM-dd'. */
+  receivedAt: string;
+}
+

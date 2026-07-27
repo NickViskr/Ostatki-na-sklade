@@ -14,6 +14,10 @@
   - В `saveOzonSettings` добавлена поддержка формата `КластерID:коэффициент` с валидацией числового ID и коэффициента не меньше 1.
 
 ### Добавлено
+- Подключение заказов на фабрике к клиенту (`src/types.ts`, `src/store/useWarehouseStore.ts`):
+  - Добавлен интерфейс `FactoryOrder` в `src/types.ts`.
+  - В Zustand-стор `useWarehouseStore` добавлены массив `factoryOrders: FactoryOrder[]` и асинхронные методы `fetchFactoryOrders()`, `saveFactoryOrder(order)` и `setFactoryOrderReceived(id)`.
+  - Реализованы сетевые вызовы `fetchGas('getFactoryOrders')`, `fetchGas('saveFactoryOrder', { data: order })` и `fetchGas('setFactoryOrderReceived', { data: { id } })` с обработкой состояния `isProcessing` и всплывающими уведомлениями `toast`.
 - Хранилище заказов на фабрике в Google Apps Script (`Code.gs`):
   - Создан лист «Заказы на фабрике» с заголовками `FACTORY_ORDERS_HEADERS` (`ID`, `Артикул`, `Дата заказа`, `Количество`, `Ожидаемое прибытие`, `Комментарий`, `Кто`, `Статус`, `Дата получения`).
   - Реализован быстрый читающий экшен `getFactoryOrders` без задержек `LockService`.

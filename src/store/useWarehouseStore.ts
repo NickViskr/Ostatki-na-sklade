@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, FactoryOrder } from '../types';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
@@ -115,6 +115,10 @@ interface WarehouseState {
   runOzonStocksSync: () => Promise<void>;
   ozonSales: OzonSalesRow[];
   fetchOzonSales: () => Promise<void>;
+  factoryOrders: FactoryOrder[];
+  fetchFactoryOrders: () => Promise<void>;
+  saveFactoryOrder: (order: { id?: string; article: string; qty: number; expectedAt: string; orderedAt?: string; comment?: string }) => Promise<boolean>;
+  setFactoryOrderReceived: (id: string) => Promise<boolean>;
 }
 
 export const useWarehouseStore = create<WarehouseState>()(
@@ -143,6 +147,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonStocks: [],
   ozonStocksSyncIssues: [],
   ozonSales: [],
+  factoryOrders: [],
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -1450,6 +1455,58 @@ export const useWarehouseStore = create<WarehouseState>()(
       }
     } catch (e) {
       console.error('getOzonSales error:', e);
+    }
+  },
+
+  fetchFactoryOrders: async () => {
+    if (!get().sessionToken) return;
+    try {
+      const result = await get().fetchGas('getFactoryOrders');
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ factoryOrders: result.data });
+      } else {
+        console.error('getFactoryOrders failed:', result.message);
+      }
+    } catch (e) {
+      console.error('getFactoryOrders error:', e);
+    }
+  },
+
+  saveFactoryOrder: async (order) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('saveFactoryOrder', { data: order });
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ factoryOrders: result.data });
+        toast.success('Заказ на фабрике сохранён');
+        return true;
+      }
+      toast.error(result.message || 'Не удалось сохранить заказ на фабрике');
+      return false;
+    } catch (e: any) {
+      toast.error('Ошибка сохранения заказа на фабрике: ' + (e?.message || e));
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  setFactoryOrderReceived: async (id) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('setFactoryOrderReceived', { data: { id } });
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ factoryOrders: result.data });
+        toast.success('Партия отмечена как полученная');
+        return true;
+      }
+      toast.error(result.message || 'Не удалось отметить получение партии');
+      return false;
+    } catch (e: any) {
+      toast.error('Ошибка при отметке получения: ' + (e?.message || e));
+      return false;
+    } finally {
+      set({ isProcessing: false });
     }
   },
 
