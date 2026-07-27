@@ -1,5 +1,6 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { ChevronDown, RefreshCw, Settings } from 'lucide-react';
+import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
@@ -12,11 +13,44 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const ozonStocksSyncIssues = useWarehouseStore((state) => state.ozonStocksSyncIssues);
   const fetchOzonStocks = useWarehouseStore((state) => state.fetchOzonStocks);
   const runOzonStocksSync = useWarehouseStore((state) => state.runOzonStocksSync);
+  const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
 
   const [isOzonStocksCollapsed, setIsOzonStocksCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [expandedOfferKeys, setExpandedOfferKeys] = useState<Record<string, boolean>>({});
+
+  const notifyCheckDone = useRef(false);
+
+  useEffect(() => {
+    if (notifyCheckDone.current) return;
+    notifyCheckDone.current = true;
+
+    async function checkNewClusters() {
+      try {
+        const res = await fetchGas('getOzonClusters');
+        if (res?.status === 'success' && Array.isArray(res.data)) {
+          const unnotified = res.data.filter((item: any) => item.notified === false);
+          if (unnotified.length > 0) {
+            const names = unnotified
+              .map((item: any) => {
+                const cid = String(item.clusterId || '').trim();
+                const cname = String(item.clusterName || '').trim();
+                return cname || `Кластер ${cid}`;
+              })
+              .join(', ');
+
+            toast.info(`Новые кластеры Ozon: ${names}`, { duration: 10000 });
+            await fetchGas('markOzonClustersNotified');
+          }
+        }
+      } catch (err) {
+        console.error('Ошибка проверки новых кластеров Ozon:', err);
+      }
+    }
+
+    checkNewClusters();
+  }, []);
 
   useEffect(() => {
     if (isAdmin) {

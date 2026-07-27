@@ -35,6 +35,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
 
+  const [directory, setDirectory] = useState<{ clusterId: string; clusterName: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<OzonSettingsData>({
@@ -48,6 +49,22 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   });
 
   const clusters = useMemo(() => {
+    if (directory.length > 0) {
+      const map = new Map<string, string>();
+      directory.forEach((item) => {
+        const cid = String(item.clusterId || '').trim();
+        if (cid) {
+          if (!map.has(cid)) {
+            const cname = String(item.clusterName || '').trim();
+            map.set(cid, cname || `Кластер ${cid}`);
+          }
+        }
+      });
+      return Array.from(map.entries())
+        .map(([clusterId, clusterName]) => ({ clusterId, clusterName }))
+        .sort((a, b) => a.clusterName.localeCompare(b.clusterName, 'ru'));
+    }
+
     const map = new Map<string, string>();
     (ozonStocks || []).forEach((item) => {
       const cid = String(item.clusterId || '').trim();
@@ -61,7 +78,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     return Array.from(map.entries())
       .map(([clusterId, clusterName]) => ({ clusterId, clusterName }))
       .sort((a, b) => a.clusterName.localeCompare(b.clusterName, 'ru'));
-  }, [ozonStocks]);
+  }, [directory, ozonStocks]);
 
   const excludedSet = useMemo(() => {
     return new Set((form.excludedClusters || '').split(',').map((s) => s.trim()).filter(Boolean));
@@ -78,6 +95,23 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   useEffect(() => {
     if (isOpen) {
       setLoading(true);
+
+      fetchGas('getOzonClusters')
+        .then((res) => {
+          if (res?.status === 'success' && Array.isArray(res.data)) {
+            const list = res.data
+              .map((item: any) => ({
+                clusterId: String(item.clusterId || '').trim(),
+                clusterName: String(item.clusterName || '').trim(),
+              }))
+              .filter((item: any) => Boolean(item.clusterId));
+            setDirectory(list);
+          }
+        })
+        .catch((err) => {
+          console.error('Ошибка получения справочника кластеров:', err);
+        });
+
       fetchGas('getOzonSettings')
         .then((res) => {
           if (res?.status === 'success' && res.data) {
