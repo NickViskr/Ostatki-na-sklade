@@ -314,6 +314,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         recommendedQty: art.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0),
         recLimited: art.clusters.some((c) => c.recommendation !== null && c.recommendation.limitedByMyStock),
         deficitQty: clustersWithNeed.reduce((s, c) => s + (c.recommendation && c.recommendation.boxes === 0 ? c.needQty : 0), 0),
+        factoryDaysLeft: art.perDay > 0 ? (art.totalEstimated + Math.max(0, art.myStockAvailable)) / art.perDay : null,
+        factoryThreshold: (Number(art.leadTimeDays) || 0) + ozonSettings.minStockDays,
         clusters: clustersWithNeed,
       };
     });
@@ -644,7 +646,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('factory') && (
                           <th className="p-3 text-right">
                             Заказ на фабрике
-                            <ColHint text="Сигнал «пора заказывать новую партию»: складов Ozon и твоего склада вместе хватит меньше, чем на срок поставки от фабрики плюс неснижаемый запас. Объём заказа считается по настройке «Объём заказа на фабрике, дней». Срок поставки берётся из колонки «Срок поставки (дни)» в SKU Базе: если он не заполнен, сигнал сработает только при падении ниже неснижаемого запаса." />
+                            <ColHint text="Сигнал «пора заказывать новую партию». Загорается по одной из двух причин: «кончается везде» — товара на Ozon и на твоём складе вместе хватит меньше, чем на срок поставки плюс неснижаемый запас; «нечем пополнить» — кластерам нужна поставка, а на твоём складе пусто, и перебросить остаток между кластерами Ozon нельзя. Объём заказа — больший из расчёта по настройке «Объём заказа на фабрике, дней» и непокрытой потребности кластеров. Наведи курсор на ячейку: там видно, на сколько дней хватит запаса и какой порог срабатывания." />
                           </th>
                         )}
                       </tr>
@@ -713,15 +715,35 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   {art.factory ? (
                                     <span
                                       className="text-rose-600 font-bold"
-                                      title={`Хватит на ${Math.round(art.factory.daysLeft)} дн. при сроке поставки ${art.leadTimeDays || 0} дн.`}
+                                      title={
+                                        art.factory.reason === 'clusterDeficit'
+                                          ? `Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, а на Моём складе товара нет: между кластерами Ozon остаток не перебросить, взять можно только с фабрики. Общего запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при сроке поставки ${art.leadTimeDays || 0} дн.`
+                                          : `Товар кончается везде: общего запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас).`
+                                      }
                                     >
                                       {fmtInt(art.factory.orderQty)} шт
                                       <span className="block text-[10px] font-semibold text-rose-400">
-                                        {fmtInt(art.factory.orderBoxes)} кор
+                                        {fmtInt(art.factory.orderBoxes)} кор · {art.factory.reason === 'clusterDeficit' ? 'нечем пополнить' : 'кончается везде'}
                                       </span>
                                     </span>
+                                  ) : (Number(art.leadTimeDays) || 0) === 0 ? (
+                                    <span
+                                      className="text-[10px] font-semibold text-slate-400"
+                                      title="Не заполнена колонка «Срок поставки, дн» в SKU Базе. Пока она пуста, сигнал по общему остатку сработает только при падении ниже неснижаемого запаса."
+                                    >
+                                      срок не задан
+                                    </span>
                                   ) : (
-                                    <span className="text-slate-300">—</span>
+                                    <span
+                                      className="text-slate-300"
+                                      title={
+                                        art.factoryDaysLeft === null
+                                          ? 'Продаж за расчётное окно нет — сигнал не считается.'
+                                          : `Заказ не нужен: запаса хватит на ${Math.round(art.factoryDaysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн., непокрытой потребности у кластеров нет.`
+                                      }
+                                    >
+                                      —
+                                    </span>
                                   )}
                                 </td>
                               )}
