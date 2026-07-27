@@ -44,7 +44,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
   const rawStocks = useWarehouseStore((state) => state.stock);
 
-  const [isOzonStocksCollapsed, setIsOzonStocksCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [expandedArticles, setExpandedArticles] = useState<Record<string, boolean>>({});
   const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
@@ -324,86 +323,68 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       {/* Ozon Stocks Mirror Section */}
       <div className="space-y-4 bg-slate-50/50 p-6 rounded-3xl border border-slate-200/60 shadow-sm" id="ozon-stocks-mirror-section">
         <div
-          className="flex justify-between items-center cursor-pointer select-none"
-          onClick={() => setIsOzonStocksCollapsed(prev => !prev)}
+          className="flex justify-between items-center"
           id="ozon-stocks-header"
         >
           <div className="flex items-center gap-3">
             <h3 className="text-xl font-bold text-slate-800">Остатки на складах Ozon</h3>
-            {!isOzonStocksCollapsed && maxUpdatedAt && (
+            {maxUpdatedAt && (
               <span className="text-xs text-slate-400 font-medium">
                 Обновлено: {maxUpdatedAt}
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
-            {!isOzonStocksCollapsed && (
-              <>
-                <div className="relative">
-                  <button
-                    type="button"
-                    id="btn-ozon-columns"
-                    onClick={() => setShowColsMenu((prev) => !prev)}
-                    className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
-                  >
-                    <Columns3 size={14} />
-                    Колонки
-                  </button>
-                  {showColsMenu && (
-                    <div className="absolute right-0 mt-2 z-20 bg-white border border-slate-200 rounded-2xl shadow-lg p-3 w-56 max-h-80 overflow-y-auto" id="ozon-columns-menu">
-                      <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400 mb-2">Показывать колонки</div>
-                      {OZON_TOGGLEABLE_COLS.map((col) => (
-                        <label key={col.key} className="flex items-center gap-2 py-1 cursor-pointer text-xs text-slate-700 hover:text-slate-900">
-                          <input
-                            type="checkbox"
-                            checked={isColVisible(col.key)}
-                            onChange={() => toggleCol(col.key)}
-                            className="rounded border-slate-300"
-                          />
-                          {col.label}
-                        </label>
-                      ))}
-                    </div>
-                  )}
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <button
+                type="button"
+                id="btn-ozon-columns"
+                onClick={() => setShowColsMenu((prev) => !prev)}
+                className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
+              >
+                <Columns3 size={14} />
+                Колонки
+              </button>
+              {showColsMenu && (
+                <div className="absolute right-0 mt-2 z-20 bg-white border border-slate-200 rounded-2xl shadow-lg p-3 w-56 max-h-80 overflow-y-auto" id="ozon-columns-menu">
+                  <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400 mb-2">Показывать колонки</div>
+                  {OZON_TOGGLEABLE_COLS.map((col) => (
+                    <label key={col.key} className="flex items-center gap-2 py-1 cursor-pointer text-xs text-slate-700 hover:text-slate-900">
+                      <input
+                        type="checkbox"
+                        checked={isColVisible(col.key)}
+                        onChange={() => toggleCol(col.key)}
+                        className="rounded border-slate-300"
+                      />
+                      {col.label}
+                    </label>
+                  ))}
                 </div>
-                <button
-                  type="button"
-                  id="btn-ozon-settings"
-                  onClick={() => setShowSettings(true)}
-                  className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
-                >
-                  <Settings size={14} />
-                  Настройки
-                </button>
-                <button
-                  type="button"
-                  id="btn-refresh-ozon-stocks"
-                  disabled={isProcessing}
-                  onClick={runOzonStocksSync}
-                  className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs disabled:opacity-50"
-                >
-                  <RefreshCw size={14} className={`transition-transform ${isProcessing ? 'animate-spin' : ''}`} />
-                  Обновить
-                </button>
-              </>
-            )}
+              )}
+            </div>
             <button
               type="button"
-              id="btn-collapse-ozon-stocks"
-              aria-label={isOzonStocksCollapsed ? 'Развернуть остатки Ozon' : 'Свернуть остатки Ozon'}
-              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition-colors"
-              onClick={() => setIsOzonStocksCollapsed(prev => !prev)}
+              id="btn-ozon-settings"
+              onClick={() => setShowSettings(true)}
+              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
             >
-              <ChevronDown
-                size={20}
-                className={`transition-transform duration-200 ${isOzonStocksCollapsed ? '-rotate-90' : ''}`}
-              />
+              <Settings size={14} />
+              Настройки
+            </button>
+            <button
+              type="button"
+              id="btn-refresh-ozon-stocks"
+              disabled={isProcessing}
+              onClick={runOzonStocksSync}
+              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={`transition-transform ${isProcessing ? 'animate-spin' : ''}`} />
+              Обновить
             </button>
           </div>
         </div>
 
-        {!isOzonStocksCollapsed && (
-          <div className="space-y-4" id="ozon-stocks-content">
+        <div className="space-y-4" id="ozon-stocks-content">
             {ozonStocksSyncIssues.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl p-4 text-sm font-semibold" id="ozon-stocks-partial-warning">
                 Данные неполные: не удалось обновить {ozonStocksSyncIssues.map(i => i.name).join(', ')}. Показаны последние успешно полученные данные по остальным кабинетам.
@@ -700,7 +681,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
               </div>
             )}
           </div>
-        )}
       </div>
       <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
     </div>
