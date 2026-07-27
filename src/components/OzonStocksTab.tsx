@@ -293,6 +293,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       const artCoverageDays = art.perDay > 0
         ? (art.totalEstimated - art.perDay * ozonSettings.minStockDays) / art.perDay
         : null;
+      const box = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
+      const clustersWithNeed = art.clusters.map((cls) => {
+        const needBoxes = cls.recommendation ? Math.ceil(cls.recommendation.neededQty / box) : 0;
+        return {
+          ...cls,
+          needBoxes,
+          needQty: needBoxes * box,
+          warehouses: stockRows.filter((s) => String(s.clusterId || '').trim() === cls.clusterId),
+        };
+      });
       return {
         ...art,
         name: stockRows.length > 0 ? (stockRows[0].name || '') : '',
@@ -303,10 +313,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         coverageDays: artCoverageDays,
         recommendedQty: art.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0),
         recLimited: art.clusters.some((c) => c.recommendation !== null && c.recommendation.limitedByMyStock),
-        clusters: art.clusters.map((cls) => ({
-          ...cls,
-          warehouses: stockRows.filter((s) => String(s.clusterId || '').trim() === cls.clusterId),
-        })),
+        deficitQty: clustersWithNeed.reduce((s, c) => s + (c.recommendation && c.recommendation.boxes === 0 ? c.needQty : 0), 0),
+        clusters: clustersWithNeed,
       };
     });
     rows.sort((a, b) => (b.perDay - a.perDay) || (b.totals.available - a.totals.available));
@@ -316,7 +324,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return coverageRows.filter((row: any) => {
-      if (onlyWithRecommendations && row.recommendedQty <= 0) return false;
+      if (onlyWithRecommendations && row.recommendedQty <= 0 && row.deficitQty <= 0 && !row.factory) return false;
       if (!q) return true;
       return String(row.article).toLowerCase().includes(q) || String(row.name || '').toLowerCase().includes(q);
     });
@@ -630,7 +638,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('recommendation') && (
                           <th className="p-3 text-right">
                             Рекомендация
-                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Всегда кратно коробке. Оранжевый цвет означает, что поставка урезана нехваткой на твоём складе. У товара показана сумма по всем его кластерам." />
+                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Всегда кратно коробке. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
                           </th>
                         )}
                         {isColVisible('factory') && (
@@ -686,8 +694,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     >
                                       {fmtInt(art.recommendedQty)} шт
                                     </span>
+                                  ) : art.deficitQty > 0 ? (
+                                    <span className="text-red-600 font-bold" title="Кластерам нужна поставка, но на Моём складе нет товара">
+                                      дефицит {fmtInt(art.deficitQty)} шт
+                                    </span>
                                   ) : (
                                     <span className="text-slate-300">—</span>
+                                  )}
+                                  {art.recommendedQty > 0 && art.deficitQty > 0 && (
+                                    <span className="block text-[10px] font-bold text-red-500" title="Часть кластеров осталась без поставки: на Моём складе не хватило товара">
+                                      + дефицит {fmtInt(art.deficitQty)} шт
+                                    </span>
                                   )}
                                 </td>
                               )}
@@ -751,8 +768,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     {isColVisible('recommendation') && (
                                       <td className="p-2.5 text-right">
                                         {cls.recommendation && cls.recommendation.boxes > 0 ? (
-                                          <span className={cls.recommendation.limitedByMyStock ? 'text-amber-600 font-semibold' : 'text-indigo-600 font-semibold'}>
+                                          <span
+                                            className={cls.recommendation.limitedByMyStock ? 'text-amber-600 font-semibold' : 'text-indigo-600 font-semibold'}
+                                            title={cls.recommendation.limitedByMyStock ? `Урезано остатком Моего склада: полная потребность ${fmtInt(cls.needQty)} шт` : undefined}
+                                          >
                                             {fmtInt(cls.recommendation.boxes)} кор ({fmtInt(cls.recommendation.qty)} шт)
+                                          </span>
+                                        ) : cls.recommendation && cls.needQty > 0 ? (
+                                          <span className="text-red-600 font-semibold" title="Кластеру нужна поставка, но на Моём складе нет товара">
+                                            нужно {fmtInt(cls.needBoxes)} кор ({fmtInt(cls.needQty)} шт)
+                                            <span className="block text-[10px] font-bold text-red-400">нет на складе</span>
                                           </span>
                                         ) : (
                                           <span className="text-slate-300">—</span>
