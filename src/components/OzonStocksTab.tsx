@@ -311,12 +311,18 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   }, [coverageRows, searchQuery, onlyWithRecommendations]);
 
   const clusterShares = useMemo(() => {
-    const map: Record<string, { clusterName: string; qty: number }> = {};
+    const map: Record<string, { clusterName: string; qty: number; priority: boolean; priorityK: number }> = {};
     let total = 0;
     for (const row of coverageRows as any[]) {
       for (const cls of row.clusters) {
-        if (!map[cls.clusterId]) map[cls.clusterId] = { clusterName: cls.clusterName, qty: 0 };
+        if (!map[cls.clusterId]) {
+          map[cls.clusterId] = { clusterName: cls.clusterName, qty: 0, priority: false, priorityK: 1 };
+        }
         map[cls.clusterId].qty += cls.qtySold || 0;
+        if (cls.priority) {
+          map[cls.clusterId].priority = true;
+          map[cls.clusterId].priorityK = cls.priorityK;
+        }
         total += cls.qtySold || 0;
       }
     }
@@ -758,7 +764,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                 <div className="flex flex-col gap-2">
                   {clusterShares.list.map((c) => (
                     <div key={c.clusterName} className="flex items-center gap-3">
-                      <span className="text-[11px] text-slate-600 w-40 truncate" title={c.clusterName}>{c.clusterName}</span>
+                      <span className="w-40 shrink-0 flex items-center gap-1.5 overflow-hidden">
+                        <span className="text-[11px] text-slate-600 truncate" title={c.clusterName}>{c.clusterName}</span>
+                        {c.priority && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-amber-100 text-amber-700 shrink-0" title="Приоритетный кластер: целевой и неснижаемый запас умножены на коэффициент">
+                            ×{c.priorityK}
+                          </span>
+                        )}
+                      </span>
                       <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
                         <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(100, c.pct)}%` }} />
                       </div>
