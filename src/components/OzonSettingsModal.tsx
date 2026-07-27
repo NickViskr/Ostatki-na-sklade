@@ -16,6 +16,7 @@ interface OzonSettingsData {
   returnsToSalePct: number;
   salesRetentionWeeks: number;
   excludedClusters: string;
+  priorityClusters: string;
 }
 
 const FieldHint: React.FC<{ text: string; position?: 'top' | 'bottom' }> = ({ text, position = 'top' }) => (
@@ -46,6 +47,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     returnsToSalePct: 80,
     salesRetentionWeeks: 78,
     excludedClusters: '',
+    priorityClusters: '',
   });
 
   const clusters = useMemo(() => {
@@ -84,12 +86,53 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     return new Set((form.excludedClusters || '').split(',').map((s) => s.trim()).filter(Boolean));
   }, [form.excludedClusters]);
 
+  const priorityMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    (form.priorityClusters || '').split(',').map((s) => s.trim()).filter(Boolean).forEach((part) => {
+      const [rawId, rawK] = part.split(':');
+      const id = String(rawId || '').trim();
+      if (!id) return;
+      const k = Number(String(rawK || '').trim().replace(',', '.'));
+      map[id] = isNaN(k) || k < 1 ? 1.5 : k;
+    });
+    return map;
+  }, [form.priorityClusters]);
+
+  const serializePriority = (map: Record<string, number>) =>
+    Object.entries(map).map(([id, k]) => `${id}:${k}`).join(',');
+
+  const handleTogglePriority = (clusterId: string) => {
+    const next = { ...priorityMap };
+    if (next[clusterId] !== undefined) {
+      delete next[clusterId];
+      setForm({ ...form, priorityClusters: serializePriority(next) });
+      return;
+    }
+    next[clusterId] = 1.5;
+    const nextExcluded = (form.excludedClusters || '').split(',').map((s) => s.trim()).filter(Boolean).filter((id) => id !== clusterId);
+    setForm({ ...form, priorityClusters: serializePriority(next), excludedClusters: nextExcluded.join(',') });
+  };
+
+  const handleChangePriorityK = (clusterId: string, value: string) => {
+    const next = { ...priorityMap };
+    const k = Number(String(value).replace(',', '.'));
+    next[clusterId] = isNaN(k) || k < 1 ? 1 : k;
+    setForm({ ...form, priorityClusters: serializePriority(next) });
+  };
+
   const handleToggleCluster = (clusterId: string) => {
     const currentList = (form.excludedClusters || '').split(',').map((s) => s.trim()).filter(Boolean);
-    const nextList = currentList.includes(clusterId)
+    const isRemoving = currentList.includes(clusterId);
+    const nextList = isRemoving
       ? currentList.filter((id) => id !== clusterId)
       : [...currentList, clusterId];
-    setForm({ ...form, excludedClusters: nextList.join(',') });
+    if (isRemoving) {
+      setForm({ ...form, excludedClusters: nextList.join(',') });
+      return;
+    }
+    const nextPriority = { ...priorityMap };
+    delete nextPriority[clusterId];
+    setForm({ ...form, excludedClusters: nextList.join(','), priorityClusters: serializePriority(nextPriority) });
   };
 
   useEffect(() => {
@@ -123,6 +166,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
               salesRetentionWeeks: Number(res.data.salesRetentionWeeks) || 78,
               excludedClusters: String(res.data.excludedClusters || ''),
+              priorityClusters: String(res.data.priorityClusters || ''),
             });
           } else if (res?.status === 'error') {
             toast.error(res.message || 'Ошибка загрузки настроек Ozon');
@@ -150,6 +194,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         returnsToSalePct: Math.min(100, Math.max(0, parseFloat(String(form.returnsToSalePct)) || 0)),
         salesRetentionWeeks: Math.max(1, parseInt(String(form.salesRetentionWeeks), 10) || 1),
         excludedClusters: form.excludedClusters,
+        priorityClusters: form.priorityClusters,
       };
 
       const res = await fetchGas('saveOzonSettings', { data: payload });
@@ -289,6 +334,57 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />
               </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Приоритетные кластеры
+                  <FieldHint
+                    position="top"
+                    text="Отметь кластеры, где наличие товара обязательно (обычно топ по продажам). Для них целевой и неснижаемый запас умножаются на коэффициент: при коэффициенте 1,5 и целевом запасе 30 дней приоритетный кластер получит 45 дней. Рекомендация к поставке загорается раньше и объём выше. Кластер без поставок приоритетным быть не может."
+                  />
+                </label>
+                {clusters.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">
+                    Кластеры появятся после первой загрузки остатков Ozon
+                  </p>
+                ) : (
+                  <div className="space-y-2 mt-2">
+                    {clusters.map((c) => {
+                      const isPriority = priorityMap[c.clusterId] !== undefined;
+                      const isExcluded = excludedSet.has(c.clusterId);
+                      return (
+                        <div key={c.clusterId} className="flex items-center justify-between gap-2">
+                          <label className={`flex items-center gap-2.5 text-sm cursor-pointer select-none ${isExcluded ? 'text-slate-300 cursor-not-allowed' : 'text-slate-700 hover:text-slate-900'}`}>
+                            <input
+                              type="checkbox"
+                              checked={isPriority}
+                              disabled={isExcluded}
+                              onChange={() => handleTogglePriority(c.clusterId)}
+                              className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 accent-indigo-600 cursor-pointer disabled:cursor-not-allowed"
+                            />
+                            <span>{c.clusterName}</span>
+                          </label>
+                          {isPriority && (
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className="text-[11px] text-slate-400">коэф.</span>
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="1"
+                                value={priorityMap[c.clusterId]}
+                                onChange={(e) => handleChangePriorityK(c.clusterId, e.target.value)}
+                                className="w-16 px-2 py-1 text-xs border border-slate-200 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t border-slate-100" />
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
