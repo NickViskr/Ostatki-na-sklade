@@ -349,15 +349,22 @@ export function calcSupplyRecommendation(
 export interface FactorySignal {
   /** На сколько дней хватит: (остаток всех кластеров + Мой склад) ÷ скорость. */
   daysLeft: number;
-  /** Объём заказа, шт = скорость × дни заказа, округление вверх. */
+  /** Объём заказа, шт: больший из «скорость × дни заказа» и непокрытой потребности кластеров. */
   orderQty: number;
   /** Тот же объём в коробках, округление вверх. */
   orderBoxes: number;
+  /** Причина сигнала: 'total' — кончается общий остаток; 'clusterDeficit' — кластерам нужна поставка, а везти нечего. */
+  reason: 'total' | 'clusterDeficit';
+  /** Непокрытая потребность кластеров, шт (0, если сигнал вызван только общим остатком). */
+  unmetDeficitQty: number;
 }
 
 /**
- * Сигнал «пора заказать на фабрике».
- * Срабатывает при (расчётный остаток всех кластеров + Мой склад) ÷ скорость < срок поставки + неснижаемые дни.
+ * Сигнал «пора заказать на фабрике». Срабатывает по любой из двух причин:
+ * 1) 'total' — (расчётный остаток всех кластеров + Мой склад) ÷ скорость < срок поставки + неснижаемые дни;
+ * 2) 'clusterDeficit' — у кластеров есть непокрытая потребность в поставке, а на Моём складе товара нет:
+ *    остаток между кластерами Ozon не перебрасывается, взять товар можно только с фабрики.
+ * Объём заказа — больший из «скорость × дни заказа» и непокрытой потребности кластеров.
  * Остатки исключённых кластеров и строки без КластерID входят в общий остаток.
  */
 export function calcFactorySignal(
@@ -366,14 +373,23 @@ export function calcFactorySignal(
   perDay: number,
   leadTimeDays: number,
   pcsPerBox: number,
-  settings: OzonCoverageSettings
+  settings: OzonCoverageSettings,
+  unmetDeficitQty: number = 0
 ): FactorySignal | null {
   if (!(perDay > 0)) return null;
   const daysLeft = (totalEstimated + Math.max(0, myStockAvailable)) / perDay;
-  if (daysLeft >= (Number(leadTimeDays) || 0) + settings.minStockDays) return null;
+  const belowThreshold = daysLeft < (Number(leadTimeDays) || 0) + settings.minStockDays;
+  const unmet = Math.max(0, Number(unmetDeficitQty) || 0);
+  if (!belowThreshold && unmet <= 0) return null;
   const box = pcsPerBox > 0 ? pcsPerBox : 1;
-  const orderQty = Math.ceil(perDay * settings.factoryOrderDays);
-  return { daysLeft, orderQty, orderBoxes: Math.ceil(orderQty / box) };
+  const orderQty = Math.max(Math.ceil(perDay * settings.factoryOrderDays), unmet);
+  return {
+    daysLeft,
+    orderQty,
+    orderBoxes: Math.ceil(orderQty / box),
+    reason: belowThreshold ? 'total' : 'clusterDeficit',
+    unmetDeficitQty: unmet
+  };
 }
 
 export interface ClusterCoverageRow {
@@ -393,6 +409,8 @@ export interface ClusterCoverageRow {
   priority: boolean;
   /** Коэффициент повышенного запаса приоритетного кластера (1 — обычный кластер). */
   priorityK: number;
+  /** Непокрытая потребность кластера, шт: сколько не досталось из-за нехватки на Моём складе. */
+  unmetQty: number;
   recommendation: SupplyRecommendation | null;
 }
 
@@ -407,6 +425,8 @@ export interface ArticleCoverage {
   unboundEstimated: number;
   /** Продажи товара, не привязанные к кластеру («Без кластера» и неизвестные названия), шт. */
   unboundQtySold: number;
+  /** Суммарная непокрытая потребность кластеров товара, шт. */
+  unmetDeficitQty: number;
   clusters: ClusterCoverageRow[];
   factory: FactorySignal | null;
 }
@@ -517,6 +537,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
         excluded: isExcluded,
         priority: isPriority,
         priorityK,
+        unmetQty: 0,
         recommendation
       });
     }
@@ -541,6 +562,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       const boxesNeeded = Math.ceil(rec.neededQty / boxSize);
       const boxesGiven = Math.min(boxesNeeded, Math.floor(remainingStock / boxSize));
       remainingStock -= boxesGiven * boxSize;
+      row.unmetQty = (boxesNeeded - boxesGiven) * boxSize;
       row.recommendation = {
         neededQty: rec.neededQty,
         boxes: boxesGiven,
@@ -550,13 +572,15 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     }
 
     const perDay = speed.perDayByArticle[article] || 0;
+    const unmetDeficitQty = clusterRows.reduce((s, r) => s + (r.unmetQty || 0), 0);
     const factory = calcFactorySignal(
       stockAgg.totalEstimated,
       myStockAvailable,
       perDay,
       leadTimeDays,
       pcsPerBox,
-      input.settings
+      input.settings,
+      unmetDeficitQty
     );
 
     articles.push({
@@ -569,6 +593,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       totalEstimated: stockAgg.totalEstimated,
       unboundEstimated: stockAgg.unboundEstimated,
       unboundQtySold,
+      unmetDeficitQty,
       clusters: clusterRows,
       factory
     });
