@@ -23,7 +23,8 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import { DashSettingsModal } from './DashSettingsModal';
 import { formatCurrency } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
-import { buildOzonAlerts, OzonAlert } from '../lib/ozonAlerts';
+import { buildOzonAlerts, buildCoverageAlerts, OzonAlert } from '../lib/ozonAlerts';
+import { buildOzonCoverage, resolveOzonArticle, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
 
 export const Dashboard: React.FC = React.memo(() => {
   const stock = useWarehouseStore((state) => state.stock);
@@ -37,6 +38,14 @@ export const Dashboard: React.FC = React.memo(() => {
   
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
+  const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
+  const ozonSales = useWarehouseStore((state) => state.ozonSales);
+  const factoryOrders = useWarehouseStore((state) => state.factoryOrders);
+  const fetchOzonStocks = useWarehouseStore((state) => state.fetchOzonStocks);
+  const fetchOzonSales = useWarehouseStore((state) => state.fetchOzonSales);
+  const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
+  const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
+  const fetchGas = useWarehouseStore((state) => state.fetchGas);
   
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isFunnelCollapsed, setIsFunnelCollapsed] = useState(false);
@@ -97,6 +106,17 @@ export const Dashboard: React.FC = React.memo(() => {
     }
   });
 
+  const [ozonSettings, setOzonSettings] = useState<OzonCoverageSettings>({
+    speedWeeks: 4,
+    minStockDays: 7,
+    targetStockDays: 30,
+    factoryOrderDays: 60,
+    returnsToSalePct: 80,
+    excludedClusters: '',
+    priorityClusters: '',
+  });
+  const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
+
   const [isAlertsCollapsed, setIsAlertsCollapsed] = useState(false);
 
   const dismissAlert = (key: string) => {
@@ -110,12 +130,79 @@ export const Dashboard: React.FC = React.memo(() => {
     });
   };
 
+  useEffect(() => {
+    if (!isAdmin) return;
+    const timer = setTimeout(() => {
+      fetchOzonStocks();
+      fetchOzonSales();
+      fetchFactoryOrders();
+      fetchGas('getOzonSettings').then((res: any) => {
+        if (res?.status === 'success' && res.data) {
+          setOzonSettings({
+            speedWeeks: Number(res.data.speedWeeks) || 4,
+            minStockDays: Number(res.data.minStockDays) || 7,
+            targetStockDays: Number(res.data.targetStockDays) || 30,
+            factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
+            returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
+            excludedClusters: String(res.data.excludedClusters || ''),
+            priorityClusters: String(res.data.priorityClusters || ''),
+          });
+        }
+      }).catch((err: any) => console.error('getOzonSettings error:', err));
+      fetchGas('getOzonClusters').then((res: any) => {
+        if (res?.status === 'success' && Array.isArray(res.data)) {
+          setClusterRefs(res.data.map((item: any) => ({
+            clusterId: String(item.clusterId || '').trim(),
+            clusterName: String(item.clusterName || '').trim(),
+          })).filter((item: any) => Boolean(item.clusterId)));
+        }
+      }).catch((err: any) => console.error('getOzonClusters error:', err));
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchGas]);
+
+  const ozonCoverage = useMemo<OzonCoverageResult | null>(() => {
+    if (!isAdmin) return null;
+    if (!ozonStocks || ozonStocks.length === 0) return null;
+    const myStockAvailability: Record<string, number> = {};
+    for (const s of skus) {
+      myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
+    }
+    return buildOzonCoverage({
+      stocks: ozonStocks,
+      sales: ozonSales || [],
+      skus,
+      clusters: clusterRefs,
+      settings: ozonSettings,
+      myStockAvailability,
+    });
+  }, [isAdmin, ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability]);
+
+  const coverageAlerts = useMemo(() => {
+    if (!isAdmin || !ozonCoverage) return [];
+    const orderedArticles = (factoryOrders || [])
+      .filter((o) => String(o.status || '').trim() !== 'received')
+      .map((o) => String(o.article || '').trim())
+      .filter(Boolean);
+    const namesByArticle: Record<string, string> = {};
+    for (const s of ozonStocks || []) {
+      const art = resolveOzonArticle(skus, s.offerId, s.sku);
+      if (art && !namesByArticle[art] && s.name) {
+        namesByArticle[art] = s.name;
+      }
+    }
+    const all = buildCoverageAlerts(ozonCoverage, ozonSettings, orderedArticles, namesByArticle);
+    const hidden = new Set(dismissedAlerts);
+    return all.filter((a) => !hidden.has(a.key));
+  }, [isAdmin, ozonCoverage, factoryOrders, ozonStocks, skus, ozonSettings, dismissedAlerts]);
+
   const alerts = useMemo(() => {
     if (!isAdmin) return [];
     const all = buildOzonAlerts(externalShipments || [], skus || []);
     const hidden = new Set(dismissedAlerts);
-    return all.filter(a => !hidden.has(a.key));
-  }, [isAdmin, externalShipments, skus, dismissedAlerts]);
+    const shipmentAlerts = all.filter(a => !hidden.has(a.key));
+    return [...shipmentAlerts, ...coverageAlerts];
+  }, [isAdmin, externalShipments, skus, dismissedAlerts, coverageAlerts]);
 
   useEffect(() => {
     if (isAdmin) {
