@@ -170,6 +170,8 @@ export interface OzonCoverageSettings {
   returnsToSalePct: number;
   /** КластерID без поставок, через запятую. */
   excludedClusters: string;
+  /** Приоритетные кластеры в формате «КластерID:коэффициент», через запятую. */
+  priorityClusters?: string;
 }
 
 export interface OzonClusterRef {
@@ -180,6 +182,23 @@ export interface OzonClusterRef {
 /** Разбор настройки excludedClusters (CSV КластерID) в множество. */
 export function parseExcludedClusters(csv: string): Set<string> {
   return new Set(String(csv || '').split(',').map(s => s.trim()).filter(Boolean));
+}
+
+/**
+ * Разбор настройки priorityClusters («КластерID:коэффициент» через запятую) в карту коэффициентов.
+ * Некорректные и меньшие единицы коэффициенты игнорируются: приоритет не может понижать запас.
+ */
+export function parsePriorityClusters(csv: string): Record<string, number> {
+  const map: Record<string, number> = {};
+  const parts = String(csv || '').split(',').map(s => s.trim()).filter(Boolean);
+  for (const part of parts) {
+    const [rawId, rawK] = part.split(':');
+    const id = String(rawId || '').trim();
+    if (!id) continue;
+    const k = Number(String(rawK || '').trim().replace(',', '.'));
+    map[id] = isNaN(k) || k < 1 ? 1.5 : k;
+  }
+  return map;
 }
 
 /** Карта «название кластера -> КластерID» по справочнику «Кластеры Ozon». */
@@ -370,6 +389,10 @@ export interface ClusterCoverageRow {
   estimated: number;
   coverageDays: number | null;
   excluded: boolean;
+  /** Кластер отмечен как приоритетный. */
+  priority: boolean;
+  /** Коэффициент повышенного запаса приоритетного кластера (1 — обычный кластер). */
+  priorityK: number;
   recommendation: SupplyRecommendation | null;
 }
 
@@ -417,6 +440,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const stocksByArticle = buildClusterStocks(input.stocks, input.skus, input.settings.returnsToSalePct);
   const nameToId = buildClusterNameToId(input.clusters);
   const excludedIds = parseExcludedClusters(input.settings.excludedClusters);
+  const priorityMap = parsePriorityClusters(input.settings.priorityClusters || '');
 
   const articleSet = new Set<string>([
     ...Object.keys(stocksByArticle),
@@ -465,10 +489,19 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       const qtySold = qtyByClusterId[clusterId] || 0;
       const isExcluded = excludedIds.has(clusterId);
       const estimated = st ? st.estimated : 0;
-      const coverage = calcCoverageDays(estimated, perDay, input.settings.minStockDays, isExcluded);
+      const priorityK = isExcluded ? 1 : (priorityMap[clusterId] || 1);
+      const isPriority = priorityK > 1;
+      const effectiveSettings = isPriority
+        ? {
+            ...input.settings,
+            minStockDays: input.settings.minStockDays * priorityK,
+            targetStockDays: input.settings.targetStockDays * priorityK,
+          }
+        : input.settings;
+      const coverage = calcCoverageDays(estimated, perDay, effectiveSettings.minStockDays, isExcluded);
       const recommendation = isExcluded
         ? null
-        : calcSupplyRecommendation(perDay, estimated, input.settings, pcsPerBox, myStockAvailable);
+        : calcSupplyRecommendation(perDay, estimated, effectiveSettings, pcsPerBox, myStockAvailable);
 
       clusterRows.push({
         clusterId,
@@ -482,6 +515,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
         estimated,
         coverageDays: coverage,
         excluded: isExcluded,
+        priority: isPriority,
+        priorityK,
         recommendation
       });
     }

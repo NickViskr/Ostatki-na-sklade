@@ -3,6 +3,10 @@
 ## [2026-07-27]
 
 ### Добавлено
+- Учёт приоритетных кластеров в модуле планирования Ozon (`src/lib/ozonCoverage.ts`):
+  - Поле `priorityClusters` в интерфейсе `OzonCoverageSettings` и функция `parsePriorityClusters` для разбора строки «КластерID:коэффициент».
+  - Поля `priority` и `priorityK` в `ClusterCoverageRow`.
+  - Увеличение `minStockDays` и `targetStockDays` на коэффициент `priorityK` при расчёте покрытия и рекомендаций для приоритетных кластеров.
 - Настройка приоритетных кластеров `priorityClusters` в `Code.gs`:
   - Добавлена запись по умолчанию `{ key: 'priorityClusters', value: '', desc: 'Приоритетные кластеры в формате КластерID:коэффициент, через запятую' }` в `OZON_SETTINGS_DEFAULTS`.
   - Добавлен ключ `'priorityClusters'` в `OZON_SETTINGS_STRING_KEYS` для чтения значения настройки в виде строки.
