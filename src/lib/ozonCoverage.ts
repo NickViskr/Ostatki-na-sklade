@@ -501,7 +501,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       const coverage = calcCoverageDays(estimated, perDay, effectiveSettings.minStockDays, isExcluded);
       const recommendation = isExcluded
         ? null
-        : calcSupplyRecommendation(perDay, estimated, effectiveSettings, pcsPerBox, myStockAvailable);
+        : calcSupplyRecommendation(perDay, estimated, effectiveSettings, pcsPerBox, Number.MAX_SAFE_INTEGER);
 
       clusterRows.push({
         clusterId,
@@ -521,6 +521,33 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       });
     }
     clusterRows.sort((a, b) => b.qtySold - a.qtySold);
+
+    // Распределение остатка Моего склада между кластерами: остаток один на всех, поэтому
+    // рекомендации выдаются по очереди — сначала приоритетные (по убыванию коэффициента),
+    // затем остальные по возрастанию покрытия. Кому не хватило — урезанная рекомендация.
+    const boxSize = pcsPerBox > 0 ? pcsPerBox : 1;
+    let remainingStock = Math.max(0, myStockAvailable);
+    const distributionOrder = clusterRows
+      .filter(r => r.recommendation !== null)
+      .sort((a, b) => {
+        if (a.priority !== b.priority) return a.priority ? -1 : 1;
+        if (a.priority && b.priority && a.priorityK !== b.priorityK) return b.priorityK - a.priorityK;
+        const ca = a.coverageDays === null ? Number.POSITIVE_INFINITY : a.coverageDays;
+        const cb = b.coverageDays === null ? Number.POSITIVE_INFINITY : b.coverageDays;
+        return ca - cb;
+      });
+    for (const row of distributionOrder) {
+      const rec = row.recommendation as SupplyRecommendation;
+      const boxesNeeded = Math.ceil(rec.neededQty / boxSize);
+      const boxesGiven = Math.min(boxesNeeded, Math.floor(remainingStock / boxSize));
+      remainingStock -= boxesGiven * boxSize;
+      row.recommendation = {
+        neededQty: rec.neededQty,
+        boxes: boxesGiven,
+        qty: boxesGiven * boxSize,
+        limitedByMyStock: boxesGiven < boxesNeeded
+      };
+    }
 
     const perDay = speed.perDayByArticle[article] || 0;
     const factory = calcFactorySignal(
