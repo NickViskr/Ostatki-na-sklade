@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Columns3, RefreshCw, Settings } from 'lucide-react';
+import { ChevronDown, ChevronRight, Columns3, RefreshCw, Search, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow } from '../types';
@@ -57,6 +57,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     excludedClusters: '',
   });
   const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
+
+  const [cabinetFilter, setCabinetFilter] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [onlyWithRecommendations, setOnlyWithRecommendations] = useState(false);
 
   const [showColsMenu, setShowColsMenu] = useState(false);
   const [hiddenCols, setHiddenCols] = useState<string[]>(() => {
@@ -146,6 +150,18 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     }).catch((err) => console.error('getOzonClusters error:', err));
   }, [isAdmin, fetchGas]);
 
+  useEffect(() => {
+    if (!showColsMenu) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('#ozon-columns-menu') && !target.closest('#btn-ozon-columns')) {
+        setShowColsMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showColsMenu]);
+
   const toggleArticle = (article: string) => {
     setExpandedArticles((prev) => ({ ...prev, [article]: !prev[article] }));
   };
@@ -205,10 +221,22 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return cabs.size;
   }, [ozonStocks]);
 
+  const filteredOzonStocks = useMemo(() => {
+    if (!ozonStocks) return [];
+    if (cabinetFilter === 'all') return ozonStocks;
+    return ozonStocks.filter((s) => s.cabinet === cabinetFilter);
+  }, [ozonStocks, cabinetFilter]);
+
+  const filteredOzonSales = useMemo(() => {
+    if (!ozonSales) return [];
+    if (cabinetFilter === 'all') return ozonSales;
+    return ozonSales.filter((s) => s.cabinet === cabinetFilter);
+  }, [ozonSales, cabinetFilter]);
+
   const coverage = useMemo<OzonCoverageResult | null>(() => {
-    if (!ozonStocks || ozonStocks.length === 0) return null;
+    if (filteredOzonStocks.length === 0) return null;
     const articleSet = new Set<string>();
-    for (const s of ozonStocks) {
+    for (const s of filteredOzonStocks) {
       if (s.offerId) articleSet.add(String(s.offerId));
     }
     const myStockAvailability: Record<string, number> = {};
@@ -216,14 +244,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
     }
     return buildOzonCoverage({
-      stocks: ozonStocks,
-      sales: ozonSales,
+      stocks: filteredOzonStocks,
+      sales: filteredOzonSales,
       skus,
       clusters: clusterRefs,
       settings: ozonSettings,
       myStockAvailability,
     });
-  }, [ozonStocks, ozonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks]);
+  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];
@@ -237,7 +265,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       other: list.reduce((s, w) => s + (w.other || 0), 0),
     });
     const rows = coverage.articles.map((art) => {
-      const stockRows = (ozonStocks || []).filter(
+      const stockRows = filteredOzonStocks.filter(
         (s) => resolveOzonArticle(skus, s.offerId, s.sku) === art.article
       );
       const unboundRows = stockRows.filter((s) => !String(s.clusterId || '').trim());
@@ -261,7 +289,33 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     });
     rows.sort((a, b) => (b.perDay - a.perDay) || (b.totals.available - a.totals.available));
     return rows;
-  }, [coverage, ozonStocks, skus, ozonSettings.minStockDays]);
+  }, [coverage, filteredOzonStocks, skus, ozonSettings.minStockDays]);
+
+  const visibleRows = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return coverageRows.filter((row: any) => {
+      if (onlyWithRecommendations && row.recommendedQty <= 0) return false;
+      if (!q) return true;
+      return String(row.article).toLowerCase().includes(q) || String(row.name || '').toLowerCase().includes(q);
+    });
+  }, [coverageRows, searchQuery, onlyWithRecommendations]);
+
+  const clusterShares = useMemo(() => {
+    const map: Record<string, { clusterName: string; qty: number }> = {};
+    let total = 0;
+    for (const row of coverageRows as any[]) {
+      for (const cls of row.clusters) {
+        if (!map[cls.clusterId]) map[cls.clusterId] = { clusterName: cls.clusterName, qty: 0 };
+        map[cls.clusterId].qty += cls.qtySold || 0;
+        total += cls.qtySold || 0;
+      }
+    }
+    const list = Object.values(map)
+      .filter((c) => c.qty > 0)
+      .map((c) => ({ ...c, pct: total > 0 ? (c.qty / total) * 100 : 0 }))
+      .sort((a, b) => b.qty - a.qty);
+    return { list, total };
+  }, [coverageRows]);
 
   if (!isAdmin) return null;
 
@@ -397,7 +451,46 @@ export const OzonStocksTab: React.FC = React.memo(() => {
             </div>
 
             {/* Table / List */}
-            {!coverageRows || coverageRows.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-3 mb-3 flex flex-wrap items-center gap-3" id="ozon-stocks-filters">
+              <div className="relative flex-1 min-w-[200px]">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  id="ozon-search-input"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Поиск по артикулу или названию"
+                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300"
+                />
+              </div>
+              {ozonStocksCabinets.length > 1 && (
+                <select
+                  id="ozon-cabinet-filter"
+                  value={cabinetFilter}
+                  onChange={(e) => setCabinetFilter(e.target.value)}
+                  className="text-xs border border-slate-200 rounded-xl px-3 py-1.5 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                >
+                  <option value="all">Все кабинеты</option>
+                  {ozonStocksCabinets.map((cab: string) => (
+                    <option key={cab} value={cab}>{cab}</option>
+                  ))}
+                </select>
+              )}
+              <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none" id="ozon-only-rec-toggle">
+                <input
+                  type="checkbox"
+                  checked={onlyWithRecommendations}
+                  onChange={(e) => setOnlyWithRecommendations(e.target.checked)}
+                  className="rounded border-slate-300"
+                />
+                Только с рекомендациями
+              </label>
+              <span className="text-[11px] text-slate-400 ml-auto">
+                Показано товаров: {visibleRows.length} из {coverageRows.length}
+              </span>
+            </div>
+
+            {visibleRows.length === 0 ? (
               <div className="bg-white p-6 rounded-2xl border border-slate-200 text-center text-sm text-slate-500" id="ozon-stocks-empty">
                 Данных пока нет. Нажмите „Обновить", чтобы загрузить остатки со складов Ozon.
               </div>
@@ -425,7 +518,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                       </tr>
                     </thead>
                     <tbody>
-                      {coverageRows.map((art: any) => {
+                      {visibleRows.map((art: any) => {
                         const isArtExpanded = !!expandedArticles[art.article];
                         return (
                           <React.Fragment key={art.article}>
@@ -582,6 +675,27 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                       })}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            )}
+
+            {clusterShares.list.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-cluster-shares">
+                <div className="text-xs font-bold text-slate-700 mb-3">
+                  Доли кластеров в продажах
+                  <span className="font-normal text-slate-400 ml-2">всего продано: {fmtInt(clusterShares.total)} шт</span>
+                </div>
+                <div className="flex flex-col gap-2">
+                  {clusterShares.list.map((c) => (
+                    <div key={c.clusterName} className="flex items-center gap-3">
+                      <span className="text-[11px] text-slate-600 w-40 truncate" title={c.clusterName}>{c.clusterName}</span>
+                      <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(100, c.pct)}%` }} />
+                      </div>
+                      <span className="text-[11px] font-semibold text-slate-700 w-14 text-right">{c.pct.toFixed(1)}%</span>
+                      <span className="text-[11px] text-slate-400 w-16 text-right">{fmtInt(c.qty)} шт</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
