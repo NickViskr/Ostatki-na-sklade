@@ -76,6 +76,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [onlyWithRecommendations, setOnlyWithRecommendations] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [factoryModalArticle, setFactoryModalArticle] = useState<string | null>(null);
+  const [showRecommendations, setShowRecommendations] = useState(true);
 
   const [showColsMenu, setShowColsMenu] = useState(false);
   const [hiddenCols, setHiddenCols] = useState<string[]>(() => {
@@ -383,6 +384,36 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return (coverageRows as any[]).find((r) => r.article === factoryModalArticle) || null;
   }, [coverageRows, factoryModalArticle]);
 
+  const recommendations = useMemo(() => {
+    const supplies: any[] = [];
+    const factories: any[] = [];
+    let orderedCount = 0;
+    for (const row of coverageRows as any[]) {
+      const clusters = row.clusters.filter((c: any) => c.recommendation && (c.recommendation.boxes > 0 || c.needQty > 0));
+      if (clusters.length > 0) {
+        let minCoverage = Number.POSITIVE_INFINITY;
+        for (const c of clusters) {
+          const cov = c.coverageDays === null || c.coverageDays === undefined ? Number.POSITIVE_INFINITY : c.coverageDays;
+          if (cov < minCoverage) minCoverage = cov;
+        }
+        supplies.push({
+          article: row.article,
+          name: row.name,
+          myStockAvailable: row.myStockAvailable,
+          minCoverage,
+          clusters,
+        });
+      }
+      if (row.factory) {
+        if (activeFactoryOrders[row.article]) orderedCount++;
+        else factories.push({ article: row.article, name: row.name, factory: row.factory, leadTimeDays: row.leadTimeDays });
+      }
+    }
+    supplies.sort((a, b) => a.minCoverage - b.minCoverage);
+    factories.sort((a, b) => a.factory.daysLeft - b.factory.daysLeft);
+    return { supplies, factories, orderedCount };
+  }, [coverageRows, activeFactoryOrders]);
+
   if (!isAdmin) return null;
 
   return (
@@ -506,6 +537,100 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                 </div>
               </div>
             </div>
+
+            {(recommendations.supplies.length > 0 || recommendations.factories.length > 0 || recommendations.orderedCount > 0) && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-4" id="ozon-recommendations">
+                <button
+                  type="button"
+                  onClick={() => setShowRecommendations((v) => !v)}
+                  className="w-full flex items-center justify-between text-left"
+                >
+                  <span className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                    {showRecommendations ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronRight size={16} className="text-slate-400" />}
+                    Рекомендации
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    поставок: {recommendations.supplies.length} · заказов на фабрике: {recommendations.factories.length}
+                  </span>
+                </button>
+                {showRecommendations && (
+                  <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Отвезти на Ozon</div>
+                      {recommendations.supplies.length === 0 ? (
+                        <div className="text-[11px] text-slate-400">Запасы кластеров в норме.</div>
+                      ) : (
+                        <div className="flex flex-col gap-3">
+                          {recommendations.supplies.map((s: any) => (
+                            <div key={s.article} className="border border-slate-100 rounded-xl p-3 bg-slate-50/60">
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span className="font-mono font-bold text-slate-800 text-[12px]">{s.article}</span>
+                                <span className="text-[11px] text-slate-400 shrink-0">на складе {fmtInt(s.myStockAvailable)} шт</span>
+                              </div>
+                              {s.name && <div className="text-[11px] text-slate-500 truncate" title={s.name}>{s.name}</div>}
+                              <div className="mt-2 flex flex-col gap-1">
+                                {s.clusters.map((c: any) => (
+                                  <div key={c.clusterId} className="flex items-center justify-between gap-2 text-[11px]">
+                                    <span className="text-slate-600 truncate" title={c.clusterName}>
+                                      {c.clusterName}
+                                      {c.priority && <span className="ml-1 text-amber-600 font-bold">×{c.priorityK}</span>}
+                                    </span>
+                                    {c.recommendation.boxes > 0 ? (
+                                      <span className={`shrink-0 font-semibold ${c.recommendation.limitedByMyStock ? 'text-amber-600' : 'text-indigo-600'}`}>
+                                        {fmtInt(c.recommendation.boxes)} кор ({fmtInt(c.recommendation.qty)} шт)
+                                      </span>
+                                    ) : (
+                                      <span className="shrink-0 font-semibold text-red-600">
+                                        нужно {fmtInt(c.needBoxes)} кор — нет на складе
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Заказать на фабрике</div>
+                      {recommendations.factories.length === 0 ? (
+                        <div className="text-[11px] text-slate-400">
+                          {recommendations.orderedCount > 0
+                            ? `Все сигналы закрыты размещёнными заказами: ${recommendations.orderedCount}.`
+                            : 'Заказывать пока нечего.'}
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {recommendations.factories.map((f: any) => (
+                            <button
+                              key={f.article}
+                              type="button"
+                              onClick={() => setFactoryModalArticle(f.article)}
+                              className="text-left border border-rose-100 bg-rose-50/60 rounded-xl p-3 hover:bg-rose-50 transition-colors"
+                            >
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span className="font-mono font-bold text-slate-800 text-[12px]">{f.article}</span>
+                                <span className="text-rose-600 font-bold text-[12px] shrink-0">
+                                  {fmtInt(f.factory.orderQty)} шт ({fmtInt(f.factory.orderBoxes)} кор)
+                                </span>
+                              </div>
+                              {f.name && <div className="text-[11px] text-slate-500 truncate" title={f.name}>{f.name}</div>}
+                              <div className="text-[11px] text-slate-500 mt-1">
+                                Хватит на {Math.round(f.factory.daysLeft)} дн. · срок поставки {f.leadTimeDays || 0} дн. · {f.factory.reason === 'clusterDeficit' ? 'нечем пополнить кластеры' : 'кончается везде'}
+                              </div>
+                            </button>
+                          ))}
+                          {recommendations.orderedCount > 0 && (
+                            <div className="text-[11px] text-emerald-700">Уже заказано на фабрике: {recommendations.orderedCount} товаров.</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Table / List */}
             <div className="bg-white rounded-2xl border border-slate-200 p-3 mb-3 flex flex-wrap items-center gap-3" id="ozon-stocks-filters">
