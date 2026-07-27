@@ -54,6 +54,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     factoryOrderDays: 60,
     returnsToSalePct: 80,
     excludedClusters: '',
+    priorityClusters: '',
   });
   const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
 
@@ -136,6 +137,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
           returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
           excludedClusters: String(res.data.excludedClusters || ''),
+          priorityClusters: String(res.data.priorityClusters || ''),
         });
       }
     }).catch((err) => console.error('getOzonSettings error:', err));
@@ -562,6 +564,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         <span className="font-semibold text-slate-700 text-[11px]">{cls.clusterName}</span>
                                         {cls.excluded && (
                                           <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-slate-200 text-slate-600">без поставок</span>
+                                        )}
+                                        {cls.priority && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-amber-100 text-amber-700" title="Приоритетный кластер: целевой и неснижаемый запас умножены на коэффициент">
+                                            приоритет ×{cls.priorityK}
+                                          </span>
                                         )}
                                       </div>
                                     </td>
