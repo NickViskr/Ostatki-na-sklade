@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow } from '../types';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
@@ -113,6 +113,8 @@ interface WarehouseState {
   ozonStocksSyncIssues: { name: string; message: string }[];
   fetchOzonStocks: () => Promise<void>;
   runOzonStocksSync: () => Promise<void>;
+  ozonSales: OzonSalesRow[];
+  fetchOzonSales: () => Promise<void>;
 }
 
 export const useWarehouseStore = create<WarehouseState>()(
@@ -140,6 +142,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonSyncStatus: null,
   ozonStocks: [],
   ozonStocksSyncIssues: [],
+  ozonSales: [],
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -1433,6 +1436,20 @@ export const useWarehouseStore = create<WarehouseState>()(
       }
     } catch (e) {
       console.error('getOzonStocks error:', e);
+    }
+  },
+
+  fetchOzonSales: async () => {
+    if (!get().sessionToken) return;
+    try {
+      const result = await get().fetchGas('getOzonSales');
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ ozonSales: result.data });
+      } else {
+        console.error('getOzonSales failed:', result.message);
+      }
+    } catch (e) {
+      console.error('getOzonSales error:', e);
     }
   },
 

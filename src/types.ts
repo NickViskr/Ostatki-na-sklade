@@ -130,3 +130,13 @@ export interface OzonStockRow {
   other: number;
   updatedAt: string;
 }
+
+export interface OzonSalesRow {
+  week: string;
+  cabinet: string;
+  offerId: string;
+  clusterName: string;
+  qty: number;
+  updatedAt: string;
+  days: number;
+}

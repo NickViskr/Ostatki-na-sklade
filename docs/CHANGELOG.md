@@ -3,6 +3,10 @@
 ## [2026-07-27]
 
 ### Добавлено
+- Загрузка данных продаж Ozon на фронтенде (`src/types.ts`, `src/store/useWarehouseStore.ts`):
+  - Добавлен интерфейс `OzonSalesRow` для представления записи продаж Ozon.
+  - В Zustand-стор `useWarehouseStore` добавлены поле `ozonSales: OzonSalesRow[]` и асинхронный метод `fetchOzonSales()`.
+  - Запрос данных через `fetchGas('getOzonSales')` с записью массива в состояние.
 - Функция `getOzonSales()` и роут `getOzonSales` в Google Apps Script (`Code.gs`):
   - Чтение данных листа «Продажи Ozon» с возвратом массива объектов `{ week, cabinet, offerId, clusterName, qty, updatedAt, days }`.
   - Форматирование дат и защита от отсутствия обязательных колонок.
