@@ -65,7 +65,10 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
   if (!isOpen) return null;
 
   const box = pcsPerBox > 0 ? pcsPerBox : 1;
-  const boxes = Math.ceil((Number(qty) || 0) / box);
+  const qtyValue = Number(qty) || 0;
+  const boxesExact = qtyValue / box;
+  const remainderPcs = qtyValue % box;
+  const isWholeBoxes = qtyValue > 0 && remainderPcs === 0;
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,7 +106,7 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
             <h3 className="text-xl font-bold text-slate-800">
               {order ? 'Заказ на фабрике' : 'Отметить заказ на фабрике'}
             </h3>
-            <div className="text-xs text-slate-500 mt-1">
+            <div className="text-xs text-slate-600 mt-1">
               <span className="font-mono font-bold text-slate-700">{article}</span>
               {productName ? ` · ${productName}` : ''}
             </div>
@@ -119,7 +122,7 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
 
         <form onSubmit={handleSave} className="p-6 space-y-5">
           <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase">Количество, шт</label>
+            <label className="text-xs font-bold text-slate-600 uppercase">Количество, шт</label>
             <input
               type="number"
               min="1"
@@ -129,14 +132,28 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
               onChange={(e) => setQty(e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value, 10) || 0))}
               className="w-full px-4 py-3 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-semibold"
             />
-            <div className="text-[11px] text-slate-400">
-              {boxes > 0 ? `${boxes} кор по ${box} шт` : 'Укажи количество'}
+            <div className="text-[12px] text-slate-500">
+              {qtyValue > 0 ? (
+                <>
+                  <span className={isWholeBoxes ? 'font-bold text-emerald-600' : 'font-bold text-red-600'}>
+                    {isWholeBoxes ? String(boxesExact) : boxesExact.toFixed(1).replace('.', ',')} кор
+                  </span>
+                  <span> по {box} шт</span>
+                  {!isWholeBoxes && (
+                    <span className="text-red-600 font-semibold">
+                      {' '}· не кратно коробке: добавь {box - remainderPcs} шт или убери {remainderPcs} шт
+                    </span>
+                  )}
+                </>
+              ) : (
+                'Укажи количество'
+              )}
               {!order && suggestedQty > 0 ? ` · расчёт предлагает ${Math.ceil(suggestedQty)} шт` : ''}
             </div>
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase">Ожидаемое прибытие</label>
+            <label className="text-xs font-bold text-slate-600 uppercase">Ожидаемое прибытие</label>
             <input
               type="date"
               required
@@ -144,13 +161,13 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
               onChange={(e) => setExpectedAt(e.target.value)}
               className="w-full px-4 py-3 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-semibold"
             />
-            <div className="text-[11px] text-slate-400">
+            <div className="text-[12px] text-slate-500">
               По умолчанию: сегодня + срок поставки из SKU Базы ({Number(leadTimeDays) || 0} дн.)
             </div>
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase">Комментарий</label>
+            <label className="text-xs font-bold text-slate-600 uppercase">Комментарий</label>
             <input
               type="text"
               maxLength={200}
@@ -161,7 +178,7 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
             />
           </div>
 
-          <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-2xl p-3 leading-snug">
+          <div className="text-[12px] text-slate-600 bg-slate-50 border border-slate-200 rounded-2xl p-3 leading-snug">
             Отметка не меняет остатки и себестоимость: заказанный товар пока не лежит ни на складах Ozon, ни на твоём складе. Она гасит красный сигнал «Заказ на фабрике» до ожидаемой даты прибытия.
             <span className="block mt-2">
               Когда партия приедет, нажми «Партия пришла»: заказ закроется и откроется вкладка «Загрузка» с предзаполненным приходом на склад. Остатки поднимутся после обычного подтверждения прихода.
@@ -197,7 +214,7 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
                   <PackageCheck size={18} />
                   Партия пришла
                 </button>
-                <span className="text-[10px] text-slate-400 text-center">
+                <span className="text-[11px] text-slate-500 text-center">
                   Закроет заказ и откроет «Загрузка» с приходом {order.qty} шт на склад
                 </span>
               </div>
