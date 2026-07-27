@@ -349,6 +349,9 @@ function doPost(e) {
       case 'getOzonStocks': result = getOzonStocks(); break;
       case 'getOzonSettings': result = getOzonSettings(); break;
       case 'saveOzonSettings': assertAdmin(currentUser); result = saveOzonSettings(data); break;
+      case 'saveOzonClusters': result = saveOzonClusters(data); break;
+      case 'getOzonClusters': result = getOzonClusters(); break;
+      case 'markOzonClustersNotified': result = markOzonClustersNotified(); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -395,6 +398,7 @@ const OZON_STOCKS_HEADERS = [
 
 const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено', 'Дней'];
 const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
+const OZON_CLUSTERS_HEADERS = ['КластерID', 'Название', 'Добавлен', 'Уведомлён'];
 const OZON_SETTINGS_DEFAULTS = [
   { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
   { key: 'minStockDays',        value: 7,  desc: 'Неснижаемый остаток, дней продаж' },
@@ -619,6 +623,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
   getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
   getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
+  getOrCreateSheet(ss, 'Кластеры Ozon', OZON_CLUSTERS_HEADERS);
   return true;
 }
 
@@ -3104,6 +3109,150 @@ function saveOzonSettings(data) {
   return getOzonSettings();
 }
 
+function getOzonClustersSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Кластеры Ozon', OZON_CLUSTERS_HEADERS);
+  ensureColumns(sheet, OZON_CLUSTERS_HEADERS);
+  return sheet;
+}
+
+function saveOzonClusters(payload) {
+  if (!payload || !Array.isArray(payload.clusters)) {
+    throw new Error('Некорректный payload: ожидается объект с массивом clusters');
+  }
+
+  const sheet = getOzonClustersSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_CLUSTERS_HEADERS.length);
+
+  ensureColumns(sheet, OZON_CLUSTERS_HEADERS);
+  const data = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const clusterIdIdx = headers.indexOf('КластерID');
+  const nameIdx = headers.indexOf('Название');
+  const addedIdx = headers.indexOf('Добавлен');
+  const notifiedIdx = headers.indexOf('Уведомлён');
+
+  if (clusterIdIdx === -1 || nameIdx === -1 || addedIdx === -1 || notifiedIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Кластеры Ozon"');
+  }
+
+  const isInitialFill = lastRow <= 1;
+  const existingMap = new Map();
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    const cid = String(row[clusterIdIdx] || '').trim();
+    if (cid) {
+      existingMap.set(cid, { rowNum: i + 1, name: String(row[nameIdx] || '').trim() });
+    }
+  }
+
+  let newClusters = 0;
+  const todayStr = getTodayDateString();
+  const clusters = payload.clusters;
+
+  for (let c = 0; c < clusters.length; c++) {
+    const item = clusters[c];
+    if (!item) continue;
+    const cid = String(item.clusterId || '').trim();
+    if (!cid) continue;
+    const cname = String(item.clusterName || '').trim();
+
+    if (existingMap.has(cid)) {
+      const existing = existingMap.get(cid);
+      if (existing.name !== cname) {
+        sheet.getRange(existing.rowNum, nameIdx + 1).setValue(cname);
+        existing.name = cname;
+      }
+    } else {
+      const notifiedVal = isInitialFill ? 1 : 0;
+      sheet.appendRow([cid, cname, todayStr, notifiedVal]);
+      existingMap.set(cid, { rowNum: sheet.getLastRow(), name: cname });
+      newClusters++;
+    }
+  }
+
+  SpreadsheetApp.flush();
+  return {
+    totalClusters: existingMap.size,
+    newClusters: isInitialFill ? 0 : newClusters
+  };
+}
+
+function getOzonClusters() {
+  const sheet = getOzonClustersSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_CLUSTERS_HEADERS.length);
+
+  ensureColumns(sheet, OZON_CLUSTERS_HEADERS);
+  const data = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const clusterIdIdx = headers.indexOf('КластерID');
+  const nameIdx = headers.indexOf('Название');
+  const addedIdx = headers.indexOf('Добавлен');
+  const notifiedIdx = headers.indexOf('Уведомлён');
+
+  if (clusterIdIdx === -1 || nameIdx === -1 || addedIdx === -1 || notifiedIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "Кластеры Ozon"');
+  }
+
+  const result = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    const cid = String(row[clusterIdIdx] || '').trim();
+    if (!cid) continue;
+
+    const cname = String(row[nameIdx] || '').trim();
+    const addedAt = row[addedIdx] ? String(row[addedIdx]).trim() : '';
+    const notified = Number(row[notifiedIdx]) === 1;
+
+    result.push({
+      clusterId: cid,
+      clusterName: cname,
+      addedAt: addedAt,
+      notified: notified
+    });
+  }
+
+  return result;
+}
+
+function markOzonClustersNotified() {
+  const sheet = getOzonClustersSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_CLUSTERS_HEADERS.length);
+
+  ensureColumns(sheet, OZON_CLUSTERS_HEADERS);
+  const data = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const notifiedIdx = headers.indexOf('Уведомлён');
+  if (notifiedIdx === -1) {
+    throw new Error('Колонка "Уведомлён" не найдена в листе "Кластеры Ozon"');
+  }
+
+  let marked = 0;
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    if (Number(row[notifiedIdx]) !== 1) {
+      sheet.getRange(i + 1, notifiedIdx + 1).setValue(1);
+      marked++;
+    }
+  }
+
+  if (marked > 0) {
+    SpreadsheetApp.flush();
+  }
+
+  return { marked: marked };
+}
+
 function saveOzonStocks(payload) {
   if (!payload || !payload.rows || !Array.isArray(payload.rows)) {
     throw new Error('Некорректный payload: список строк rows обязателен и должен быть массивом');
@@ -4788,6 +4937,41 @@ function scheduledOzonCheck() {
       } catch (salesErr) {
         result.salesOk = false;
         result.salesMessage = 'Ошибка вызова /api/ozon/sales: ' + salesErr.toString() + '. Если это таймаут при первичной загрузке — данные, скорее всего, записаны, проверьте лист.';
+      }
+    }
+
+    // Синхронизация справочника кластеров Ozon
+    {
+      try {
+        const clustersResponse = UrlFetchApp.fetch(PROXY_URL + '/api/ozon/clusters', {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify({
+            sessionToken: token,
+            devMode: devMode
+          }),
+          muteHttpExceptions: true
+        });
+        const clustersCode = clustersResponse.getResponseCode();
+        const clustersContent = clustersResponse.getContentText();
+        if (clustersCode >= 200 && clustersCode < 300) {
+          const clustersParsed = JSON.parse(clustersContent);
+          if (clustersParsed.status === 'success') {
+            result.clustersOk = true;
+            result.clustersTotal = (clustersParsed.data && clustersParsed.data.totalClusters) || 0;
+            result.clustersNew = (clustersParsed.data && clustersParsed.data.newClusters) || 0;
+            result.clustersMessage = 'Справочник кластеров Ozon синхронизирован';
+          } else {
+            result.clustersOk = false;
+            result.clustersMessage = clustersParsed.message || 'Ошибка прокси при опросе справочника кластеров Ozon';
+          }
+        } else {
+          result.clustersOk = false;
+          result.clustersMessage = 'HTTP ' + clustersCode + ': ' + clustersContent.slice(0, 200);
+        }
+      } catch (clustersErr) {
+        result.clustersOk = false;
+        result.clustersMessage = 'Ошибка вызова /api/ozon/clusters: ' + clustersErr.toString();
       }
     }
 

@@ -3,6 +3,13 @@
 ## [2026-07-26]
 
 ### Добавлено
+- Интеграция справочника кластеров Ozon в Google Apps Script (`Code.gs`):
+  - Хранение справочника в листе «Кластеры Ozon» (`OZON_CLUSTERS_HEADERS`: КластерID, Название, Добавлен, Уведомлён).
+  - Создание листа в `setupDatabase` и хелпер `getOzonClustersSheet`.
+  - Функция `saveOzonClusters` для сохранения/обновления кластеров с автоматическим выставлением `Уведомлён = 1` и `newClusters: 0` при первичном наполнении.
+  - Функции `getOzonClusters` и `markOzonClustersNotified` для считывания и сброса статуса уведомлений.
+  - Роуты `saveOzonClusters`, `getOzonClusters`, `markOzonClustersNotified` в `doPost`.
+  - Фоновая синхронизация `/api/ozon/clusters` в процедуре `scheduledOzonCheck`.
 - Эндпоинт `POST /api/ozon/clusters` в `server.ts`:
   - Авторизация сессии через `verifyGasSession`.
   - Извлечение ключей Ozon через `fetchOzonKeys` с выбором первого кабинета.
