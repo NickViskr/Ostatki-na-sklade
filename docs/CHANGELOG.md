@@ -3,6 +3,10 @@
 ## [2026-07-28]
 
 ### Добавлено
+- Настройки точки отгрузки Ozon и лимита коробок в модальном окне `OzonSettingsModal.tsx`:
+  - Поле ввода тарифного лимита «Максимум коробок на кластер» (`maxBoxesPerCluster`).
+  - Поиск склада отгрузки Ozon FBO по наименованию (мин. 4 символа) через API `/api/ozon/dropoff/search` и выбор из списка с отображением адреса и типа.
+  - Сохранение и загрузка настроек `dropOffWarehouseId`, `dropOffWarehouseName`, `dropOffWarehouseType` и `maxBoxesPerCluster`.
 - Backend-эндпоинты прокси для оформления заявок на поставку Ozon (`server.ts`):
   - Поиск склада отгрузки `/api/ozon/dropoff/search` по подстроке наименования (мин. 4 символа).
   - Расчёт черновика поставки `/api/ozon/supply/draft` методом `/v1/draft/multi-cluster/create` с асинхронным опросом состояния и разбором принятых/отклонённых товаров.

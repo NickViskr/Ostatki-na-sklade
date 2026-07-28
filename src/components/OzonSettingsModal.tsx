@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { X, HelpCircle } from 'lucide-react';
+import { X, HelpCircle, Search, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 
@@ -17,6 +17,10 @@ interface OzonSettingsData {
   salesRetentionWeeks: number;
   excludedClusters: string;
   priorityClusters: string;
+  maxBoxesPerCluster: number;
+  dropOffWarehouseId: string;
+  dropOffWarehouseName: string;
+  dropOffWarehouseType: string;
 }
 
 const FieldHint: React.FC<{ text: string; position?: 'top' | 'bottom' }> = ({ text, position = 'top' }) => (
@@ -35,6 +39,13 @@ const FieldHint: React.FC<{ text: string; position?: 'top' | 'bottom' }> = ({ te
 export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
+  const sessionToken = useWarehouseStore((state) => state.sessionToken);
+  const devMode = useWarehouseStore((state) => state.devMode);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
+
+  const [dropOffQuery, setDropOffQuery] = useState('');
+  const [dropOffResults, setDropOffResults] = useState<{ warehouseId: string; name: string; address: string; warehouseType: string }[]>([]);
+  const [dropOffSearching, setDropOffSearching] = useState(false);
 
   const [directory, setDirectory] = useState<{ clusterId: string; clusterName: string }[]>([]);
   const [loading, setLoading] = useState(false);
@@ -48,7 +59,44 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     salesRetentionWeeks: 78,
     excludedClusters: '',
     priorityClusters: '',
+    maxBoxesPerCluster: 30,
+    dropOffWarehouseId: '',
+    dropOffWarehouseName: '',
+    dropOffWarehouseType: '',
   });
+
+  const handleDropOffSearch = async () => {
+    const query = dropOffQuery.trim();
+    if (query.length < 4) {
+      toast.error('Введите минимум 4 символа названия точки отгрузки');
+      return;
+    }
+    setDropOffSearching(true);
+    try {
+      const role = currentUser?.role?.toLowerCase() || '';
+      const isAdminRole = role === 'admin' || role === 'администратор';
+      const sendDevMode = devMode && isAdminRole;
+
+      const res = await fetch('/api/ozon/dropoff/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionToken, search: query, ...(sendDevMode ? { devMode: true } : {}) })
+      });
+      const result = await res.json();
+      if (result.status === 'success' && Array.isArray(result.data?.warehouses)) {
+        setDropOffResults(result.data.warehouses);
+        if (result.data.warehouses.length === 0) {
+          toast.error('Ozon не нашёл точек отгрузки по этому названию');
+        }
+      } else {
+        toast.error(result.message || 'Ошибка поиска точки отгрузки');
+      }
+    } catch (e: any) {
+      toast.error('Ошибка сети при поиске точки отгрузки: ' + (e?.message || ''));
+    } finally {
+      setDropOffSearching(false);
+    }
+  };
 
   const clusters = useMemo(() => {
     if (directory.length > 0) {
@@ -167,6 +215,10 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               salesRetentionWeeks: Number(res.data.salesRetentionWeeks) || 78,
               excludedClusters: String(res.data.excludedClusters || ''),
               priorityClusters: String(res.data.priorityClusters || ''),
+              maxBoxesPerCluster: Number(res.data.maxBoxesPerCluster) || 30,
+              dropOffWarehouseId: String(res.data.dropOffWarehouseId || ''),
+              dropOffWarehouseName: String(res.data.dropOffWarehouseName || ''),
+              dropOffWarehouseType: String(res.data.dropOffWarehouseType || ''),
             });
           } else if (res?.status === 'error') {
             toast.error(res.message || 'Ошибка загрузки настроек Ozon');
@@ -195,6 +247,10 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         salesRetentionWeeks: Math.max(1, parseInt(String(form.salesRetentionWeeks), 10) || 1),
         excludedClusters: form.excludedClusters,
         priorityClusters: form.priorityClusters,
+        maxBoxesPerCluster: Math.max(1, parseInt(String(form.maxBoxesPerCluster), 10) || 1),
+        dropOffWarehouseId: form.dropOffWarehouseId,
+        dropOffWarehouseName: form.dropOffWarehouseName,
+        dropOffWarehouseType: form.dropOffWarehouseType,
       };
 
       const res = await fetchGas('saveOzonSettings', { data: payload });
@@ -333,6 +389,99 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Максимум коробок на кластер
+                  <FieldHint text="Тарифный лимит Ozon на бесплатную отгрузку в один кластер. Если коробок больше, превышение подсвечивается в мастере поставки и остаток лучше оформить отдельной заявкой. Технический предел Ozon на один вызов — тоже 30 коробок." />
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={form.maxBoxesPerCluster}
+                  onChange={(e) =>
+                    setForm({ ...form, maxBoxesPerCluster: e.target.value === '' ? 0 : parseInt(e.target.value, 10) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Точка отгрузки Ozon
+                  <FieldHint text="Склад Ozon, куда вы физически привозите коробки. Дальше Ozon развозит товар по кластерам сам. Найдите точку по части названия — например «ПЫШМА» — и выберите из списка. Ozon может сменить точку, тогда просто найдите новую." />
+                </label>
+
+                {form.dropOffWarehouseId ? (
+                  <div className="mb-2 p-3 rounded-xl bg-emerald-50 border border-emerald-200">
+                    <div className="text-sm font-bold text-emerald-900">{form.dropOffWarehouseName || 'Без названия'}</div>
+                    <div className="text-xs text-emerald-700 mt-0.5">
+                      ID {form.dropOffWarehouseId} · {form.dropOffWarehouseType || 'тип не указан'}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mb-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                    Точка отгрузки не выбрана — оформить поставку не получится
+                  </div>
+                )}
+
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={dropOffQuery}
+                    placeholder="Название точки, минимум 4 символа"
+                    onChange={(e) => setDropOffQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleDropOffSearch(); } }}
+                    className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleDropOffSearch}
+                    disabled={dropOffSearching}
+                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 text-sm font-bold"
+                  >
+                    <Search size={16} />
+                    {dropOffSearching ? 'Ищу…' : 'Найти'}
+                  </button>
+                </div>
+
+                {dropOffResults.length > 0 && (
+                  <div className="mt-2 space-y-1.5 max-h-52 overflow-y-auto">
+                    {dropOffResults.map((w) => {
+                      const isActive = w.warehouseId === form.dropOffWarehouseId;
+                      return (
+                        <button
+                          key={w.warehouseId}
+                          type="button"
+                          onClick={() =>
+                            setForm({
+                              ...form,
+                              dropOffWarehouseId: w.warehouseId,
+                              dropOffWarehouseName: w.name,
+                              dropOffWarehouseType: w.warehouseType,
+                            })
+                          }
+                          className={`w-full text-left p-3 rounded-xl border transition-colors ${
+                            isActive
+                              ? 'bg-indigo-50 border-indigo-300'
+                              : 'bg-white border-slate-200 hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            {isActive && <Check size={14} className="text-indigo-600 mt-0.5 shrink-0" />}
+                            <div className="min-w-0">
+                              <div className="text-sm font-bold text-slate-800 break-words">{w.name}</div>
+                              <div className="text-xs text-slate-500 mt-0.5">{w.warehouseType}</div>
+                              <div className="text-xs text-slate-400 mt-0.5 break-words">{w.address}</div>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <div>
