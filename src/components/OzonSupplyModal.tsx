@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { X, AlertTriangle, Send } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
+import { resolveOzonArticle } from '../lib/ozonCoverage';
 
 export interface SupplyPlanRow {
   article: string;
@@ -30,6 +31,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   isOpen, onClose, rows, cabinet, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated
 }) => {
   const skus = useWarehouseStore((state) => state.skus);
+  const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
   const sessionToken = useWarehouseStore((state) => state.sessionToken);
   const devMode = useWarehouseStore((state) => state.devMode);
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -46,18 +48,50 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     return v === undefined ? r.qty : v;
   };
 
-  // Ozon-SKU хранится в SKU Базе, колонка «ШК Ozon»
+  /**
+   * Нормализация значения в числовой Ozon-SKU.
+   * Отсекает буквенные префиксы технических штрихкодов (OZN1706096599),
+   * дробный хвост из Google Sheets (1706096599.0) и пробелы.
+   * Возвращает пустую строку, если числа получить не удалось.
+   */
+  const normalizeOzonSku = (raw: any): string => {
+    let v = String(raw == null ? '' : raw).trim();
+    if (!v) return '';
+    v = v.replace(/\s+/g, '');
+    v = v.replace(/\.0+$/, '');
+    const digits = v.replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.length < 6) return '';
+    return digits;
+  };
+
+  /**
+   * Ozon-SKU по артикулу приложения.
+   * Основной источник — зеркало «Остатки Ozon»: там SKU приходит от Ozon напрямую.
+   * Запасной — колонка «ШК Ozon» в SKU Базе.
+   */
   const skuMap = useMemo(() => {
     const map: Record<string, string> = {};
-    for (const s of skus) {
-      const ozon = String(s.ozonBarcode || '').trim();
-      if (ozon) map[s.sku] = ozon;
+
+    for (const row of ozonStocks || []) {
+      const article = resolveOzonArticle(skus, row.offerId, row.sku);
+      if (!article || article === 'НЕИЗВЕСТНО') continue;
+      if (map[article]) continue;
+      const normalized = normalizeOzonSku(row.sku);
+      if (normalized) map[article] = normalized;
     }
+
+    for (const s of skus) {
+      if (map[s.sku]) continue;
+      const normalized = normalizeOzonSku(s.ozonBarcode);
+      if (normalized) map[s.sku] = normalized;
+    }
+
     return map;
-  }, [skus]);
+  }, [skus, ozonStocks]);
 
   const missingSku = useMemo(
-    () => Array.from(new Set(rows.filter((r) => !/^\d+$/.test(skuMap[r.article] || '')).map((r) => r.article))),
+    () => Array.from(new Set(rows.filter((r) => !skuMap[r.article]).map((r) => r.article))),
     [rows, skuMap]
   );
 
@@ -154,7 +188,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       return;
     }
     if (missingSku.length > 0) {
-      toast.error('Не заполнен ШК Ozon в SKU Базе: ' + missingSku.join(', '));
+      toast.error('Не удалось определить Ozon-SKU для артикулов: ' + missingSku.join(', ') + '. Проверьте, что товар есть в зеркале «Остатки Ozon», либо заполните ШК Ozon в SKU Базе.');
       return;
     }
     const clusters = buildPayloadClusters();
@@ -238,7 +272,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
             <>
               {missingSku.length > 0 && (
                 <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800">
-                  Не заполнен ШК Ozon в SKU Базе: {missingSku.join(', ')}. Без него заявку отправить нельзя.
+                  Не удалось определить Ozon-SKU: {missingSku.join(', ')}. SKU берётся из зеркала «Остатки Ozon», запасной источник — колонка «ШК Ozon» в SKU Базе.
                 </div>
               )}
               <div className="text-xs text-slate-500">
@@ -249,7 +283,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                   <div key={rowKey(r)} className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/50">
                     <div className="min-w-0 flex-1">
                       <div className="font-mono font-bold text-sm text-slate-800 truncate">{r.article}</div>
-                      <div className="text-[11px] text-slate-500 truncate">{r.clusterName}</div>
+                      <div className="text-[11px] text-slate-500 truncate">
+                        {r.clusterName}
+                        {skuMap[r.article] && <span className="ml-1.5 text-slate-400">SKU {skuMap[r.article]}</span>}
+                      </div>
                       {r.limitedByMyStock && (
                         <div className="text-[11px] text-amber-600 font-semibold">урезано остатком Моего склада</div>
                       )}
