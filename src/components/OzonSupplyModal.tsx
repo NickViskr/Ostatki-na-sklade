@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { X, AlertTriangle, Send, Trash2, ArrowLeft } from 'lucide-react';
+import { X, AlertTriangle, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { resolveOzonArticle } from '../lib/ozonCoverage';
@@ -25,8 +25,6 @@ interface OzonSupplyModalProps {
   onCreated: () => void;
 }
 
-type Phase = 'form' | 'verdict' | 'sending';
-
 const REQUEST_TIMEOUT_SEC = 60;
 
 export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
@@ -39,11 +37,12 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
 
-  const [phase, setPhase] = useState<Phase>('form');
+  const [sending, setSending] = useState(false);
   const [qtyEdit, setQtyEdit] = useState<Record<string, number>>({});
   const [removedRows, setRemovedRows] = useState<Record<string, boolean>>({});
   const [draftId, setDraftId] = useState('');
   const [verdict, setVerdict] = useState<any>(null);
+  const [dirty, setDirty] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(REQUEST_TIMEOUT_SEC);
   const [timedOut, setTimedOut] = useState(false);
 
@@ -51,15 +50,15 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   const rowKey = (r: SupplyPlanRow) => `${r.article}|||${r.clusterId}`;
 
-  // Сброс состояния при каждом открытии: иначе зависшая фаза отправки
-  // остаётся навсегда и модалка больше не открывается нормально
+  // Сброс состояния при каждом открытии
   useEffect(() => {
     if (isOpen) {
-      setPhase('form');
+      setSending(false);
       setQtyEdit({});
       setRemovedRows({});
       setDraftId('');
       setVerdict(null);
+      setDirty(false);
       setSecondsLeft(REQUEST_TIMEOUT_SEC);
       setTimedOut(false);
     }
@@ -67,7 +66,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   // Обратный отсчёт во время работы с Ozon
   useEffect(() => {
-    if (phase !== 'sending') return;
+    if (!sending) return;
     setSecondsLeft(REQUEST_TIMEOUT_SEC);
     setTimedOut(false);
     const id = setInterval(() => {
@@ -81,7 +80,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       });
     }, 1000);
     return () => clearInterval(id);
-  }, [phase]);
+  }, [sending]);
 
   const getQty = (r: SupplyPlanRow) => {
     const v = qtyEdit[rowKey(r)];
@@ -143,6 +142,34 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   if (!isOpen) return null;
 
+  const markDirty = () => {
+    if (verdict) setDirty(true);
+  };
+
+  const changeQty = (r: SupplyPlanRow, value: string) => {
+    setQtyEdit({ ...qtyEdit, [rowKey(r)]: value === '' ? 0 : parseInt(value, 10) });
+    markDirty();
+  };
+
+  const removeRow = (r: SupplyPlanRow) => {
+    setRemovedRows({ ...removedRows, [rowKey(r)]: true });
+    markDirty();
+  };
+
+  const removeCluster = (clusterId: string) => {
+    const next = { ...removedRows };
+    for (const r of rows) {
+      if (r.clusterId === clusterId) next[rowKey(r)] = true;
+    }
+    setRemovedRows(next);
+    markDirty();
+  };
+
+  const restoreRows = () => {
+    setRemovedRows({});
+    markDirty();
+  };
+
   const buildPayloadClusters = () => {
     const byCluster: Record<string, { clusterId: string; items: { sku: number; quantity: number }[] }> = {};
     for (const r of activeRows) {
@@ -193,7 +220,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   };
 
   const handleClose = () => {
-    if (phase === 'sending' && !timedOut) {
+    if (sending && !timedOut) {
       const ok = window.confirm(
         'Запрос к Ozon ещё выполняется. Если закрыть окно сейчас, заявка всё равно может быть создана — проверьте её в Ozon Seller. Закрыть?'
       );
@@ -221,7 +248,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       } else {
         toast.error('Ошибка сети: ' + (e?.message || ''));
       }
-      setPhase('verdict');
+      setSending(false);
       return;
     }
 
@@ -234,7 +261,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       } else {
         toast.error(result.message || 'Ozon не принял заявку');
       }
-      setPhase('verdict');
+      setSending(false);
       return;
     }
 
@@ -261,7 +288,12 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     onClose();
   };
 
-  const handleSubmit = async () => {
+  /**
+   * Расчёт черновика.
+   * autoCreate = true только при первом нажатии: если Ozon принял всё полностью,
+   * заявка создаётся сразу. После любой правки состава пересчёт заявку не создаёт.
+   */
+  const runDraft = async (autoCreate: boolean) => {
     if (!dropOffWarehouseId || !dropOffWarehouseType) {
       toast.error('Не выбрана точка отгрузки — укажите её в настройках Ozon');
       return;
@@ -276,7 +308,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       return;
     }
 
-    setPhase('sending');
+    setSending(true);
 
     let result: any;
     try {
@@ -289,53 +321,55 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       } else {
         toast.error('Ошибка сети: ' + (e?.message || ''));
       }
-      setPhase('form');
+      setSending(false);
       return;
     }
 
     if (result.status !== 'success') {
       toast.error(result.message || 'Ozon не рассчитал черновик');
-      setPhase('form');
+      setSending(false);
       return;
     }
 
     const data = result.data;
     setDraftId(String(data.draftId || ''));
     setVerdict(data);
+    setDirty(false);
 
     const hasRejected = Array.isArray(data.rejectedItems) && data.rejectedItems.length > 0;
     const hasBadCluster = (data.clusters || []).some((c: any) => c.state !== 'FULL_AVAILABLE');
     const hasRestricted = (data.clusters || []).some((c: any) => (c.rejected || []).length > 0);
-
     const clusterIds = (data.clusters || []).map((c: any) => String(c.clusterId));
 
-    if (hasRejected || hasBadCluster || hasRestricted) {
-      setPhase('verdict');
+    if (!autoCreate || hasRejected || hasBadCluster || hasRestricted) {
+      setSending(false);
+      if (hasRejected || hasBadCluster || hasRestricted) {
+        toast.error('Ozon принял заявку не полностью — проверьте состав');
+      } else {
+        toast.success('Ozon подтвердил состав полностью');
+      }
       return;
     }
 
     await sendOrder(String(data.draftId || ''), clusterIds);
   };
 
-  const handleConfirmAnyway = async () => {
-    setPhase('sending');
-    const clusterIds = (verdict?.clusters || []).map((c: any) => String(c.clusterId));
+  const handlePrimary = async () => {
+    if (!verdict) {
+      await runDraft(true);
+      return;
+    }
+    if (dirty) {
+      await runDraft(false);
+      return;
+    }
+    setSending(true);
+    const clusterIds = (verdict.clusters || []).map((c: any) => String(c.clusterId));
     await sendOrder(draftId, clusterIds);
   };
 
-  const handleBackToForm = () => {
-    setPhase('form');
-    setVerdict(null);
-    setDraftId('');
-  };
-
-  const removeCluster = (clusterId: string) => {
-    const next = { ...removedRows };
-    for (const r of rows) {
-      if (r.clusterId === clusterId) next[rowKey(r)] = true;
-    }
-    setRemovedRows(next);
-  };
+  const primaryLabel = !verdict ? 'Оформить заявку в Ozon' : dirty ? 'Пересчитать в Ozon' : 'Создать заявку в этом составе';
+  const primaryIsSafe = Boolean(verdict) && dirty;
 
   return (
     <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
@@ -354,7 +388,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
         </div>
 
         <div className="p-6 overflow-y-auto flex-1 space-y-3">
-          {phase === 'sending' && (
+          {sending ? (
             <div className="py-12 text-center">
               {timedOut ? (
                 <div className="space-y-2">
@@ -372,19 +406,99 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 </div>
               )}
             </div>
-          )}
-
-          {phase === 'form' && (
+          ) : (
             <>
               {missingSku.length > 0 && (
                 <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800">
                   Не удалось определить Ozon-SKU: {missingSku.join(', ')}. SKU берётся из зеркала «Остатки Ozon», запасной источник — колонка «ШК Ozon» в SKU Базе.
                 </div>
               )}
+
+              {verdict && dirty && (
+                <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs font-semibold text-indigo-900">
+                  Состав изменён после расчёта. Нажмите «Пересчитать в Ozon» — заявка при этом НЕ создаётся.
+                </div>
+              )}
+
+              {verdict && !dirty && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 flex gap-2">
+                  <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                  <div className="text-xs font-semibold text-amber-900">
+                    Ниже — ответ Ozon. Заявка ещё НЕ создана. Можно уменьшить количество или убрать кластер прямо здесь,
+                    тогда потребуется пересчёт. Либо создать заявку в подтверждённом составе.
+                  </div>
+                </div>
+              )}
+
+              {verdict && (
+                <div className="space-y-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Ответ Ozon</div>
+                  {(verdict.clusters || []).map((c: any) => {
+                    const stillSelected = activeRows.some((r) => r.clusterId === String(c.clusterId));
+                    return (
+                      <div key={c.clusterId} className={`p-3 rounded-xl border ${stillSelected ? 'border-slate-200' : 'border-slate-100 opacity-50'}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="font-bold text-sm text-slate-800">
+                            {c.clusterName || c.clusterId}
+                            {!stillSelected && <span className="ml-2 text-[11px] font-semibold text-slate-400">убран из заявки</span>}
+                          </div>
+                          <div className={`text-[11px] font-bold ${c.state === 'FULL_AVAILABLE' ? 'text-emerald-600' : 'text-red-600'}`}>
+                            {c.state}{c.invalidReason && c.invalidReason !== 'UNSPECIFIED' ? ` · ${c.invalidReason}` : ''}
+                          </div>
+                        </div>
+                        {(c.accepted || []).length > 0 && (
+                          <div className="mt-2">
+                            <div className="text-[11px] font-bold uppercase text-slate-400">Войдёт в поставку</div>
+                            {c.accepted.map((it: any, i: number) => (
+                              <div key={`a${i}`} className="text-[11px] text-slate-600 flex justify-between gap-2">
+                                <span className="truncate">{it.offerId || it.sku}</span>
+                                <span className="font-semibold shrink-0">{it.quantity} шт</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {(c.rejected || []).length > 0 && (
+                          <div className="mt-2">
+                            <div className="text-[11px] font-bold uppercase text-red-500">Не войдёт</div>
+                            {c.rejected.map((it: any, i: number) => (
+                              <div key={`r${i}`} className="text-[11px] text-red-600 flex justify-between gap-2">
+                                <span className="truncate">{it.offerId || it.sku}</span>
+                                <span className="font-semibold shrink-0">{it.quantity} шт</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {stillSelected && (
+                          <button
+                            type="button"
+                            onClick={() => removeCluster(String(c.clusterId))}
+                            className="mt-2 text-[11px] font-bold text-red-600 hover:text-red-800"
+                          >
+                            Убрать этот кластер из заявки
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {(verdict.rejectedItems || []).length > 0 && (
+                    <div className="p-3 rounded-xl bg-red-50 border border-red-200">
+                      <div className="text-[11px] font-bold uppercase text-red-600 mb-1">Причины отказа Ozon</div>
+                      {verdict.rejectedItems.map((r: any, i: number) => (
+                        <div key={i} className="text-[11px] text-red-700">
+                          кластер {r.clusterId}, SKU {r.sku}: {(r.reasons || []).join(', ')}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 pt-1">Состав заявки</div>
               <div className="text-xs text-slate-500">
-                Проверьте состав. Количество можно уменьшить, лишнюю строку или кластер — убрать крестиком.
-                Остатки на складе это не меняет: в Ozon уходит заявленное количество.
+                Количество можно уменьшить, лишнюю строку или кластер — убрать. Остатки на складе это не меняет.
               </div>
+
               <div className="flex flex-col gap-2">
                 {activeRows.map((r) => (
                   <div key={rowKey(r)} className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/50">
@@ -404,15 +518,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                       min="0"
                       step="1"
                       value={getQty(r)}
-                      onChange={(e) =>
-                        setQtyEdit({ ...qtyEdit, [rowKey(r)]: e.target.value === '' ? 0 : parseInt(e.target.value, 10) })
-                      }
+                      onChange={(e) => changeQty(r, e.target.value)}
                       className="w-24 px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-semibold text-slate-800 bg-white"
                     />
                     <span className="text-[11px] text-slate-400 shrink-0">шт</span>
                     <button
                       type="button"
-                      onClick={() => setRemovedRows({ ...removedRows, [rowKey(r)]: true })}
+                      onClick={() => removeRow(r)}
                       title="Убрать эту строку из заявки"
                       className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors shrink-0"
                     >
@@ -422,29 +534,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 ))}
               </div>
 
-              {totals.clusters > 1 && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  <span className="text-[11px] text-slate-400 mr-1">Убрать кластер целиком:</span>
-                  {Array.from(new Set(activeRows.map((r) => r.clusterId))).map((cid) => {
-                    const cname = activeRows.find((r) => r.clusterId === cid)?.clusterName || cid;
-                    return (
-                      <button
-                        key={cid}
-                        type="button"
-                        onClick={() => removeCluster(cid)}
-                        className="px-2 py-1 rounded-lg border border-slate-200 text-[11px] font-semibold text-slate-600 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-colors"
-                      >
-                        {cname} ✕
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
               {Object.keys(removedRows).length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setRemovedRows({})}
+                  onClick={restoreRows}
                   className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800"
                 >
                   Вернуть убранные строки
@@ -456,103 +549,28 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
               </div>
             </>
           )}
-
-          {phase === 'verdict' && verdict && (
-            <>
-              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 flex gap-2">
-                <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
-                <div className="text-xs font-semibold text-amber-900">
-                  Ozon принял заявку не полностью. Заявка ещё НЕ создана.
-                  Можно вернуться и убрать проблемные кластеры или уменьшить количество — либо создать заявку в том составе, который Ozon подтвердил.
-                </div>
-              </div>
-
-              {(verdict.clusters || []).map((c: any) => (
-                <div key={c.clusterId} className="p-3 rounded-xl border border-slate-200">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="font-bold text-sm text-slate-800">{c.clusterName || c.clusterId}</div>
-                    <div className={`text-[11px] font-bold ${c.state === 'FULL_AVAILABLE' ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {c.state}{c.invalidReason && c.invalidReason !== 'UNSPECIFIED' ? ` · ${c.invalidReason}` : ''}
-                    </div>
-                  </div>
-                  {(c.accepted || []).length > 0 && (
-                    <div className="mt-2">
-                      <div className="text-[11px] font-bold uppercase text-slate-400">Войдёт в поставку</div>
-                      {c.accepted.map((it: any, i: number) => (
-                        <div key={`a${i}`} className="text-[11px] text-slate-600 flex justify-between gap-2">
-                          <span className="truncate">{it.offerId || it.sku}</span>
-                          <span className="font-semibold shrink-0">{it.quantity} шт</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {(c.rejected || []).length > 0 && (
-                    <div className="mt-2">
-                      <div className="text-[11px] font-bold uppercase text-red-500">Не войдёт</div>
-                      {c.rejected.map((it: any, i: number) => (
-                        <div key={`r${i}`} className="text-[11px] text-red-600 flex justify-between gap-2">
-                          <span className="truncate">{it.offerId || it.sku}</span>
-                          <span className="font-semibold shrink-0">{it.quantity} шт</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              {(verdict.rejectedItems || []).length > 0 && (
-                <div className="p-3 rounded-xl bg-red-50 border border-red-200">
-                  <div className="text-[11px] font-bold uppercase text-red-600 mb-1">Причины отказа Ozon</div>
-                  {verdict.rejectedItems.map((r: any, i: number) => (
-                    <div key={i} className="text-[11px] text-red-700">
-                      кластер {r.clusterId}, SKU {r.sku}: {(r.reasons || []).join(', ')}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
         </div>
 
         <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex gap-3 justify-end">
-          {phase === 'verdict' && (
-            <button
-              type="button"
-              onClick={handleBackToForm}
-              className="px-5 py-2.5 rounded-xl text-sm font-bold text-indigo-600 hover:bg-indigo-50 transition-colors flex items-center gap-2 mr-auto"
-            >
-              <ArrowLeft size={16} />
-              Вернуться и исправить
-            </button>
-          )}
           <button
             type="button"
             onClick={handleClose}
             className="px-5 py-2.5 rounded-xl text-sm font-bold text-slate-600 hover:bg-slate-200 transition-colors"
           >
-            {phase === 'sending' && timedOut ? 'Закрыть' : 'Отмена'}
+            {timedOut ? 'Закрыть' : 'Отмена'}
           </button>
-          {phase === 'form' && (
+          {!sending && (
             <button
               type="button"
               id="btn-ozon-supply-submit"
-              onClick={handleSubmit}
+              onClick={handlePrimary}
               disabled={missingSku.length > 0 || activeRows.length === 0}
-              className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-bold transition-colors flex items-center gap-2"
+              className={`px-5 py-2.5 rounded-xl disabled:opacity-50 text-white text-sm font-bold transition-colors flex items-center gap-2 ${
+                primaryIsSafe ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-red-600 hover:bg-red-700'
+              }`}
             >
-              <Send size={16} />
-              Оформить заявку в Ozon
-            </button>
-          )}
-          {phase === 'verdict' && (
-            <button
-              type="button"
-              id="btn-ozon-supply-confirm"
-              onClick={handleConfirmAnyway}
-              className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-bold transition-colors flex items-center gap-2"
-            >
-              <Send size={16} />
-              Создать заявку в этом составе
+              {primaryIsSafe ? <RefreshCw size={16} /> : <Send size={16} />}
+              {primaryLabel}
             </button>
           )}
         </div>
