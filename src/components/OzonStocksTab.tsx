@@ -70,6 +70,26 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     priorityClusters: '',
   });
   const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
+  const [supplySettings, setSupplySettings] = useState({
+    maxBoxesPerCluster: 30,
+    dropOffWarehouseId: '',
+    dropOffWarehouseName: '',
+    dropOffWarehouseType: '',
+  });
+  const [selectedSupply, setSelectedSupply] = useState<Record<string, boolean>>({});
+  const [supplySummaryOpen, setSupplySummaryOpen] = useState(false);
+
+  const supplyKey = (article: string, clusterId: string) => `${article}|||${clusterId}`;
+
+  const toggleSupplyRow = (article: string, clusterId: string) => {
+    const key = supplyKey(article, clusterId);
+    setSelectedSupply((prev) => {
+      const next = { ...prev };
+      if (next[key]) delete next[key];
+      else next[key] = true;
+      return next;
+    });
+  };
 
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -155,6 +175,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
           excludedClusters: String(res.data.excludedClusters || ''),
           priorityClusters: String(res.data.priorityClusters || ''),
+        });
+        setSupplySettings({
+          maxBoxesPerCluster: Number(res.data.maxBoxesPerCluster) || 30,
+          dropOffWarehouseId: String(res.data.dropOffWarehouseId || ''),
+          dropOffWarehouseName: String(res.data.dropOffWarehouseName || ''),
+          dropOffWarehouseType: String(res.data.dropOffWarehouseType || ''),
         });
       }
     }).catch((err) => console.error('getOzonSettings error:', err));
@@ -384,6 +410,50 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return (coverageRows as any[]).find((r) => r.article === factoryModalArticle) || null;
   }, [coverageRows, factoryModalArticle]);
 
+  const supplyPlan = useMemo(() => {
+    const rows: any[] = [];
+    const boxesByCluster: Record<string, { clusterId: string; clusterName: string; boxes: number }> = {};
+    const cabinets = new Set<string>();
+
+    for (const row of coverageRows as any[]) {
+      for (const c of row.clusters) {
+        if (!c.recommendation || c.recommendation.boxes <= 0) continue;
+        if (!selectedSupply[supplyKey(row.article, c.clusterId)]) continue;
+
+        rows.push({
+          article: row.article,
+          name: row.name,
+          clusterId: String(c.clusterId),
+          clusterName: String(c.clusterName || ''),
+          boxes: c.recommendation.boxes,
+          qty: c.recommendation.qty,
+          limitedByMyStock: c.recommendation.limitedByMyStock === true,
+        });
+
+        (row.cabinets || []).forEach((cab: string) => { if (cab) cabinets.add(cab); });
+
+        const cid = String(c.clusterId);
+        if (!boxesByCluster[cid]) {
+          boxesByCluster[cid] = { clusterId: cid, clusterName: String(c.clusterName || ''), boxes: 0 };
+        }
+        boxesByCluster[cid].boxes += c.recommendation.boxes;
+      }
+    }
+
+    const limit = Number(supplySettings.maxBoxesPerCluster) || 30;
+    const overLimit = Object.values(boxesByCluster).filter((c) => c.boxes > limit);
+
+    return {
+      rows,
+      clusters: Object.values(boxesByCluster),
+      cabinets: Array.from(cabinets),
+      totalBoxes: rows.reduce((s, r) => s + r.boxes, 0),
+      totalQty: rows.reduce((s, r) => s + r.qty, 0),
+      overLimit,
+      limit,
+    };
+  }, [coverageRows, selectedSupply, supplySettings]);
+
   const recommendations = useMemo(() => {
     const supplies: any[] = [];
     const factories: any[] = [];
@@ -557,6 +627,78 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                   <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
                     <div>
                       <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Отвезти на Ozon</div>
+
+                      {supplyPlan.rows.length > 0 && (
+                        <div className="mb-3 p-3 rounded-xl bg-indigo-50 border border-indigo-200">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="text-[11px] font-semibold text-indigo-900">
+                              Выбрано: {supplyPlan.rows.length} строк · {fmtInt(supplyPlan.totalBoxes)} кор ({fmtInt(supplyPlan.totalQty)} шт) · кластеров: {supplyPlan.clusters.length}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedSupply({})}
+                                className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-slate-600 hover:bg-slate-200 transition-colors"
+                              >
+                                Снять всё
+                              </button>
+                              <button
+                                type="button"
+                                id="btn-ozon-create-supply"
+                                onClick={() => setSupplySummaryOpen(true)}
+                                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold transition-colors"
+                              >
+                                Оформить поставку
+                              </button>
+                            </div>
+                          </div>
+
+                          {supplyPlan.cabinets.length > 1 && (
+                            <div className="mt-2 text-[11px] font-semibold text-red-700">
+                              Выбраны товары из разных кабинетов ({supplyPlan.cabinets.join(', ')}). Заявка создаётся в одном кабинете — отфильтруйте кабинет выше.
+                            </div>
+                          )}
+
+                          {supplyPlan.overLimit.length > 0 && (
+                            <div className="mt-2 text-[11px] font-semibold text-amber-700">
+                              Превышен лимит {supplyPlan.limit} кор на кластер: {supplyPlan.overLimit.map((c: any) => `${c.clusterName} — ${c.boxes} кор`).join('; ')}. Остаток лучше оформить отдельной заявкой.
+                            </div>
+                          )}
+
+                          {!supplySettings.dropOffWarehouseId && (
+                            <div className="mt-2 text-[11px] font-semibold text-red-700">
+                              Не выбрана точка отгрузки — укажите её в настройках Ozon.
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {supplySummaryOpen && supplyPlan.rows.length > 0 && (
+                        <div className="mb-3 p-3 rounded-xl bg-white border border-slate-300">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Состав заявки</div>
+                            <button
+                              type="button"
+                              onClick={() => setSupplySummaryOpen(false)}
+                              className="text-[11px] font-bold text-slate-500 hover:text-slate-800"
+                            >
+                              Закрыть
+                            </button>
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            {supplyPlan.rows.map((r: any) => (
+                              <div key={`${r.article}|||${r.clusterId}`} className="flex items-center justify-between gap-2 text-[11px]">
+                                <span className="font-mono font-bold text-slate-700 truncate">{r.article}</span>
+                                <span className="text-slate-500 truncate">{r.clusterName}</span>
+                                <span className="shrink-0 font-semibold text-indigo-600">{fmtInt(r.boxes)} кор ({fmtInt(r.qty)} шт)</span>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-2 text-[11px] text-slate-500">
+                            Точка отгрузки: {supplySettings.dropOffWarehouseName || 'не выбрана'}. Отправка заявки в Ozon будет добавлена следующей задачей.
+                          </div>
+                        </div>
+                      )}
                       {recommendations.supplies.length === 0 ? (
                         <div className="text-[11px] text-slate-400">Запасы кластеров в норме.</div>
                       ) : (
@@ -571,7 +713,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               <div className="mt-2 flex flex-col gap-1">
                                 {s.clusters.map((c: any) => (
                                   <div key={c.clusterId} className="flex items-center justify-between gap-2 text-[11px]">
-                                    <span className="text-slate-600 truncate" title={c.clusterName}>
+                                    <span className="text-slate-600 truncate flex items-center gap-1.5" title={c.clusterName}>
+                                      {c.recommendation.boxes > 0 && (
+                                        <input
+                                          type="checkbox"
+                                          checked={Boolean(selectedSupply[supplyKey(s.article, c.clusterId)])}
+                                          onChange={() => toggleSupplyRow(s.article, c.clusterId)}
+                                          className="shrink-0 w-3.5 h-3.5 accent-indigo-600 cursor-pointer"
+                                          title="Включить в заявку на поставку"
+                                        />
+                                      )}
                                       {c.clusterName}
                                       {c.priority && <span className="ml-1 text-amber-600 font-bold">×{c.priorityK}</span>}
                                     </span>
