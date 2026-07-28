@@ -647,6 +647,12 @@ export const Dashboard: React.FC = React.memo(() => {
                 } else if (alert.severity === 'violet') {
                   severityClasses = 'bg-violet-50 border-violet-200 text-violet-800';
                   titleClasses = 'text-violet-800';
+                } else if (alert.severity === 'sky') {
+                  severityClasses = 'bg-sky-50 border-sky-200 text-sky-800';
+                  titleClasses = 'text-sky-800';
+                } else if (alert.severity === 'orange') {
+                  severityClasses = 'bg-orange-50 border-orange-200 text-orange-800';
+                  titleClasses = 'text-orange-800';
                 }
 
                 return (
@@ -670,7 +676,7 @@ export const Dashboard: React.FC = React.memo(() => {
                     <div className="flex items-center gap-2 shrink-0">
                       <button
                         type="button"
-                        onClick={() => setActiveTab('ozon')}
+                        onClick={() => setActiveTab(alert.type === 'supply_needed' || alert.type === 'factory_order' ? 'ozonStocks' : 'ozon')}
                         className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-white border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 transition-all shadow-xs"
                       >
                         Открыть
