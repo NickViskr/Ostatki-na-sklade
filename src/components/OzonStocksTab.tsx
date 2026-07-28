@@ -5,6 +5,7 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow, FactoryOrder } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
+import { OzonSupplyModal } from './OzonSupplyModal';
 import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, resolveOzonArticle } from '../lib/ozonCoverage';
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
@@ -646,7 +647,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 type="button"
                                 id="btn-ozon-create-supply"
                                 onClick={() => setSupplySummaryOpen(true)}
-                                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold transition-colors"
+                                disabled={supplyPlan.cabinets.length > 1 || !supplySettings.dropOffWarehouseId}
+                                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-[11px] font-bold transition-colors"
                               >
                                 Оформить поставку
                               </button>
@@ -673,32 +675,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         </div>
                       )}
 
-                      {supplySummaryOpen && supplyPlan.rows.length > 0 && (
-                        <div className="mb-3 p-3 rounded-xl bg-white border border-slate-300">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Состав заявки</div>
-                            <button
-                              type="button"
-                              onClick={() => setSupplySummaryOpen(false)}
-                              className="text-[11px] font-bold text-slate-500 hover:text-slate-800"
-                            >
-                              Закрыть
-                            </button>
-                          </div>
-                          <div className="flex flex-col gap-1">
-                            {supplyPlan.rows.map((r: any) => (
-                              <div key={`${r.article}|||${r.clusterId}`} className="flex items-center justify-between gap-2 text-[11px]">
-                                <span className="font-mono font-bold text-slate-700 truncate">{r.article}</span>
-                                <span className="text-slate-500 truncate">{r.clusterName}</span>
-                                <span className="shrink-0 font-semibold text-indigo-600">{fmtInt(r.boxes)} кор ({fmtInt(r.qty)} шт)</span>
-                              </div>
-                            ))}
-                          </div>
-                          <div className="mt-2 text-[11px] text-slate-500">
-                            Точка отгрузки: {supplySettings.dropOffWarehouseName || 'не выбрана'}. Отправка заявки в Ozon будет добавлена следующей задачей.
-                          </div>
-                        </div>
-                      )}
+
                       {recommendations.supplies.length === 0 ? (
                         <div className="text-[11px] text-slate-400">Запасы кластеров в норме.</div>
                       ) : (
@@ -1237,6 +1214,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           </div>
       </div>
       <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
+      <OzonSupplyModal
+        isOpen={supplySummaryOpen && supplyPlan.rows.length > 0}
+        onClose={() => setSupplySummaryOpen(false)}
+        rows={supplyPlan.rows}
+        cabinet={supplyPlan.cabinets.length === 1 ? supplyPlan.cabinets[0] : (cabinetFilter !== 'all' ? cabinetFilter : '')}
+        dropOffWarehouseId={supplySettings.dropOffWarehouseId}
+        dropOffWarehouseName={supplySettings.dropOffWarehouseName}
+        dropOffWarehouseType={supplySettings.dropOffWarehouseType}
+        onCreated={() => setSelectedSupply({})}
+      />
       {factoryModalArticle && (
         <FactoryOrderModal
           isOpen={true}
