@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { X, AlertTriangle, Send } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { X, AlertTriangle, Send, Trash2, ArrowLeft } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { resolveOzonArticle } from '../lib/ozonCoverage';
@@ -27,6 +27,8 @@ interface OzonSupplyModalProps {
 
 type Phase = 'form' | 'verdict' | 'sending';
 
+const REQUEST_TIMEOUT_SEC = 60;
+
 export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   isOpen, onClose, rows, cabinet, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated
 }) => {
@@ -39,20 +41,62 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   const [phase, setPhase] = useState<Phase>('form');
   const [qtyEdit, setQtyEdit] = useState<Record<string, number>>({});
+  const [removedRows, setRemovedRows] = useState<Record<string, boolean>>({});
   const [draftId, setDraftId] = useState('');
   const [verdict, setVerdict] = useState<any>(null);
+  const [secondsLeft, setSecondsLeft] = useState(REQUEST_TIMEOUT_SEC);
+  const [timedOut, setTimedOut] = useState(false);
+
+  const abortRef = useRef<AbortController | null>(null);
 
   const rowKey = (r: SupplyPlanRow) => `${r.article}|||${r.clusterId}`;
+
+  // Сброс состояния при каждом открытии: иначе зависшая фаза отправки
+  // остаётся навсегда и модалка больше не открывается нормально
+  useEffect(() => {
+    if (isOpen) {
+      setPhase('form');
+      setQtyEdit({});
+      setRemovedRows({});
+      setDraftId('');
+      setVerdict(null);
+      setSecondsLeft(REQUEST_TIMEOUT_SEC);
+      setTimedOut(false);
+    }
+  }, [isOpen]);
+
+  // Обратный отсчёт во время работы с Ozon
+  useEffect(() => {
+    if (phase !== 'sending') return;
+    setSecondsLeft(REQUEST_TIMEOUT_SEC);
+    setTimedOut(false);
+    const id = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(id);
+          setTimedOut(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [phase]);
+
   const getQty = (r: SupplyPlanRow) => {
     const v = qtyEdit[rowKey(r)];
     return v === undefined ? r.qty : v;
   };
 
+  const activeRows = useMemo(
+    () => rows.filter((r) => !removedRows[rowKey(r)]),
+    [rows, removedRows]
+  );
+
   /**
    * Нормализация значения в числовой Ozon-SKU.
    * Отсекает буквенные префиксы технических штрихкодов (OZN1706096599),
    * дробный хвост из Google Sheets (1706096599.0) и пробелы.
-   * Возвращает пустую строку, если числа получить не удалось.
    */
   const normalizeOzonSku = (raw: any): string => {
     let v = String(raw == null ? '' : raw).trim();
@@ -65,11 +109,6 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     return digits;
   };
 
-  /**
-   * Ozon-SKU по артикулу приложения.
-   * Основной источник — зеркало «Остатки Ozon»: там SKU приходит от Ozon напрямую.
-   * Запасной — колонка «ШК Ozon» в SKU Базе.
-   */
   const skuMap = useMemo(() => {
     const map: Record<string, string> = {};
 
@@ -91,25 +130,26 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   }, [skus, ozonStocks]);
 
   const missingSku = useMemo(
-    () => Array.from(new Set(rows.filter((r) => !skuMap[r.article]).map((r) => r.article))),
-    [rows, skuMap]
+    () => Array.from(new Set(activeRows.filter((r) => !skuMap[r.article]).map((r) => r.article))),
+    [activeRows, skuMap]
   );
 
   const totals = useMemo(() => {
     let qty = 0;
-    for (const r of rows) qty += getQty(r);
-    return { qty, rows: rows.length };
-  }, [rows, qtyEdit]);
+    for (const r of activeRows) qty += getQty(r);
+    const clusters = new Set(activeRows.map((r) => r.clusterId));
+    return { qty, rows: activeRows.length, clusters: clusters.size };
+  }, [activeRows, qtyEdit]);
 
   if (!isOpen) return null;
 
   const buildPayloadClusters = () => {
     const byCluster: Record<string, { clusterId: string; items: { sku: number; quantity: number }[] }> = {};
-    for (const r of rows) {
+    for (const r of activeRows) {
       const q = getQty(r);
       if (q <= 0) continue;
       const ozonSku = skuMap[r.article];
-      if (!/^\d+$/.test(ozonSku || '')) continue;
+      if (!ozonSku) continue;
       if (!byCluster[r.clusterId]) byCluster[r.clusterId] = { clusterId: r.clusterId, items: [] };
       byCluster[r.clusterId].items.push({ sku: Number(ozonSku), quantity: q });
     }
@@ -118,7 +158,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   const buildAvailabilityCheck = () => {
     const byArticle: Record<string, number> = {};
-    for (const r of rows) {
+    for (const r of activeRows) {
       const q = getQty(r);
       if (q <= 0) continue;
       byArticle[r.article] = (byArticle[r.article] || 0) + q;
@@ -133,18 +173,57 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     return JSON.stringify({ sessionToken, ...(sendDevMode ? { devMode: true } : {}), ...extra });
   };
 
+  /** fetch с жёстким обрывом по таймауту, чтобы модалка не висела вечно */
+  const fetchWithTimeout = async (url: string, body: string) => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_SEC * 1000);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal: controller.signal
+      });
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+      abortRef.current = null;
+    }
+  };
+
+  const handleClose = () => {
+    if (phase === 'sending' && !timedOut) {
+      const ok = window.confirm(
+        'Запрос к Ozon ещё выполняется. Если закрыть окно сейчас, заявка всё равно может быть создана — проверьте её в Ozon Seller. Закрыть?'
+      );
+      if (!ok) return;
+    }
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    onClose();
+  };
+
   const sendOrder = async (useDraftId: string, clusterIds: string[]) => {
-    const res = await fetch('/api/ozon/supply/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: proxyBody({
+    let result: any;
+    try {
+      result = await fetchWithTimeout('/api/ozon/supply/create', proxyBody({
         cabinet,
         draftId: useDraftId,
         clusterIds,
         availabilityCheck: buildAvailabilityCheck()
-      })
-    });
-    const result = await res.json();
+      }));
+    } catch (e: any) {
+      if (e?.name === 'AbortError') {
+        toast.error('Ozon не ответил за минуту. Проверьте список заявок в Ozon Seller: заявка могла быть создана.');
+      } else {
+        toast.error('Ошибка сети: ' + (e?.message || ''));
+      }
+      setPhase('verdict');
+      return;
+    }
 
     if (result.status !== 'success') {
       if (result.stage === 'not_enough_stock') {
@@ -169,7 +248,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
           orderId,
           dropOffName: dropOffWarehouseName,
           clusters: clusterIds.join(','),
-          itemsJSON: JSON.stringify(rows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) }))),
+          itemsJSON: JSON.stringify(activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) }))),
           status: 'Создана'
         }
       });
@@ -177,7 +256,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       console.error('Не удалось записать заявку в журнал:', e);
     }
 
-    toast.success('Заявка создана в Ozon. Номер: ' + orderId);
+    toast.success('Заявка создана в Ozon. Номер: ' + orderId + '. Грузоместа заполните в Ozon Seller.');
     onCreated();
     onClose();
   };
@@ -198,51 +277,64 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     }
 
     setPhase('sending');
+
+    let result: any;
     try {
-      const res = await fetch('/api/ozon/supply/draft', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: proxyBody({ cabinet, dropOffWarehouseId, dropOffWarehouseType, clusters })
-      });
-      const result = await res.json();
-
-      if (result.status !== 'success') {
-        toast.error(result.message || 'Ozon не рассчитал черновик');
-        setPhase('form');
-        return;
-      }
-
-      const data = result.data;
-      setDraftId(String(data.draftId || ''));
-      setVerdict(data);
-
-      const hasRejected = Array.isArray(data.rejectedItems) && data.rejectedItems.length > 0;
-      const hasBadCluster = (data.clusters || []).some((c: any) => c.state !== 'FULL_AVAILABLE');
-      const hasRestricted = (data.clusters || []).some((c: any) => (c.rejected || []).length > 0);
-
-      const clusterIds = (data.clusters || []).map((c: any) => String(c.clusterId));
-
-      if (hasRejected || hasBadCluster || hasRestricted) {
-        setPhase('verdict');
-        return;
-      }
-
-      await sendOrder(String(data.draftId || ''), clusterIds);
+      result = await fetchWithTimeout('/api/ozon/supply/draft', proxyBody({
+        cabinet, dropOffWarehouseId, dropOffWarehouseType, clusters
+      }));
     } catch (e: any) {
-      toast.error('Ошибка сети: ' + (e?.message || ''));
+      if (e?.name === 'AbortError') {
+        toast.error('Ozon не ответил за минуту. Заявка НЕ создана — попробуйте ещё раз.');
+      } else {
+        toast.error('Ошибка сети: ' + (e?.message || ''));
+      }
       setPhase('form');
+      return;
     }
+
+    if (result.status !== 'success') {
+      toast.error(result.message || 'Ozon не рассчитал черновик');
+      setPhase('form');
+      return;
+    }
+
+    const data = result.data;
+    setDraftId(String(data.draftId || ''));
+    setVerdict(data);
+
+    const hasRejected = Array.isArray(data.rejectedItems) && data.rejectedItems.length > 0;
+    const hasBadCluster = (data.clusters || []).some((c: any) => c.state !== 'FULL_AVAILABLE');
+    const hasRestricted = (data.clusters || []).some((c: any) => (c.rejected || []).length > 0);
+
+    const clusterIds = (data.clusters || []).map((c: any) => String(c.clusterId));
+
+    if (hasRejected || hasBadCluster || hasRestricted) {
+      setPhase('verdict');
+      return;
+    }
+
+    await sendOrder(String(data.draftId || ''), clusterIds);
   };
 
   const handleConfirmAnyway = async () => {
     setPhase('sending');
-    try {
-      const clusterIds = (verdict?.clusters || []).map((c: any) => String(c.clusterId));
-      await sendOrder(draftId, clusterIds);
-    } catch (e: any) {
-      toast.error('Ошибка сети: ' + (e?.message || ''));
-      setPhase('verdict');
+    const clusterIds = (verdict?.clusters || []).map((c: any) => String(c.clusterId));
+    await sendOrder(draftId, clusterIds);
+  };
+
+  const handleBackToForm = () => {
+    setPhase('form');
+    setVerdict(null);
+    setDraftId('');
+  };
+
+  const removeCluster = (clusterId: string) => {
+    const next = { ...removedRows };
+    for (const r of rows) {
+      if (r.clusterId === clusterId) next[rowKey(r)] = true;
     }
+    setRemovedRows(next);
   };
 
   return (
@@ -256,15 +348,29 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
               {cabinet ? ` · кабинет ${cabinet}` : ''}
             </div>
           </div>
-          <button onClick={onClose} type="button" className="p-2 hover:bg-slate-200 rounded-full transition-colors text-slate-500">
+          <button onClick={handleClose} type="button" className="p-2 hover:bg-slate-200 rounded-full transition-colors text-slate-500">
             <X size={20} />
           </button>
         </div>
 
         <div className="p-6 overflow-y-auto flex-1 space-y-3">
           {phase === 'sending' && (
-            <div className="py-12 text-center text-slate-500 font-medium">
-              Работаем с Ozon, это может занять до минуты…
+            <div className="py-12 text-center">
+              {timedOut ? (
+                <div className="space-y-2">
+                  <div className="text-sm font-bold text-red-700">Ozon не ответил за минуту</div>
+                  <div className="text-xs text-slate-600 max-w-md mx-auto">
+                    Заявка могла быть создана, а могла и нет. Откройте Ozon Seller, раздел FBO → Заявки на поставку.
+                    Если заявка появилась — отмените её там и создайте заново. Если нет — просто попробуйте ещё раз.
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-slate-500 font-medium">Работаем с Ozon…</div>
+                  <div className="text-3xl font-bold text-indigo-600 tabular-nums">{secondsLeft}</div>
+                  <div className="text-xs text-slate-400">секунд до истечения ожидания</div>
+                </div>
+              )}
             </div>
           )}
 
@@ -276,10 +382,11 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 </div>
               )}
               <div className="text-xs text-slate-500">
-                Проверьте количества. Изменения не влияют на остатки — они уйдут в Ozon как заявленное количество.
+                Проверьте состав. Количество можно уменьшить, лишнюю строку или кластер — убрать крестиком.
+                Остатки на складе это не меняет: в Ozon уходит заявленное количество.
               </div>
               <div className="flex flex-col gap-2">
-                {rows.map((r) => (
+                {activeRows.map((r) => (
                   <div key={rowKey(r)} className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/50">
                     <div className="min-w-0 flex-1">
                       <div className="font-mono font-bold text-sm text-slate-800 truncate">{r.article}</div>
@@ -303,11 +410,49 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                       className="w-24 px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-semibold text-slate-800 bg-white"
                     />
                     <span className="text-[11px] text-slate-400 shrink-0">шт</span>
+                    <button
+                      type="button"
+                      onClick={() => setRemovedRows({ ...removedRows, [rowKey(r)]: true })}
+                      title="Убрать эту строку из заявки"
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors shrink-0"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
                 ))}
               </div>
+
+              {totals.clusters > 1 && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  <span className="text-[11px] text-slate-400 mr-1">Убрать кластер целиком:</span>
+                  {Array.from(new Set(activeRows.map((r) => r.clusterId))).map((cid) => {
+                    const cname = activeRows.find((r) => r.clusterId === cid)?.clusterName || cid;
+                    return (
+                      <button
+                        key={cid}
+                        type="button"
+                        onClick={() => removeCluster(cid)}
+                        className="px-2 py-1 rounded-lg border border-slate-200 text-[11px] font-semibold text-slate-600 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-colors"
+                      >
+                        {cname} ✕
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {Object.keys(removedRows).length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setRemovedRows({})}
+                  className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800"
+                >
+                  Вернуть убранные строки
+                </button>
+              )}
+
               <div className="text-xs font-bold text-slate-700">
-                Итого: {totals.rows} строк, {totals.qty} шт
+                Итого: {totals.rows} строк, {totals.clusters} кластеров, {totals.qty} шт
               </div>
             </>
           )}
@@ -317,7 +462,8 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 flex gap-2">
                 <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
                 <div className="text-xs font-semibold text-amber-900">
-                  Ozon принял заявку не полностью. Проверьте, что войдёт в поставку. Заявка ещё НЕ создана.
+                  Ozon принял заявку не полностью. Заявка ещё НЕ создана.
+                  Можно вернуться и убрать проблемные кластеры или уменьшить количество — либо создать заявку в том составе, который Ozon подтвердил.
                 </div>
               </div>
 
@@ -369,20 +515,29 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
         </div>
 
         <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex gap-3 justify-end">
+          {phase === 'verdict' && (
+            <button
+              type="button"
+              onClick={handleBackToForm}
+              className="px-5 py-2.5 rounded-xl text-sm font-bold text-indigo-600 hover:bg-indigo-50 transition-colors flex items-center gap-2 mr-auto"
+            >
+              <ArrowLeft size={16} />
+              Вернуться и исправить
+            </button>
+          )}
           <button
             type="button"
-            onClick={onClose}
-            disabled={phase === 'sending'}
-            className="px-5 py-2.5 rounded-xl text-sm font-bold text-slate-600 hover:bg-slate-200 disabled:opacity-50 transition-colors"
+            onClick={handleClose}
+            className="px-5 py-2.5 rounded-xl text-sm font-bold text-slate-600 hover:bg-slate-200 transition-colors"
           >
-            Отмена
+            {phase === 'sending' && timedOut ? 'Закрыть' : 'Отмена'}
           </button>
           {phase === 'form' && (
             <button
               type="button"
               id="btn-ozon-supply-submit"
               onClick={handleSubmit}
-              disabled={missingSku.length > 0 || rows.length === 0}
+              disabled={missingSku.length > 0 || activeRows.length === 0}
               className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-bold transition-colors flex items-center gap-2"
             >
               <Send size={16} />
