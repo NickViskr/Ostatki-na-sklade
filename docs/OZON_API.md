@@ -582,3 +582,65 @@
 - Черновик живёт 30 минут, метода удаления FBO-черновика нет (самоуничтожается). Лимиты: 2/мин, 50/час, 500/день.
 - Отмена уже созданной заявки: /v1/supply-order/cancel (+ /v1/supply-order/cancel/status).
 - Вывод для этапа H: «только черновик» как отдельный шаг бессмыслен (30 минут, в ЛК не виден) — кнопка должна вести полный мастер до создания заявки, с подтверждением пользователя на каждом шаге.
+
+## Разведка этапа H (28.07.2026): создание заявки на поставку — проверено вживую через Ozon MCP
+
+Все формы ниже подтверждены живыми вызовами боевыми ключами. Метод /v2/draft/supply/create НЕ вызывался — его схема взята из описания.
+
+### 1. POST /v1/cluster/list
+Запрос: `{"cluster_type": "CLUSTER_TYPE_OZON"}`
+В ответе у кластера ДВА разных идентификатора:
+- `id` — внутренний, 1–3 знака (154, 2, 7). В черновиках НЕ используется.
+- `macrolocal_cluster_id` — 4 знака, число (4002–4077). Именно он нужен для черновиков и заявок.
+Также: `name`, `type`, `logistic_clusters[].warehouses[]{warehouse_id, name, type}`. Типы складов: FULL_FILLMENT, CROSS_DOCK, SORTING_CENTER.
+
+### 2. POST /v1/draft/direct/create (один кластер)
+Запрос:
+`{"cluster_info": {"macrolocal_cluster_id": 4039, "items": [{"sku": 1706096599, "quantity": 1}]}, "deletion_sku_mode": "PARTIAL"}`
+Ответ: `{"draft_id": 120214369, "errors": []}`
+
+КРИТИЧНО:
+- `deletion_sku_mode` обязателен де-факто, хотя в swagger помечен как необязательный с дефолтом PARTIAL. Без него Ozon отвечает HTTP 400 «value must not be in list [0]».
+- `operation_id` в ответе НЕТ — метод сразу возвращает `draft_id`. Опрос по operation_id в этом флоу не применяется.
+- `cluster_info` — ОБЪЕКТ, ровно один кластер. Плоский массив `cluster_ids` метод не принимает.
+- Черновик живёт 30 минут, в личном кабинете НЕ виден, самоуничтожается. Записи в кабинете создаёт только /v2/draft/supply/create.
+
+### 3. POST /v2/draft/create/info (расчёт черновика)
+Запрос: `{"draft_id": 120214369}` — ключ именно draft_id, не operation_id.
+Ответ: `status` (UNSPECIFIED / IN_PROGRESS / SUCCESS / FAILED), `errors[]`, `clusters[]`.
+Внутри `clusters[]`: `macrolocal_cluster_id`, `cluster_name`, `supply_type`, `warehouses[]`.
+Внутри `warehouses[]`:
+- `storage_warehouse.warehouse_id` — id склада размещения (int64, 14–16 знаков)
+- `storage_warehouse.name`, `storage_warehouse.address`
+- `availability_status.state` — FULL_AVAILABLE / PARTIAL_AVAILABLE / NOT_AVAILABLE / UNSPECIFIED
+- `availability_status.invalid_reason` — вживую встречались UNSPECIFIED (когда доступен), NOT_AVAILABLE_RANK (склад не проходит по рейтингу), NOT_AVAILABLE_MATRIX (склад не принимает такие товары)
+- `bundle_id` — товары попадают в поставку; `restricted_bundle_id` — не попадают
+- `total_rank` (1 = лучший), `total_score` (0…1)
+На живом прогоне расчёт вернул SUCCESS с первого запроса, но цикл опроса на случай IN_PROGRESS закладывать обязательно.
+Пример: из 17 складов кластера Москва (4039) доступны были только два — ХОРУГВИНО_РФЦ (rank 1) и СОФЬИНО_РФЦ (rank 2).
+
+### 4. POST /v2/draft/timeslot/info
+Все пять полей обязательны:
+`{"draft_id": 120214369, "date_from": "2026-07-28", "date_to": "2026-08-10", "supply_type": "DIRECT", "selected_cluster_warehouses": [{"macrolocal_cluster_id": 4039, "storage_warehouse_id": 15431806189000}]}`
+- Формат дат: строгий `^\d{4}-(0[1-9]|1[0-2])-\d{2}$`, то есть YYYY-MM-DD.
+- Период максимум 28 дней от текущей даты.
+- `selected_cluster_warehouses` — максимум 20 элементов.
+Ответ: `result.requested_date_from`, `result.requested_date_to`, `result.drop_off_warehouse_timeslots{current_time_in_timezone, warehouse_timezone, days[]{date_in_timezone, timeslots[]{from_in_timezone, to_in_timezone}}}`, `error_reason`.
+Примечание: живой ответ через Ozon MCP получить не удалось — в swagger-снимке MCP поле pattern для дат записано как подсказка " YYYY-MM-DD" и локальный валидатор блокирует любую настоящую дату. Это дефект MCP, а не Ozon: прямой HTTP-запрос форму принимает.
+
+### 5. POST /v2/draft/supply/create (схема, живьём не вызывался)
+`{"draft_id": <int64>, "supply_type": "DIRECT|CROSSDOCK|MULTI_CLUSTER", "selected_cluster_warehouses": [{"macrolocal_cluster_id": <int64>, "storage_warehouse_id": <int64>}], "timeslot": {"from_in_timezone": "...", "to_in_timezone": "..."}}`
+- Обязательны: `draft_id`, `supply_type`, `selected_cluster_warehouses`.
+- `storage_warehouse_id` — только для DIRECT.
+- `timeslot` — ОДИН объект на всю заявку, не массив и не по складу; формально необязателен.
+- Для MULTI_CLUSTER передавать нужно ВСЕ кластеры из расчёта, иначе ошибка INVALID_CLUSTERS_COUNT.
+Ответ: `draft_id`, `error_reasons[]`.
+
+### 6. Один кластер против нескольких
+- `/v1/draft/direct/create` — ровно ОДИН кластер (`cluster_info` — объект), `delivery_info` отсутствует как поле.
+- `/v1/draft/multi-cluster/create` — `clusters_info` массив до 20 кластеров, у каждого свой `items[]` до 5000 позиций; дополнительно ОБЯЗАТЕЛЕН `delivery_info` с точкой отгрузки (`type`, `drop_off_warehouse{warehouse_id, warehouse_type}` либо `seller_warehouse_id`).
+- Вывод: несколько кластеров в одной заявке возможны только через MULTI_CLUSTER и только с указанием точки отгрузки.
+
+### 7. Прочие находки
+- `/v3/product/list` с телом `{"filter": {"visibility": "ALL"}, "limit": 5}` отдаёт `result.items[]{product_id, offer_id, sku, has_fbo_stocks}` — способ получить Ozon-SKU по артикулу, если зеркала остатков недостаточно.
+- Ozon MCP валидирует запросы локально по swagger до отправки; такие отказы приходят как OzonClientValidationError и до Ozon не доходят.
