@@ -1117,6 +1117,361 @@ async function startServer() {
     }
   });
 
+  // ── Этап H: оформление заявки на поставку ────────────────────────────────────
+
+  /** Выбор кабинета по имени; без имени — первый в списке. */
+  function pickCabinet(keys: OzonKeysBundle, name?: string): OzonCabinetKeys {
+    const wanted = String(name || '').trim().toLowerCase();
+    if (wanted) {
+      const found = keys.cabinets.find(c => String(c.name || '').trim().toLowerCase() === wanted);
+      if (found) return found;
+    }
+    return keys.cabinets[0];
+  }
+
+  /**
+   * Товарный состав по bundle_id. Метод читающий, несмотря на POST.
+   * Ozon отдаёт не больше 100 позиций за страницу и сигналит о продолжении через has_next + last_id.
+   * По документации за один вызов передаётся ровно один bundle_id.
+   */
+  async function loadBundleItems(bundleId: string, cab: OzonCabinetKeys): Promise<any[]> {
+    if (!bundleId) return [];
+    const out: any[] = [];
+    let lastId = '';
+    try {
+      for (let page = 0; page < 10; page++) {
+        const body: any = {
+          bundle_ids: [String(bundleId)],
+          limit: 100,
+          sort_field: "QUANTITY",
+          is_asc: false
+        };
+        if (lastId) body.last_id = lastId;
+
+        const data: any = await fetchOzonApi("/v1/supply-order/bundle",
+          { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, body);
+
+        const items = Array.isArray(data?.items) ? data.items : [];
+        for (const it of items) {
+          out.push({
+            sku: String(it?.sku ?? ''),
+            offerId: String(it?.offer_id ?? ''),
+            name: String(it?.name ?? ''),
+            barcode: String(it?.barcode ?? ''),
+            quantity: Number(it?.quantity) || 0,
+            volumeInLitres: Number(it?.volume_in_litres) || 0,
+            totalVolumeInLitres: Number(it?.total_volume_in_litres) || 0
+          });
+        }
+
+        if (data?.has_next !== true) break;
+        lastId = String(data?.last_id || '');
+        if (!lastId) break;
+      }
+    } catch (e: any) {
+      console.error("loadBundleItems failed for bundle " + bundleId + ":", e?.message || e);
+    }
+    return out;
+  }
+
+  // Поиск точки отгрузки по подстроке названия (минимум 4 символа — требование Ozon)
+  app.post("/api/ozon/dropoff/search", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const search = String(req.body?.search || '').trim();
+      if (search.length < 4) {
+        return res.status(400).json({ status: "error", message: "Для поиска точки отгрузки нужно минимум 4 символа" });
+      }
+
+      const keys = await fetchOzonKeys();
+      if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+      const cab = pickCabinet(keys, req.body?.cabinet);
+
+      const data: any = await fetchOzonApi("/v1/warehouse/fbo/list",
+        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
+        { filter_by_supply_type: ["CREATE_TYPE_CROSSDOCK"], search });
+
+      const found = Array.isArray(data?.search) ? data.search : [];
+      const warehouses = found.map((w: any) => ({
+        warehouseId: String(w?.warehouse_id ?? ''),
+        name: String(w?.name ?? ''),
+        address: String(w?.address ?? ''),
+        // В ответе тип приходит с префиксом WAREHOUSE_TYPE_, а методы черновика ждут значение без него
+        warehouseType: String(w?.warehouse_type ?? '').replace(/^WAREHOUSE_TYPE_/, '')
+      }));
+
+      return res.json({ status: "success", data: { warehouses } });
+
+    } catch (error: any) {
+      console.error("Ozon dropoff search failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
+  // Черновик поставки: создание + расчёт + вердикт Ozon по каждому кластеру
+  app.post("/api/ozon/supply/draft", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const dropOffId = String(req.body?.dropOffWarehouseId || '').trim();
+      const dropOffType = String(req.body?.dropOffWarehouseType || '').trim().toUpperCase();
+      const clustersIn = Array.isArray(req.body?.clusters) ? req.body.clusters : [];
+
+      if (!dropOffId || !dropOffType) {
+        return res.status(400).json({ status: "error", message: "Не указана точка отгрузки — заполните её в настройках Ozon" });
+      }
+      if (clustersIn.length === 0) {
+        return res.status(400).json({ status: "error", message: "Не передан ни один кластер" });
+      }
+      if (clustersIn.length > 20) {
+        return res.status(400).json({ status: "error", message: "Ozon принимает не больше 20 кластеров в одной заявке" });
+      }
+
+      const keys = await fetchOzonKeys();
+      if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+      const cab = pickCabinet(keys, req.body?.cabinet);
+
+      const clustersInfo = clustersIn.map((c: any) => ({
+        macrolocal_cluster_id: Number(c?.clusterId),
+        items: (Array.isArray(c?.items) ? c.items : []).map((i: any) => ({
+          sku: Number(i?.sku),
+          quantity: Number(i?.quantity) || 0
+        })).filter((i: any) => i.sku > 0 && i.quantity > 0)
+      })).filter((c: any) => c.macrolocal_cluster_id > 0 && c.items.length > 0);
+
+      if (clustersInfo.length === 0) {
+        return res.status(400).json({ status: "error", message: "Состав поставки пуст: проверьте, что у артикулов заполнен ШК Ozon" });
+      }
+
+      // deletion_sku_mode обязателен де-факто, без него Ozon отвечает 400
+      const createData: any = await fetchOzonApi("/v1/draft/multi-cluster/create",
+        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
+        {
+          clusters_info: clustersInfo,
+          delivery_info: {
+            type: "DROPOFF",
+            drop_off_warehouse: { warehouse_id: Number(dropOffId), warehouse_type: dropOffType }
+          },
+          deletion_sku_mode: "PARTIAL"
+        });
+
+      const draftId = createData?.draft_id;
+      if (!draftId) {
+        return res.status(502).json({ status: "error", stage: "ozon_api", message: "Ozon не вернул draft_id", details: createData?.errors || null });
+      }
+
+      // Расчёт черновика асинхронный: опрашиваем до готовности
+      let info: any = null;
+      for (let attempt = 0; attempt < 15; attempt++) {
+        info = await fetchOzonApi("/v2/draft/create/info",
+          { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
+          { draft_id: draftId });
+        const st = String(info?.status || '');
+        if (st === 'SUCCESS' || st === 'FAILED') break;
+        await sleep(2000);
+      }
+
+      if (String(info?.status || '') !== 'SUCCESS') {
+        return res.status(502).json({
+          status: "error",
+          stage: "ozon_api",
+          message: "Ozon не рассчитал черновик: статус " + String(info?.status || 'нет ответа'),
+          details: info?.errors || null
+        });
+      }
+
+      // Отклонённые SKU привязаны к кластеру
+      const rejectedItems: any[] = [];
+      const rawErrors = Array.isArray(info?.errors) ? info.errors : [];
+      for (const err of rawErrors) {
+        const validations = Array.isArray(err?.items_validation) ? err.items_validation : [];
+        for (const v of validations) {
+          const items = Array.isArray(v?.rejected_items) ? v.rejected_items : [];
+          for (const it of items) {
+            rejectedItems.push({
+              clusterId: String(v?.macrolocal_cluster_id ?? ''),
+              sku: String(it?.sku ?? ''),
+              reasons: Array.isArray(it?.reasons) ? it.reasons.map((r: any) => String(r)) : []
+            });
+          }
+        }
+      }
+
+      const clustersOut: any[] = [];
+      const rawClusters = Array.isArray(info?.clusters) ? info.clusters : [];
+      for (const cl of rawClusters) {
+        const warehouses = Array.isArray(cl?.warehouses) ? cl.warehouses : [];
+
+        // bundle_id и restricted_bundle_id могут лежать в РАЗНЫХ элементах warehouses[],
+        // поэтому сканируем весь массив, а не только первый элемент
+        let bundleId = '';
+        let restrictedBundleId = '';
+        let mainWh: any = null;
+        for (const wh of warehouses) {
+          if (!bundleId && wh?.bundle_id) {
+            bundleId = String(wh.bundle_id);
+            mainWh = wh;
+          }
+          if (!restrictedBundleId && wh?.restricted_bundle_id) {
+            restrictedBundleId = String(wh.restricted_bundle_id);
+          }
+        }
+        if (!mainWh && warehouses.length > 0) mainWh = warehouses[0];
+
+        const accepted = await loadBundleItems(bundleId, cab);
+        const rejected = await loadBundleItems(restrictedBundleId, cab);
+
+        clustersOut.push({
+          clusterId: String(cl?.macrolocal_cluster_id ?? ''),
+          clusterName: String(cl?.cluster_name || ''),
+          supplyType: String(cl?.supply_type || ''),
+          state: String(mainWh?.availability_status?.state || ''),
+          invalidReason: String(mainWh?.availability_status?.invalid_reason || ''),
+          bundleId,
+          restrictedBundleId,
+          accepted,
+          rejected
+        });
+      }
+
+      return res.json({
+        status: "success",
+        data: { draftId: String(draftId), clusters: clustersOut, rejectedItems }
+      });
+
+    } catch (error: any) {
+      console.error("Ozon supply draft failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
+  // Создание заявки из черновика. Необратимо: заявка появляется в кабинете Ozon.
+  app.post("/api/ozon/supply/create", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const devMode = req.body?.devMode === true;
+      const draftId = Number(req.body?.draftId);
+      const clusterIds = Array.isArray(req.body?.clusterIds) ? req.body.clusterIds : [];
+      const availabilityCheck = Array.isArray(req.body?.availabilityCheck) ? req.body.availabilityCheck : [];
+
+      if (!draftId || clusterIds.length === 0) {
+        return res.status(400).json({ status: "error", message: "Не передан draftId или список кластеров" });
+      }
+
+      // Повторная проверка наличия на Моём складе — последний рубеж перед необратимым действием
+      if (availabilityCheck.length > 0) {
+        const gasUrl = process.env.GAS_URL;
+        if (!gasUrl) {
+          return res.status(500).json({ status: "error", message: "GAS_URL is not configured on the server" });
+        }
+        const checkResponse = await fetch(gasUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "checkSupplyAvailability",
+            sessionToken: token,
+            ...(devMode ? { devMode: true } : {}),
+            data: { items: availabilityCheck }
+          })
+        });
+        const checkText = await checkResponse.text();
+        let checkData: any;
+        try {
+          checkData = JSON.parse(checkText);
+        } catch {
+          return res.status(502).json({ status: "error", message: "GAS вернул не-JSON при проверке наличия" });
+        }
+        if (checkData.status !== "success") {
+          return res.status(500).json({ status: "error", message: checkData.message || "Не удалось проверить наличие товара" });
+        }
+        const shortage = (checkData.data?.items || []).filter((i: any) => i.enough === false);
+        if (shortage.length > 0) {
+          return res.status(409).json({
+            status: "error",
+            stage: "not_enough_stock",
+            message: "На Моём складе не хватает товара — заявка в Ozon не отправлена",
+            data: { shortage }
+          });
+        }
+      }
+
+      const keys = await fetchOzonKeys();
+      if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+      const cab = pickCabinet(keys, req.body?.cabinet);
+
+      // Для MULTI_CLUSTER передаются все кластеры расчёта; storage_warehouse_id только для DIRECT
+      await fetchOzonApi("/v2/draft/supply/create",
+        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
+        {
+          draft_id: draftId,
+          supply_type: "MULTI_CLUSTER",
+          selected_cluster_warehouses: clusterIds.map((id: any) => ({ macrolocal_cluster_id: Number(id) }))
+        });
+
+      let statusData: any = null;
+      let orderId = '';
+      for (let attempt = 0; attempt < 20; attempt++) {
+        statusData = await fetchOzonApi("/v2/draft/supply/create/status",
+          { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
+          { draft_id: draftId });
+        const st = String(statusData?.status || '');
+        if (st === 'SUCCESS') {
+          orderId = String(statusData?.order_id ?? '');
+          break;
+        }
+        if (st === 'FAILED') break;
+        await sleep(2000);
+      }
+
+      if (!orderId) {
+        return res.status(502).json({
+          status: "error",
+          stage: "ozon_api",
+          message: "Ozon не подтвердил создание заявки: статус " + String(statusData?.status || 'нет ответа'),
+          details: statusData?.error_reasons || null
+        });
+      }
+
+      return res.json({ status: "success", data: { orderId, draftId: String(draftId) } });
+
+    } catch (error: any) {
+      console.error("Ozon supply create failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
   function getMskWeekMonday(dateStr: string): string {
     const shifted = new Date(new Date(dateStr).getTime() + 3 * 60 * 60 * 1000);
     const day = shifted.getUTCDay();

@@ -3,6 +3,11 @@
 ## [2026-07-28]
 
 ### Добавлено
+- Backend-эндпоинты прокси для оформления заявок на поставку Ozon (`server.ts`):
+  - Поиск склада отгрузки `/api/ozon/dropoff/search` по подстроке наименования (мин. 4 символа).
+  - Расчёт черновика поставки `/api/ozon/supply/draft` методом `/v1/draft/multi-cluster/create` с асинхронным опросом состояния и разбором принятых/отклонённых товаров.
+  - Создание финальной заявки `/api/ozon/supply/create` с серверной перепроверкой остатков на Моём складе через GAS экшен `checkSupplyAvailability` перед вызовом `/v2/draft/supply/create`.
+  - Вспомогательные хелперы `pickCabinet` (выбор кабинета Ozon) и `loadBundleItems` (пагинированное чтение бандла).
 - Backend-структура и API-экшены для мастера создания поставок Ozon (`Code.gs`):
   - Новые настройки в `OZON_SETTINGS_DEFAULTS`: `maxBoxesPerCluster`, `dropOffWarehouseId`, `dropOffWarehouseName`, `dropOffWarehouseType`.
   - Валидация строковых параметров `dropOffWarehouseId` (цифровой ID) и `dropOffWarehouseType` (список `OZON_DROPOFF_TYPES`) в `saveOzonSettings`.
