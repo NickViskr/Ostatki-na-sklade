@@ -369,6 +369,9 @@ function doPost(e) {
       case 'markOzonClustersNotified': result = markOzonClustersNotified(); break;
       case 'saveFactoryOrder': assertAdmin(currentUser); result = saveFactoryOrder(data, currentUser.username); break;
       case 'setFactoryOrderReceived': assertAdmin(currentUser); result = setFactoryOrderReceived(data, currentUser.username); break;
+      case 'checkSupplyAvailability': result = checkSupplyAvailability(data); break;
+      case 'saveOzonSupplyRequest': assertAdmin(currentUser); result = saveOzonSupplyRequest(data, currentUser.username); break;
+      case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -417,6 +420,7 @@ const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 
 const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
 const OZON_CLUSTERS_HEADERS = ['КластерID', 'Название', 'Добавлен', 'Уведомлён'];
 const FACTORY_ORDERS_HEADERS = ['ID', 'Артикул', 'Дата заказа', 'Количество', 'Ожидаемое прибытие', 'Комментарий', 'Кто', 'Статус', 'Дата получения'];
+const OZON_SUPPLY_REQUESTS_HEADERS = ['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус'];
 const OZON_SETTINGS_DEFAULTS = [
   { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
   { key: 'minStockDays',        value: 7,  desc: 'Неснижаемый остаток, дней продаж' },
@@ -425,9 +429,14 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
   { key: 'excludedClusters',    value: '', desc: 'КластерID без поставок, через запятую' },
-  { key: 'priorityClusters',    value: '', desc: 'Приоритетные кластеры в формате КластерID:коэффициент, через запятую' }
+  { key: 'priorityClusters',    value: '', desc: 'Приоритетные кластеры в формате КластерID:коэффициент, через запятую' },
+  { key: 'maxBoxesPerCluster',  value: 30, desc: 'Максимум коробок на один кластер в одной заявке (тарифный лимит Ozon)' },
+  { key: 'dropOffWarehouseId',   value: '', desc: 'ID точки отгрузки Ozon (drop-off), число' },
+  { key: 'dropOffWarehouseName', value: '', desc: 'Название точки отгрузки Ozon' },
+  { key: 'dropOffWarehouseType', value: '', desc: 'Тип точки отгрузки: SORTING_CENTER, CROSS_DOCK, FULL_FILLMENT, DELIVERY_POINT, ORDERS_RECEIVING_POINT' }
 ];
-const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters'];
+const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType'];
+const OZON_DROPOFF_TYPES = ['SORTING_CENTER', 'CROSS_DOCK', 'FULL_FILLMENT', 'DELIVERY_POINT', 'ORDERS_RECEIVING_POINT'];
 const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
 const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
 const OZON_SALES_PERIOD_ANCHOR_MS = Date.parse('2024-01-01T00:00:00Z'); // понедельник — якорь 28-дневных блоков
@@ -643,6 +652,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
   getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
   getOrCreateSheet(ss, 'Кластеры Ozon', OZON_CLUSTERS_HEADERS);
+  getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
   return true;
 }
 
@@ -2964,6 +2974,106 @@ function getKitComponents(kitSku) {
   return kits[kitSku] || { type: 'legacy', components: [] };
 }
 
+/**
+ * Проверка наличия товара на Моём складе перед отправкой заявки в Ozon.
+ * Только чтение: остатки, капитализацию и историю не трогает.
+ * Для виртуальных комплектов доступность = min(остаток компонента / норма), целое вниз.
+ * data.items — массив { article, quantity }.
+ */
+function checkSupplyAvailability(data) {
+  const items = (data && Array.isArray(data.items)) ? data.items : [];
+  if (items.length === 0) {
+    throw new Error('Не передан список товаров для проверки наличия');
+  }
+
+  const stockRows = getStock();
+  const stockMap = {};
+  for (let i = 0; i < stockRows.length; i++) {
+    stockMap[String(stockRows[i].article).trim()] = Number(stockRows[i].quantity) || 0;
+  }
+
+  const kits = getKits();
+  const result = [];
+
+  for (let i = 0; i < items.length; i++) {
+    const article = String(items[i].article || '').trim();
+    const requested = Number(items[i].quantity) || 0;
+    let available = 0;
+
+    const kit = kits[article];
+    if (kit && kit.type === 'virtual' && kit.components && kit.components.length > 0) {
+      available = Infinity;
+      for (let c = 0; c < kit.components.length; c++) {
+        const comp = kit.components[c];
+        const norm = Number(comp.quantity) || 1;
+        const compStock = Number(stockMap[String(comp.componentSku).trim()]) || 0;
+        const possible = Math.floor(compStock / norm);
+        if (possible < available) available = possible;
+      }
+      if (!Number.isFinite(available)) available = 0;
+    } else {
+      available = Number(stockMap[article]) || 0;
+    }
+
+    result.push({
+      article: article,
+      requested: requested,
+      available: available,
+      enough: available >= requested
+    });
+  }
+
+  return { items: result, checkedAt: new Date().toISOString() };
+}
+
+/** Журнал созданных заявок на поставку. На остатки и себестоимость не влияет. */
+function saveOzonSupplyRequest(data, username) {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  const id = 'SUP-' + new Date().getTime();
+  sheet.appendRow([
+    id,
+    new Date(),
+    String((data && data.cabinet) || ''),
+    String((data && data.draftId) || ''),
+    String((data && data.orderId) || ''),
+    String((data && data.dropOffName) || ''),
+    String((data && data.clusters) || ''),
+    String((data && data.itemsJSON) || ''),
+    String(username || ''),
+    String((data && data.status) || 'Создана')
+  ]);
+  return { id: id };
+}
+
+function getOzonSupplyRequests() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  const values = sheet.getDataRange().getValues();
+  if (values.length <= 1) return [];
+  const headers = values[0].map(function(h) { return String(h).trim(); });
+  const idx = {};
+  OZON_SUPPLY_REQUESTS_HEADERS.forEach(function(h) { idx[h] = headers.indexOf(h); });
+  const rows = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (row.join('').trim() === '') continue;
+    rows.push({
+      id: String(row[idx['ID']] || ''),
+      date: row[idx['Дата']] ? new Date(row[idx['Дата']]).toISOString() : '',
+      cabinet: String(row[idx['Кабинет']] || ''),
+      draftId: String(row[idx['DraftID']] || ''),
+      orderId: String(row[idx['OrderID']] || ''),
+      dropOffName: String(row[idx['Точка отгрузки']] || ''),
+      clusters: String(row[idx['Кластеры']] || ''),
+      itemsJSON: String(row[idx['Состав']] || ''),
+      who: String(row[idx['Кто']] || ''),
+      status: String(row[idx['Статус']] || '')
+    });
+  }
+  return rows;
+}
+
 
 
 function getExternalShipmentsSheet() {
@@ -3058,6 +3168,27 @@ function saveOzonSettings(data) {
   for (const k in data) {
     if (!validKeys.includes(k)) continue;
     const rawVal = data[k];
+
+    if (k === 'dropOffWarehouseId') {
+      const idVal = String(rawVal == null ? '' : rawVal).trim();
+      if (idVal && !/^\d+$/.test(idVal)) {
+        throw new Error('Настройка "dropOffWarehouseId" должна быть числом или пустой строкой');
+      }
+      keysToSave[k] = idVal;
+      continue;
+    }
+    if (k === 'dropOffWarehouseName') {
+      keysToSave[k] = String(rawVal == null ? '' : rawVal).trim();
+      continue;
+    }
+    if (k === 'dropOffWarehouseType') {
+      const typeVal = String(rawVal == null ? '' : rawVal).trim().toUpperCase();
+      if (typeVal && OZON_DROPOFF_TYPES.indexOf(typeVal) === -1) {
+        throw new Error('Настройка "dropOffWarehouseType": недопустимое значение "' + typeVal + '"');
+      }
+      keysToSave[k] = typeVal;
+      continue;
+    }
 
     if (OZON_SETTINGS_STRING_KEYS.includes(k)) {
       const strVal = String(rawVal || '').trim();

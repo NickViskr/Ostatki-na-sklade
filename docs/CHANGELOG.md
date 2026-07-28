@@ -3,6 +3,12 @@
 ## [2026-07-28]
 
 ### Добавлено
+- Backend-структура и API-экшены для мастера создания поставок Ozon (`Code.gs`):
+  - Новые настройки в `OZON_SETTINGS_DEFAULTS`: `maxBoxesPerCluster`, `dropOffWarehouseId`, `dropOffWarehouseName`, `dropOffWarehouseType`.
+  - Валидация строковых параметров `dropOffWarehouseId` (цифровой ID) и `dropOffWarehouseType` (список `OZON_DROPOFF_TYPES`) в `saveOzonSettings`.
+  - Лист «Заявки Ozon» (`OZON_SUPPLY_REQUESTS_HEADERS`) с полями ID, Дата, ОтгрузкаID, ТипОтгрузки, ОтгрузкаИмя, Статус, ПараметрыJSON, Создал, Создано.
+  - Экшен `checkSupplyAvailability`: безопасная проверка остатков и виртуальных комплектов без внесения списаний.
+  - Экшены `saveOzonSupplyRequest` и `getOzonSupplyRequests` для записи и чтения заявок Ozon FBO.
 - Документирование результатов разведки этапа H в паспорте API (`docs/OZON_API.md`):
   - Добавлена новая секция «Разведка этапа H (28.07.2026): создание заявки на поставку — проверено вживую через Ozon MCP» с подробным описанием методов `/v1/cluster/list`, `/v1/draft/direct/create`, `/v2/draft/create/info`, `/v2/draft/timeslot/info`, `/v2/draft/supply/create` и особенностей работы с черновиками Ozon FBO.
 
