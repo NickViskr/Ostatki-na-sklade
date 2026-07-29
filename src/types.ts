@@ -111,6 +111,8 @@ export interface ExternalShipment {
   acceptedJSON?: string;
   recalcJSON?: string;
   peresortJSON?: string;
+  /** КластерID поставки (MULTI_CLUSTER): у каждой строки свой кластер. */
+  clusterId?: string;
 }
 
 export interface OzonStockRow {

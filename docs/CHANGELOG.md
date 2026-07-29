@@ -3,6 +3,12 @@
 ## [2026-07-29]
 
 ### Добавлено
+- Модуль локального зачёта потребности по незавершённым заявкам Ozon (`src/lib/ozonPending.ts`):
+  - Поле `clusterId?: string` в интерфейсе `ExternalShipment` (`src/types.ts`).
+  - Чистые функции `buildPendingSupplies`, `isPendingCleared`, `isPendingActive`, `getPendingQty`, `mergePendingWithRequested`.
+  - Учёт 7-дневного предохранителя (`PENDING_SAFETY_DAYS = 7`), обработка снятия зачёта по статусам Ozon (`CANCELLED`, `REJECTED_AT_SUPPLY_WAREHOUSE`, `OVERDUE` и уход остатка).
+  - Подстраховка журналом «Заявки Ozon» до синхронизации данных от Ozon Seller API.
+  - Объединение локального зачёта и колонки «В заявках» через выбор наибольшего значения (`mergePendingWithRequested`).
 - Обновление правил и предохранителя в `docs/OZON_PLAN.md`:
   - Синхронизация предохранителя пункта 23 (7 дней).
   - Добавление правил работы с Ozon MCP, получением согласия пользователя на Claude в Chrome и обходом кэша gviz Google Таблиц.
