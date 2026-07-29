@@ -133,6 +133,44 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     [activeRows, skuMap]
   );
 
+  /** Сколько единиц товара помещается в одну коробку, из SKU Базы */
+  const pcsPerBoxMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const s of skus) {
+      const n = Number(s.pcsPerBox) || 0;
+      if (n > 0) map[s.sku] = n;
+    }
+    return map;
+  }, [skus]);
+
+  /** Разбор количества на коробки: сколько полных и сколько остаётся в неполной */
+  const boxInfo = (r: SupplyPlanRow) => {
+    const perBox = pcsPerBoxMap[r.article] || 0;
+    const qty = getQty(r);
+    if (perBox <= 0) {
+      return { perBox: 0, fullBoxes: 0, remainder: 0, isPartial: false, totalBoxes: 0 };
+    }
+    const fullBoxes = Math.floor(qty / perBox);
+    const remainder = qty % perBox;
+    return {
+      perBox,
+      fullBoxes,
+      remainder,
+      isPartial: remainder > 0,
+      totalBoxes: fullBoxes + (remainder > 0 ? 1 : 0)
+    };
+  };
+
+  const partialBoxRows = useMemo(
+    () => activeRows.filter((r) => boxInfo(r).isPartial),
+    [activeRows, qtyEdit, pcsPerBoxMap]
+  );
+
+  const noBoxNormRows = useMemo(
+    () => Array.from(new Set(activeRows.filter((r) => !pcsPerBoxMap[r.article]).map((r) => r.article))),
+    [activeRows, pcsPerBoxMap]
+  );
+
   const totals = useMemo(() => {
     let qty = 0;
     for (const r of activeRows) qty += getQty(r);
@@ -442,8 +480,19 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                             {c.clusterName || c.clusterId}
                             {!stillSelected && <span className="ml-2 text-[11px] font-semibold text-slate-400">убран из заявки</span>}
                           </div>
-                          <div className={`text-[11px] font-bold ${c.state === 'FULL_AVAILABLE' ? 'text-emerald-600' : 'text-red-600'}`}>
-                            {c.state}{c.invalidReason && c.invalidReason !== 'UNSPECIFIED' ? ` · ${c.invalidReason}` : ''}
+                          <div className={`text-[11px] font-bold ${c.state === 'FULL_AVAILABLE' ? 'text-emerald-600' : c.state === 'PARTIAL_AVAILABLE' ? 'text-amber-600' : 'text-red-600'}`}>
+                            {c.state === 'FULL_AVAILABLE'
+                              ? 'принято'
+                              : c.state === 'PARTIAL_AVAILABLE'
+                                ? 'принято частично'
+                                : c.state === 'NOT_AVAILABLE'
+                                  ? 'кластер не принимает'
+                                  : 'статус не определён'}
+                            {c.invalidReason === 'NOT_AVAILABLE_MATRIX' && ' · склад не принимает такие товары'}
+                            {c.invalidReason === 'NOT_AVAILABLE_RANK' && ' · склад недоступен по рейтингу'}
+                            {c.invalidReason === 'NOT_AVAILABLE_ROUTE' && ' · нет маршрута'}
+                            {c.invalidReason === 'PARTIAL_MATRIX_AVAILABLE' && ' · примет только часть товаров'}
+                            {String(c.invalidReason || '').indexOf('TIMESLOT') >= 0 && ' · нет свободных слотов'}
                           </div>
                         </div>
                         {(c.accepted || []).length > 0 && (
@@ -499,6 +548,23 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 Количество можно уменьшить, лишнюю строку или кластер — убрать. Остатки на складе это не меняет.
               </div>
 
+              {noBoxNormRows.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                  Не задано количество в коробке (поле «Штук в коробке» в SKU Базе): {noBoxNormRows.join(', ')}.
+                  Заявку это не блокирует, но посчитать коробки не получится.
+                </div>
+              )}
+
+              {partialBoxRows.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                  Неполные коробки: {partialBoxRows.map((r) => {
+                    const b = boxInfo(r);
+                    return `${r.article} / ${r.clusterName} — ${b.fullBoxes} полных и ${b.remainder} шт из ${b.perBox}`;
+                  }).join('; ')}.
+                  Это не ошибка — заявку создать можно. Чтобы коробки были полными, округлите количество.
+                </div>
+              )}
+
               <div className="flex flex-col gap-2">
                 {activeRows.map((r) => (
                   <div key={rowKey(r)} className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/50">
@@ -512,7 +578,23 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                         <div className="text-[11px] text-amber-600 font-semibold">урезано остатком Моего склада</div>
                       )}
                     </div>
-                    <div className="text-[11px] text-slate-400 shrink-0">{r.boxes} кор</div>
+                    <div className="text-[11px] shrink-0 text-right">
+                      {(() => {
+                        const b = boxInfo(r);
+                        if (b.perBox <= 0) {
+                          return <span className="text-amber-600 font-semibold">норма коробки<br />не задана</span>;
+                        }
+                        return (
+                          <>
+                            <div className="text-slate-500 font-semibold">{b.totalBoxes} кор</div>
+                            <div className="text-slate-400">по {b.perBox} шт</div>
+                            {b.isPartial && (
+                              <div className="text-amber-600 font-semibold">неполная: {b.remainder} шт</div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
                     <input
                       type="number"
                       min="0"
