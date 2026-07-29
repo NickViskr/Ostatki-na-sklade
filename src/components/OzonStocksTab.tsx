@@ -8,6 +8,7 @@ import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
 import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
+import { getStatusDetails } from '../lib/ozonStatus';
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
 
@@ -103,6 +104,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [onlyWithRecommendations, setOnlyWithRecommendations] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [factoryModalArticle, setFactoryModalArticle] = useState<string | null>(null);
+  const [pendingModalArticle, setPendingModalArticle] = useState<string | null>(null);
   const [showRecommendations, setShowRecommendations] = useState(false);
 
   const [showColsMenu, setShowColsMenu] = useState(false);
@@ -307,6 +309,24 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       : (ozonSupplyRequests || []).filter((r) => String(r.cabinet || '') === cabinetFilter);
     return buildPendingSupplies({ shipments, requests, skus });
   }, [externalShipments, ozonSupplyRequests, skus, cabinetFilter]);
+
+  // Названия кластеров по идентификатору — для расшифровки зачёта.
+  const clusterNameById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of clusterRefs) {
+      const id = String(c.clusterId || '').trim();
+      if (id) map[id] = String(c.clusterName || '').trim();
+    }
+    return map;
+  }, [clusterRefs]);
+
+  // Строки расшифровки зачёта по товару, открытому в модалке.
+  const pendingModalRows = useMemo(() => {
+    if (!pendingModalArticle) return [];
+    return pendingSupplies.details
+      .filter((d) => d.article === pendingModalArticle)
+      .sort((a, b) => String(b.since || '').localeCompare(String(a.since || '')));
+  }, [pendingModalArticle, pendingSupplies]);
 
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (filteredOzonStocks.length === 0) return null;
@@ -1009,9 +1029,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {isColVisible('pending') && (
                                 <td className="p-3 text-right">
                                   {art.pendingTotal > 0 ? (
-                                    <span className="font-semibold text-sky-600" title={`По этому товару уже создано заявок на ${fmtInt(art.pendingTotal)} шт. На это количество потребность уменьшена, и столько же зарезервировано на Моём складе.`}>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setPendingModalArticle(art.article); }}
+                                      className="font-semibold text-sky-600 hover:underline"
+                                      title={`По этому товару уже создано заявок на ${fmtInt(art.pendingTotal)} шт. На это количество потребность уменьшена, и столько же зарезервировано на Моём складе. Нажми, чтобы посмотреть список заявок.`}
+                                    >
                                       {fmtInt(art.pendingTotal)}
-                                    </span>
+                                    </button>
                                   ) : (
                                     <span className="text-slate-300">—</span>
                                   )}
@@ -1319,6 +1344,74 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           leadTimeDays={factoryModalRow ? factoryModalRow.leadTimeDays : 0}
           order={activeFactoryOrders[factoryModalArticle] || null}
         />
+      )}
+      {pendingModalArticle && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/40 flex items-start justify-center p-4 overflow-y-auto"
+          onClick={() => setPendingModalArticle(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-3xl mt-16 p-5"
+            onClick={(e) => e.stopPropagation()}
+            id="ozon-pending-modal"
+          >
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <div className="text-sm font-bold text-slate-800">Расшифровка зачёта</div>
+                <div className="text-[11px] text-slate-500 font-mono">{pendingModalArticle}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingModalArticle(null)}
+                className="text-slate-400 hover:text-slate-700 text-lg leading-none px-2"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
+              Эти заявки уже созданы, поэтому их количества вычтены из потребности и зарезервированы на Моём складе. Зачёт снимется сам, когда заявка будет отменена, отклонена, просрочена или товар примет склад Ozon. Если статус получить не удалось, зачёт истечёт через 7 дней от даты в колонке «С какого числа».
+            </div>
+            {pendingModalRows.length === 0 ? (
+              <div className="text-[11px] text-slate-400">По этому товару активных заявок нет.</div>
+            ) : (
+              <table className="w-full text-left text-[11px] border-collapse">
+                <thead>
+                  <tr className="text-slate-500 font-semibold border-b border-slate-200">
+                    <th className="py-2 pr-2">Кластер</th>
+                    <th className="py-2 pr-2 text-right">Штук</th>
+                    <th className="py-2 pr-2">Статус</th>
+                    <th className="py-2 pr-2">С какого числа</th>
+                    <th className="py-2 pr-2">Заявка</th>
+                    <th className="py-2">Откуда</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingModalRows.map((d, idx) => (
+                    <tr key={`${d.orderId}-${d.clusterId}-${idx}`} className="border-b border-slate-100">
+                      <td className="py-2 pr-2 text-slate-700">{d.clusterId ? (clusterNameById[d.clusterId] || d.clusterId) : 'Без кластера'}</td>
+                      <td className="py-2 pr-2 text-right font-semibold text-slate-800">{fmtInt(d.qty)}</td>
+                      <td className="py-2 pr-2">
+                        <span className={`px-1.5 py-0.5 rounded-md font-semibold ${getStatusDetails(d.ozonStatus).badgeClass}`}>
+                          {getStatusDetails(d.ozonStatus).label}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-2 text-slate-500">{fmtDateFull(d.since)}</td>
+                      <td className="py-2 pr-2 text-slate-500 font-mono">{d.orderId || '—'}</td>
+                      <td className="py-2 text-slate-400">{d.source === 'shipment' ? 'данные Ozon' : 'журнал заявок'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="font-bold text-slate-800">
+                    <td className="py-2 pr-2">Итого</td>
+                    <td className="py-2 pr-2 text-right">{fmtInt(pendingModalRows.reduce((s, d) => s + d.qty, 0))}</td>
+                    <td colSpan={4}></td>
+                  </tr>
+                </tfoot>
+              </table>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
