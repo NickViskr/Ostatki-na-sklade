@@ -219,8 +219,10 @@ export const Dashboard: React.FC = React.memo(() => {
   }, [isAdmin, externalShipments, skus, dismissedAlerts, coverageAlerts]);
 
   useEffect(() => {
+    // «Внешние отгрузки» грузим всем: по ним строится резерв под заявки в колонке «Свободно».
+    // Журнал «Заявки Ozon» требует прав администратора, поэтому он только для админа.
+    fetchExternalShipments();
     if (isAdmin) {
-      fetchExternalShipments();
       fetchOzonSupplyRequests();
     }
   }, [isAdmin, fetchExternalShipments, fetchOzonSupplyRequests]);
@@ -870,6 +872,12 @@ export const Dashboard: React.FC = React.memo(() => {
               <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('quantity')}>
                 Кол-во {getSortIcon('quantity')}
               </th>
+              <th className="px-6 py-4 font-semibold text-slate-600 text-right group">
+                <div className="flex items-center justify-end gap-1">
+                  Свободно
+                  <span title="Сколько штук этого артикула свободно для новых поставок: остаток минус то, что уже зарезервировано под созданные заявки на Ozon. Резерв нужен, чтобы одну и ту же партию не отправить дважды. Колонка «Кол-во» остаётся фактическим учётным остатком и на резерв не уменьшается — по ней считается капитализация."><HelpCircle size={14} className="text-slate-400 group-hover:text-indigo-500" /></span>
+                </div>
+              </th>
               <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('avgCost')}>
                 <div className="flex items-center justify-end gap-1">
                   Себест. (сред.) 
@@ -907,6 +915,7 @@ export const Dashboard: React.FC = React.memo(() => {
                 <tr key={i} className="border-b border-slate-100 animate-pulse">
                   <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-24"></div></td>
                   <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 ml-auto"></div></td>
+                  <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 ml-auto"></div></td>
                   <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-20 ml-auto"></div></td>
                   <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-24 ml-auto"></div></td>
                   <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-20 ml-auto"></div></td>
@@ -916,7 +925,7 @@ export const Dashboard: React.FC = React.memo(() => {
             ) : sortedStock.length === 0 ? (
               // Empty state indicating no data
               <tr>
-                <td colSpan={6} className="px-6 py-16 text-center">
+                <td colSpan={7} className="px-6 py-16 text-center">
                   <div className="flex flex-col items-center justify-center space-y-3">
                     <div className="bg-slate-100 p-4 rounded-full text-slate-400">
                       <LayoutDashboard size={32} />
@@ -951,6 +960,38 @@ export const Dashboard: React.FC = React.memo(() => {
                       </span>
                     )}
                   </div>
+                </td>
+                <td className="px-6 py-4 text-right">
+                  {(() => {
+                    const reserved = pendingSupplies.byArticle[item.article] || 0;
+                    const free = Math.max(0, (item as any).quantity - reserved);
+                    if (reserved <= 0) {
+                      return (
+                        <div className="inline-flex flex-col items-end">
+                          <span
+                            className={`px-2 py-1 rounded-md font-bold ${free < (Number(lowStockThreshold) || 0) ? 'bg-red-50 text-red-600' : 'bg-slate-100 text-slate-700'}`}
+                            title={`Свободно ${free} шт. Заявок на поставку Ozon по этому артикулу сейчас нет.`}
+                          >
+                            {free}
+                          </span>
+                          {(item as any).isVirtual && (
+                            <span className="text-[9px] text-violet-500 font-bold uppercase tracking-wider mt-0.5 mr-0.5">
+                              сборка
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        className="inline-flex flex-col items-end"
+                        title={`На складе ${(item as any).quantity} шт. Из них ${reserved} шт зарезервировано под уже созданные заявки на поставку Ozon. Свободно для новых поставок ${free} шт.`}
+                      >
+                        <span className="px-2 py-1 rounded-md font-bold bg-amber-50 text-amber-700">{free}</span>
+                        <span className="text-[10px] text-slate-400 mt-0.5">резерв {reserved}</span>
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td className="px-6 py-4 text-right font-medium whitespace-nowrap">{formatCurrency(item.avgCost)} ₽</td>
                 <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.capitalization)} ₽</td>
