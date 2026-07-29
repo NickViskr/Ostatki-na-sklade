@@ -7,6 +7,7 @@ import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
 import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, resolveOzonArticle } from '../lib/ozonCoverage';
+import { buildPendingSupplies } from '../lib/ozonPending';
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
 
@@ -57,6 +58,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const rawStocks = useWarehouseStore((state) => state.stock);
   const factoryOrders = useWarehouseStore((state) => state.factoryOrders);
   const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
+  const externalShipments = useWarehouseStore((state) => state.externalShipments);
+  const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
+  const ozonSupplyRequests = useWarehouseStore((state) => state.ozonSupplyRequests);
+  const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
 
   const [showSettings, setShowSettings] = useState(false);
   const [expandedArticles, setExpandedArticles] = useState<Record<string, boolean>>({});
@@ -161,8 +166,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       fetchOzonStocks();
       fetchOzonSales();
       fetchFactoryOrders();
+      fetchExternalShipments();
+      fetchOzonSupplyRequests();
     }
-  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders]);
+  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchExternalShipments, fetchOzonSupplyRequests]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -287,6 +294,19 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return ozonSales.filter((s) => s.cabinet === cabinetFilter);
   }, [ozonSales, cabinetFilter]);
 
+  // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
+  // Фильтр по кабинету тот же, что у остатков и продаж, иначе заявки чужого кабинета
+  // уменьшили бы потребность выбранного.
+  const pendingSupplies = useMemo(() => {
+    const shipments = cabinetFilter === 'all'
+      ? (externalShipments || [])
+      : (externalShipments || []).filter((s) => String(s.cabinet || '') === cabinetFilter);
+    const requests = cabinetFilter === 'all'
+      ? (ozonSupplyRequests || [])
+      : (ozonSupplyRequests || []).filter((r) => String(r.cabinet || '') === cabinetFilter);
+    return buildPendingSupplies({ shipments, requests, skus });
+  }, [externalShipments, ozonSupplyRequests, skus, cabinetFilter]);
+
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (filteredOzonStocks.length === 0) return null;
     const articleSet = new Set<string>();
@@ -304,8 +324,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       clusters: clusterRefs,
       settings: ozonSettings,
       myStockAvailability,
+      pending: pendingSupplies,
     });
-  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks]);
+  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];

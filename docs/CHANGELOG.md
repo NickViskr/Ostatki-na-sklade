@@ -3,6 +3,10 @@
 ## [2026-07-29]
 
 ### Добавлено
+- Подключение расчёта зачёта потребности на вкладке «Остатки Озон» (`src/components/OzonStocksTab.tsx`):
+  - Автоматическая подгрузка внешних отгрузок и заявок Ozon при старте вкладки администратором.
+  - Расчёт `pendingSupplies` с учётом выбранного фильтра по кабинету (`cabinetFilter`) через `buildPendingSupplies`.
+  - Передача `pending: pendingSupplies` в вызов `buildOzonCoverage`.
 - Интеграция чтения журнала «Заявки Ozon» в Zustand-стор (`src/store/useWarehouseStore.ts`):
   - Поля `ozonSupplyRequests` и `fetchOzonSupplyRequests` в состояние склада.
   - Асинхронный метод `fetchOzonSupplyRequests` для вызова экшена GAS `getOzonSupplyRequests`.
