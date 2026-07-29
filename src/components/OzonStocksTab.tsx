@@ -24,6 +24,7 @@ const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
   { key: 'other', label: 'Прочее' },
   { key: 'estimated', label: 'Расчётный' },
   { key: 'coverage', label: 'Покрытие' },
+  { key: 'pending', label: 'Зачёт' },
   { key: 'myStock', label: 'Мой склад' },
   { key: 'recommendation', label: 'Рекомендация' },
   { key: 'factory', label: 'Заказ на фабрике' },
@@ -933,6 +934,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             <ColHint text="На сколько дней хватит расчётного остатка сверх неснижаемого запаса. Красный — запас уже ниже неснижаемого, жёлтый — ниже целевого, зелёный — норма. «∞» означает, что продаж нет, а остаток есть." />
                           </th>
                         )}
+                        {isColVisible('pending') && (
+                          <th className="p-3 text-right">
+                            Зачёт
+                            <ColHint text="Сколько штук уже едет по созданным заявкам на поставку. Эти штуки вычитаются из потребности сразу, не дожидаясь, пока Ozon отразит их в колонке «В заявках» — иначе один и тот же товар легко отправить дважды. По кластеру берётся наибольшее из двух чисел: нашего зачёта и колонки «В заявках» Ozon, потому что оба описывают одни и те же заявки. Зачёт снимается сам, когда заявка отменена, отклонена, просрочена или товар уже принят складом Ozon." />
+                          </th>
+                        )}
                         {isColVisible('myStock') && (
                           <th className="p-3 text-right">
                             Мой склад
@@ -991,6 +998,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {isColVisible('other') && <td className={`p-3 text-right ${art.totals.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.other)}</td>}
                               {isColVisible('estimated') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.totalEstimated)}</td>}
                               {isColVisible('coverage') && <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>}
+                              {isColVisible('pending') && (
+                                <td className="p-3 text-right">
+                                  {art.pendingTotal > 0 ? (
+                                    <span className="font-semibold text-sky-600" title={`По этому товару уже создано заявок на ${fmtInt(art.pendingTotal)} шт. На это количество потребность уменьшена, и столько же зарезервировано на Моём складе.`}>
+                                      {fmtInt(art.pendingTotal)}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-300">—</span>
+                                  )}
+                                </td>
+                              )}
                               {isColVisible('myStock') && <td className="p-3 text-right text-slate-600">{fmtInt(art.myStockAvailable)}</td>}
                               {isColVisible('recommendation') && (
                                 <td className="p-3 text-right">
@@ -1111,6 +1129,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     {isColVisible('other') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                     {isColVisible('estimated') && <td className="p-2.5 text-right font-medium text-slate-800">{fmtInt(cls.estimated)}</td>}
                                     {isColVisible('coverage') && <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>}
+                                    {isColVisible('pending') && (
+                                      <td className="p-2.5 text-right">
+                                        {cls.pendingEffective > 0 ? (
+                                          <span className="font-medium text-sky-600" title={`Потребность кластера уменьшена на ${fmtInt(cls.pendingEffective)} шт. Наш зачёт по созданным заявкам: ${fmtInt(cls.pendingQty)} шт. Колонка «В заявках» у Ozon: ${fmtInt(cls.requestedQty)} шт. Берём наибольшее из двух, а не сумму — это одни и те же заявки.`}>
+                                            {fmtInt(cls.pendingEffective)}
+                                          </span>
+                                        ) : (
+                                          <span className="text-slate-300">—</span>
+                                        )}
+                                      </td>
+                                    )}
                                     {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                     {isColVisible('recommendation') && (
                                       <td className="p-2.5 text-right">
@@ -1161,6 +1190,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       {isColVisible('other') && <td className={`p-2 text-right ${(wh.other || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.other)}</td>}
                                       {isColVisible('estimated') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('coverage') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('pending') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('myStock') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('recommendation') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('factory') && <td className="p-2 text-right text-slate-300">—</td>}
@@ -1191,6 +1221,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 {isColVisible('other') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.other)}</td>}
                                 {isColVisible('estimated') && <td className="p-2.5 text-right font-medium text-slate-700">{fmtInt(art.unboundEstimated)}</td>}
                                 {isColVisible('coverage') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('pending') && (
+                                  <td className="p-2.5 text-right">
+                                    {(pendingSupplies.unboundByArticle[art.article] || 0) > 0 ? (
+                                      <span className="text-slate-600" title="Заявки, у которых Ozon не вернул кластер. В кластерные рекомендации они не идут, но в общий зачёт по товару входят.">
+                                        {fmtInt(pendingSupplies.unboundByArticle[art.article] || 0)}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-300">—</span>
+                                    )}
+                                  </td>
+                                )}
                                 {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('recommendation') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('factory') && <td className="p-2.5 text-right text-slate-300">—</td>}
