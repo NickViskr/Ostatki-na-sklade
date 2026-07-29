@@ -416,6 +416,12 @@ export interface ClusterCoverageRow {
   priorityK: number;
   /** Непокрытая потребность кластера, шт: сколько не досталось из-за нехватки на Моём складе. */
   unmetQty: number;
+  /** Локальный зачёт по этому кластеру, шт (из уже созданных заявок). */
+  pendingQty: number;
+  /** «В заявках» по данным Ozon для этого кластера, шт. */
+  requestedQty: number;
+  /** Применённый к потребности зачёт = наибольшее из pendingQty и requestedQty, шт. */
+  pendingEffective: number;
   recommendation: SupplyRecommendation | null;
 }
 
@@ -432,8 +438,24 @@ export interface ArticleCoverage {
   unboundQtySold: number;
   /** Суммарная непокрытая потребность кластеров товара, шт. */
   unmetDeficitQty: number;
+  /** Весь локальный зачёт по товару, шт (включая позиции без кластера). */
+  pendingTotal: number;
+  /** Свободный остаток Моего склада после резерва под созданные заявки, шт. */
+  freeMyStock: number;
   clusters: ClusterCoverageRow[];
   factory: FactorySignal | null;
+}
+
+/**
+ * Готовый локальный зачёт по созданным заявкам (пункт 23).
+ * Структура повторяет PendingSuppliesResult из ozonPending.ts, но объявлена здесь отдельно:
+ * прямой импорт создал бы кольцевую зависимость между модулями.
+ */
+export interface OzonPendingLike {
+  /** Зачёт по кластерам: артикул -> КластерID -> шт. */
+  byArticleCluster: Record<string, Record<string, number>>;
+  /** Зачёт по товару целиком, шт (включая позиции без кластера). */
+  byArticle: Record<string, number>;
 }
 
 export interface OzonCoverageInput {
@@ -444,6 +466,8 @@ export interface OzonCoverageInput {
   settings: OzonCoverageSettings;
   /** Доступность на Моём складе по артикулу (виртуальные комплекты уже учтены вызывающей стороной). */
   myStockAvailability: Record<string, number>;
+  /** Локальный зачёт по созданным заявкам; не передан — расчёт идёт как раньше. */
+  pending?: OzonPendingLike;
   /** Момент расчёта; по умолчанию — текущее время. */
   now?: Date;
 }
@@ -480,6 +504,12 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     const pcsPerBox = skuItem && skuItem.pcsPerBox > 0 ? skuItem.pcsPerBox : 1;
     const leadTimeDays = skuItem ? (Number(skuItem.leadTimeDays) || 0) : 0;
     const myStockAvailable = Number(input.myStockAvailability[article]) || 0;
+    // Локальный зачёт: товар из созданных заявок физически ещё лежит на Моём складе
+    // (расход проводится только при ACCEPTED_AT_SUPPLY_WAREHOUSE), поэтому он резервируется
+    // и не может быть повторно распределён в другой кластер.
+    const pendingByCluster = (input.pending && input.pending.byArticleCluster[article]) || {};
+    const pendingTotal = Math.max(0, Number(input.pending && input.pending.byArticle[article]) || 0);
+    const freeMyStock = Math.max(0, myStockAvailable - pendingTotal);
 
     const qtyByClusterId: Record<string, number> = {};
     const perDayByClusterId: Record<string, number> = {};
@@ -523,10 +553,16 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
             targetStockDays: input.settings.targetStockDays * priorityK,
           }
         : input.settings;
+      // Зачёт и колонка «В заявках» описывают одни и те же заявки — берётся наибольшее, не сумма.
+      const pendingQty = Math.max(0, Number(pendingByCluster[clusterId]) || 0);
+      const requestedQty = st ? Math.max(0, Number(st.requested) || 0) : 0;
+      const pendingEffective = Math.max(pendingQty, requestedQty);
+      // Покрытие в днях считается по чистому остатку Ozon: товар в заявке ещё не приехал,
+      // продавать его нельзя. Зачёт влияет только на потребность в новой поставке.
       const coverage = calcCoverageDays(estimated, perDay, effectiveSettings.minStockDays, isExcluded);
       const recommendation = isExcluded
         ? null
-        : calcSupplyRecommendation(perDay, estimated, effectiveSettings, pcsPerBox, Number.MAX_SAFE_INTEGER);
+        : calcSupplyRecommendation(perDay, estimated + pendingEffective, effectiveSettings, pcsPerBox, Number.MAX_SAFE_INTEGER);
 
       clusterRows.push({
         clusterId,
@@ -543,6 +579,9 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
         priority: isPriority,
         priorityK,
         unmetQty: 0,
+        pendingQty,
+        requestedQty,
+        pendingEffective,
         recommendation
       });
     }
@@ -552,7 +591,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     // рекомендации выдаются по очереди — сначала приоритетные (по убыванию коэффициента),
     // затем остальные по возрастанию покрытия. Кому не хватило — урезанная рекомендация.
     const boxSize = pcsPerBox > 0 ? pcsPerBox : 1;
-    let remainingStock = Math.max(0, myStockAvailable);
+    let remainingStock = freeMyStock;
     const distributionOrder = clusterRows
       .filter(r => r.recommendation !== null)
       .sort((a, b) => {
@@ -599,6 +638,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       unboundEstimated: stockAgg.unboundEstimated,
       unboundQtySold,
       unmetDeficitQty,
+      pendingTotal,
+      freeMyStock,
       clusters: clusterRows,
       factory
     });

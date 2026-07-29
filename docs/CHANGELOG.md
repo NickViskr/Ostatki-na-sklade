@@ -3,6 +3,11 @@
 ## [2026-07-29]
 
 ### Добавлено
+- Интеграция локального зачёта потребности в расчёт покрытия Ozon (`src/lib/ozonCoverage.ts`):
+  - Добавлен интерфейс `OzonPendingLike` и опциональное поле `pending?: OzonPendingLike` в `OzonCoverageInput` (без кольцевого импорта `ozonPending.ts`).
+  - Поля `pendingQty`, `requestedQty`, `pendingEffective` в `ClusterCoverageRow` и `pendingTotal`, `freeMyStock` в `ArticleCoverage`.
+  - Учёт действенного зачёта (`pendingEffective = Math.max(pendingQty, requestedQty)`) при вычислении рекомендаций поставки по кластерам.
+  - Резервирование остатка Моего склада под задействованный зачёт (`freeMyStock = Math.max(0, myStockAvailable - pendingTotal)`).
 - Накопление колонки «В заявках» (`requested`) в кластерных агрегатах остатков Ozon (`src/lib/ozonCoverage.ts`):
   - Поле `requested: number` добавлено в интерфейс `ClusterStockAgg`.
   - В функции `buildClusterStocks` добавлено чтение и суммирование `requested` по кластерам без включения в расчётный остаток `estimated`.
