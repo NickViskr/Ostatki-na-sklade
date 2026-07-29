@@ -161,6 +161,29 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     };
   };
 
+  /**
+   * Разбор на коробки для позиции из ответа Ozon.
+   * Артикул приложения восстанавливается по offerId и Ozon-SKU через resolveOzonArticle,
+   * норма упаковки берётся из SKU Базы.
+   */
+  const boxInfoForOzonItem = (it: any) => {
+    const article = resolveOzonArticle(skus, String(it?.offerId || ''), String(it?.sku || ''));
+    const perBox = pcsPerBoxMap[article] || 0;
+    const qty = Number(it?.quantity) || 0;
+    if (perBox <= 0) {
+      return { perBox: 0, fullBoxes: 0, remainder: 0, isPartial: false, totalBoxes: 0 };
+    }
+    const fullBoxes = Math.floor(qty / perBox);
+    const remainder = qty % perBox;
+    return {
+      perBox,
+      fullBoxes,
+      remainder,
+      isPartial: remainder > 0,
+      totalBoxes: fullBoxes + (remainder > 0 ? 1 : 0)
+    };
+  };
+
   const partialBoxRows = useMemo(
     () => activeRows.filter((r) => boxInfo(r).isPartial),
     [activeRows, qtyEdit, pcsPerBoxMap]
@@ -498,23 +521,42 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                         {(c.accepted || []).length > 0 && (
                           <div className="mt-2">
                             <div className="text-[11px] font-bold uppercase text-slate-400">Войдёт в поставку</div>
-                            {c.accepted.map((it: any, i: number) => (
-                              <div key={`a${i}`} className="text-[11px] text-slate-600 flex justify-between gap-2">
-                                <span className="truncate">{it.offerId || it.sku}</span>
-                                <span className="font-semibold shrink-0">{it.quantity} шт</span>
-                              </div>
-                            ))}
+                            {c.accepted.map((it: any, i: number) => {
+                              const b = boxInfoForOzonItem(it);
+                              return (
+                                <div key={`a${i}`} className="text-[11px] text-slate-600 flex justify-between gap-2">
+                                  <span className="truncate">{it.offerId || it.sku}</span>
+                                  <span className="shrink-0 text-right">
+                                    <span className="font-semibold">{it.quantity} шт</span>
+                                    {b.perBox > 0 && (
+                                      <span className="text-slate-400"> · {b.totalBoxes} кор по {b.perBox} шт</span>
+                                    )}
+                                    {b.isPartial && (
+                                      <span className="text-amber-600 font-semibold"> · неполная: {b.remainder} шт</span>
+                                    )}
+                                  </span>
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                         {(c.rejected || []).length > 0 && (
                           <div className="mt-2">
                             <div className="text-[11px] font-bold uppercase text-red-500">Не войдёт</div>
-                            {c.rejected.map((it: any, i: number) => (
-                              <div key={`r${i}`} className="text-[11px] text-red-600 flex justify-between gap-2">
-                                <span className="truncate">{it.offerId || it.sku}</span>
-                                <span className="font-semibold shrink-0">{it.quantity} шт</span>
-                              </div>
-                            ))}
+                            {c.rejected.map((it: any, i: number) => {
+                              const b = boxInfoForOzonItem(it);
+                              return (
+                                <div key={`r${i}`} className="text-[11px] text-red-600 flex justify-between gap-2">
+                                  <span className="truncate">{it.offerId || it.sku}</span>
+                                  <span className="shrink-0 text-right">
+                                    <span className="font-semibold">{it.quantity} шт</span>
+                                    {b.perBox > 0 && (
+                                      <span className="text-red-400"> · {b.totalBoxes} кор по {b.perBox} шт</span>
+                                    )}
+                                  </span>
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                         {stillSelected && (
