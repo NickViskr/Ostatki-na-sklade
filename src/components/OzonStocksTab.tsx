@@ -493,6 +493,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           article: row.article,
           name: row.name,
           myStockAvailable: row.myStockAvailable,
+          freeMyStock: row.freeMyStock,
+          pendingTotal: row.pendingTotal,
           minCoverage,
           clusters,
         });
@@ -706,7 +708,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             <div key={s.article} className="border border-slate-100 rounded-xl p-3 bg-slate-50/60">
                               <div className="flex items-baseline justify-between gap-2">
                                 <span className="font-mono font-bold text-slate-800 text-[12px]">{s.article}</span>
-                                <span className="text-[11px] text-slate-400 shrink-0">на складе {fmtInt(s.myStockAvailable)} шт</span>
+                                <span
+                                  className="text-[11px] text-slate-400 shrink-0"
+                                  title={s.pendingTotal > 0 ? `На складе всего ${fmtInt(s.myStockAvailable)} шт, из них ${fmtInt(s.pendingTotal)} шт зарезервировано под уже созданные заявки. Свободно для новых поставок ${fmtInt(s.freeMyStock)} шт.` : undefined}
+                                >
+                                  свободно {fmtInt(s.freeMyStock)} шт
+                                  {s.pendingTotal > 0 && <span className="text-amber-500"> (из {fmtInt(s.myStockAvailable)})</span>}
+                                </span>
                               </div>
                               {s.name && <div className="text-[11px] text-slate-500 truncate" title={s.name}>{s.name}</div>}
                               <div className="mt-2 flex flex-col gap-1">
@@ -943,7 +951,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('myStock') && (
                           <th className="p-3 text-right">
                             Мой склад
-                            <ColHint text="Свободный остаток этого артикула на твоём складе. Это потолок поставки: рекомендация не может превышать то, что есть в наличии. Для виртуальных комплектов — доступность по компонентам." />
+                            <ColHint text="Сколько штук этого артикула свободно на твоём складе для НОВЫХ поставок. Это потолок рекомендации. Если часть остатка уже зарезервирована под созданные заявки, крупная цифра — свободный остаток, а под ней мелким шрифтом общий остаток и размер резерва. Резерв нужен, чтобы одну и ту же партию не порекомендовало отвезти второй раз в другой кластер. Для виртуальных комплектов остаток считается по компонентам." />
                           </th>
                         )}
                         {isColVisible('recommendation') && (
@@ -1009,7 +1017,21 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   )}
                                 </td>
                               )}
-                              {isColVisible('myStock') && <td className="p-3 text-right text-slate-600">{fmtInt(art.myStockAvailable)}</td>}
+                              {isColVisible('myStock') && (
+                                <td className="p-3 text-right">
+                                  {art.pendingTotal > 0 ? (
+                                    <span
+                                      className="inline-flex flex-col items-end"
+                                      title={`На складе всего ${fmtInt(art.myStockAvailable)} шт. Из них ${fmtInt(art.pendingTotal)} шт зарезервировано под уже созданные заявки на поставку. Для новых поставок свободно ${fmtInt(art.freeMyStock)} шт — это и есть потолок рекомендации.`}
+                                    >
+                                      <span className="font-semibold text-amber-600">{fmtInt(art.freeMyStock)}</span>
+                                      <span className="text-[10px] text-slate-400 font-normal">из {fmtInt(art.myStockAvailable)} · резерв {fmtInt(art.pendingTotal)}</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-600">{fmtInt(art.myStockAvailable)}</span>
+                                  )}
+                                </td>
+                              )}
                               {isColVisible('recommendation') && (
                                 <td className="p-3 text-right">
                                   {art.recommendedQty > 0 ? (
