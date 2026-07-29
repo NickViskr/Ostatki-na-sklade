@@ -693,6 +693,18 @@ async function startServer() {
 
       // Step 5. Forming records on supply
       const clusterMap = await loadClusterMap({ ozonClientId: cabinets[0].clientId, ozonApiKey: cabinets[0].apiKey });
+
+      // Обратный справочник: название кластера → macrolocal_cluster_id.
+      // Нужен, когда Ozon не отдаёт идентификатор кластера в поставке.
+      const clusterIdByName = new Map<string, string>();
+      clusterMap.forEach((clusterName, clusterIdValue) => {
+        const nameKey = String(clusterName).trim();
+        if (nameKey && !clusterIdByName.has(nameKey)) {
+          clusterIdByName.set(nameKey, String(clusterIdValue));
+        }
+      });
+
+      const clusterStats = { fromApi: 0, fromName: 0, unresolved: 0 };
       const finalShipments: any[] = [];
       
       for (const entry of ordersDetailsList) {
@@ -739,6 +751,20 @@ async function startServer() {
           }
 
           const bundleId = supply.bundle_id || '';
+
+          // Идентификатор кластера: сначала из ответа Ozon, затем по названию склада хранения
+          let clusterIdOut = macrolocalStr;
+          if (clusterIdOut) {
+            clusterStats.fromApi++;
+          } else {
+            const byName = clusterIdByName.get(String(storageWarehouse).trim());
+            if (byName) {
+              clusterIdOut = byName;
+              clusterStats.fromName++;
+            } else {
+              clusterStats.unresolved++;
+            }
+          }
           
           finalShipments.push({
             postingId,
@@ -751,7 +777,7 @@ async function startServer() {
             timeslot: timeslotStr,
             shipmentDate,
             bundleId,
-            clusterId: macrolocalStr,
+            clusterId: clusterIdOut,
             cabinetIndex,
             cabinet: cabinets[cabinetIndex].name
           });
@@ -861,7 +887,8 @@ async function startServer() {
         data: {
           found: shipmentsForGas.length,
           added: gasData.data?.addedCount || 0,
-          updated: gasData.data?.updatedCount || 0
+          updated: gasData.data?.updatedCount || 0,
+          clusterStats
         }
       });
 

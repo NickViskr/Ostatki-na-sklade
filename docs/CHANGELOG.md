@@ -3,6 +3,10 @@
 ## [2026-07-29]
 
 ### Добавлено
+- Резервный сопоставитель `clusterId` и статистика в `/api/ozon/check` (`server.ts`):
+  - Построение обратного справочника `clusterIdByName` (название кластера → id) на базе `clusterMap`.
+  - Определение `clusterId` по названию склада хранения, если Ozon не передал `macrolocal_cluster_id`.
+  - Возврат статистики `clusterStats` (`fromApi`, `fromName`, `unresolved`) в JSON-ответе эндпоинта.
 - Диагностический эндпоинт `GET /api/version` в `server.ts`:
   - Возвращает `{ status: "success", version: "2026-07-29-clusterid", features: { clusterIdInShipments: true } }`.
   - Размещён перед Vite middleware для доступности в продакшене без авторизации и раскрытия чувствительных данных.

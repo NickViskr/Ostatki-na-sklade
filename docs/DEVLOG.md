@@ -2,6 +2,7 @@
 
 | Дата | Задача | Изменённые файлы | Ключевые решения | Известные ограничения |
 | :--- | :--- | :--- | :--- | :--- |
+| 2026-07-29 | Резервное определение «КластерID» по названию склада и счётчики статистики | `server.ts` | Построение обратного справочника `clusterIdByName` (название кластера → id) из `clusterMap`. Резервное определение `clusterIdOut` по названию склада хранения `storageWarehouse` при отсутствии `macrolocal_cluster_id` от API Ozon. Сбор и возврат метрик `clusterStats` (`fromApi`, `fromName`, `unresolved`) в ответе `/api/ozon/check`. | Нет |
 | 2026-07-29 | Добавление диагностического эндпоинта /api/version | `server.ts` | Добавлен публичный GET эндпоинт `/api/version`, возвращающий метку версии прокси (`2026-07-29-clusterid`) и флаги фич без передачи авторизационных данных или секретов. Размещён перед Vite middleware. | Нет |
 | 2026-07-28 | Передача «КластерID» из прокси в Apps Script | `server.ts` | Добавлено сохранение `clusterId: macrolocalStr` в `finalShipments` и передача `clusterId: s.clusterId || ''` в структуру `shipmentsForGas` в эндпоинте `/api/ozon/check`. | Нет |
 | 2026-07-28 | Исправление сохранения и чтения «КластерID» в «Внешние отгрузки» | `Code.gs` | Приведение `clusterIdVal` к строке (`String(rawClusterId).trim()`), обновление `colClusterId` в `saveExternalShipments` только при непустом значении (`if (clusterIdVal)`), а также возврат `clusterId` строкой через `getVal(colClusterId, false).trim()` в `getExternalShipments`. | Нет |
