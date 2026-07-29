@@ -15,7 +15,8 @@ import {
   HelpCircle,
   ChevronLeft,
   ChevronRight,
-  X
+  X,
+  Columns3
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -26,6 +27,19 @@ import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, OzonAlert } from '../lib/ozonAlerts';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
+
+// Колонки таблицы остатков, которые можно скрывать. «Артикул» скрыть нельзя — это опора строки.
+const DASH_TOGGLEABLE_COLS: { key: string; label: string }[] = [
+  { key: 'quantity', label: 'Кол-во' },
+  { key: 'free', label: 'Свободно' },
+  { key: 'avgCost', label: 'Себест. (сред.)' },
+  { key: 'capitalization', label: 'Капитализация' },
+  { key: 'storage', label: 'Хранение ₽/сут' },
+  { key: 'turnover', label: 'Оборач. (дни)' },
+];
+
+// По умолчанию скрыт учётный остаток: пользователю важнее свободный остаток за вычетом резерва.
+const DASH_DEFAULT_HIDDEN_COLS = ['quantity'];
 
 export const Dashboard: React.FC = React.memo(() => {
   const stock = useWarehouseStore((state) => state.stock);
@@ -98,6 +112,35 @@ export const Dashboard: React.FC = React.memo(() => {
   }, [dashTableSelectedSkus, currentUser?.username]);
 
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
+
+  // Скрытие колонок таблицы остатков. Настройка своя у каждого пользователя.
+  const [showColsMenu, setShowColsMenu] = useState(false);
+  const [hiddenCols, setHiddenCols] = useState<string[]>(DASH_DEFAULT_HIDDEN_COLS);
+
+  useEffect(() => {
+    if (!currentUser?.username) return;
+    try {
+      const saved = localStorage.getItem(`dashCols_${currentUser.username}`);
+      setHiddenCols(saved ? JSON.parse(saved) : DASH_DEFAULT_HIDDEN_COLS);
+    } catch (e) {
+      setHiddenCols(DASH_DEFAULT_HIDDEN_COLS);
+    }
+  }, [currentUser?.username]);
+
+  const toggleCol = (key: string) => {
+    setHiddenCols((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      if (currentUser?.username) {
+        try {
+          localStorage.setItem(`dashCols_${currentUser.username}`, JSON.stringify(next));
+        } catch (e) {}
+      }
+      return next;
+    });
+  };
+
+  const isColVisible = (key: string) => !hiddenCols.includes(key);
+  const visibleColsCount = 1 + DASH_TOGGLEABLE_COLS.filter((c) => isColVisible(c.key)).length;
 
   const [dismissedAlerts, setDismissedAlerts] = useState<string[]>(() => {
     try {
@@ -862,6 +905,35 @@ export const Dashboard: React.FC = React.memo(() => {
         )}
       </div>
 
+      <div className="flex justify-end mb-2 relative">
+        <button
+          type="button"
+          onClick={() => setShowColsMenu((v) => !v)}
+          className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-xl px-3 py-2 hover:bg-slate-50 transition-colors"
+        >
+          <Columns3 size={14} /> Колонки
+        </button>
+        {showColsMenu && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setShowColsMenu(false)} />
+            <div className="absolute right-0 top-full mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg p-2 w-60">
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 py-1">Показывать колонки</div>
+              {DASH_TOGGLEABLE_COLS.map((col) => (
+                <label key={col.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer text-xs text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={isColVisible(col.key)}
+                    onChange={() => toggleCol(col.key)}
+                    className="accent-indigo-600"
+                  />
+                  {col.label}
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
       <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead>
@@ -869,15 +941,20 @@ export const Dashboard: React.FC = React.memo(() => {
               <th className="px-6 py-4 font-semibold text-slate-600 cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('article')}>
                 Артикул {getSortIcon('article')}
               </th>
+              {isColVisible('quantity') && (
               <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('quantity')}>
                 Кол-во {getSortIcon('quantity')}
               </th>
+              )}
+              {isColVisible('free') && (
               <th className="px-6 py-4 font-semibold text-slate-600 text-right group">
                 <div className="flex items-center justify-end gap-1">
                   Свободно
                   <span title="Сколько штук этого артикула свободно для новых поставок: остаток минус то, что уже зарезервировано под созданные заявки на Ozon. Резерв нужен, чтобы одну и ту же партию не отправить дважды. Колонка «Кол-во» остаётся фактическим учётным остатком и на резерв не уменьшается — по ней считается капитализация."><HelpCircle size={14} className="text-slate-400 group-hover:text-indigo-500" /></span>
                 </div>
               </th>
+              )}
+              {isColVisible('avgCost') && (
               <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('avgCost')}>
                 <div className="flex items-center justify-end gap-1">
                   Себест. (сред.) 
@@ -885,6 +962,8 @@ export const Dashboard: React.FC = React.memo(() => {
                   {getSortIcon('avgCost')}
                 </div>
               </th>
+              )}
+              {isColVisible('capitalization') && (
               <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('capitalization')}>
                 <div className="flex items-center justify-end gap-1">
                   Капитализация 
@@ -892,6 +971,8 @@ export const Dashboard: React.FC = React.memo(() => {
                   {getSortIcon('capitalization')}
                 </div>
               </th>
+              )}
+              {isColVisible('storage') && (
               <th className="px-6 py-4 font-semibold text-slate-600 text-right cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('storageCost')}>
                 <div className="flex items-center justify-end gap-1">
                   Хранение ₽/сут
@@ -899,6 +980,8 @@ export const Dashboard: React.FC = React.memo(() => {
                   {getSortIcon('storageCost')}
                 </div>
               </th>
+              )}
+              {isColVisible('turnover') && (
               <th className="px-6 py-4 font-semibold text-slate-600 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('turnover')}>
                 <div className="flex items-center justify-center gap-1">
                   Оборач. (дни) 
@@ -906,6 +989,7 @@ export const Dashboard: React.FC = React.memo(() => {
                   {getSortIcon('turnover')}
                 </div>
               </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -914,18 +998,18 @@ export const Dashboard: React.FC = React.memo(() => {
               Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="border-b border-slate-100 animate-pulse">
                   <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-24"></div></td>
-                  <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 ml-auto"></div></td>
-                  <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 ml-auto"></div></td>
-                  <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-20 ml-auto"></div></td>
-                  <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-24 ml-auto"></div></td>
-                  <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-20 ml-auto"></div></td>
-                  <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 mx-auto"></div></td>
+                  {isColVisible('quantity') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 ml-auto"></div></td>}
+                  {isColVisible('free') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 ml-auto"></div></td>}
+                  {isColVisible('avgCost') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-20 ml-auto"></div></td>}
+                  {isColVisible('capitalization') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-24 ml-auto"></div></td>}
+                  {isColVisible('storage') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-20 ml-auto"></div></td>}
+                  {isColVisible('turnover') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 mx-auto"></div></td>}
                 </tr>
               ))
             ) : sortedStock.length === 0 ? (
               // Empty state indicating no data
               <tr>
-                <td colSpan={7} className="px-6 py-16 text-center">
+                <td colSpan={visibleColsCount} className="px-6 py-16 text-center">
                   <div className="flex flex-col items-center justify-center space-y-3">
                     <div className="bg-slate-100 p-4 rounded-full text-slate-400">
                       <LayoutDashboard size={32} />
@@ -949,6 +1033,7 @@ export const Dashboard: React.FC = React.memo(() => {
                 title="Нажмите, чтобы просмотреть историю товарных операций"
               >
                 <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium group-hover:underline">{item.article}</td>
+                {isColVisible('quantity') && (
                 <td className="px-6 py-4 text-right">
                   <div className="inline-flex flex-col items-end">
                     <span className={`px-2 py-1 rounded-md font-bold ${(item as any).quantity < (Number(lowStockThreshold) || 0) ? 'bg-red-50 text-red-600' : 'bg-slate-100 text-slate-700'}`}>
@@ -961,6 +1046,8 @@ export const Dashboard: React.FC = React.memo(() => {
                     )}
                   </div>
                 </td>
+                )}
+                {isColVisible('free') && (
                 <td className="px-6 py-4 text-right">
                   {(() => {
                     const reserved = pendingSupplies.byArticle[item.article] || 0;
@@ -993,8 +1080,10 @@ export const Dashboard: React.FC = React.memo(() => {
                     );
                   })()}
                 </td>
-                <td className="px-6 py-4 text-right font-medium whitespace-nowrap">{formatCurrency(item.avgCost)} ₽</td>
-                <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.capitalization)} ₽</td>
+                )}
+                {isColVisible('avgCost') && <td className="px-6 py-4 text-right font-medium whitespace-nowrap">{formatCurrency(item.avgCost)} ₽</td>}
+                {isColVisible('capitalization') && <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.capitalization)} ₽</td>}
+                {isColVisible('storage') && (
                 <td className="px-6 py-4 text-right font-medium whitespace-nowrap text-slate-700">
                   {(() => {
                     const skuData = skus.find(s => s.sku === item.article);
@@ -1003,12 +1092,15 @@ export const Dashboard: React.FC = React.memo(() => {
                     return `${formatCurrency(cost)} ₽`;
                   })()}
                 </td>
+                )}
+                {isColVisible('turnover') && (
                 <td className="px-6 py-4 text-center">
                   <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden max-w-[80px] mx-auto">
                     <div className="bg-indigo-500 h-full" style={{ width: `${Math.min(item.turnover, 100)}%` }}></div>
                   </div>
                   <span className="text-[10px] text-slate-400 font-bold uppercase mt-1 block">{item.turnover} дн.</span>
                 </td>
+                )}
               </tr>
             )))}
           </tbody>
