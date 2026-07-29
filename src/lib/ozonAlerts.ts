@@ -291,7 +291,13 @@ export function buildCoverageAlerts(
           clusterStr += ` и ещё ${selectedClusters.length - 3} кластер(ов)`;
         }
 
-        const description = `${namePart} · ${clusterStr}`;
+        // Если часть потребности уже закрыта созданными заявками, говорим об этом прямо:
+        // иначе алерт выглядит противоречием — заявка создана, а поставку всё равно просят.
+        const pendingNote = art.pendingTotal > 0
+          ? ` · уже в заявках ${Math.round(art.pendingTotal)} шт, эта потребность сверх них`
+          : '';
+
+        const description = `${namePart} · ${clusterStr}${pendingNote}`;
 
         const minCoverageDays = Math.min(
           ...selectedClusters.map(cls => cls.coverageDays === null ? Number.POSITIVE_INFINITY : cls.coverageDays)
