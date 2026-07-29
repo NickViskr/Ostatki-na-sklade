@@ -3,6 +3,10 @@
 ## [2026-07-28]
 
 ### Добавлено
+- Колонка «КластерID» в листе «Внешние отгрузки» (`Code.gs`):
+  - Добавлена новая колонка «КластерID» (macrolocal_cluster_id) в массив `EXTERNAL_SHIPMENTS_HEADERS`.
+  - Извлечение `clusterId`/`cluster_id` в `saveExternalShipments` и сохранение значения для новых и обновляемых строк.
+  - Чтение и возврат `clusterId` числом в `getExternalShipments`.
 - Информация о коробках в блоке «Ответ Ozon» (`OzonSupplyModal.tsx`):
   - Хелпер `boxInfoForOzonItem` восстанавливает артикул приложения по offerId и Ozon-SKU через `resolveOzonArticle`.
   - Отображение количества коробок, нормы штук и неполных коробок в принятых и отклонённых позициях ответа Ozon.

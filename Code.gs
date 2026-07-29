@@ -408,7 +408,7 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID'
 ];
 
 const OZON_STOCKS_HEADERS = [
@@ -3844,6 +3844,7 @@ function saveExternalShipments(shipments) {
   const storageWarehouseIdx = headers.indexOf('Склад хранения');
   const timeslotIdx = headers.indexOf('Таймслот');
   const cabinetIdx = headers.indexOf('Кабинет');
+  const colClusterId = headers.indexOf('КластерID');
   
   if (postingIdIdx === -1) {
     throw new Error('PostingID column not found in Внешние отгрузки');
@@ -3889,6 +3890,8 @@ function saveExternalShipments(shipments) {
     if (processedPostingIds.has(postingId)) continue;
     processedPostingIds.add(postingId);
     
+    const clusterIdVal = s.clusterId !== undefined && s.clusterId !== null && s.clusterId !== '' ? Number(s.clusterId) : (s.cluster_id !== undefined && s.cluster_id !== null && s.cluster_id !== '' ? Number(s.cluster_id) : 0);
+    
     if (existingPostingIdToRowIndex[postingId] !== undefined) {
       const rowIndex = existingPostingIdToRowIndex[postingId];
       const sheetRow = rowIndex + 1;
@@ -3914,6 +3917,7 @@ function saveExternalShipments(shipments) {
       setIfChanged(dropOffWarehouseIdx, s.dropOffWarehouse || '');
       setIfChanged(storageWarehouseIdx, s.storageWarehouse || '');
       setIfChanged(timeslotIdx, s.timeslot || '');
+      setIfChanged(colClusterId, clusterIdVal);
       
       // Кабинет обновляется только непустым значением — старый прокси его не присылает,
       // пустым значением затирать уже записанный кабинет нельзя
@@ -3957,6 +3961,7 @@ function saveExternalShipments(shipments) {
       if (storageWarehouseIdx >= 0) newRow[storageWarehouseIdx] = s.storageWarehouse || '';
       if (timeslotIdx >= 0) newRow[timeslotIdx] = s.timeslot || '';
       if (cabinetIdx >= 0) newRow[cabinetIdx] = s.cabinet || '';
+      if (colClusterId >= 0) newRow[colClusterId] = clusterIdVal;
       
       rowsToAdd.push(newRow);
       addedCount++;
@@ -3995,6 +4000,7 @@ function getExternalShipments() {
   const acceptedJsonIdx = headers.indexOf('ПринятоJSON');
   const recalcJsonIdx = headers.indexOf('ПерерасчётJSON');
   const peresortJsonIdx = headers.indexOf('ПересортJSON');
+  const colClusterId = headers.indexOf('КластерID');
   
   if (postingIdIdx === -1) return [];
   
@@ -4037,7 +4043,8 @@ function getExternalShipments() {
       cabinet: getVal(cabinetIdx, false),
       acceptedJSON: getVal(acceptedJsonIdx, false),
       recalcJSON: getVal(recalcJsonIdx, false),
-      peresortJSON: getVal(peresortJsonIdx, false)
+      peresortJSON: getVal(peresortJsonIdx, false),
+      clusterId: colClusterId !== -1 && row[colClusterId] !== '' && row[colClusterId] !== null && row[colClusterId] !== undefined ? Number(row[colClusterId]) : 0
     });
   }
   return shipments;
