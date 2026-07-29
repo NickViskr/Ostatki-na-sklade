@@ -3,6 +3,9 @@
 ## [2026-07-28]
 
 ### Добавлено
+- Передача `clusterId` в эндпоинте `/api/ozon/check` (`server.ts`):
+  - Сохранение `clusterId: macrolocalStr` в объекте `finalShipments`.
+  - Передача `clusterId: s.clusterId || ''` в объект `shipmentsForGas` для отправки в Apps Script (`saveExternalShipments`).
 - Колонка «КластерID» в листе «Внешние отгрузки» (`Code.gs`):
   - Добавлена новая колонка «КластерID» (macrolocal_cluster_id) в массив `EXTERNAL_SHIPMENTS_HEADERS`.
   - Извлечение `clusterId`/`cluster_id` строкой в `saveExternalShipments` и предотвращение затирания сохранённого значения пустым при обновлении.

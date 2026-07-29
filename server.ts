@@ -751,6 +751,7 @@ async function startServer() {
             timeslot: timeslotStr,
             shipmentDate,
             bundleId,
+            clusterId: macrolocalStr,
             cabinetIndex,
             cabinet: cabinets[cabinetIndex].name
           });
@@ -824,6 +825,7 @@ async function startServer() {
           dropOffWarehouse: s.dropOffWarehouse,
           storageWarehouse: s.storageWarehouse,
           timeslot: s.timeslot,
+          clusterId: s.clusterId || '',
           cabinet: s.cabinet
         });
       }
