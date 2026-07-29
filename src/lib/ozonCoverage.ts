@@ -218,6 +218,8 @@ export interface ClusterStockAgg {
   available: number;
   transit: number;
   returns: number;
+  /** «В заявках» по данным Ozon, шт. В расчётный остаток estimated НЕ входит. */
+  requested: number;
   /** Расчётный остаток = Доступно + В пути + Возвраты × %возвратов. */
   estimated: number;
 }
@@ -256,6 +258,7 @@ export function buildClusterStocks(
     const available = Number(row.available) || 0;
     const transit = Number(row.transit) || 0;
     const returns = Number(row.returns) || 0;
+    const requested = Number(row.requested) || 0;
     const estimated = available + transit + returns * pct;
 
     agg.totalEstimated += estimated;
@@ -272,6 +275,7 @@ export function buildClusterStocks(
         available: 0,
         transit: 0,
         returns: 0,
+        requested: 0,
         estimated: 0
       };
     }
@@ -279,6 +283,7 @@ export function buildClusterStocks(
     c.available += available;
     c.transit += transit;
     c.returns += returns;
+    c.requested += requested;
     c.estimated += estimated;
   }
 

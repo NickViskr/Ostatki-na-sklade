@@ -3,6 +3,9 @@
 ## [2026-07-29]
 
 ### Добавлено
+- Накопление колонки «В заявках» (`requested`) в кластерных агрегатах остатков Ozon (`src/lib/ozonCoverage.ts`):
+  - Поле `requested: number` добавлено в интерфейс `ClusterStockAgg`.
+  - В функции `buildClusterStocks` добавлено чтение и суммирование `requested` по кластерам без включения в расчётный остаток `estimated`.
 - Модуль локального зачёта потребности по незавершённым заявкам Ozon (`src/lib/ozonPending.ts`):
   - Поле `clusterId?: string` в интерфейсе `ExternalShipment` (`src/types.ts`).
   - Чистые функции `buildPendingSupplies`, `isPendingCleared`, `isPendingActive`, `getPendingQty`, `mergePendingWithRequested`.
