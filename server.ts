@@ -1980,6 +1980,15 @@ ${wbDictStr}`;
     }
   });
 
+  // Метка версии прокси для диагностики развёртывания. Секретов не отдаёт.
+  app.get("/api/version", (req, res) => {
+    res.json({
+      status: "success",
+      version: "2026-07-29-clusterid",
+      features: { clusterIdInShipments: true }
+    });
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
