@@ -3,6 +3,9 @@
 ## [2026-07-29]
 
 ### Добавлено
+- Интеграция чтения журнала «Заявки Ozon» в Zustand-стор (`src/store/useWarehouseStore.ts`):
+  - Поля `ozonSupplyRequests` и `fetchOzonSupplyRequests` в состояние склада.
+  - Асинхронный метод `fetchOzonSupplyRequests` для вызова экшена GAS `getOzonSupplyRequests`.
 - Интеграция локального зачёта потребности в расчёт покрытия Ozon (`src/lib/ozonCoverage.ts`):
   - Добавлен интерфейс `OzonPendingLike` и опциональное поле `pending?: OzonPendingLike` в `OzonCoverageInput` (без кольцевого импорта `ozonPending.ts`).
   - Поля `pendingQty`, `requestedQty`, `pendingEffective` в `ClusterCoverageRow` и `pendingTotal`, `freeMyStock` в `ArticleCoverage`.

@@ -4,6 +4,7 @@ import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, Servic
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
+import { OzonSupplyRequestRow } from '../lib/ozonPending';
 import { toast } from 'sonner';
 
 const normalizeStock = (items: StockItem[]): StockItem[] =>
@@ -115,6 +116,8 @@ interface WarehouseState {
   runOzonStocksSync: () => Promise<void>;
   ozonSales: OzonSalesRow[];
   fetchOzonSales: () => Promise<void>;
+  ozonSupplyRequests: OzonSupplyRequestRow[];
+  fetchOzonSupplyRequests: () => Promise<void>;
   factoryOrders: FactoryOrder[];
   fetchFactoryOrders: () => Promise<void>;
   saveFactoryOrder: (order: { id?: string; article: string; qty: number; expectedAt: string; orderedAt?: string; comment?: string }) => Promise<boolean>;
@@ -147,6 +150,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonStocks: [],
   ozonStocksSyncIssues: [],
   ozonSales: [],
+  ozonSupplyRequests: [],
   factoryOrders: [],
 
   getEffectiveAvailability: (article) => {
@@ -1455,6 +1459,25 @@ export const useWarehouseStore = create<WarehouseState>()(
       }
     } catch (e) {
       console.error('getOzonSales error:', e);
+    }
+  },
+
+  /**
+   * Журнал «Заявки Ozon» — подстраховка локального зачёта потребности:
+   * до ближайшего опроса Ozon данных о новой заявке во «Внешних отгрузках» ещё нет.
+   * Действие доступно только администратору; для остальных ролей молча остаётся пустым.
+   */
+  fetchOzonSupplyRequests: async () => {
+    if (!get().sessionToken) return;
+    try {
+      const result = await get().fetchGas('getOzonSupplyRequests');
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ ozonSupplyRequests: result.data });
+      } else {
+        console.error('getOzonSupplyRequests failed:', result.message);
+      }
+    } catch (e) {
+      console.error('getOzonSupplyRequests error:', e);
     }
   },
 
