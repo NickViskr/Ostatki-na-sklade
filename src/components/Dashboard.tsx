@@ -25,6 +25,7 @@ import { formatCurrency } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, OzonAlert } from '../lib/ozonAlerts';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
+import { buildPendingSupplies } from '../lib/ozonPending';
 
 export const Dashboard: React.FC = React.memo(() => {
   const stock = useWarehouseStore((state) => state.stock);
@@ -44,6 +45,8 @@ export const Dashboard: React.FC = React.memo(() => {
   const fetchOzonStocks = useWarehouseStore((state) => state.fetchOzonStocks);
   const fetchOzonSales = useWarehouseStore((state) => state.fetchOzonSales);
   const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
+  const ozonSupplyRequests = useWarehouseStore((state) => state.ozonSupplyRequests);
+  const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   
@@ -161,6 +164,16 @@ export const Dashboard: React.FC = React.memo(() => {
     return () => clearTimeout(timer);
   }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchGas]);
 
+  // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
+  // На главной кабинеты не разделяются — берутся все записи.
+  const pendingSupplies = useMemo(() => {
+    return buildPendingSupplies({
+      shipments: externalShipments || [],
+      requests: ozonSupplyRequests || [],
+      skus,
+    });
+  }, [externalShipments, ozonSupplyRequests, skus]);
+
   const ozonCoverage = useMemo<OzonCoverageResult | null>(() => {
     if (!isAdmin) return null;
     if (!ozonStocks || ozonStocks.length === 0) return null;
@@ -175,8 +188,9 @@ export const Dashboard: React.FC = React.memo(() => {
       clusters: clusterRefs,
       settings: ozonSettings,
       myStockAvailability,
+      pending: pendingSupplies,
     });
-  }, [isAdmin, ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability]);
+  }, [isAdmin, ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies]);
 
   const coverageAlerts = useMemo(() => {
     if (!isAdmin || !ozonCoverage) return [];
@@ -207,8 +221,9 @@ export const Dashboard: React.FC = React.memo(() => {
   useEffect(() => {
     if (isAdmin) {
       fetchExternalShipments();
+      fetchOzonSupplyRequests();
     }
-  }, [isAdmin, fetchExternalShipments]);
+  }, [isAdmin, fetchExternalShipments, fetchOzonSupplyRequests]);
 
   const funnelData = useMemo(() => {
     if (!isAdmin || !externalShipments || externalShipments.length === 0) {
