@@ -3890,7 +3890,8 @@ function saveExternalShipments(shipments) {
     if (processedPostingIds.has(postingId)) continue;
     processedPostingIds.add(postingId);
     
-    const clusterIdVal = s.clusterId !== undefined && s.clusterId !== null && s.clusterId !== '' ? Number(s.clusterId) : (s.cluster_id !== undefined && s.cluster_id !== null && s.cluster_id !== '' ? Number(s.cluster_id) : 0);
+    const rawClusterId = (s.clusterId !== undefined && s.clusterId !== null && s.clusterId !== '') ? s.clusterId : (s.cluster_id !== undefined && s.cluster_id !== null ? s.cluster_id : '');
+    const clusterIdVal = String(rawClusterId).trim();
     
     if (existingPostingIdToRowIndex[postingId] !== undefined) {
       const rowIndex = existingPostingIdToRowIndex[postingId];
@@ -3917,7 +3918,12 @@ function saveExternalShipments(shipments) {
       setIfChanged(dropOffWarehouseIdx, s.dropOffWarehouse || '');
       setIfChanged(storageWarehouseIdx, s.storageWarehouse || '');
       setIfChanged(timeslotIdx, s.timeslot || '');
-      setIfChanged(colClusterId, clusterIdVal);
+      
+      // КластерID обновляется только непустым значением: старый прокси его не присылает,
+      // а у прямых поставок macrolocal_cluster_id пустой — затирать записанный кластер нельзя
+      if (clusterIdVal) {
+        setIfChanged(colClusterId, clusterIdVal);
+      }
       
       // Кабинет обновляется только непустым значением — старый прокси его не присылает,
       // пустым значением затирать уже записанный кабинет нельзя
@@ -4044,7 +4050,7 @@ function getExternalShipments() {
       acceptedJSON: getVal(acceptedJsonIdx, false),
       recalcJSON: getVal(recalcJsonIdx, false),
       peresortJSON: getVal(peresortJsonIdx, false),
-      clusterId: colClusterId !== -1 && row[colClusterId] !== '' && row[colClusterId] !== null && row[colClusterId] !== undefined ? Number(row[colClusterId]) : 0
+      clusterId: getVal(colClusterId, false).trim()
     });
   }
   return shipments;
