@@ -644,3 +644,70 @@
 ### 7. Прочие находки
 - `/v3/product/list` с телом `{"filter": {"visibility": "ALL"}, "limit": 5}` отдаёт `result.items[]{product_id, offer_id, sku, has_fbo_stocks}` — способ получить Ozon-SKU по артикулу, если зеркала остатков недостаточно.
 - Ozon MCP валидирует запросы локально по swagger до отправки; такие отказы приходят как OzonClientValidationError и до Ozon не доходят.
+
+## Разведка пункта 24 (30.07.2026): грузоместа и этикетки — проверено вживую на заявке 120366939
+
+Все формы ниже сняты живыми вызовами боевыми ключами. Создано одно грузоместо и одна этикетка.
+
+### Ключ всей цепочки — supply_id, а не order_id
+- `/v3/supply-order/get` принимает ТОЛЬКО `order_id`; `order_number` и `supply_id` дают HTTP 400 «Orders … not found».
+- Все методы грузомест принимают ТОЛЬКО `supply_id` (в приложении это PostingID во «Внешних отгрузках»). `order_id` они не понимают.
+- У заявки на один кластер `order_number` численно совпадает с `supply_id` — совпадение, полагаться нельзя.
+
+### 1. POST /v1/cargoes/create — запись
+Запрос: `supply_id` (int64, обяз.), `cargoes[]` (обяз., не более 30 коробок или 40 палет), `delete_current_version` (bool, необяз.).
+Внутри `cargoes[]`: `key` (ваш уникальный ключ, обяз.), `value` (обяз.), `value.type` (обяз.), `value.items[]` (до 5000).
+Внутри `items[]`: `barcode`, `offer_id`, `quantity`, `quant`, `expires_at` — все необязательные.
+КРИТИЧНО:
+- `value.type` объявлен обязательным, но в swagger не описан вообще — ни типа, ни enum. Вживую принято значение `BOX`.
+- `delete_current_version: true` заменяет ВСЮ раскладку поставки. Это единственный способ исправить состав: удалить единственную коробку нельзя, `/v1/cargoes/delete` отвечает `CANT_DELETE_ALL_CARGOES`.
+- Ответ при успехе: только `operation_id`, блок `errors` ОТСУТСТВУЕТ целиком, а не приходит пустым.
+- При ошибке: `errors.error_reasons[]` (INVALID_STATE, VALIDATION_FAILED, WAREHOUSE_LIMITS_EXCEED, SUPPLY_NOT_BELONG_CONTRACTOR, SUPPLY_NOT_BELONG_COMPANY, IS_FINALIZED, SKU_DISTRIBUTION_DISABLED, SUPPLY_IS_NOT_EMPTY, OPERATION_NOT_FOUND, OPERATION_FAILED) и `errors.items_validation[]{barcode, cargo_key, quant}`.
+Пример живого запроса, принятого с первой попытки:
+`{"supply_id": 2000061478681, "cargoes": [{"key": "recon-box-1", "value": {"type": "BOX", "items": [{"barcode": "OZN2128609943", "offer_id": "Органайзер_3_пол_белый", "quantity": 1, "quant": 1}]}}]}`
+
+### 2. POST /v2/cargoes/create/info — чтение
+Запрос: `operation_id` (string, единственное поле).
+Ответ: `status` (STATUS_UNSPECIFIED / SUCCESS / IN_PROGRESS / FAILED), `result.cargoes[].key` (ваш ключ), `result.cargoes[].value.cargo_id` (int64, номер коробки от Ozon).
+Сопоставление своих коробок с номерами Ozon — по полю `key`.
+`bundle_id` коробки этот метод НЕ возвращает.
+Вживую SUCCESS пришёл с первого опроса, но цикл опроса закладывать обязательно.
+Версия v1 этого метода (`/v1/cargoes/create/info`) отключена 07.11.2025 — не использовать.
+
+### 3. POST /v1/cargoes/get — чтение
+Запрос: `supply_ids[]` (до 100).
+Ответ: `supply[]{supply_id, bundle_id, cargoes[]}`; внутри `cargoes[]`: `cargo_id`, `type`, `bundle_id` (СВОЙ у коробки, отличается от bundle_id поставки), `content_type` (вживую MONO), `placement_zone_type` (вживую SINGLE), `tracking_info{date, status, type}`.
+Единственный источник bundle_id коробки. Состава коробки метод не отдаёт — состав раскрывается вызовом `/v1/supply-order/bundle` по bundle_id коробки.
+Это делает хранение грузомест в базе приложения ненужным: текущее состояние всегда читается из Ozon по supply_id.
+
+### 4. POST /v1/cargoes-label/create — запись
+Запрос: `supply_id` (обяз.), `cargoes[].cargo_id` (необяз.). Без `cargoes[]` этикетки печатаются на все грузоместа поставки.
+Ответ: `operation_id`; ошибки `errors.error_reasons[]`: INVALID_STATE, OPERATION_NOT_FOUND, OPERATION_FAILED, SUPPLY_NOT_BELONG_CONTRACTOR, SUPPLY_NOT_BELONG_COMPANY, SUPPLY_IS_EMPTY, CARGOES_NOT_FOUND.
+
+### 5. POST /v1/cargoes-label/get — чтение
+Запрос: `operation_id`.
+Ответ: `status` (SUCCESS / IN_PROGRESS / FAILED), `result.file_url`, `result.file_guid` (deprecated).
+БЕЗОПАСНОСТЬ: `file_url` — pre-signed ссылка на S3 с подписью внутри URL. Открывается БЕЗ ключей Ozon кем угодно, живёт 24 часа (`X-Amz-Expires=86400`). Имя файла `tag_<cargo_id>.pdf`. Ссылку нельзя сохранять в базу, писать в журналы и передавать в переписке — она сама себе пропуск.
+Старый метод `GET /v1/cargoes-label/file/{file_guid}` отключён 10.04.2026 — не использовать.
+
+### 6. POST /v1/cargoes/rules/get — чтение
+Запрос: `supply_ids[]` (до 100). Ключ `order_id` метод не принимает.
+Ответ: `supply_check_lists[]`, у каждого `supply_id` и шесть правил, у каждого правила `satisfied`:
+- `cargoes_presents_rule` — грузоместа указаны; `count`, `cargo_count_per_type[]{type, count}`
+- `package_units_with_distribution_rule` — у всех коробок непустой состав; `count_with_distribution`, `count_all`
+- `is_valid_distribution_rule` — состав грузомест совпадает с составом поставки; `count_sku_total`, `count_distributed_sku`, `percents_int`
+- `expire_dates_presented_rule` — сроки годности; `is_applicable` вживую false
+- `placement_zones_rule` — зоны размещения; `count_cargoes_with_mono_placement_zone`, `count_cargoes_all`
+- `edit_deadline_expire_rule` — крайний срок редактирования
+КРИТИЧНО: `is_valid_distribution_rule` считает АРТИКУЛЫ, а не штуки, и бинарно. При 1 разложенной штуке из 18 `count_distributed_sku` = 0 и `percents_int` = 0; при 17 из 18 будет ровно то же самое. Строить по этому полю прогресс-бар нельзя, только признак «да/нет».
+Не путать с `package_units_with_distribution_rule`: он отвечает на другой вопрос — все ли созданные коробки непустые, и при одной заполненной коробке уже даёт true.
+Наблюдение: `edit_deadline_expire_rule.satisfied` остаётся false на свежей заявке, пока не выбран таймслот. В схеме это не описано.
+
+### 7. POST /v1/cargoes/delete и /v1/cargoes/delete/status — приложением НЕ используются
+`delete`: запрос `supply_id`, `cargo_ids[]` (до 70); ответ `operation_id`, `errors.supply_error_reasons[]` (SUPPLY_NOT_FOUND, CANT_DELETE_ALL_CARGOES, SUPPLY_DOES_NOT_BELONG_TO_THE_CONTRACTOR, SUPPLY_DOES_NOT_BELONG_TO_THE_COMPANY, SUPPLY_CARGOES_IS_FINALIZED, SUPPLY_CARGOES_LOCKED, OPERATION_NOT_FOUND).
+`delete/status`: запрос `operation_id`, ответ `status` (SUCCESS / IN_PROGRESS / ERROR).
+Ловушка: финальный статус ошибки у удаления называется ERROR, а у создания грузомест и этикеток — FAILED.
+Исправление состава делается перезаписью через `delete_current_version: true`, поэтому удаление приложению не нужно.
+
+### 8. Вывод для архитектуры пункта 24
+Хранение грузомест в Google Sheets не требуется: `supply_id` уже лежит во «Внешних отгрузках» (PostingID), состав поставки — там же в itemsJSON, а текущее состояние коробок и готовность читаются из Ozon двумя вызовами. Правок в Code.gs пункт 24 не требует.
