@@ -5004,6 +5004,66 @@ function createOrUpdateTestDatabase() {
 
 const PROXY_URL = 'https://service-415081166309.us-west1.run.app';
 
+/**
+ * Единая точка записи результата прогона автоопроса Ozon.
+ * Пишет последний прогон в свойство ozon_lastAutoSync (как раньше) и дополнительно
+ * дозаписывает компактную запись в журнал ozon_syncHistory — последние 20 прогонов.
+ * Журнал нужен, чтобы разовая осечка одного шага не исчезала при следующем удачном прогоне.
+ * Ошибка записи журнала намеренно не прерывает прогон: журнал вторичен по отношению к статусу.
+ */
+function saveOzonSyncResult(result) {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('ozon_lastAutoSync', JSON.stringify(result));
+
+  try {
+    const cut = function (text) {
+      const str = String(text === undefined || text === null ? '' : text).trim();
+      return str.length > 150 ? str.slice(0, 150) + '…' : str;
+    };
+
+    const entry = {
+      time: result.time || new Date().toISOString(),
+      target: result.target || '',
+      ok: result.ok === true,
+      stocksOk: result.stocksOk,
+      salesOk: result.salesOk,
+      clustersOk: result.clustersOk,
+      errors: []
+    };
+
+    if (result.ok !== true) entry.errors.push('Заявки: ' + cut(result.message));
+    if (result.stocksOk === false) entry.errors.push('Остатки: ' + cut(result.stocksMessage));
+    if (result.salesOk === false) entry.errors.push('Продажи: ' + cut(result.salesMessage));
+    if (result.clustersOk === false) entry.errors.push('Кластеры: ' + cut(result.clustersMessage));
+
+    let history = [];
+    const raw = props.getProperty('ozon_syncHistory');
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) history = parsed;
+      } catch (parseErr) {
+        history = [];
+      }
+    }
+
+    history.push(entry);
+    while (history.length > 20) {
+      history.shift();
+    }
+
+    let serialized = JSON.stringify(history);
+    while (serialized.length > 8000 && history.length > 1) {
+      history.shift();
+      serialized = JSON.stringify(history);
+    }
+
+    props.setProperty('ozon_syncHistory', serialized);
+  } catch (historyErr) {
+    Logger.log('Ошибка записи журнала ozon_syncHistory: ' + historyErr.toString());
+  }
+}
+
 function scheduledOzonCheck() {
   // ВАЖНО: Работает только через SpreadsheetApp.getActiveSpreadsheet() для листа «Сессии» (НЕ через getSpreadsheet()!).
   // Причина: сессии всегда живут в боевой таблице, прокси проверяет токен именно там.
@@ -5062,7 +5122,7 @@ function scheduledOzonCheck() {
     } catch (fetchErr) {
       result.ok = false;
       result.message = 'Ошибка вызова прокси: ' + fetchErr.toString() + '. Если это таймаут — данные, скорее всего, записаны, проверьте лист.';
-      props.setProperty('ozon_lastAutoSync', JSON.stringify(result));
+      saveOzonSyncResult(result);
       return result;
     }
 
@@ -5238,7 +5298,7 @@ function scheduledOzonCheck() {
     }
   }
 
-  props.setProperty('ozon_lastAutoSync', JSON.stringify(result));
+  saveOzonSyncResult(result);
   return result;
 }
 
@@ -5302,11 +5362,23 @@ function getOzonSyncStatusInfo() {
     }
   }
 
+  let history = [];
+  const historyStr = props.getProperty('ozon_syncHistory');
+  if (historyStr) {
+    try {
+      const parsedHistory = JSON.parse(historyStr);
+      if (Array.isArray(parsedHistory)) history = parsedHistory;
+    } catch (e) {
+      Logger.log('Error parsing ozon_syncHistory property: ' + e.toString());
+    }
+  }
+
   return {
     enabled: enabled,
     triggersCount: triggersCount,
     target: target,
-    lastRun: lastRun
+    lastRun: lastRun,
+    history: history
   };
 }
 
