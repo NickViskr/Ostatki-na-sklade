@@ -5062,6 +5062,68 @@ function saveOzonSyncResult(result) {
   } catch (historyErr) {
     Logger.log('Ошибка записи журнала ozon_syncHistory: ' + historyErr.toString());
   }
+
+  scheduleOzonSyncRetryIfNeeded(result);
+}
+
+/**
+ * Планирует один повторный прогон автоопроса Ozon, если хотя бы один шаг упал.
+ * Разовые причины сбоя (429 от Ozon, ошибка кабинета code:2, занятый LockService)
+ * лечатся простым повтором, поэтому ждать 12 часов до планового прогона незачем.
+ *
+ * Защита от бесконечной цепочки: свойство ozon_retryPending хранит метку времени
+ * запланированного повтора. Прогон, запущенный как повтор, новый повтор не планирует.
+ * Метка старше 30 минут считается протухшей (повтор не сработал) и не блокирует
+ * будущие попытки — иначе один пропущенный Google триггер отключил бы механизм навсегда.
+ */
+function scheduleOzonSyncRetryIfNeeded(result) {
+  const props = PropertiesService.getScriptProperties();
+
+  const retryStamp = Number(props.getProperty('ozon_retryPending') || 0);
+  const isFreshRetry = retryStamp > 0 && (Date.now() - retryStamp) < 30 * 60 * 1000;
+  if (retryStamp > 0) {
+    props.deleteProperty('ozon_retryPending');
+  }
+  if (isFreshRetry) {
+    return;
+  }
+
+  const failed = result.ok !== true
+    || result.stocksOk === false
+    || result.salesOk === false
+    || result.clustersOk === false;
+  if (!failed) {
+    return;
+  }
+
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'runOzonSyncRetry') {
+        ScriptApp.deleteTrigger(triggers[i]);
+      }
+    }
+    ScriptApp.newTrigger('runOzonSyncRetry').timeBased().after(2 * 60 * 1000).create();
+    props.setProperty('ozon_retryPending', String(Date.now()));
+    Logger.log('Автоопрос Ozon: запланирован повторный прогон через 2 минуты.');
+  } catch (retryErr) {
+    props.deleteProperty('ozon_retryPending');
+    Logger.log('Автоопрос Ozon: не удалось запланировать повторный прогон: ' + retryErr.toString());
+  }
+}
+
+/**
+ * Обработчик одноразового триггера повторного прогона.
+ * Самоочистка триггеров обязательна: иначе они накапливаются и упираются в лимит проекта.
+ */
+function runOzonSyncRetry() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'runOzonSyncRetry') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  scheduledOzonCheck();
 }
 
 function scheduledOzonCheck() {
