@@ -360,7 +360,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
           )}
 
           {isSidebarCollapsed && (
-            <div className={`w-2 h-2 shrink-0 rounded-full ${allOk ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+            <div className={`w-2 h-2 shrink-0 rounded-full ${statusLevel === 'ok' ? 'bg-emerald-500 animate-pulse' : (statusLevel === 'warning' ? 'bg-amber-500' : 'bg-red-500')}`} />
           )}
         </div>
       </div>
