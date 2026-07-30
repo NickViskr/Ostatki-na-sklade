@@ -190,9 +190,27 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    // For other actions, acquire the script lock
-    lock = LockService.getScriptLock();
-    lock.waitLock(10000);
+    // Волна 1 пункта 25: читающие действия обслуживаются без LockService.
+    // Глобальный замок ставил чтение в общую очередь с записями, из-за чего старт
+    // приложения растягивался до 8,4 с. Проверки прав внутри switch не затрагиваются:
+    // действия по-прежнему проходят через switch и его вызовы assertAdmin.
+    // Список составлен поимённо по фактическому дереву вызовов, а не по префиксу get.
+    // getArchivedItems намеренно НЕ включён: он вызывает cleanOldArchivedItems,
+    // которая физически удаляет строки старше 60 дней, то есть является записью.
+    // Волна 2 (getUsers, getGlobalSettings, getExternalShipments,
+    // getOzonSupplyRequests, checkSupplyAvailability) добавляется отдельной задачей.
+    const LOCK_FREE_ACTIONS = [
+      'getInitialData',
+      'getStock',
+      'getTransactions',
+      'getSkus',
+      'getServices',
+      'getServiceRates'
+    ];
+    if (!LOCK_FREE_ACTIONS.includes(action)) {
+      lock = LockService.getScriptLock();
+      lock.waitLock(10000);
+    }
     
     switch (action) {
       case 'verifySession':
