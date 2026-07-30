@@ -1362,6 +1362,8 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   fetchOzonSyncStatus: async () => {
+    // Без токена запрос заведомо вернёт 401 и засорит консоль ошибкой на экране входа.
+    if (!get().sessionToken) return;
     try {
       const result = await get().fetchGas('getOzonSyncStatus');
       if (result.status === 'success') {

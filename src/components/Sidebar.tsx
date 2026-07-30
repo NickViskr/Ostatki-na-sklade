@@ -47,11 +47,34 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   }, [fetchOzonSyncStatus]);
 
   const lastRun = ozonSyncStatus?.lastRun;
-  const lastRunFresh = !!lastRun && (Date.now() - new Date(lastRun.time).getTime()) < 14 * 60 * 60 * 1000;
+  // Порог свежести 26 часов: плановые прогоны идут раз в 12 часов, но триггер Apps Script
+  // плавает внутри часового окна, поэтому разрыв доходит до 13 часов. 26 часов дают запас
+  // ровно на один пропущенный прогон и убирают ложные тревоги.
+  const lastRunFresh = !!lastRun && (Date.now() - new Date(lastRun.time).getTime()) < 26 * 60 * 60 * 1000;
   const syncEnabled = ozonSyncStatus?.enabled === true;
-  const syncHealthy = syncEnabled && lastRunFresh && lastRun?.ok === true && lastRun?.stocksOk !== false && lastRun?.salesOk !== false;
+
+  // Сколько шагов прогона упало. Разовые причины (429 от Ozon, ошибка кабинета code:2)
+  // лечатся автоповтором, поэтому одна осечка — это предупреждение, а не сбой.
+  const failedSteps = [
+    lastRun?.ok === false,
+    lastRun?.stocksOk === false,
+    lastRun?.salesOk === false,
+    lastRun?.clustersOk === false
+  ].filter(Boolean).length;
+
+  // Красный оставляем за настоящими поломками: автоопрос выключен, прогонов нет,
+  // данные устарели, либо легли сразу все основные шаги.
+  const allMainStepsFailed = lastRun?.ok === false && lastRun?.stocksOk === false && lastRun?.salesOk === false;
+  const syncBroken = !!ozonSyncStatus && (!syncEnabled || !lastRun || !lastRunFresh || allMainStepsFailed);
+  const syncWarning = !syncBroken && failedSteps > 0;
+  const syncHealthy = !syncBroken && !syncWarning;
+
   const allOk = !gasError && (!ozonSyncStatus || syncHealthy);
-  const syncStatusReason = !syncEnabled ? 'Автоопрос выключен' : !lastRun ? 'Ещё не запускался' : !lastRunFresh ? 'Данные устарели (нет прогона > 14 ч)' : '';
+  const statusLevel = gasError || syncBroken ? 'error' : (syncWarning ? 'warning' : 'ok');
+  const statusLabel = statusLevel === 'ok'
+    ? 'Система в норме'
+    : (gasError ? 'Ошибка GAS' : (statusLevel === 'warning' ? 'Синхронизация с осечкой' : 'Сбой синхронизации Ozon'));
+  const syncStatusReason = !syncEnabled ? 'Автоопрос выключен' : !lastRun ? 'Ещё не запускался' : !lastRunFresh ? 'Данные устарели (нет прогона > 26 ч)' : (syncWarning ? 'Часть данных не обновилась, подробности в журнале прогонов' : '');
 
   // Журнал прогонов приходит из бэкенда в хронологическом порядке — показываем свежие сверху.
   // slice() перед reverse() обязателен: reverse мутирует массив, а он лежит в сторе.
@@ -226,16 +249,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
         )}
         <div 
           className={`bg-slate-50 border border-slate-100 flex ${isSidebarCollapsed ? 'p-3 justify-center rounded-2xl cursor-help' : 'p-4 rounded-2xl flex-col'}`} 
-          title={isSidebarCollapsed ? "Статус системы: " + (allOk ? "в норме" : (gasError ? "ошибка GAS" : "сбой синхронизации Ozon")) : undefined}
+          title={isSidebarCollapsed ? "Статус системы: " + statusLabel : undefined}
         >
           {!isSidebarCollapsed && (
             <>
               <p className="text-xs text-slate-500 mb-2">Статус системы</p>
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 overflow-hidden">
-                  <div className={`w-2 h-2 shrink-0 rounded-full ${allOk ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-                  <span className={`text-xs font-bold whitespace-nowrap ${allOk ? 'text-slate-700' : 'text-red-600'}`}>
-                    {allOk ? 'Система в норме' : (gasError ? 'Ошибка GAS' : 'Сбой синхронизации Ozon')}
+                  <div className={`w-2 h-2 shrink-0 rounded-full ${statusLevel === 'ok' ? 'bg-emerald-500 animate-pulse' : (statusLevel === 'warning' ? 'bg-amber-500' : 'bg-red-500')}`} />
+                  <span className={`text-xs font-bold whitespace-nowrap ${statusLevel === 'ok' ? 'text-slate-700' : (statusLevel === 'warning' ? 'text-amber-600' : 'text-red-600')}`}>
+                    {statusLabel}
                   </span>
                 </div>
                 <button

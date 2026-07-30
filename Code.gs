@@ -205,7 +205,12 @@ function doPost(e) {
       'getTransactions',
       'getSkus',
       'getServices',
-      'getServiceRates'
+      'getServiceRates',
+      'getUsers',
+      'getGlobalSettings',
+      'getExternalShipments',
+      'getOzonSupplyRequests',
+      'checkSupplyAvailability'
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();
