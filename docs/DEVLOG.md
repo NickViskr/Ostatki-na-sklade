@@ -2,6 +2,7 @@
 
 | Дата | Задача | Изменённые файлы | Ключевые решения | Известные ограничения |
 | :--- | :--- | :--- | :--- | :--- |
+| 2026-07-30 | Выделение пункта 27 в плане (`docs/OZON_PLAN.md`) | `docs/OZON_PLAN.md` | Бывшая волна 3 пункта 25 вынесена в отдельный необязательный пункт 27 (освобождение `getArchivedItems` от замка `LockService` за счёт выноса `cleanOldArchivedItems` в суточный триггер). | Нет |
 | 2026-07-30 | Индикатор статуса в свёрнутом сайдбаре (`src/components/Sidebar.tsx`) | `src/components/Sidebar.tsx` | Точка статуса в режиме свёрнутого меню приведена к трёхуровневой схеме (`statusLevel`: ok/warning/error) аналогично развёрнутому виду. | Нет |
 | 2026-07-30 | Трёхуровневый индикатор «Статус системы» и порог 26ч (`src/components/Sidebar.tsx`, `src/store/useWarehouseStore.ts`) | `src/components/Sidebar.tsx`, `src/store/useWarehouseStore.ts` | 1) Порог свежести прогона Ozon увеличен с 14 до 26 часов. 2) Статус системы переведён на 3 уровня: `ok` (зеленый), `warning` (желтый, при частичных осечках шагов), `error` (красный, при полном сбое/отключении/устаревании). 3) В `fetchOzonSyncStatus` добавлена проверка наличия `sessionToken` для предотвращения вызовов 401 до авторизации. | Нет |
 | 2026-07-30 | Снятие LockService с читающих действий — волна 2 пункта 25 (`Code.gs`) | `Code.gs` | В массив `LOCK_FREE_ACTIONS` в `doPost` добавлены еще 5 читающих действий: `getUsers`, `getGlobalSettings`, `getExternalShipments`, `getOzonSupplyRequests`, `checkSupplyAvailability`. Эти действия теперь также выполняются без ожидания глобального LockService. | Нет |
