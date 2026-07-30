@@ -36,6 +36,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const fetchOzonSyncStatus = useWarehouseStore((state) => state.fetchOzonSyncStatus);
 
   const [isStatusExpanded, setIsStatusExpanded] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
   useEffect(() => {
     fetchOzonSyncStatus();
@@ -51,6 +52,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const syncHealthy = syncEnabled && lastRunFresh && lastRun?.ok === true && lastRun?.stocksOk !== false && lastRun?.salesOk !== false;
   const allOk = !gasError && (!ozonSyncStatus || syncHealthy);
   const syncStatusReason = !syncEnabled ? 'Автоопрос выключен' : !lastRun ? 'Ещё не запускался' : !lastRunFresh ? 'Данные устарели (нет прогона > 14 ч)' : '';
+
+  // Журнал прогонов приходит из бэкенда в хронологическом порядке — показываем свежие сверху.
+  // slice() перед reverse() обязателен: reverse мутирует массив, а он лежит в сторе.
+  const syncHistoryRaw = ozonSyncStatus?.history;
+  const syncHistory: any[] = Array.isArray(syncHistoryRaw) ? syncHistoryRaw.slice().reverse() : [];
 
 
 
@@ -285,6 +291,44 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
                   {syncStatusReason && (
                     <div className="text-red-600 text-[10px] pt-0.5 break-words">
                       {syncStatusReason}
+                    </div>
+                  )}
+
+                  {syncHistory.length > 0 && (
+                    <div className="pt-1.5 border-t border-slate-200/60 mt-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setIsHistoryOpen(!isHistoryOpen)}
+                        className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-700 transition-colors"
+                      >
+                        {isHistoryOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                        Журнал прогонов ({syncHistory.length})
+                      </button>
+
+                      {isHistoryOpen && (
+                        <div className="mt-1.5 space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                          {syncHistory.map((run, runIdx) => {
+                            const runOk = run?.ok === true && run?.stocksOk !== false && run?.salesOk !== false && run?.clustersOk !== false;
+                            const runErrors: any[] = Array.isArray(run?.errors) ? run.errors : [];
+                            return (
+                              <div key={`${run?.time || 'run'}-${runIdx}`} className="flex items-start gap-1.5">
+                                <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1 ${runOk ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-[10px] font-mono text-slate-500">
+                                    {run?.time ? new Date(run.time).toLocaleString('ru-RU') : '—'}
+                                    {run?.target === 'test' ? ' · тест' : ''}
+                                  </div>
+                                  {runErrors.map((errText, errIdx) => (
+                                    <div key={errIdx} className="text-[10px] text-red-600 break-words leading-snug">
+                                      {String(errText)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

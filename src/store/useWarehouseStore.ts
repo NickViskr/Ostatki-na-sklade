@@ -106,7 +106,7 @@ interface WarehouseState {
   getEffectiveAvgCost: (article: string) => number;
   devMode: boolean;
   setDevMode: (v: boolean) => void;
-  ozonSyncStatus: { enabled: boolean; triggersCount: number; target: string; lastRun: any | null } | null;
+  ozonSyncStatus: { enabled: boolean; triggersCount: number; target: string; lastRun: any | null; history?: any[] } | null;
   fetchOzonSyncStatus: () => Promise<void>;
   setOzonSyncEnabled: (enabled: boolean) => Promise<void>;
   runOzonSyncNow: () => Promise<void>;
