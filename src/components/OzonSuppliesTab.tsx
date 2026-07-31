@@ -1325,16 +1325,22 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     return sortedGroups.filter(g => g.cabinet === cabinetFilter);
   }, [sortedGroups, cabinetFilter]);
 
-  // Обработанные = заявки без единой новой поставки (оформлены или проигнорированы)
+  // Заявка целиком отменена в Ozon Seller: действий по ней не требуется.
+  // Частично отменённые заявки этим правилом НЕ скрываются.
+  const isFullyCancelled = (g: any) =>
+    g.items.length > 0 &&
+    g.items.every((i: any) => String(i.ozonStatus || '').trim().toUpperCase() === 'CANCELLED');
+
+  // Обработанные = заявки без единой новой поставки либо полностью отменённые
   const processedGroupsCount = useMemo(
-    () => filteredGroups.filter(g => !g.items.some((i) => i.status === 'new')).length,
+    () => filteredGroups.filter(g => isFullyCancelled(g) || !g.items.some((i) => i.status === 'new')).length,
     [filteredGroups]
   );
 
-  // По умолчанию видны только актуальные заявки (есть хотя бы одна новая поставка)
+  // По умолчанию видны только актуальные заявки: есть новая поставка и заявка не отменена целиком
   const displayedGroups = useMemo(() => {
     if (showProcessed) return filteredGroups;
-    return filteredGroups.filter(g => g.items.some((i) => i.status === 'new'));
+    return filteredGroups.filter(g => !isFullyCancelled(g) && g.items.some((i) => i.status === 'new'));
   }, [filteredGroups, showProcessed]);
 
   const getStatusSummary = (group: ExternalShipment[]) => {

@@ -672,6 +672,60 @@ async function startServer() {
         }
       }
 
+      // Журнал «Заявки Ozon» — третий источник идентификаторов для опроса.
+      // Нужен для заявок, удалённых в Ozon Seller до первого опроса: строк во
+      // «Внешних отгрузках» по ним нет, в листинге активных статусов их тоже нет,
+      // поэтому статус CANCELLED без этого шага никогда не доедет, а локальный
+      // резерв под такую заявку продолжает висеть.
+      try {
+        const gasResponseReq = await fetch(gasUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "getOzonSupplyRequests",
+            sessionToken: token,
+            ...(devMode ? { devMode: true } : {})
+          })
+        });
+        const rawTextReq = await gasResponseReq.text();
+        const gasResultReq: any = JSON.parse(rawTextReq);
+
+        if (gasResultReq.status === "success") {
+          const FINAL_OZON_STATES = ["COMPLETED", "CANCELLED", "REJECTED_AT_SUPPLY_WAREHOUSE", "OVERDUE"];
+          const finalOrderIds = new Set<string>();
+          for (const s of existingShipments) {
+            const oId = String(s.orderId || '').trim();
+            const oSt = String(s.ozonStatus || '').trim().toUpperCase();
+            if (oId && FINAL_OZON_STATES.includes(oSt)) finalOrderIds.add(oId);
+          }
+
+          const JOURNAL_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+          const nowMs = Date.now();
+          let addedFromJournal = 0;
+
+          for (const r of (gasResultReq.data || [])) {
+            const oId = String(r?.orderId || '').trim();
+            if (!oId || finalOrderIds.has(oId)) continue;
+
+            const rStatus = String(r?.status || '').trim().toLowerCase();
+            if (rStatus.indexOf('отмен') === 0) continue;
+
+            const rawDate = String(r?.date || '').trim();
+            const t = new Date(rawDate.indexOf('T') < 0 ? rawDate.replace(' ', 'T') : rawDate).getTime();
+            if (!isNaN(t) && nowMs - t > JOURNAL_MAX_AGE_MS) continue;
+
+            const rowCabinet = String(r?.cabinet || '').trim();
+            const ci = rowCabinet && cabinetIndexByName.has(rowCabinet) ? (cabinetIndexByName.get(rowCabinet) as number) : 0;
+            if (!activeOrderIdsByCabinet[ci].has(oId)) addedFromJournal++;
+            activeOrderIdsByCabinet[ci].add(oId);
+          }
+
+          console.log("Журнал «Заявки Ozon»: добавлено к опросу заявок — " + addedFromJournal);
+        }
+      } catch (e: any) {
+        console.error("Не удалось прочитать журнал «Заявки Ozon» при опросе:", e?.message || e);
+      }
+
       // Step 4. Details of orders — ключами соответствующего кабинета
       const ordersDetailsList: Array<{ order: any; cabinetIndex: number }> = [];
       const batchSize = 50;

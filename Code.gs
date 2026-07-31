@@ -3119,6 +3119,21 @@ function nameFromDisposition(dispHeader, fallbackName) {
 }
 
 /**
+ * Приводит имя файла этикетки к сопоставимому виду.
+ * NFC чинит декомпозированную кириллицу с macOS: «и» + U+0306 становится «й».
+ * Расширение и регистр отбрасываются, чтобы ручное переименование на Диске
+ * не ломало поиск.
+ */
+function normalizeLabelKey(name) {
+  let s = String(name || '');
+  try {
+    s = s.normalize('NFC');
+  } catch (e) {}
+  s = s.replace(/\.pdf$/i, '');
+  return s.trim().toLowerCase();
+}
+
+/**
  * Определяет расширение по MIME-типу, если имя файла его не имеет.
  */
 function extFromContentType(contentType) {
@@ -3222,17 +3237,28 @@ function saveSupplyDocsToDrive(data) {
     problems.push('Папка «' + labelsFolderName + '» не найдена в родительской папке — этикетки ШК товаров не скопированы');
   } else {
     const lib = libIt.next();
+
+    // Читаем библиотеку один раз и строим указатель по нормализованному имени.
+    // Прямой getFilesByName не годится: он требует побайтового совпадения.
+    const libIndex = {};
+    const allFiles = lib.getFiles();
+    while (allFiles.hasNext()) {
+      const lf = allFiles.next();
+      const key = normalizeLabelKey(lf.getName());
+      if (key && !libIndex[key]) libIndex[key] = lf;
+    }
+
     for (let a = 0; a < articles.length; a++) {
       const art = sanitizeDriveName(articles[a]);
       if (!art) continue;
-      const wanted = art + '.pdf';
-      const fit = lib.getFilesByName(wanted);
-      if (!fit.hasNext()) {
+      const wanted = art.normalize ? art.normalize('NFC') + '.pdf' : art + '.pdf';
+      const src = libIndex[normalizeLabelKey(art)];
+      if (!src) {
         missingLabels.push(wanted);
         continue;
       }
       try {
-        replaceFileInFolder(targetFolder, wanted, fit.next().getBlob());
+        replaceFileInFolder(targetFolder, wanted, src.getBlob());
         saved.push(wanted);
       } catch (e2) {
         problems.push('Этикетка ' + wanted + ': ' + e2.toString());
