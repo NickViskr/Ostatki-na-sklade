@@ -1057,6 +1057,21 @@
   - Функция `normalizeOzonSku` для очистки технических штрихкодов `OZN...` и дробных хвостов `.0`.
   - Отображение текущего Ozon-SKU под названием кластера в списке выбранных позиций.
 
+## [2026-07-31]
+
+### Добавлено
+- Интеграция эндпоинтов финализации заявки Ozon и состояния грузомест в `server.ts`:
+  - Подключен импорт библиотеки `xlsx`.
+  - Добавлено поле `placementZone` в состав поставки.
+  - Метка версии прокси обложена значением `2026-07-31-cargoes-state`.
+  - Реализован эндпоинт POST `/api/ozon/supply/finalize` для завершения создания поставки в Ozon.
+  - Реализован эндпоинт POST `/api/ozon/cargoes/state` для чтения статуса грузомест и готовности документов Ozon.
+- Функция сохранения документов заявки Ozon на Google Диск в `Code.gs`:
+  - В `OZON_SETTINGS_DEFAULTS` добавлены настройки `supplyDocsFolderId` (ID папки документов) и `supplyDocsLabelsFolder` (подпапка ШК).
+  - Настройка `supplyDocsLabelsFolder` зарегистрирована в `OZON_SETTINGS_STRING_KEYS`.
+  - В `doPost` зарегистрирован экшен `saveSupplyDocsToDrive`.
+  - Реализована функция `saveSupplyDocsToDrive` и вспомогательные функции `sanitizeDriveName`, `getOrCreateChildFolder`, `replaceFileInFolder`, `nameFromDisposition`, `extFromContentType` для автоматической загрузки и распределения файлов этикеток, актов и накладных по папкам Google Диска.
+
 
 
 

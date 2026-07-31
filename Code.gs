@@ -395,6 +395,7 @@ function doPost(e) {
       case 'checkSupplyAvailability': result = checkSupplyAvailability(data); break;
       case 'saveOzonSupplyRequest': assertAdmin(currentUser); result = saveOzonSupplyRequest(data, currentUser.username); break;
       case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
+      case 'saveSupplyDocsToDrive': assertAdmin(currentUser); result = saveSupplyDocsToDrive(data); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -456,9 +457,11 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'maxBoxesPerCluster',  value: 30, desc: 'Максимум коробок на один кластер в одной заявке (тарифный лимит Ozon)' },
   { key: 'dropOffWarehouseId',   value: '', desc: 'ID точки отгрузки Ozon (drop-off), число' },
   { key: 'dropOffWarehouseName', value: '', desc: 'Название точки отгрузки Ozon' },
-  { key: 'dropOffWarehouseType', value: '', desc: 'Тип точки отгрузки: SORTING_CENTER, CROSS_DOCK, FULL_FILLMENT, DELIVERY_POINT, ORDERS_RECEIVING_POINT' }
+  { key: 'dropOffWarehouseType', value: '', desc: 'Тип точки отгрузки: SORTING_CENTER, CROSS_DOCK, FULL_FILLMENT, DELIVERY_POINT, ORDERS_RECEIVING_POINT' },
+  { key: 'supplyDocsFolderId',    value: '1hTJPqJrkV7qC4YuUi2qm_-_9y9iDjnFe', desc: 'ID родительской папки Google Диска для документов заявок на поставку' },
+  { key: 'supplyDocsLabelsFolder', value: 'ШК озон для автоматизации', desc: 'Имя подпапки для этикеток коробок поставки' }
 ];
-const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType'];
+const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType', 'supplyDocsFolderId', 'supplyDocsLabelsFolder'];
 const OZON_DROPOFF_TYPES = ['SORTING_CENTER', 'CROSS_DOCK', 'FULL_FILLMENT', 'DELIVERY_POINT', 'ORDERS_RECEIVING_POINT'];
 const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
 const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
@@ -3067,6 +3070,177 @@ function saveOzonSupplyRequest(data, username) {
     String((data && data.status) || 'Создана')
   ]);
   return { id: id };
+}
+
+/**
+ * Вспомогательная функция очистки символов из названия папки.
+ */
+function sanitizeDriveName(name) {
+  return String(name || '').replace(/[\/\\:\*\?"<>\|]/g, '_').trim();
+}
+
+/**
+ * Возвращает существующую подпапку или создаёт её.
+ */
+function getOrCreateChildFolder(parent, name) {
+  const cleanName = sanitizeDriveName(name);
+  if (!cleanName) return parent;
+  const folders = parent.getFoldersByName(cleanName);
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+  return parent.createFolder(cleanName);
+}
+
+/**
+ * Заменяет файл в подпапке (удаляет старые с таким именем, создаёт новый).
+ */
+function replaceFileInFolder(folder, fileName, blob) {
+  const files = folder.getFilesByName(fileName);
+  while (files.hasNext()) {
+    files.next().setTrashed(true);
+  }
+  const newBlob = blob.setName(fileName);
+  return folder.createFile(newBlob);
+}
+
+/**
+ * Достаёт имя файла из заголовка Content-Disposition или возвращает fallbackName.
+ */
+function nameFromDisposition(dispHeader, fallbackName) {
+  if (!dispHeader) return fallbackName;
+  const match = String(dispHeader).match(/filename\*?=(?:UTF-8'')?([^;]+)/i);
+  if (!match) return fallbackName;
+  let raw = match[1].replace(/^["']|["']$/g, '').trim();
+  try {
+    raw = decodeURIComponent(raw);
+  } catch (e) {}
+  return raw || fallbackName;
+}
+
+/**
+ * Определяет расширение по MIME-типу, если имя файла его не имеет.
+ */
+function extFromContentType(contentType) {
+  const ct = String(contentType || '').toLowerCase();
+  if (ct.indexOf('application/pdf') !== -1) return '.pdf';
+  if (ct.indexOf('image/png') !== -1) return '.png';
+  if (ct.indexOf('image/jpeg') !== -1) return '.jpg';
+  if (ct.indexOf('application/zip') !== -1) return '.zip';
+  return '.bin';
+}
+
+/**
+ * Скачивает файлы документов заявки на поставку с Ozon-прокси и сохраняет на Google Диск.
+ * Структура на Диске:
+ *   [Родительская папка]/Заявка_[orderId]_[orderNumber]/
+ *     - [supplyDocsLabelsFolder]/labels_[supplyId]_[orderId].pdf (или ZIP)
+ *     - [ИмяФайлаИзHeaders] (акт / накладная)
+ *
+ * @param {Object} data { postingId, orderId, orderNumber, supplyId }
+ * @returns {Object} { status: 'success', folderUrl, folderId, savedFilesCount, savedFiles }
+ */
+function saveSupplyDocsToDrive(data) {
+  if (!data || typeof data !== 'object') {
+    throw new Error('Данные для сохранения документов не переданы');
+  }
+  const postingId = String(data.postingId || '').trim();
+  const orderId = String(data.orderId || '').trim();
+  const orderNumber = String(data.orderNumber || '').trim();
+  const supplyId = String(data.supplyId || '').trim();
+
+  if (!postingId) {
+    throw new Error('Параметр postingId обязателен');
+  }
+
+  const settings = getOzonSettings();
+  const rootFolderId = String(settings.supplyDocsFolderId || '').trim();
+  if (!rootFolderId) {
+    throw new Error('Не настроен ID родительской папки Google Диска (supplyDocsFolderId)');
+  }
+
+  let rootFolder;
+  try {
+    rootFolder = DriveApp.getFolderById(rootFolderId);
+  } catch (e) {
+    throw new Error('Не удалось открыть родительскую папку Google Диска ID ' + rootFolderId + ': ' + e.toString());
+  }
+
+  const folderName = 'Заявка_' + (orderId || postingId) + (orderNumber ? ('_' + orderNumber) : '');
+  const targetFolder = getOrCreateChildFolder(rootFolder, folderName);
+
+  const labelsSubfolderName = String(settings.supplyDocsLabelsFolder || 'ШК озон для автоматизации').trim();
+  const labelsFolder = labelsSubfolderName ? getOrCreateChildFolder(targetFolder, labelsSubfolderName) : targetFolder;
+
+  const sessionToken = PropertiesService.getScriptProperties().getProperty('server_sessionToken') || '';
+
+  const urlsToFetch = [
+    { type: 'labels', path: '/api/ozon/cargoes/labels', folder: labelsFolder, fallback: 'labels_' + (supplyId || orderId || postingId) },
+    { type: 'act', path: '/api/ozon/supply/act', folder: targetFolder, fallback: 'act_' + (orderId || postingId) },
+    { type: 'waybill', path: '/api/ozon/supply/waybill', folder: targetFolder, fallback: 'waybill_' + (orderId || postingId) }
+  ];
+
+  const savedFiles = [];
+
+  for (let i = 0; i < urlsToFetch.length; i++) {
+    const item = urlsToFetch[i];
+    const fullUrl = PROXY_URL + item.path;
+
+    try {
+      const response = UrlFetchApp.fetch(fullUrl, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+          postingId: postingId,
+          orderId: orderId,
+          supplyId: supplyId,
+          sessionToken: sessionToken
+        }),
+        muteHttpExceptions: true
+      });
+
+      const code = response.getResponseCode();
+      if (code < 200 || code >= 300) {
+        Logger.log('Не удалось скачать ' + item.type + ' (' + code + '): ' + response.getContentText().slice(0, 200));
+        continue;
+      }
+
+      const blob = response.getBlob();
+      const headers = response.getAllHeaders();
+      const dispHeader = headers['Content-Disposition'] || headers['content-disposition'] || '';
+      let fileName = nameFromDisposition(dispHeader, '');
+
+      if (!fileName) {
+        const ct = headers['Content-Type'] || headers['content-type'] || blob.getContentType();
+        const ext = extFromContentType(ct);
+        fileName = item.fallback + ext;
+      } else {
+        fileName = sanitizeDriveName(fileName);
+      }
+
+      const createdFile = replaceFileInFolder(item.folder, fileName, blob);
+      savedFiles.push({
+        type: item.type,
+        fileName: fileName,
+        fileId: createdFile.getId(),
+        fileUrl: createdFile.getUrl()
+      });
+    } catch (e) {
+      Logger.log('Ошибка при загрузке ' + item.type + ': ' + e.toString());
+    }
+  }
+
+  if (savedFiles.length === 0) {
+    throw new Error('Не удалось скачать ни одного документа из Ozon. Проверьте готовность документов и логи.');
+  }
+
+  return {
+    status: 'success',
+    folderUrl: targetFolder.getUrl(),
+    folderId: targetFolder.getId(),
+    savedFilesCount: savedFiles.length,
+    savedFiles: savedFiles
+  };
 }
 
 function getOzonSupplyRequests() {
