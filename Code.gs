@@ -358,6 +358,9 @@ function doPost(e) {
       case 'saveExternalShipments':
         result = saveExternalShipments(data.shipments);
         break;
+      case 'applyCancelledOzonOrders':
+        result = applyCancelledOzonOrders(data);
+        break;
       case 'getExternalShipments':
         result = getExternalShipments();
         break;
@@ -3050,6 +3053,126 @@ function checkSupplyAvailability(data) {
   }
 
   return { items: result, checkedAt: new Date().toISOString() };
+}
+
+/** Сколько дней хранить отменённые заявки, прежде чем удалить их из базы. */
+const OZON_CANCELLED_KEEP_DAYS = 28;
+
+/**
+ * Обработка заявок, отменённых в Ozon Seller.
+ * 1) Сразу помечает строки журнала «Заявки Ozon» статусом «Отменена». Это мгновенно
+ *    возвращает забронированный остаток на «Мой склад»: логика зачёта пропускает
+ *    статусы, начинающиеся на «отмен».
+ * 2) Чистит базу от отменённых записей старше OZON_CANCELLED_KEEP_DAYS дней.
+ *
+ * БЕЗОПАСНОСТЬ УДАЛЕНИЯ. Строка «Внешних отгрузок» удаляется, только если выполнено ВСЁ:
+ * статус Ozon равен CANCELLED, внутренний статус равен new, и пусты все следы обработки —
+ * TransGroupInfo, ПринятоJSON, ПерерасчётJSON, ПересортJSON. Одного статуса недостаточно:
+ * функция updateExternalShipmentStatus умеет возвращать строку в new, не очищая
+ * TransGroupInfo, поэтому такая строка может быть связана с реальными проводками.
+ * На остатки, себестоимость и капитализацию функция не влияет.
+ */
+function applyCancelledOzonOrders(data) {
+  const rawIds = (data && Array.isArray(data.orderIds)) ? data.orderIds : [];
+  const orderIds = rawIds
+    .map(function (v) { return String(v || '').trim(); })
+    .filter(function (v) { return v !== ''; });
+
+  const ss = getSpreadsheet();
+  const result = { updated: 0, purgedRequests: 0, purgedShipments: 0 };
+  const cutoff = new Date().getTime() - OZON_CANCELLED_KEEP_DAYS * 24 * 60 * 60 * 1000;
+  const notEmpty = function (v) { return String(v || '').trim() !== ''; };
+
+  const wanted = {};
+  for (var i = 0; i < orderIds.length; i++) wanted[orderIds[i]] = true;
+
+  // --- Журнал «Заявки Ozon»: пометить отменённые и вычистить старые ---
+  const reqSheet = getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  const reqLast = reqSheet.getLastRow();
+
+  if (reqLast >= 2) {
+    const reqHeaders = reqSheet.getRange(1, 1, 1, reqSheet.getLastColumn()).getValues()[0];
+    const cOrder = reqHeaders.indexOf('OrderID');
+    const cStatus = reqHeaders.indexOf('Статус');
+    const cDate = reqHeaders.indexOf('Дата');
+    if (cOrder < 0 || cStatus < 0 || cDate < 0) {
+      throw new Error('В листе «Заявки Ozon» не найдены колонки OrderID, Статус или Дата');
+    }
+
+    const reqValues = reqSheet.getRange(2, 1, reqLast - 1, reqSheet.getLastColumn()).getValues();
+    const statusColumn = [];
+    const reqRowsToDelete = [];
+
+    for (var r = 0; r < reqValues.length; r++) {
+      var st = String(reqValues[r][cStatus] || '').trim();
+      const oid = String(reqValues[r][cOrder] || '').trim();
+
+      if (oid && wanted[oid] && st !== 'Отменена') {
+        st = 'Отменена';
+        result.updated++;
+      }
+      statusColumn.push([st]);
+
+      if (st.toLowerCase().indexOf('отмен') === 0) {
+        const dv = reqValues[r][cDate];
+        const ms = (dv instanceof Date) ? dv.getTime() : new Date(String(dv || '')).getTime();
+        if (!isNaN(ms) && ms < cutoff) reqRowsToDelete.push(r + 2);
+      }
+    }
+
+    if (result.updated > 0) {
+      reqSheet.getRange(2, cStatus + 1, reqLast - 1, 1).setValues(statusColumn);
+    }
+
+    for (var d1 = reqRowsToDelete.length - 1; d1 >= 0; d1--) {
+      reqSheet.deleteRow(reqRowsToDelete[d1]);
+      result.purgedRequests++;
+    }
+  }
+
+  // --- «Внешние отгрузки»: удалять только заведомо необработанные отменённые ---
+  const shSheet = getExternalShipmentsSheet();
+  const shLast = shSheet.getLastRow();
+
+  if (shLast >= 2) {
+    const shHeaders = shSheet.getRange(1, 1, 1, shSheet.getLastColumn()).getValues()[0];
+    const sOzon = shHeaders.indexOf('Статус Ozon');
+    const sStatus = shHeaders.indexOf('Статус');
+    const sDate = shHeaders.indexOf('Дата обнаружения');
+    const sTrans = shHeaders.indexOf('TransGroupInfo');
+    const sAccepted = shHeaders.indexOf('ПринятоJSON');
+    const sRecalc = shHeaders.indexOf('ПерерасчётJSON');
+    const sPeresort = shHeaders.indexOf('ПересортJSON');
+
+    if (sOzon >= 0 && sStatus >= 0 && sDate >= 0) {
+      const shValues = shSheet.getRange(2, 1, shLast - 1, shSheet.getLastColumn()).getValues();
+      const shRowsToDelete = [];
+
+      for (var k = 0; k < shValues.length; k++) {
+        const row = shValues[k];
+
+        if (String(row[sOzon] || '').trim().toUpperCase() !== 'CANCELLED') continue;
+        if (String(row[sStatus] || '').trim() !== 'new') continue;
+
+        // Любой след обработки запрещает удаление
+        if (sTrans >= 0 && notEmpty(row[sTrans])) continue;
+        if (sAccepted >= 0 && notEmpty(row[sAccepted])) continue;
+        if (sRecalc >= 0 && notEmpty(row[sRecalc])) continue;
+        if (sPeresort >= 0 && notEmpty(row[sPeresort])) continue;
+
+        const dv2 = row[sDate];
+        const ms2 = (dv2 instanceof Date) ? dv2.getTime() : new Date(String(dv2 || '')).getTime();
+        if (!isNaN(ms2) && ms2 < cutoff) shRowsToDelete.push(k + 2);
+      }
+
+      for (var d2 = shRowsToDelete.length - 1; d2 >= 0; d2--) {
+        shSheet.deleteRow(shRowsToDelete[d2]);
+        result.purgedShipments++;
+      }
+    }
+  }
+
+  return result;
 }
 
 /** Журнал созданных заявок на поставку. На остатки и себестоимость не влияет. */

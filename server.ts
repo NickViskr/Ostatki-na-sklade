@@ -746,6 +746,47 @@ async function startServer() {
         }
       }
 
+      // Заявки, отменённые в Ozon Seller, строк во «Внешних отгрузках» не получают:
+      // ниже они сознательно пропускаются, потому что поставка не отгружалась.
+      // Поэтому возвращаем забронированный остаток через журнал «Заявки Ozon».
+      // Вызов делается всегда, даже с пустым списком: на той стороне он ещё и чистит
+      // отменённые записи старше 28 дней.
+      try {
+        const cancelledOrderIds: string[] = [];
+        for (const entry of ordersDetailsList) {
+          const st = String(entry?.order?.state || '').trim().toUpperCase();
+          if (st !== 'CANCELLED') continue;
+          const oId = String(entry?.order?.order_id || '').trim();
+          if (oId && cancelledOrderIds.indexOf(oId) < 0) cancelledOrderIds.push(oId);
+        }
+
+        const gasResponseCancel = await fetch(gasUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "applyCancelledOzonOrders",
+            sessionToken: token,
+            data: { orderIds: cancelledOrderIds },
+            ...(devMode ? { devMode: true } : {})
+          })
+        });
+        const rawTextCancel = await gasResponseCancel.text();
+        const gasResultCancel: any = JSON.parse(rawTextCancel);
+
+        if (gasResultCancel.status === "success") {
+          const st = gasResultCancel.data || {};
+          console.log(
+            "Отменённые заявки: помечено " + (st.updated ?? 0) +
+            ", удалено записей журнала " + (st.purgedRequests ?? 0) +
+            ", удалено строк отгрузок " + (st.purgedShipments ?? 0)
+          );
+        } else {
+          console.error("Не удалось обработать отменённые заявки:", gasResultCancel.message);
+        }
+      } catch (e: any) {
+        console.error("Ошибка при обработке отменённых заявок:", e?.message || e);
+      }
+
       // Step 5. Forming records on supply
       const clusterMap = await loadClusterMap({ ozonClientId: cabinets[0].clientId, ozonApiKey: cabinets[0].apiKey });
 
