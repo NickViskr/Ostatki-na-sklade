@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import * as XLSX from "xlsx";
 
 dotenv.config();
 
@@ -1189,7 +1190,8 @@ async function startServer() {
             barcode: String(it?.barcode ?? ''),
             quantity: Number(it?.quantity) || 0,
             volumeInLitres: Number(it?.volume_in_litres) || 0,
-            totalVolumeInLitres: Number(it?.total_volume_in_litres) || 0
+            totalVolumeInLitres: Number(it?.total_volume_in_litres) || 0,
+            placementZone: String(it?.placement_zone ?? '')
           });
         }
 
@@ -1492,6 +1494,343 @@ async function startServer() {
 
     } catch (error: any) {
       console.error("Ozon supply create failed:", error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
+  // ── Грузоместа и документы заявки (пункт 24 плана) ────────────────────────────
+  // Разведка и формы ответов Ozon: docs/OZON_API.md, секции «Разведка пункта 24»
+  // и «Разведка A2 пункта 24». Ключ всей цепочки — supply_id, а не order_id.
+
+  const CARGO_POLL_ATTEMPTS = 15;
+  const CARGO_POLL_DELAY_MS = 2000;
+
+  function sanitizeFileName(name: string): string {
+    const cleaned = String(name || '')
+      .replace(/[\/\\:*?"<>|]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return cleaned || 'Без названия';
+  }
+
+  function zoneToRussian(zone: string): string {
+    const z = String(zone || '').toUpperCase();
+    if (z === 'SORT') return 'Сортируемый товар';
+    if (z === 'NON_SORT') return 'Несортируемый товар';
+    if (z === 'KGT') return 'Крупногабаритный товар';
+    return String(zone || '');
+  }
+
+  // Файл «Состав ГМ поставки»: семь колонок в том же порядке, что отдаёт кабинет Ozon.
+  // Одна строка = один артикул в одном грузоместе.
+  function buildCompositionXlsxBase64(
+    boxes: any[],
+    cargoIdByKey: Record<string, string>,
+    zones: Record<string, string>
+  ): string {
+    const rows: any[][] = [[
+      'ШК товара',
+      'Артикул товара',
+      'Кол-во товаров',
+      'Зона размещения',
+      'Срок годности ДО в формате YYYY-MM-DD (необязательно)',
+      'ШК ГМ',
+      'Тип ГМ (не обязательно)'
+    ]];
+
+    for (const box of boxes) {
+      const cargoId = cargoIdByKey[String(box?.key || '')] || '';
+      const items = Array.isArray(box?.items) ? box.items : [];
+      for (const it of items) {
+        const barcode = String(it?.barcode || '');
+        rows.push([
+          barcode,
+          String(it?.offerId || ''),
+          Number(it?.quantity) || 0,
+          zoneToRussian(zones[barcode] || ''),
+          '',
+          cargoId,
+          'Коробка'
+        ]);
+      }
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Состав ГМ поставки');
+    return XLSX.write(wb, { bookType: 'xlsx', type: 'base64' }) as string;
+  }
+
+  // Создание грузомест одной поставки с полной перезаписью прежней раскладки
+  async function createCargoesForSupply(cab: any, supplyId: string, boxes: any[]): Promise<Record<string, string>> {
+    const payload = {
+      supply_id: Number(supplyId),
+      delete_current_version: true,
+      cargoes: boxes.map((b: any) => ({
+        key: String(b?.key || ''),
+        value: {
+          type: 'BOX',
+          items: (Array.isArray(b?.items) ? b.items : []).map((it: any) => ({
+            barcode: String(it?.barcode || ''),
+            offer_id: String(it?.offerId || ''),
+            quantity: Number(it?.quantity) || 0,
+            quant: Number(it?.quant) || 1
+          }))
+        }
+      }))
+    };
+
+    const created: any = await fetchOzonApi("/v1/cargoes/create",
+      { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, payload);
+
+    const operationId = String(created?.operation_id || '');
+    if (!operationId) {
+      const reasons = created?.errors?.error_reasons || [];
+      throw new Error('Ozon не принял грузоместа: ' + (reasons.length ? reasons.join(', ') : 'нет operation_id'));
+    }
+
+    const cargoIdByKey: Record<string, string> = {};
+    for (let attempt = 0; attempt < CARGO_POLL_ATTEMPTS; attempt++) {
+      const info: any = await fetchOzonApi("/v2/cargoes/create/info",
+        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { operation_id: operationId });
+      const st = String(info?.status || '');
+      if (st === 'SUCCESS') {
+        const list = Array.isArray(info?.result?.cargoes) ? info.result.cargoes : [];
+        // Порядок элементов у Ozon произвольный — сопоставляем только по key
+        for (const c of list) {
+          const k = String(c?.key || '').trim();
+          const id = String(c?.value?.cargo_id ?? '').trim();
+          if (k && id) cargoIdByKey[k] = id;
+        }
+        return cargoIdByKey;
+      }
+      if (st === 'FAILED') {
+        const reasons = info?.errors?.error_reasons || [];
+        throw new Error('Ozon отклонил грузоместа: ' + (reasons.length ? reasons.join(', ') : 'FAILED'));
+      }
+      await sleep(CARGO_POLL_DELAY_MS);
+    }
+    throw new Error('Ozon не ответил о создании грузомест за отведённое время');
+  }
+
+  // Этикетки грузомест генерируются только покластерно: один вызов на один supply_id
+  async function createCargoLabelUrl(cab: any, supplyId: string): Promise<string> {
+    const created: any = await fetchOzonApi("/v1/cargoes-label/create",
+      { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { supply_id: Number(supplyId) });
+
+    const operationId = String(created?.operation_id || '');
+    if (!operationId) {
+      const reasons = created?.errors?.error_reasons || [];
+      throw new Error('Ozon не принял запрос этикеток: ' + (reasons.length ? reasons.join(', ') : 'нет operation_id'));
+    }
+
+    for (let attempt = 0; attempt < CARGO_POLL_ATTEMPTS; attempt++) {
+      const info: any = await fetchOzonApi("/v1/cargoes-label/get",
+        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { operation_id: operationId });
+      const st = String(info?.status || '');
+      if (st === 'SUCCESS') {
+        const url = String(info?.result?.file_url || '');
+        if (!url) throw new Error('Ozon вернул успех без ссылки на этикетки');
+        return url;
+      }
+      if (st === 'FAILED') {
+        const reasons = info?.errors?.error_reasons || [];
+        throw new Error('Ozon отклонил генерацию этикеток: ' + (reasons.length ? reasons.join(', ') : 'FAILED'));
+      }
+      await sleep(CARGO_POLL_DELAY_MS);
+    }
+    throw new Error('Ozon не отдал этикетки за отведённое время');
+  }
+
+  // Полный цикл после создания заявки: грузоместа, этикетки, файлы состава, чек-листы
+  app.post("/api/ozon/supply/finalize", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const orderId = String(req.body?.orderId || '').trim();
+      const clusters = Array.isArray(req.body?.clusters) ? req.body.clusters : [];
+      const zones: Record<string, string> =
+        (req.body?.zones && typeof req.body.zones === 'object') ? req.body.zones : {};
+
+      if (!orderId || clusters.length === 0) {
+        return res.status(400).json({ status: "error", message: "Не передан orderId или список кластеров" });
+      }
+
+      const keys = await fetchOzonKeys();
+      if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+      const cab = pickCabinet(keys, req.body?.cabinet);
+
+      const warnings: string[] = [];
+      const files: any[] = [];
+      const supplyIds: string[] = [];
+
+      // Шаг 1. Ждём, пока Ozon разложит заявку по поставкам-кластерам
+      let orderNumber = '';
+      let supplies: any[] = [];
+      for (let attempt = 0; attempt < CARGO_POLL_ATTEMPTS; attempt++) {
+        const detail: any = await fetchOzonApi("/v3/supply-order/get",
+          { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { order_ids: [orderId] });
+        const orders = Array.isArray(detail?.orders) ? detail.orders : [];
+        const order = orders.find((o: any) => String(o?.order_id) === orderId) || orders[0];
+        if (order) {
+          orderNumber = String(order?.order_number || '');
+          supplies = Array.isArray(order?.supplies) ? order.supplies : [];
+        }
+        if (supplies.length > 0) break;
+        await sleep(CARGO_POLL_DELAY_MS);
+      }
+
+      if (supplies.length === 0) {
+        return res.status(502).json({
+          status: "error",
+          stage: "ozon_api",
+          message: "Ozon не показал поставки заявки " + orderId + " за отведённое время"
+        });
+      }
+
+      // Шаг 2. По каждому кластеру: грузоместа, файл состава, этикетки
+      for (const cluster of clusters) {
+        const clusterId = String(cluster?.clusterId || '').trim();
+        const clusterName = String(cluster?.clusterName || '').trim() || clusterId;
+        const boxes = Array.isArray(cluster?.boxes) ? cluster.boxes : [];
+
+        const supply = supplies.find((s: any) => String(s?.macrolocal_cluster_id || '') === clusterId);
+        if (!supply) {
+          warnings.push('Кластер ' + clusterName + ': Ozon не создал поставку, грузоместа не отправлены');
+          continue;
+        }
+
+        const supplyId = String(supply?.supply_id || '');
+        if (!supplyId) {
+          warnings.push('Кластер ' + clusterName + ': у поставки нет номера');
+          continue;
+        }
+        supplyIds.push(supplyId);
+
+        if (boxes.length === 0) {
+          warnings.push('Кластер ' + clusterName + ': пустая раскладка, грузоместа не отправлены');
+          continue;
+        }
+
+        let cargoIdByKey: Record<string, string> = {};
+        try {
+          cargoIdByKey = await createCargoesForSupply(cab, supplyId, boxes);
+        } catch (e: any) {
+          warnings.push('Кластер ' + clusterName + ': ' + (e?.message || String(e)));
+          continue;
+        }
+
+        const missingKeys = boxes
+          .map((b: any) => String(b?.key || ''))
+          .filter((k: string) => !cargoIdByKey[k]);
+        if (missingKeys.length > 0) {
+          warnings.push('Кластер ' + clusterName + ': Ozon не вернул номера для коробок ' + missingKeys.join(', '));
+        }
+
+        try {
+          files.push({
+            kind: 'base64',
+            name: sanitizeFileName(clusterName) + '.xlsx',
+            content: buildCompositionXlsxBase64(boxes, cargoIdByKey, zones)
+          });
+        } catch (e: any) {
+          warnings.push('Кластер ' + clusterName + ': не удалось собрать файл состава — ' + (e?.message || String(e)));
+        }
+
+        try {
+          const labelUrl = await createCargoLabelUrl(cab, supplyId);
+          files.push({
+            kind: 'url',
+            url: labelUrl,
+            fallbackName: 'tags-cargoes-by-supply-' + supplyId
+          });
+        } catch (e: any) {
+          warnings.push('Кластер ' + clusterName + ': этикетки грузомест не получены — ' + (e?.message || String(e)));
+        }
+      }
+
+      // Шаг 3. Чек-листы готовности по всем поставкам заявки
+      let checkLists: any[] = [];
+      if (supplyIds.length > 0) {
+        try {
+          const rules: any = await fetchOzonApi("/v1/cargoes/rules/get",
+            { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { supply_ids: supplyIds });
+          checkLists = Array.isArray(rules?.supply_check_lists) ? rules.supply_check_lists : [];
+        } catch (e: any) {
+          warnings.push('Не удалось получить чек-лист готовности: ' + (e?.message || String(e)));
+        }
+      }
+
+      return res.json({
+        status: "success",
+        data: {
+          orderId,
+          orderNumber,
+          folderName: 'Озон ' + (orderNumber || orderId),
+          files,
+          checkLists,
+          warnings
+        }
+      });
+
+    } catch (error: any) {
+      console.error("Ozon supply finalize failed:", error?.message || error);
+      return res.status(error.httpStatus || 500).json({
+        status: "error",
+        stage: error.stage || "ozon_api",
+        httpStatus: error.httpStatus || 500,
+        message: error.message || String(error)
+      });
+    }
+  });
+
+  // Только чтение: текущие грузоместа и чек-лист готовности поставок
+  app.post("/api/ozon/cargoes/state", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const supplyIds = (Array.isArray(req.body?.supplyIds) ? req.body.supplyIds : [])
+        .map((v: any) => String(v || '').trim())
+        .filter((v: string) => v !== '');
+
+      if (supplyIds.length === 0) {
+        return res.status(400).json({ status: "error", message: "Не передан список supplyIds" });
+      }
+
+      const keys = await fetchOzonKeys();
+      if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
+        return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
+      }
+      const cab = pickCabinet(keys, req.body?.cabinet);
+
+      const cargoesData: any = await fetchOzonApi("/v1/cargoes/get",
+        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { supply_ids: supplyIds });
+      const rulesData: any = await fetchOzonApi("/v1/cargoes/rules/get",
+        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { supply_ids: supplyIds });
+
+      return res.json({
+        status: "success",
+        data: {
+          supply: Array.isArray(cargoesData?.supply) ? cargoesData.supply : [],
+          checkLists: Array.isArray(rulesData?.supply_check_lists) ? rulesData.supply_check_lists : []
+        }
+      });
+
+    } catch (error: any) {
+      console.error("Ozon cargoes state failed:", error?.message || error);
       return res.status(error.httpStatus || 500).json({
         status: "error",
         stage: error.stage || "ozon_api",
@@ -2011,8 +2350,8 @@ ${wbDictStr}`;
   app.get("/api/version", (req, res) => {
     res.json({
       status: "success",
-      version: "2026-07-29-clusterid",
-      features: { clusterIdInShipments: true }
+      version: "2026-07-31-cargoes",
+      features: { clusterIdInShipments: true, cargoesAndDocs: true }
     });
   });
 
