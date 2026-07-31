@@ -660,7 +660,7 @@
 Внутри `items[]`: `barcode`, `offer_id`, `quantity`, `quant`, `expires_at` — все необязательные.
 КРИТИЧНО:
 - `value.type` объявлен обязательным, но в swagger не описан вообще — ни типа, ни enum. Вживую принято значение `BOX`.
-- `delete_current_version: true` заменяет ВСЮ раскладку поставки. Это единственный способ исправить состав: удалить единственную коробку нельзя, `/v1/cargoes/delete` отвечает `CANT_DELETE_ALL_CARGOES`.
+- `delete_current_version: true` заменяет ВСЮ раскладку поставки. Это единственный способ исправить состав: удалить единственную коробку методом `/v1/cargoes/delete` нельзя, он отвечает `CANT_DELETE_ALL_CARGOES`. ПРОВЕРЕНО ВЖИВУЮ 30.07.2026: на перезапись это ограничение НЕ распространяется — вызов с `delete_current_version: true` штатно снёс единственное грузоместо поставки и создал вместо него три новых.
 - Ответ при успехе: только `operation_id`, блок `errors` ОТСУТСТВУЕТ целиком, а не приходит пустым.
 - При ошибке: `errors.error_reasons[]` (INVALID_STATE, VALIDATION_FAILED, WAREHOUSE_LIMITS_EXCEED, SUPPLY_NOT_BELONG_CONTRACTOR, SUPPLY_NOT_BELONG_COMPANY, IS_FINALIZED, SKU_DISTRIBUTION_DISABLED, SUPPLY_IS_NOT_EMPTY, OPERATION_NOT_FOUND, OPERATION_FAILED) и `errors.items_validation[]{barcode, cargo_key, quant}`.
 Пример живого запроса, принятого с первой попытки:
@@ -669,7 +669,7 @@
 ### 2. POST /v2/cargoes/create/info — чтение
 Запрос: `operation_id` (string, единственное поле).
 Ответ: `status` (STATUS_UNSPECIFIED / SUCCESS / IN_PROGRESS / FAILED), `result.cargoes[].key` (ваш ключ), `result.cargoes[].value.cargo_id` (int64, номер коробки от Ozon).
-Сопоставление своих коробок с номерами Ozon — по полю `key`.
+Сопоставление своих коробок с номерами Ozon — ТОЛЬКО по полю `key`. ПРОВЕРЕНО ВЖИВУЮ 30.07.2026: порядок элементов в `result.cargoes[]` произвольный, на живом прогоне он пришёл обратным (box-3, box-2, box-1), и номера `cargo_id` присвоены тоже наоборот — box-1 получил наибольший номер. Полагаться на порядок массива запрещено.
 `bundle_id` коробки этот метод НЕ возвращает.
 Вживую SUCCESS пришёл с первого опроса, но цикл опроса закладывать обязательно.
 Версия v1 этого метода (`/v1/cargoes/create/info`) отключена 07.11.2025 — не использовать.
@@ -687,7 +687,7 @@
 ### 5. POST /v1/cargoes-label/get — чтение
 Запрос: `operation_id`.
 Ответ: `status` (SUCCESS / IN_PROGRESS / FAILED), `result.file_url`, `result.file_guid` (deprecated).
-БЕЗОПАСНОСТЬ: `file_url` — pre-signed ссылка на S3 с подписью внутри URL. Открывается БЕЗ ключей Ozon кем угодно, живёт 24 часа (`X-Amz-Expires=86400`). Имя файла `tag_<cargo_id>.pdf`. Ссылку нельзя сохранять в базу, писать в журналы и передавать в переписке — она сама себе пропуск.
+БЕЗОПАСНОСТЬ: `file_url` — pre-signed ссылка на S3 с подписью внутри URL. Открывается БЕЗ ключей Ozon кем угодно, живёт 24 часа (`X-Amz-Expires=86400`). Имя файла зависит от запроса: если `cargoes[]` передан, файл называется `tag_<cargo_id>.pdf`; если `cargoes[]` не передан и этикетки печатаются на всю поставку, файл называется `<supply_id>.pdf`. Проверено вживую 30.07.2026: на трёх грузоместах пришёл один PDF на 3 страницы, 83 874 байта, по одной этикетке на коробку. Ссылку нельзя сохранять в базу, писать в журналы и передавать в переписке — она сама себе пропуск.
 Старый метод `GET /v1/cargoes-label/file/{file_guid}` отключён 10.04.2026 — не использовать.
 
 ### 6. POST /v1/cargoes/rules/get — чтение
