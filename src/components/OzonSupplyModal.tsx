@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { buildCargoPlan, buildBoxesPayload } from '../lib/ozonCargo';
 import { X, AlertTriangle, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -26,6 +27,7 @@ interface OzonSupplyModalProps {
 }
 
 const REQUEST_TIMEOUT_SEC = 60;
+const FINALIZE_TIMEOUT_SEC = 180; // достройка идёт по каждому кластеру, минуты не хватает
 
 export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   isOpen, onClose, rows, cabinet, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated
@@ -45,6 +47,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const [dirty, setDirty] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(REQUEST_TIMEOUT_SEC);
   const [timedOut, setTimedOut] = useState(false);
+  const [progressText, setProgressText] = useState('');
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -61,12 +64,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       setDirty(false);
       setSecondsLeft(REQUEST_TIMEOUT_SEC);
       setTimedOut(false);
+      setProgressText('');
     }
   }, [isOpen]);
 
   // Обратный отсчёт во время работы с Ozon
   useEffect(() => {
-    if (!sending) return;
+    if (!sending || progressText) return;
     setSecondsLeft(REQUEST_TIMEOUT_SEC);
     setTimedOut(false);
     const id = setInterval(() => {
@@ -80,7 +84,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       });
     }, 1000);
     return () => clearInterval(id);
-  }, [sending]);
+  }, [sending, progressText]);
 
   const getQty = (r: SupplyPlanRow) => {
     const v = qtyEdit[rowKey(r)];
@@ -262,10 +266,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   };
 
   /** fetch с жёстким обрывом по таймауту, чтобы модалка не висела вечно */
-  const fetchWithTimeout = async (url: string, body: string) => {
+  const fetchWithTimeout = async (url: string, body: string, timeoutSec: number = REQUEST_TIMEOUT_SEC) => {
     const controller = new AbortController();
     abortRef.current = controller;
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_SEC * 1000);
+    const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -294,7 +298,85 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     onClose();
   };
 
-  const sendOrder = async (useDraftId: string, clusterIds: string[]) => {
+  /**
+   * Автоматическая достройка заявки после её создания: грузоместа, этикетки,
+   * файлы состава и папка документов на Google Диске. Дополнительных кнопок нет.
+   * Раскладка считается по составу, который подтвердил пользователь, то есть по
+   * accepted из вердикта Ozon, а не по исходному плану.
+   */
+  const finalizeSupply = async (orderId: string, verdictData: any) => {
+    const clustersOut: any[] = [];
+    const zones: Record<string, string> = {};
+    const articleSet: Record<string, boolean> = {};
+
+    for (const c of (verdictData?.clusters || [])) {
+      const accepted = Array.isArray(c?.accepted) ? c.accepted : [];
+      const items = accepted.map((it: any) => ({
+        offerId: String(it?.offerId || ''),
+        barcode: String(it?.barcode || ''),
+        quantity: Number(it?.quantity) || 0
+      }));
+      for (const it of accepted) {
+        const bc = String(it?.barcode || '');
+        if (bc) zones[bc] = String(it?.placementZone || '');
+      }
+      const plan = buildCargoPlan(items, skus);
+      for (const b of plan.boxes) articleSet[b.article] = true;
+      clustersOut.push({
+        clusterId: String(c?.clusterId || ''),
+        clusterName: String(c?.clusterName || ''),
+        boxes: buildBoxesPayload(plan)
+      });
+    }
+
+    setProgressText('Создаю грузоместа и этикетки в Ozon…');
+
+    let fin: any;
+    try {
+      fin = await fetchWithTimeout('/api/ozon/supply/finalize', proxyBody({
+        cabinet,
+        orderId,
+        clusters: clustersOut,
+        zones
+      }), FINALIZE_TIMEOUT_SEC);
+    } catch (e: any) {
+      const reason = e?.name === 'AbortError' ? 'Ozon не ответил вовремя' : (e?.message || 'ошибка сети');
+      toast.error('Заявка создана, но грузоместа не отправлены: ' + reason + '. Заполните их в Ozon Seller.');
+      return;
+    }
+
+    if (fin?.status !== 'success') {
+      toast.error('Заявка создана, но грузоместа не отправлены: ' + (fin?.message || 'ошибка прокси') + '. Заполните их в Ozon Seller.');
+      return;
+    }
+
+    const warnings: string[] = Array.isArray(fin.data?.warnings) ? fin.data.warnings : [];
+    for (const w of warnings) toast.error(w);
+
+    setProgressText('Складываю файлы на Google Диск…');
+
+    try {
+      const gas = await fetchGas('saveSupplyDocsToDrive', {
+        data: {
+          folderName: String(fin.data?.folderName || ''),
+          files: Array.isArray(fin.data?.files) ? fin.data.files : [],
+          articles: Object.keys(articleSet)
+        }
+      });
+      const res = gas?.data || gas;
+      const problems: string[] = Array.isArray(res?.problems) ? res.problems : [];
+      const missing: string[] = Array.isArray(res?.missingLabels) ? res.missingLabels : [];
+      for (const p of problems) toast.error(p);
+      if (missing.length > 0) {
+        toast.error('Нет этикеток ШК для: ' + missing.join(', ') + '. Положите их в папку-библиотеку на Google Диске.');
+      }
+      toast.success('Папка «' + String(res?.folderName || '') + '» собрана на Google Диске');
+    } catch (e: any) {
+      toast.error('Файлы не сложены на Диск: ' + (e?.message || 'ошибка') + '. Скачайте их из Ozon Seller вручную.');
+    }
+  };
+
+  const sendOrder = async (useDraftId: string, clusterIds: string[], verdictData: any) => {
     let result: any;
     try {
       result = await fetchWithTimeout('/api/ozon/supply/create', proxyBody({
@@ -344,7 +426,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       console.error('Не удалось записать заявку в журнал:', e);
     }
 
-    toast.success('Заявка создана в Ozon. Номер: ' + orderId + '. Грузоместа заполните в Ozon Seller.');
+    toast.success('Заявка создана в Ozon. Номер: ' + orderId);
+    await finalizeSupply(orderId, verdictData);
+    setProgressText('');
     onCreated();
     onClose();
   };
@@ -412,10 +496,14 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       return;
     }
 
-    await sendOrder(String(data.draftId || ''), clusterIds);
+    await sendOrder(String(data.draftId || ''), clusterIds, data);
   };
 
   const handlePrimary = async () => {
+    if (noBoxNormRows.length > 0) {
+      toast.error('Не задано количество в коробке для артикулов: ' + noBoxNormRows.join(', ') + '. Заполните «Штук в коробке» в SKU Базе — без этого грузоместа не разложить.');
+      return;
+    }
     if (!verdict) {
       await runDraft(true);
       return;
@@ -426,7 +514,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     }
     setSending(true);
     const clusterIds = (verdict.clusters || []).map((c: any) => String(c.clusterId));
-    await sendOrder(draftId, clusterIds);
+    await sendOrder(draftId, clusterIds, verdict);
   };
 
   const primaryLabel = !verdict ? 'Оформить заявку в Ozon' : dirty ? 'Пересчитать в Ozon' : 'Создать заявку в этом составе';
@@ -461,6 +549,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-2">
+                  {progressText ? (
+                    <>
+                      <div className="text-sm font-bold text-indigo-700">Заявка создана. Достраиваю поставку…</div>
+                      <div className="text-xs text-slate-500">{progressText}</div>
+                      <div className="text-xs text-slate-400">Не закрывайте окно</div>
+                    </>
+                  ) : null}
                   <div className="text-slate-500 font-medium">Работаем с Ozon…</div>
                   <div className="text-3xl font-bold text-indigo-600 tabular-nums">{secondsLeft}</div>
                   <div className="text-xs text-slate-400">секунд до истечения ожидания</div>
