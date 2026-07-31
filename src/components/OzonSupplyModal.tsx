@@ -351,7 +351,6 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     }
 
     const warnings: string[] = Array.isArray(fin.data?.warnings) ? fin.data.warnings : [];
-    for (const w of warnings) toast.error(w);
 
     setProgressText('Складываю файлы на Google Диск…');
 
@@ -366,13 +365,21 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       const res = gas?.data || gas;
       const problems: string[] = Array.isArray(res?.problems) ? res.problems : [];
       const missing: string[] = Array.isArray(res?.missingLabels) ? res.missingLabels : [];
-      for (const p of problems) toast.error(p);
-      if (missing.length > 0) {
-        toast.error('Нет этикеток ШК для: ' + missing.join(', ') + '. Положите их в папку-библиотеку на Google Диске.');
-      }
+
       toast.success('Папка «' + String(res?.folderName || '') + '» собрана на Google Диске');
+
+      // Предупреждения показываем ПОСЛЕ успеха и держим дольше: иначе зелёный тост
+      // накрывает их сверху и пользователь ничего не замечает
+      const allWarnings: string[] = warnings.concat(problems);
+      if (missing.length > 0) {
+        allWarnings.push('Нет этикеток ШК для: ' + missing.join(', ') + '. Положите их в папку-библиотеку на Google Диске.');
+      }
+      allWarnings.forEach((w, i) => {
+        setTimeout(() => toast.error(w, { duration: 15000 }), 400 * (i + 1));
+      });
     } catch (e: any) {
-      toast.error('Файлы не сложены на Диск: ' + (e?.message || 'ошибка') + '. Скачайте их из Ozon Seller вручную.');
+      for (const w of warnings) toast.error(w, { duration: 15000 });
+      toast.error('Файлы не сложены на Диск: ' + (e?.message || 'ошибка') + '. Скачайте их из Ozon Seller вручную.', { duration: 15000 });
     }
   };
 

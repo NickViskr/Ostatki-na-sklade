@@ -3055,6 +3055,79 @@ function checkSupplyAvailability(data) {
   return { items: result, checkedAt: new Date().toISOString() };
 }
 
+/**
+ * Закрывает строки журнала «Заявки Ozon» по фактическому состоянию поставок.
+ * Если у заявки есть строки во «Внешних отгрузках» и ВСЕ они в терминальном статусе,
+ * заявка больше не приведёт к поставке — журналу проставляется соответствующий статус.
+ * Нужно для заявок, отменённых уже после того, как их начали отслеживать: опрос их
+ * повторно не запрашивает, и без этой функции они вечно числились бы созданными.
+ * Ozon не опрашивается: работаем только по данным, которые уже лежат в базе.
+ * На остатки, себестоимость и капитализацию не влияет.
+ */
+function syncOzonJournalFromShipments() {
+  const TERMINAL_LABELS = {
+    'CANCELLED': 'Отменена',
+    'OVERDUE': 'Просрочена',
+    'REJECTED_AT_SUPPLY_WAREHOUSE': 'Отказано'
+  };
+
+  const shSheet = getExternalShipmentsSheet();
+  const shLast = shSheet.getLastRow();
+  if (shLast < 2) return 0;
+
+  const shHeaders = shSheet.getRange(1, 1, 1, shSheet.getLastColumn()).getValues()[0];
+  const sOrder = shHeaders.indexOf('OrderID');
+  const sOzon = shHeaders.indexOf('Статус Ozon');
+  if (sOrder < 0 || sOzon < 0) return 0;
+
+  const shValues = shSheet.getRange(2, 1, shLast - 1, shSheet.getLastColumn()).getValues();
+  const byOrder = {};
+
+  for (var k = 0; k < shValues.length; k++) {
+    const oid = String(shValues[k][sOrder] || '').trim();
+    if (!oid) continue;
+    const st = String(shValues[k][sOzon] || '').trim().toUpperCase();
+    if (!byOrder[oid]) byOrder[oid] = { allTerminal: true, label: '' };
+    if (!TERMINAL_LABELS[st]) {
+      byOrder[oid].allTerminal = false;
+    } else if (!byOrder[oid].label) {
+      byOrder[oid].label = TERMINAL_LABELS[st];
+    }
+  }
+
+  const ss = getSpreadsheet();
+  const reqSheet = getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  const reqLast = reqSheet.getLastRow();
+  if (reqLast < 2) return 0;
+
+  const reqHeaders = reqSheet.getRange(1, 1, 1, reqSheet.getLastColumn()).getValues()[0];
+  const cOrder = reqHeaders.indexOf('OrderID');
+  const cStatus = reqHeaders.indexOf('Статус');
+  if (cOrder < 0 || cStatus < 0) return 0;
+
+  const reqValues = reqSheet.getRange(2, 1, reqLast - 1, reqSheet.getLastColumn()).getValues();
+  const statusColumn = [];
+  var closed = 0;
+
+  for (var r = 0; r < reqValues.length; r++) {
+    var st2 = String(reqValues[r][cStatus] || '').trim();
+    const oid2 = String(reqValues[r][cOrder] || '').trim();
+    const info = oid2 ? byOrder[oid2] : null;
+
+    if (st2 === 'Создана' && info && info.allTerminal && info.label) {
+      st2 = info.label;
+      closed++;
+    }
+    statusColumn.push([st2]);
+  }
+
+  if (closed > 0) {
+    reqSheet.getRange(2, cStatus + 1, reqLast - 1, 1).setValues(statusColumn);
+  }
+
+  return closed;
+}
+
 /** Сколько дней хранить отменённые заявки, прежде чем удалить их из базы. */
 const OZON_CANCELLED_KEEP_DAYS = 28;
 
@@ -3171,6 +3244,10 @@ function applyCancelledOzonOrders(data) {
       }
     }
   }
+
+  // Закрываем журнал по фактическому состоянию поставок: заявки, отменённые уже
+  // после начала отслеживания, опрос повторно не запрашивает
+  result.closedFromShipments = syncOzonJournalFromShipments();
 
   return result;
 }
