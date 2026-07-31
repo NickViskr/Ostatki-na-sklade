@@ -459,7 +459,7 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'dropOffWarehouseName', value: '', desc: 'Название точки отгрузки Ozon' },
   { key: 'dropOffWarehouseType', value: '', desc: 'Тип точки отгрузки: SORTING_CENTER, CROSS_DOCK, FULL_FILLMENT, DELIVERY_POINT, ORDERS_RECEIVING_POINT' },
   { key: 'supplyDocsFolderId',    value: '1hTJPqJrkV7qC4YuUi2qm_-_9y9iDjnFe', desc: 'ID родительской папки Google Диска для документов заявок на поставку' },
-  { key: 'supplyDocsLabelsFolder', value: 'ШК озон для автоматизации', desc: 'Имя подпапки для этикеток коробок поставки' }
+  { key: 'supplyDocsLabelsFolder', value: 'ШК озон для автоматизации', desc: 'Имя папки-библиотеки с этикетками ШК товаров внутри родительской папки, файлы называются Артикул.pdf' }
 ];
 const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType', 'supplyDocsFolderId', 'supplyDocsLabelsFolder'];
 const OZON_DROPOFF_TYPES = ['SORTING_CENTER', 'CROSS_DOCK', 'FULL_FILLMENT', 'DELIVERY_POINT', 'ORDERS_RECEIVING_POINT'];
@@ -3131,27 +3131,31 @@ function extFromContentType(contentType) {
 }
 
 /**
- * Скачивает файлы документов заявки на поставку с Ozon-прокси и сохраняет на Google Диск.
- * Структура на Диске:
- *   [Родительская папка]/Заявка_[orderId]_[orderNumber]/
- *     - [supplyDocsLabelsFolder]/labels_[supplyId]_[orderId].pdf (или ZIP)
- *     - [ИмяФайлаИзHeaders] (акт / накладная)
+ * Собирает папку документов заявки на поставку на Google Диске (пункт 24 плана).
+ * Прокси уже сходил в Ozon: собрал файлы состава и получил ссылки на этикетки
+ * грузомест. Apps Script только раскладывает готовое по папкам, сам в Ozon не ходит.
+ * Структура: [Родительская папка]/Озон <номер заявки>/
+ *   - <Кластер>.xlsx — состав грузомест, приходит в base64
+ *   - файл этикеток грузомест — качается по ссылке Ozon, имя даёт Ozon, не переименовывать
+ *   - <Артикул>.pdf — этикетки ШК товаров, копируются из папки-библиотеки
+ * Папка-библиотека лежит в РОДИТЕЛЬСКОЙ папке, а не внутри папки заявки.
+ * Ссылки Ozon действуют 24 часа и открываются без ключей — в журналы их не писать.
  *
- * @param {Object} data { postingId, orderId, orderNumber, supplyId }
- * @returns {Object} { status: 'success', folderUrl, folderId, savedFilesCount, savedFiles }
+ * @param {Object} data { folderName, files, articles }
+ * @returns {Object} { folderName, folderUrl, saved, missingLabels, problems }
  */
 function saveSupplyDocsToDrive(data) {
   if (!data || typeof data !== 'object') {
-    throw new Error('Данные для сохранения документов не переданы');
+    throw new Error('Данные для сборки папки не переданы');
   }
-  const postingId = String(data.postingId || '').trim();
-  const orderId = String(data.orderId || '').trim();
-  const orderNumber = String(data.orderNumber || '').trim();
-  const supplyId = String(data.supplyId || '').trim();
 
-  if (!postingId) {
-    throw new Error('Параметр postingId обязателен');
+  const folderName = sanitizeDriveName(data.folderName);
+  if (!folderName) {
+    throw new Error('Не передано имя папки заявки');
   }
+
+  const files = Array.isArray(data.files) ? data.files : [];
+  const articles = Array.isArray(data.articles) ? data.articles : [];
 
   const settings = getOzonSettings();
   const rootFolderId = String(settings.supplyDocsFolderId || '').trim();
@@ -3166,80 +3170,82 @@ function saveSupplyDocsToDrive(data) {
     throw new Error('Не удалось открыть родительскую папку Google Диска ID ' + rootFolderId + ': ' + e.toString());
   }
 
-  const folderName = 'Заявка_' + (orderId || postingId) + (orderNumber ? ('_' + orderNumber) : '');
   const targetFolder = getOrCreateChildFolder(rootFolder, folderName);
+  const saved = [];
+  const problems = [];
 
-  const labelsSubfolderName = String(settings.supplyDocsLabelsFolder || 'ШК озон для автоматизации').trim();
-  const labelsFolder = labelsSubfolderName ? getOrCreateChildFolder(targetFolder, labelsSubfolderName) : targetFolder;
-
-  const sessionToken = PropertiesService.getScriptProperties().getProperty('server_sessionToken') || '';
-
-  const urlsToFetch = [
-    { type: 'labels', path: '/api/ozon/cargoes/labels', folder: labelsFolder, fallback: 'labels_' + (supplyId || orderId || postingId) },
-    { type: 'act', path: '/api/ozon/supply/act', folder: targetFolder, fallback: 'act_' + (orderId || postingId) },
-    { type: 'waybill', path: '/api/ozon/supply/waybill', folder: targetFolder, fallback: 'waybill_' + (orderId || postingId) }
-  ];
-
-  const savedFiles = [];
-
-  for (let i = 0; i < urlsToFetch.length; i++) {
-    const item = urlsToFetch[i];
-    const fullUrl = PROXY_URL + item.path;
-
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i] || {};
+    const label = String(f.name || f.fallbackName || 'файл');
     try {
-      const response = UrlFetchApp.fetch(fullUrl, {
-        method: 'post',
-        contentType: 'application/json',
-        payload: JSON.stringify({
-          postingId: postingId,
-          orderId: orderId,
-          supplyId: supplyId,
-          sessionToken: sessionToken
-        }),
-        muteHttpExceptions: true
-      });
-
-      const code = response.getResponseCode();
-      if (code < 200 || code >= 300) {
-        Logger.log('Не удалось скачать ' + item.type + ' (' + code + '): ' + response.getContentText().slice(0, 200));
-        continue;
-      }
-
-      const blob = response.getBlob();
-      const headers = response.getAllHeaders();
-      const dispHeader = headers['Content-Disposition'] || headers['content-disposition'] || '';
-      let fileName = nameFromDisposition(dispHeader, '');
-
-      if (!fileName) {
+      if (f.kind === 'base64') {
+        const xlsName = sanitizeDriveName(f.name);
+        if (!xlsName) {
+          problems.push('Файл состава без имени пропущен');
+          continue;
+        }
+        const xlsBlob = Utilities.newBlob(Utilities.base64Decode(String(f.content || '')), MimeType.MICROSOFT_EXCEL, xlsName);
+        replaceFileInFolder(targetFolder, xlsName, xlsBlob);
+        saved.push(xlsName);
+      } else if (f.kind === 'url') {
+        const response = UrlFetchApp.fetch(String(f.url || ''), { muteHttpExceptions: true, followRedirects: true });
+        const code = response.getResponseCode();
+        if (code < 200 || code >= 300) {
+          problems.push('Этикетки грузомест (' + label + '): Ozon ответил HTTP ' + code);
+          continue;
+        }
+        const blob = response.getBlob();
+        const headers = response.getAllHeaders();
+        const disp = headers['Content-Disposition'] || headers['content-disposition'] || '';
         const ct = headers['Content-Type'] || headers['content-type'] || blob.getContentType();
-        const ext = extFromContentType(ct);
-        fileName = item.fallback + ext;
+        const fallback = sanitizeDriveName(f.fallbackName) + extFromContentType(ct);
+        const fileName = sanitizeDriveName(nameFromDisposition(disp, fallback));
+        if (!fileName) {
+          problems.push('Этикетки грузомест: не удалось определить имя файла');
+          continue;
+        }
+        replaceFileInFolder(targetFolder, fileName, blob);
+        saved.push(fileName);
       } else {
-        fileName = sanitizeDriveName(fileName);
+        problems.push('Неизвестный тип файла: ' + String(f.kind));
       }
-
-      const createdFile = replaceFileInFolder(item.folder, fileName, blob);
-      savedFiles.push({
-        type: item.type,
-        fileName: fileName,
-        fileId: createdFile.getId(),
-        fileUrl: createdFile.getUrl()
-      });
     } catch (e) {
-      Logger.log('Ошибка при загрузке ' + item.type + ': ' + e.toString());
+      problems.push('Файл ' + label + ': ' + e.toString());
     }
   }
 
-  if (savedFiles.length === 0) {
-    throw new Error('Не удалось скачать ни одного документа из Ozon. Проверьте готовность документов и логи.');
+  const labelsFolderName = String(settings.supplyDocsLabelsFolder || '').trim() || 'ШК озон для автоматизации';
+  const missingLabels = [];
+  const libIt = rootFolder.getFoldersByName(labelsFolderName);
+
+  if (!libIt.hasNext()) {
+    problems.push('Папка «' + labelsFolderName + '» не найдена в родительской папке — этикетки ШК товаров не скопированы');
+  } else {
+    const lib = libIt.next();
+    for (let a = 0; a < articles.length; a++) {
+      const art = sanitizeDriveName(articles[a]);
+      if (!art) continue;
+      const wanted = art + '.pdf';
+      const fit = lib.getFilesByName(wanted);
+      if (!fit.hasNext()) {
+        missingLabels.push(wanted);
+        continue;
+      }
+      try {
+        replaceFileInFolder(targetFolder, wanted, fit.next().getBlob());
+        saved.push(wanted);
+      } catch (e2) {
+        problems.push('Этикетка ' + wanted + ': ' + e2.toString());
+      }
+    }
   }
 
   return {
-    status: 'success',
+    folderName: folderName,
     folderUrl: targetFolder.getUrl(),
-    folderId: targetFolder.getId(),
-    savedFilesCount: savedFiles.length,
-    savedFiles: savedFiles
+    saved: saved,
+    missingLabels: missingLabels,
+    problems: problems
   };
 }
 
