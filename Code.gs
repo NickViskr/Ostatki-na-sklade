@@ -311,7 +311,7 @@ function doPost(e) {
         result = deleteSku(payload.sku, currentUser.username);
         break;
       case 'commit':
-        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username);
+        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId);
         break;
       case 'getGlobalSettings':
         if (sessionToken && !currentUser) {
@@ -898,7 +898,7 @@ function getTransactionSheet(ss) {
     finalSheet = sheet1 || sheet2;
   }
   if (finalSheet) {
-    ensureColumns(finalSheet, ['groupId', 'isComponent']);
+    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID']);
   }
   return finalSheet;
 }
@@ -1444,12 +1444,55 @@ function isWriteOffDestination(dest) {
   return String(dest || '').indexOf('Списание') !== -1;
 }
 
-function commitTransaction(data, type, destination, deliveryDate, username, originalDate) {
+/**
+ * Пункт 28, этап A. Ищет в листе истории строки с указанным ключом операции.
+ * Сначала читает только колонку ключей, полные строки дочитывает лишь при совпадении.
+ * Возвращает массив разобранных транзакций; пустой массив — ключ ещё не встречался.
+ */
+function findTransactionsByOpId(transSheet, opIdStr) {
+  if (!transSheet || !opIdStr) return [];
+  const lastRow = transSheet.getLastRow();
+  const lastCol = transSheet.getLastColumn();
+  if (lastRow <= 1 || lastCol === 0) return [];
+  const headers = transSheet.getRange(1, 1, 1, lastCol).getValues()[0]
+    .map(function(h) { return String(h).trim(); });
+  const opIdx = headers.indexOf('OpID');
+  if (opIdx === -1) return [];
+  const keys = transSheet.getRange(2, opIdx + 1, lastRow - 1, 1).getValues();
+  const hitRows = [];
+  for (let i = 0; i < keys.length; i++) {
+    if (String(keys[i][0]).trim() === opIdStr) hitRows.push(i + 2);
+  }
+  if (hitRows.length === 0) return [];
+  const found = [];
+  for (let j = 0; j < hitRows.length; j++) {
+    const row = transSheet.getRange(hitRows[j], 1, 1, lastCol).getValues()[0];
+    found.push(parseTransactionRow(row, headers));
+  }
+  return found;
+}
+
+function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId) {
   const items = Array.isArray(data) ? data : [data];
   const dateStr = originalDate || new Date().toISOString();
   const ss = getSpreadsheet();
   const transSheet = getTransactionSheet(ss);
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
+
+  // Пункт 28, этап A: защита от двойного проведения одной и той же операции.
+  // Выполняется внутри замка, который doPost захватывает до switch.
+  const opIdStr = String(opId || '').trim();
+  if (opIdStr) {
+    const alreadyWritten = findTransactionsByOpId(transSheet, opIdStr);
+    if (alreadyWritten.length > 0) {
+      return {
+        stock: getStock(),
+        newTransactions: alreadyWritten,
+        skus: getSkus(),
+        idempotentHit: true
+      };
+    }
+  }
   
   const stockData = stockSheet.getDataRange().getValues();
   const stockMap = {};
@@ -1694,6 +1737,15 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
   });
 
   if (rowsToAppend.length > 0) {
+    if (opIdStr) {
+      const opColIdx = getTransColIndex(transSheet, 'OpID');
+      if (opColIdx >= 0) {
+        for (let r = 0; r < rowsToAppend.length; r++) {
+          while (rowsToAppend[r].length <= opColIdx) rowsToAppend[r].push('');
+          rowsToAppend[r][opColIdx] = opIdStr;
+        }
+      }
+    }
     const startRow = transSheet.getLastRow() + 1;
     transSheet.getRange(startRow, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
     SpreadsheetApp.flush();
