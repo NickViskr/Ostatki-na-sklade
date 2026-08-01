@@ -13,7 +13,7 @@ import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, newOperationId } from '../lib/utils';
 
 interface PendingItem {
   article: string;
@@ -22,6 +22,13 @@ interface PendingItem {
 }
 
 export const ManualTab: React.FC = React.memo(() => {
+  // Пункт 28, этап B: ключ операции рождается при первом нажатии кнопки
+  // и очищается только после успеха, поэтому повтор после ошибки идёт с тем же ключом.
+  const opIdRef = useRef('');
+  const takeOpId = () => {
+    if (!opIdRef.current) opIdRef.current = newOperationId();
+    return opIdRef.current;
+  };
   const stock = useWarehouseStore((state) => state.stock);
   const skus = useWarehouseStore((state) => state.skus);
   const kits = useWarehouseStore((state) => state.kits);
@@ -174,13 +181,14 @@ export const ManualTab: React.FC = React.memo(() => {
 
       let ok = true;
       if (incomingItems.length > 0) {
-        ok = await commitTransaction(incomingItems, 'Приход', labeledDestination, deliveryDate);
+        ok = await commitTransaction(incomingItems, 'Приход', labeledDestination, deliveryDate, takeOpId() + ':in');
       }
       if (ok && outgoingItems.length > 0) {
-        ok = await commitTransaction(outgoingItems, 'Расход', labeledDestination, deliveryDate);
+        ok = await commitTransaction(outgoingItems, 'Расход', labeledDestination, deliveryDate, takeOpId() + ':out');
       }
 
       if (ok === true) {
+        opIdRef.current = '';
         setPendingItems([]);
         setManualForm({
           ...manualForm,
@@ -217,10 +225,12 @@ export const ManualTab: React.FC = React.memo(() => {
       parsedItems,
       standardType,
       labeledDestination,
-      deliveryDate
+      deliveryDate,
+      takeOpId()
     );
     
     if (success) {
+      opIdRef.current = '';
       setPendingItems([]);
       setManualForm({
         ...manualForm,

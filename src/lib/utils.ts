@@ -44,3 +44,18 @@ export const parseAppDate = (raw?: string | null): Date | null => {
   const d = new Date(s);
   return isNaN(d.getTime()) ? null : d;
 };
+
+/**
+ * Пункт 28, этап B. Ключ операции для защиты от двойного проведения.
+ * Один ключ = одна операция, сколько бы раз её ни отправили повторно.
+ */
+export const newOperationId = (): string => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Переходим к запасному варианту ниже
+  }
+  return 'op-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+};

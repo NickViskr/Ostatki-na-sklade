@@ -75,7 +75,7 @@ interface WarehouseState {
   handleUpdateService: (id: string, name: string, cost: number, isActive: boolean) => Promise<boolean>;
   handleDeleteService: (id: string) => Promise<boolean>;
   handleAddServiceRate: (serviceId: string, cost: number, validFrom: string) => Promise<boolean>;
-  commitTransaction: (items: ParsedItem[], type: string, destination: string, deliveryDate?: string) => Promise<boolean>;
+  commitTransaction: (items: ParsedItem[], type: string, destination: string, deliveryDate?: string, opId?: string) => Promise<boolean>;
   handleDeleteTransaction: (id: string) => Promise<boolean>;
   handleDeleteMultipleTransactions: (ids: string[]) => Promise<boolean>;
   handleUpdateTransaction: (id: string, data: Transaction) => Promise<boolean>;
@@ -528,7 +528,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     }
   },
 
-  commitTransaction: async (items, type, destination, deliveryDate = '') => {
+  commitTransaction: async (items, type, destination, deliveryDate = '', opId = '') => {
     const { notificationEmail } = useSettingsStore.getState();
     
     if (type === 'Расход') {
@@ -574,6 +574,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     set({ isProcessing: true });
     try {
       const result = await get().fetchGas('commit', {
+        opId,
         data: items, 
         type, 
         destination,
@@ -598,7 +599,11 @@ export const useWarehouseStore = create<WarehouseState>()(
           };
         });
         
-        toast.success('Операция успешно записана в Google Таблицу!');
+        if (payloadData.idempotentHit) {
+          toast.success('Эта операция уже была записана ранее — повтор не создан');
+        } else {
+          toast.success('Операция успешно записана в Google Таблицу!');
+        }
         
         const pendingOzonPostingIds = get().pendingOzonPostingIds;
         if (pendingOzonPostingIds.length > 0) {

@@ -13,11 +13,14 @@ import {
 } from "lucide-react";
 import { useWarehouseStore } from "../store/useWarehouseStore";
 import { useUIStore } from "../store/useUIStore";
-import { formatCurrency } from "../lib/utils";
+import { formatCurrency, newOperationId } from "../lib/utils";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { toast } from "sonner";
 
 export const ConfirmModal: React.FC = () => {
+  // Пункт 28, этап B: ключ операции рождается один раз при открытии окна
+  // и не меняется при повторных нажатиях кнопки подтверждения.
+  const opIdRef = useRef(newOperationId());
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const commitTransaction = useWarehouseStore(
     (state) => state.commitTransaction,
@@ -496,6 +499,7 @@ export const ConfirmModal: React.FC = () => {
       opType,
       finalDestination,
       deliveryDate,
+      opIdRef.current,
     );
     if (success) {
       setShowConfirmModal(false);
