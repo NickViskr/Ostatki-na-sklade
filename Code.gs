@@ -312,6 +312,15 @@ function doPost(e) {
         break;
       case 'commit':
         result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId);
+        // Пункт 28, этап C: привязка поставок Ozon выполняется здесь же, внутри замка.
+        // Ошибка привязки не отменяет уже записанный расход — она возвращается клиенту как предупреждение.
+        if (result && payload.postingIds && payload.postingIds.length > 0) {
+          try {
+            result.postingsLink = linkPostingsToCommit(payload.postingIds, result.newTransactions);
+          } catch (linkErr) {
+            result.postingsLink = { linked: 0, error: String(linkErr) };
+          }
+        }
         break;
       case 'getGlobalSettings':
         if (sessionToken && !currentUser) {
@@ -4535,6 +4544,57 @@ function getExternalShipments() {
     });
   }
   return shipments;
+}
+
+/**
+ * Пункт 28, этап C. Помечает поставки Ozon обработанными и записывает им привязку
+ * к транзакциям только что проведённого расхода. Вызывается внутри той же операции
+ * commit, поэтому связь не теряется при обрыве связи с клиентом.
+ * Лист читается один раз на все поставки, а не по разу на каждую.
+ */
+function linkPostingsToCommit(postingIds, newTransactions) {
+  const ids = (postingIds || [])
+    .map(function(p) { return String(p).trim(); })
+    .filter(function(p) { return p !== ''; });
+  if (ids.length === 0) return null;
+
+  const txIds = [];
+  (newTransactions || []).forEach(function(t) {
+    if (t && !t.isComponent && t.id && txIds.indexOf(String(t.id)) === -1) {
+      txIds.push(String(t.id));
+    }
+  });
+  const linkInfo = JSON.stringify(txIds);
+
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const statusIdx = headers.indexOf('Статус');
+  const transGroupInfoIdx = headers.indexOf('TransGroupInfo');
+  if (postingIdIdx === -1 || statusIdx === -1) {
+    return { linked: 0, notFound: ids, txIds: txIds };
+  }
+
+  const pending = {};
+  ids.forEach(function(p) { pending[p.toLowerCase()] = p; });
+
+  let linked = 0;
+  for (let i = 1; i < data.length; i++) {
+    const cur = String(data[i][postingIdIdx]).trim().toLowerCase();
+    if (pending[cur]) {
+      sheet.getRange(i + 1, statusIdx + 1).setValue('processed');
+      if (transGroupInfoIdx >= 0) {
+        sheet.getRange(i + 1, transGroupInfoIdx + 1).setValue(linkInfo);
+      }
+      linked++;
+      delete pending[cur];
+    }
+  }
+  SpreadsheetApp.flush();
+
+  const notFound = Object.keys(pending).map(function(k) { return pending[k]; });
+  return { linked: linked, notFound: notFound, txIds: txIds };
 }
 
 function updateExternalShipmentStatus(postingId, status, transGroupInfo) {
