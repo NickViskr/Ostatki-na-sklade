@@ -404,6 +404,17 @@ export const ConfirmModal: React.FC = () => {
 
   const [commitError, setCommitError] = useState<string | null>(null);
   const [isCheckingResult, setIsCheckingResult] = useState<boolean>(false);
+  // Пункт 28, этап D. Через 20 секунд ожидания показываем, что операция ещё идёт.
+  // Главная причина аварии 01.08.2026 — человек не понимал, живо ли приложение, ижал второй раз.
+  const [isSlowRunning, setIsSlowRunning] = useState<boolean>(false);
+  useEffect(() => {
+    if (!isProcessing) {
+      setIsSlowRunning(false);
+      return;
+    }
+    const slowTimer = setTimeout(() => setIsSlowRunning(true), 20000);
+    return () => clearTimeout(slowTimer);
+  }, [isProcessing]);
 
   const isConfirmDisabled =
     isProcessing ||
@@ -1032,6 +1043,13 @@ export const ConfirmModal: React.FC = () => {
             <span>
               Укажите себестоимость: приход нельзя провести с нулевой ценой. Позиций без цены: {zeroPriceIndexes.length}.
             </span>
+          </div>
+        )}
+
+        {isProcessing && isSlowRunning && !commitError && (
+          <div className="mx-8 mb-4 p-4 bg-sky-50 border border-sky-200 rounded-2xl text-sky-800 text-sm font-medium flex items-center gap-2">
+            <Loader2 className="animate-spin text-sky-600 shrink-0" size={18} />
+            <span>Операция идёт дольше обычного. Не закрывайте окно и не нажимайте кнопку повторно — запись уже выполняется.</span>
           </div>
         )}
 

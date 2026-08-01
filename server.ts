@@ -237,7 +237,8 @@ async function startServer() {
   const READ_ONLY_ACTIONS = [
     'getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems',
     'verifySession', 'login', 'getGlobalSettings', 'getExternalShipments', 'getOzonSupplyRequests',
-    'getOzonSettings', 'getOzonClusters', 'getOzonSyncStatus', 'getFactoryOrders', 'getGeminiKey', 'getOzonKeys'
+    'getOzonSettings', 'getOzonClusters', 'getOzonSyncStatus', 'getFactoryOrders', 'getGeminiKey', 'getOzonKeys',
+    'getStock', 'getServiceRates', 'getOzonStocks', 'getOzonSales', 'checkSupplyAvailability'
   ];
 
   // API Endpoint to proxy GAS requests
@@ -284,10 +285,18 @@ async function startServer() {
       // 1) Распознавание заглушки doGet
       // 2) Автоповтор до 3 попыток для read-only и commit (идемпотентен по opId)
       // 3) Порог обрыва 300 с для пишущих действий
-      const canRetry = action && (READ_ONLY_ACTIONS.includes(action) || action === 'commit');
+      // Пункт 28, этап D. Повтор действия commit безопасен ТОЛЬКО при наличии ключа операции:
+      // именно ключ не даёт серверу записать вторую копию. Без ключа повтор запрещён —
+      // иначе возвращается авария 01.08.2026 с двойным списанием.
+      const opIdRaw = req.body?.opId;
+      const hasOpId = typeof opIdRaw === 'string' && opIdRaw.trim() !== '';
+      const canRetry = !!action && (READ_ONLY_ACTIONS.includes(action) || (action === 'commit' && hasOpId));
       const maxTries = canRetry ? 3 : 1;
       const isWriteAction = action === 'commit' || (action && !READ_ONLY_ACTIONS.includes(action));
-      const timeoutMs = isWriteAction ? 300_000 : 45_000;
+      // Пункт 28, этап D. Замеры 01.08.2026: обычная запись укладывается в 8 с,
+      // самая долгая наблюдавшаяся — около 30 с. Порог 90 с даёт трёхкратный запас
+      // и при этом не заставляет пользователя ждать ошибку пять минут.
+      const timeoutMs = isWriteAction ? 90_000 : 45_000;
 
       let lastError: any = null;
       let lastRawText = "";
