@@ -234,6 +234,12 @@ async function startServer() {
     return ['getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems'].includes(action);
   }
 
+  const READ_ONLY_ACTIONS = [
+    'getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems',
+    'verifySession', 'login', 'getGlobalSettings', 'getExternalShipments', 'getOzonSupplyRequests',
+    'getOzonSettings', 'getOzonClusters', 'getOzonSyncStatus', 'getFactoryOrders', 'getGeminiKey', 'getOzonKeys'
+  ];
+
   // API Endpoint to proxy GAS requests
   app.post("/api/gas", async (req, res) => {
     try {
@@ -254,10 +260,9 @@ async function startServer() {
         }
       }
 
-      if (action && !isCacheable(action) && action !== 'verifySession' && action !== 'login' && action !== 'getGlobalSettings') {
+      if (action && !READ_ONLY_ACTIONS.includes(action)) {
         gasCache.clear();
       }
-
 
       // Не пропускаем серверные action через клиентский прокси
       const forbiddenActions = ['getGeminiKey', 'getOzonKeys'];
@@ -273,60 +278,105 @@ async function startServer() {
         if (!token) {
           return res.status(401).json({ status: "error", message: "Missing sessionToken" });
         }
-        // Опционально: если токена нет в кэше, он будет проверен в GAS. Если он в кэше — круто.
-        // Если фейковый токен спамит и его нет в кэше, он пойдет в GAS, но мы ограничим IP через rate-limit
       }
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30_000);
-      let gasResponse;
-      try {
-        gasResponse = await fetch(gasUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(req.body),
-          signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-      } catch (err: any) {
-        clearTimeout(timeoutId);
-        if (err.name === 'AbortError') {
-          return res.status(504).json({ status: "error", message: "GAS request timeout (30s)" });
+      // Пункт 28, этап D:
+      // 1) Распознавание заглушки doGet
+      // 2) Автоповтор до 3 попыток для read-only и commit (идемпотентен по opId)
+      // 3) Порог обрыва 300 с для пишущих действий
+      const canRetry = action && (READ_ONLY_ACTIONS.includes(action) || action === 'commit');
+      const maxTries = canRetry ? 3 : 1;
+      const isWriteAction = action === 'commit' || (action && !READ_ONLY_ACTIONS.includes(action));
+      const timeoutMs = isWriteAction ? 300_000 : 45_000;
+
+      let lastError: any = null;
+      let lastRawText = "";
+
+      for (let attempt = 1; attempt <= maxTries; attempt++) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+          const gasResponse = await fetch(gasUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(req.body),
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+
+          const rawText = await gasResponse.text();
+          lastRawText = rawText;
+
+          // Распознавание заглушки doGet и HTML редиректов
+          if (
+            rawText.includes("Google Apps Script Web App is operational") ||
+            rawText.includes("Use POST for API requests") ||
+            rawText.includes("<!DOCTYPE html") ||
+            rawText.includes("<html")
+          ) {
+            console.warn(`Attempt ${attempt}/${maxTries}: GAS returned doGet stub/HTML response for action '${action}'`);
+            if (attempt < maxTries) {
+              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              continue;
+            }
+            return res.status(502).json({
+              status: "error",
+              message: `Google Apps Script returned doGet stub response. Request method may have been altered during redirect.`
+            });
+          }
+
+          let data;
+          try {
+            data = JSON.parse(rawText);
+          } catch (parseErr: any) {
+            console.warn(`Attempt ${attempt}/${maxTries}: GAS returned non-JSON response for action '${action}':`, rawText.substring(0, 300));
+            if (attempt < maxTries) {
+              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              continue;
+            }
+            return res.status(502).json({
+              status: "error",
+              message: `Google Apps Script returned a non-JSON response. Raw response snippet: ${rawText.substring(0, 300)}`
+            });
+          }
+
+          // Если GAS ответил успехом для сессии, сохраняем токен в кэш
+          if (data && data.status === "success") {
+            if (action && isCacheable(action)) {
+              gasCache.set(cacheKey, { data, cachedAt: Date.now() });
+            }
+
+            if (token) cacheToken(token);
+            if (isPublic && data.data?.sessionToken) cacheToken(data.data.sessionToken);
+
+            // Инвалидируем кэш ключа, если настройки были сохранены
+            if (action === "saveGlobalSettings") {
+              cachedApiKey = null;
+              cachedOzonKeys = null;
+              console.log("Кэш API ключей сброшен после сохранения настроек");
+            }
+          }
+
+          return res.json(data);
+        } catch (err: any) {
+          clearTimeout(timeoutId);
+          lastError = err;
+          if (err.name === 'AbortError') {
+            console.warn(`Attempt ${attempt}/${maxTries}: GAS request timeout (${timeoutMs / 1000}s) for action '${action}'`);
+            if (attempt < maxTries) {
+              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              continue;
+            }
+            return res.status(504).json({ status: "error", message: `GAS request timeout (${timeoutMs / 1000}s)` });
+          }
+          if (attempt < maxTries) {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+            continue;
+          }
+          throw err;
         }
-        throw err;
       }
-      
-      let data;
-      const rawText = await gasResponse.text();
-      try {
-        data = JSON.parse(rawText);
-      } catch (parseErr: any) {
-        console.error("GAS returned non-JSON response:", rawText.substring(0, 1000));
-        return res.status(502).json({
-          status: "error",
-          message: `Google Apps Script returned a non-JSON response. Raw response snippet: ${rawText.substring(0, 300)}`
-        });
-      }
-
-      
-      // Если GAS ответил успехом для сессии, сохраняем токен в кэш
-      if (data.status === "success") {
-        if (action && isCacheable(action)) {
-          gasCache.set(cacheKey, { data, cachedAt: Date.now() });
-        }
-
-        if (token) cacheToken(token);
-        if (isPublic && data.data?.sessionToken) cacheToken(data.data.sessionToken);
-
-        // Инвалидируем кэш ключа, если настройки были сохранены
-        if (action === "saveGlobalSettings") {
-          cachedApiKey = null;
-          cachedOzonKeys = null;
-          console.log("Кэш API ключей сброшен после сохранения настроек");
-        }
-      }
-
-      return res.json(data);
     } catch (err: any) {
       console.error("Error proxying to GAS:", err);
       return res.status(500).json({ status: "error", message: err.message });

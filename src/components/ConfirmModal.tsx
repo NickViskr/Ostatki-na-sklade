@@ -402,6 +402,9 @@ export const ConfirmModal: React.FC = () => {
           .filter((idx) => idx !== -1)
       : [];
 
+  const [commitError, setCommitError] = useState<string | null>(null);
+  const [isCheckingResult, setIsCheckingResult] = useState<boolean>(false);
+
   const isConfirmDisabled =
     isProcessing ||
     finalItems.length === 0 ||
@@ -410,6 +413,7 @@ export const ConfirmModal: React.FC = () => {
     zeroPriceIndexes.length > 0;
 
   const handleConfirm = async () => {
+    setCommitError(null);
     if (opType === "Приход" && zeroPriceIndexes.length > 0) {
       toast.error("Укажите себестоимость больше нуля для каждой позиции прихода");
       return;
@@ -513,6 +517,23 @@ export const ConfirmModal: React.FC = () => {
       setShowConfirmModal(false);
       setParsedItems(null);
       useUIStore.getState().setRawText("");
+    } else {
+      setCommitError("Ответ не получен, операция могла быть записана");
+    }
+  };
+
+  const handleCheckResult = async () => {
+    setIsCheckingResult(true);
+    try {
+      await useWarehouseStore.getState().fetchStock();
+      toast.info("Данные перезагружены");
+      setShowConfirmModal(false);
+      setParsedItems(null);
+      useUIStore.getState().setRawText("");
+    } catch (e) {
+      toast.error("Ошибка при обновлении данных");
+    } finally {
+      setIsCheckingResult(false);
     }
   };
 
@@ -1014,6 +1035,13 @@ export const ConfirmModal: React.FC = () => {
           </div>
         )}
 
+        {commitError && (
+          <div className="mx-8 mb-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl text-amber-800 text-sm font-medium flex items-center gap-2">
+            <AlertCircle className="text-amber-600 shrink-0" size={18} />
+            <span>{commitError}</span>
+          </div>
+        )}
+
         <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
           <div className="flex gap-8">
             <div>
@@ -1057,18 +1085,33 @@ export const ConfirmModal: React.FC = () => {
             >
               Отмена
             </button>
-            <button
-              onClick={handleConfirm}
-              disabled={isConfirmDisabled}
-              className="bg-slate-900 text-white px-12 py-4 rounded-2xl font-bold hover:bg-slate-800 disabled:opacity-50 transition-all shadow-xl flex items-center gap-2"
-            >
-              {isProcessing ? (
-                <Loader2 className="animate-spin" size={20} />
-              ) : (
-                <CheckCircle2 size={20} />
-              )}
-              Подтвердить и записать
-            </button>
+            {commitError ? (
+              <button
+                onClick={handleCheckResult}
+                disabled={isCheckingResult}
+                className="bg-amber-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-amber-700 disabled:opacity-50 transition-all shadow-xl flex items-center gap-2"
+              >
+                {isCheckingResult ? (
+                  <Loader2 className="animate-spin" size={20} />
+                ) : (
+                  <Zap size={20} />
+                )}
+                Проверить результат
+              </button>
+            ) : (
+              <button
+                onClick={handleConfirm}
+                disabled={isConfirmDisabled}
+                className="bg-slate-900 text-white px-12 py-4 rounded-2xl font-bold hover:bg-slate-800 disabled:opacity-50 transition-all shadow-xl flex items-center gap-2"
+              >
+                {isProcessing ? (
+                  <Loader2 className="animate-spin" size={20} />
+                ) : (
+                  <CheckCircle2 size={20} />
+                )}
+                Подтвердить и записать
+              </button>
+            )}
           </div>
         </div>
       </div>
