@@ -1093,6 +1093,9 @@
   - Настройка `supplyDocsLabelsFolder` зарегистрирована в `OZON_SETTINGS_STRING_KEYS`.
   - В `doPost` зарегистрирован экшен `saveSupplyDocsToDrive`.
   - Реализована функция `saveSupplyDocsToDrive` и вспомогательные функции `sanitizeDriveName`, `getOrCreateChildFolder`, `replaceFileInFolder`, `nameFromDisposition`, `extFromContentType` для автоматической загрузки и распределения файлов этикеток, актов и накладных по папкам Google Диска.
+- План развития Ozon (`docs/OZON_PLAN.md`):
+  - Добавлен пункт 28 «Защита от двойного проведения операции» (приоритет №1, заведён по итогам боевой аварии 01.08.2026).
+  - В раздел «Заметки для следующего чата» добавлена ориентировка на приоритетный старт работ по пункту 28.
 
 
 
