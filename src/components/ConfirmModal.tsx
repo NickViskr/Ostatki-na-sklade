@@ -21,6 +21,14 @@ export const ConfirmModal: React.FC = () => {
   // Пункт 28, этап B: ключ операции рождается один раз при открытии окна
   // и не меняется при повторных нажатиях кнопки подтверждения.
   const opIdRef = useRef(newOperationId());
+  // Пункт 28, этап C: список поставок Ozon живёт не дольше окна подтверждения.
+  // Иначе он залипает и цепляется к посторонней операции: 01.08.2026 из-за этого
+  // оприходование излишков привязалось к заявке Ozon и пометило две поставки из четырёх.
+  useEffect(() => {
+    return () => {
+      useWarehouseStore.getState().setPendingOzonPostingIds([]);
+    };
+  }, []);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const commitTransaction = useWarehouseStore(
     (state) => state.commitTransaction,

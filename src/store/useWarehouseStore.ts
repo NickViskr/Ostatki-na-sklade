@@ -529,6 +529,9 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   commitTransaction: async (items, type, destination, deliveryDate = '', opId = '') => {
+    // Пункт 28, этап C: список поставок Ozon фиксируется в начале операции
+    // и уходит на сервер вместе с расходом, а не отдельными запросами после него.
+    const postingIds = get().pendingOzonPostingIds;
     const { notificationEmail } = useSettingsStore.getState();
     
     if (type === 'Расход') {
@@ -575,6 +578,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     try {
       const result = await get().fetchGas('commit', {
         opId,
+        postingIds,
         data: items, 
         type, 
         destination,
@@ -605,20 +609,21 @@ export const useWarehouseStore = create<WarehouseState>()(
           toast.success('Операция успешно записана в Google Таблицу!');
         }
         
-        const pendingOzonPostingIds = get().pendingOzonPostingIds;
-        if (pendingOzonPostingIds.length > 0) {
-          // Привязка заявки к транзакциям: ID главных строк — в TransGroupInfo.
-          // Именно ID, а не groupId: groupId есть только у комплектов, у обычных товаров он пуст
-          const txIds = Array.from(new Set(
-            (payloadData.newTransactions || [])
-              .filter((t: Transaction) => !t.isComponent && t.id)
-              .map((t: Transaction) => String(t.id))
-          ));
-          const linkInfo = JSON.stringify(txIds);
-          for (const pid of pendingOzonPostingIds) {
-            await get().markExternalShipment(pid, 'processed', linkInfo);
+        // Пункт 28, этап C: привязку поставок выполнил сервер внутри той же операции.
+        // Здесь только разбираем результат и предупреждаем, если связь сохранилась не полностью.
+        if (postingIds.length > 0) {
+          const link = payloadData.postingsLink;
+          const linkedCount = link && typeof link.linked === 'number' ? link.linked : 0;
+          if (linkedCount < postingIds.length) {
+            toast.error(
+              'Расход записан, но привязка заявки Ozon сохранена не полностью (' +
+              linkedCount + ' из ' + postingIds.length +
+              '). Откройте вкладку «Поставки Озон» и привяжите заявку кнопкой «Привязать как дубль».',
+              { duration: 15000 }
+            );
           }
           set({ pendingOzonPostingIds: [] });
+          await get().fetchExternalShipments();
         }
         
         // No background fetches needed anymore since we returned all affected data!

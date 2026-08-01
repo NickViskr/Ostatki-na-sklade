@@ -1119,6 +1119,12 @@
 - В `Code.gs` реализована функция `linkPostingsToCommit` для привязки поставок Ozon к проведённому расходу внутри операции `commitTransaction` (пункт 28, этап C).
 - В `doPost` добавлены проброс `payload.postingIds` и автоматическая пометка поставок `processed` внутри серверного замка.
 
+## [2026-08-01]
+
+### Изменено
+- В `useWarehouseStore.ts` пометка поставок Ozon перенесена внутрь атомарной операции `commitTransaction` (передача `postingIds` в payload) с обработкой результата `postingsLink` (пункт 28, этап C).
+- В `ConfirmModal.tsx` добавлен сброс `pendingOzonPostingIds` при закрытии окна подтверждения для предотвращения привязки к чужим операциям.
+
 
 
 
