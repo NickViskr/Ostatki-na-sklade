@@ -311,12 +311,32 @@ async function startServer() {
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
-          const gasResponse = await fetch(gasUrl, {
+          // Пункт 29, шаг 1б: редирект обрабатываем вручную.
+          // Node.js fetch при автоматическом следовании редиректу меняет
+          // метод POST на GET, из-за чего Apps Script отвечает заглушкой doGet.
+          // Поэтому ловим 3xx сами и повторяем именно POST по новому адресу.
+          let gasResponse = await fetch(gasUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(req.body),
+            redirect: "manual",
             signal: controller.signal
           });
+
+          let redirectHops = 0;
+          while (gasResponse.status >= 300 && gasResponse.status < 400 && redirectHops < 5) {
+            const location = gasResponse.headers.get("location");
+            if (!location) break;
+            redirectHops++;
+            console.log(`GAS redirect ${redirectHops} for action '${action}', repeating POST`);
+            gasResponse = await fetch(location, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(req.body),
+              redirect: "manual",
+              signal: controller.signal
+            });
+          }
           clearTimeout(timeoutId);
 
           const rawText = await gasResponse.text();
