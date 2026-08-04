@@ -234,6 +234,10 @@ async function startServer() {
     return ['getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems'].includes(action);
   }
 
+  // Пункт 29: диагностика. Счётчик запросов к Apps Script, выполняющихся
+  // прямо сейчас. Нужен, чтобы проверить, связаны ли сбои с параллельностью.
+  let gasInFlight = 0;
+
   const READ_ONLY_ACTIONS = [
     'getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems',
     'verifySession', 'login', 'getGlobalSettings', 'getExternalShipments', 'getOzonSupplyRequests',
@@ -310,6 +314,8 @@ async function startServer() {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+        gasInFlight++;
+        const gasStartedAt = Date.now();
         try {
           // Откат правки 04.08.2026: ручная обработка редиректа с повтором POST
           // ломала авторизацию. Apps Script отдаёт результат doPost по адресу
@@ -325,6 +331,10 @@ async function startServer() {
 
           const rawText = await gasResponse.text();
           lastRawText = rawText;
+
+          // Пункт 29: диагностическая запись по каждому ответу Apps Script.
+          const isStub = rawText.includes("Web App is operational");
+          console.log(`GASDIAG action=${action} attempt=${attempt}/${maxTries} http=${gasResponse.status} ms=${Date.now() - gasStartedAt} inflight=${gasInFlight} stub=${isStub} len=${rawText.length}`);
 
           // Распознавание заглушки doGet и HTML редиректов
           if (
@@ -380,6 +390,7 @@ async function startServer() {
         } catch (err: any) {
           clearTimeout(timeoutId);
           lastError = err;
+          console.log(`GASDIAG action=${action} attempt=${attempt}/${maxTries} FAILED ms=${Date.now() - gasStartedAt} inflight=${gasInFlight} err=${err.name}`);
           if (err.name === 'AbortError') {
             console.warn(`Attempt ${attempt}/${maxTries}: GAS request timeout (${timeoutMs / 1000}s) for action '${action}'`);
             if (attempt < maxTries) {
@@ -393,6 +404,8 @@ async function startServer() {
             continue;
           }
           throw err;
+        } finally {
+          gasInFlight--;
         }
       }
     } catch (err: any) {
