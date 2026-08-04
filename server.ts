@@ -291,12 +291,17 @@ async function startServer() {
       const opIdRaw = req.body?.opId;
       const hasOpId = typeof opIdRaw === 'string' && opIdRaw.trim() !== '';
       const canRetry = !!action && (READ_ONLY_ACTIONS.includes(action) || (action === 'commit' && hasOpId));
-      const maxTries = canRetry ? 3 : 1;
+      const maxTries = canRetry ? 2 : 1;
+      // Пункт 29, шаг 1: пауза перед повтором увеличена с 1 с до 20 с.
+      // Причина: при обрыве по таймауту выполнение Apps Script продолжается
+      // и продолжает держать LockService. Повтор через секунду упирался
+      // в этот же замок и падал с Lock timeout, добавляя нагрузку вместо помощи.
+      const retryDelayMs = 20_000;
       const isWriteAction = action === 'commit' || (action && !READ_ONLY_ACTIONS.includes(action));
       // Пункт 28, этап D. Замеры 01.08.2026: обычная запись укладывается в 8 с,
       // самая долгая наблюдавшаяся — около 30 с. Порог 90 с даёт трёхкратный запас
       // и при этом не заставляет пользователя ждать ошибку пять минут.
-      const timeoutMs = isWriteAction ? 90_000 : 45_000;
+      const timeoutMs = isWriteAction ? 90_000 : 25_000;
 
       let lastError: any = null;
       let lastRawText = "";
@@ -326,7 +331,7 @@ async function startServer() {
           ) {
             console.warn(`Attempt ${attempt}/${maxTries}: GAS returned doGet stub/HTML response for action '${action}'`);
             if (attempt < maxTries) {
-              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
               continue;
             }
             return res.status(502).json({
@@ -341,7 +346,7 @@ async function startServer() {
           } catch (parseErr: any) {
             console.warn(`Attempt ${attempt}/${maxTries}: GAS returned non-JSON response for action '${action}':`, rawText.substring(0, 300));
             if (attempt < maxTries) {
-              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
               continue;
             }
             return res.status(502).json({
@@ -374,13 +379,13 @@ async function startServer() {
           if (err.name === 'AbortError') {
             console.warn(`Attempt ${attempt}/${maxTries}: GAS request timeout (${timeoutMs / 1000}s) for action '${action}'`);
             if (attempt < maxTries) {
-              await new Promise((r) => setTimeout(r, 1000 * attempt));
+              await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
               continue;
             }
             return res.status(504).json({ status: "error", message: `GAS request timeout (${timeoutMs / 1000}s)` });
           }
           if (attempt < maxTries) {
-            await new Promise((r) => setTimeout(r, 1000 * attempt));
+            await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
             continue;
           }
           throw err;
