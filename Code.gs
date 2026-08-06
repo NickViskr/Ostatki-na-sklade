@@ -406,7 +406,7 @@ function doPost(e) {
       case 'saveOzonStocks': result = saveOzonStocks(data); break;
       case 'saveOzonSales': result = saveOzonSales(data); break;
       case 'getOzonStocks': result = getOzonStocks(); break;
-      case 'getOzonSales': result = getOzonSales(); break;
+      case 'getOzonSales': result = getOzonSales(data && data.weeksLimit); break;
       case 'getOzonSettings': result = getOzonSettings(); break;
       case 'saveOzonSettings': assertAdmin(currentUser); result = saveOzonSettings(data); break;
       case 'saveOzonClusters': result = saveOzonClusters(data); break;
@@ -4199,7 +4199,10 @@ function saveOzonSales(payload) {
   };
 }
 
-function getOzonSales() {
+// Пункт 29: необязательный параметр weeksLimit ограничивает выдачу
+// последними N неделями. Без параметра поведение прежнее — отдаётся
+// вся история, поэтому существующие вызовы не ломаются.
+function getOzonSales(weeksLimit) {
   const sheet = getOzonSalesSheet();
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return [];
@@ -4257,6 +4260,26 @@ function getOzonSales() {
       updatedAt: updatedVal,
       days: parseNumber(row[daysIdx])
     });
+  }
+
+  // Пункт 29: если запрошено ограничение, оставляем строки только
+  // последних N недель. Недели отбираются по значению колонки «Неделя»,
+  // формат yyyy-MM-dd сортируется как обычный текст.
+  const limit = Number(weeksLimit);
+  if (limit > 0) {
+    const weekSet = {};
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].week) weekSet[rows[i].week] = true;
+    }
+    const allWeeks = Object.keys(weekSet).sort();
+    if (allWeeks.length > limit) {
+      const keepFrom = allWeeks[allWeeks.length - limit];
+      const filtered = [];
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i].week >= keepFrom) filtered.push(rows[i]);
+      }
+      return filtered;
+    }
   }
 
   return rows;

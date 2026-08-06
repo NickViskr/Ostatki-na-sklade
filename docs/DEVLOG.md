@@ -338,6 +338,7 @@
 | 2026-08-06 | Устранение удаления прежних сессий в loginUser в Code.gs | `Code.gs` | Реализован этап F пункта 29: в `loginUser` убрано удаление сессий того же пользователя. Просроченные сессии фильтруются без `deleteRow`, а обновление листа выполняется одной атомарной операцией (`clearContent` + `setValues`). | Нет |
 | 2026-08-06 | Замер времени расчётов coverage и coverageRows в OzonStocksTab.tsx | `src/components/OzonStocksTab.tsx` | Реализован этап E пункта 29: добавлены замеры времени расчёта покрытия (coverage) и построения строк (coverageRows) с выводом результатов `OZONPERF` в консоль браузера. Логика и зависимости не менялись. | Нет |
 | 2026-08-06 | Исправление ошибки TS2339 в OzonStocksTab.tsx | `src/components/OzonStocksTab.tsx` | Из лога `OZONPERF` удалено обращение к несуществующему свойству `pendingSupplies.length`, приводящему к ошибке компиляции TypeScript. | Нет |
+| 2026-08-06 | Добавление параметра weeksLimit в getOzonSales в Code.gs | `Code.gs` | Добавлен необязательный параметр `weeksLimit` в `getOzonSales` для ограничения выдачи последними N неделями. В обработчике передаётся `data && data.weeksLimit`. Без параметра отдаётся вся история. | Нет |
 
 
 

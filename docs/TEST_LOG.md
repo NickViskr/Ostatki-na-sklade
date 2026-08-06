@@ -359,6 +359,7 @@
 | 2026-08-06 | Обновление работы loginUser с листом «Сессии» в Code.gs (пункт 29, этап F) | Проверка отсутствия deleteRow и appendRow к листу «Сессии» в loginUser, проверка вызовов deleteRow (23) и сборка compile_applet | OK | 1) Выполнены 2 замены в `Code.gs`. 2) Подтверждено: в `loginUser` нет `deleteRow` и `appendRow`, перезапись листа атомарная. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Замер времени расчётов на вкладке «Остатки Озон» в OzonStocksTab.tsx (пункт 29, этап E) | Проверка 2 вхождений OZONPERF, 1 perfStart, 1 rowsPerfStart в OzonStocksTab.tsx, сборка compile_applet | OK | 1) Выполнены 3 замены в `src/components/OzonStocksTab.tsx`. 2) Подтверждено: ровно 2 вхождения `OZONPERF`, ровно 1 `perfStart`, ровно 1 `rowsPerfStart`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Исправление TS2339 в OzonStocksTab.tsx | Проверка 0 вхождений pendingSupplies.length, 2 вхождений OZONPERF, сборка compile_applet | OK | 1) Выполнена замена в `src/components/OzonStocksTab.tsx`. 2) Подтверждено: 0 вхождений `pendingSupplies.length`, 2 вхождения `OZONPERF`. 3) Сборка `compile_applet` прошла успешно. |
+| 2026-08-06 | Добавление параметра weeksLimit в getOzonSales в Code.gs | Проверка вызовов weeksLimit в Code.gs, 1 вхождения в объявлении функции, передача data && data.weeksLimit в switch, сборка compile_applet | OK | 1) Выполнены 3 замены в `Code.gs`. 2) Подтверждено: `getOzonSales(weeksLimit)` объявлена с параметром, в `switch` передаётся `data && data.weeksLimit`. 3) Сборка `compile_applet` прошла успешно. |
 
 
 
