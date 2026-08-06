@@ -364,6 +364,7 @@
 | 2026-08-06 | Передача weeksLimit внутри data в useWarehouseStore.ts | Проверка вызыва fetchGas в useWarehouseStore.ts на вхождение { data: { weeksLimit: 12 } }, сборка compile_applet | OK | 1) Выполнена замена в `src/store/useWarehouseStore.ts`. 2) Подтверждено: ровно 1 вхождение `weeksLimit` в виде `{ data: { weeksLimit: 12 } }`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Передача weeksLimit в блоке быстрого обхода в Code.gs | Проверка вызова getOzonSales с payload.data.weeksLimit в Code.gs, проверка отсутствия вызовов getOzonSales() без параметра, сборка compile_applet | OK | 1) Выполнена замена в `Code.gs`. 2) Подтверждено: 2 вызова `getOzonSales` с параметром (в блоке быстрого обхода и в switch), 0 вызовов без параметра. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Задержка расчёта покрытия до загрузки кластеров в OzonStocksTab.tsx | Проверка 3 вхождений clusterRefsLoaded, вызов setClusterRefsLoaded в finally, 10 элементов в зависимости useMemo coverage, сборка compile_applet | OK | 1) Выполнены 4 замены в `src/components/OzonStocksTab.tsx`. 2) Подтверждено: 3 вхождения `clusterRefsLoaded`, 1 вызов `setClusterRefsLoaded` в `finally`, 10 элементов в массиве зависимостей `coverage`. 3) Сборка `compile_applet` прошла успешно. |
+| 2026-08-06 | Обновление статусов этапов в пункте 29 в OZON_PLAN.md | Проверка числа строк (184), байт (рост) и 29 пунктов по grep | OK | 1) Выполнена замена в `docs/OZON_PLAN.md`. 2) Подтверждено: ровно 184 строки, размер вырос, grep по пунктам даёт 29. |
 
 
 
