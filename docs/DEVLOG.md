@@ -342,6 +342,7 @@
 | 2026-08-06 | Ограничение выдачи getOzonSales до 12 недель в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В вызове `fetchGas('getOzonSales')` передан объект `{ weeksLimit: 12 }` для запроса только последних 12 недель истории продаж Ozon вместо всей истории. | Нет |
 | 2026-08-06 | Передача weeksLimit внутри поля data в getOzonSales в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В вызове `fetchGas('getOzonSales')` параметр `weeksLimit: 12` перенесён внутрь объекта `data`, чтобы `doPost` в `Code.gs` корректно считывал его из `payload.data`. | Нет |
 | 2026-08-06 | Передача weeksLimit в блоке быстрого обхода switch в Code.gs | `Code.gs` | В блоке быстрых читающих экшенов вызов `getOzonSales()` заменён на `getOzonSales(payload.data && payload.data.weeksLimit)` для применения ограничения по неделям без ожидания основного switch. | Нет |
+| 2026-08-06 | Ожидание загрузки справочника кластеров перед расчётом покрытия в OzonStocksTab.tsx | `src/components/OzonStocksTab.tsx` | Добавлено состояние `clusterRefsLoaded`, которое устанавливается в `true` при завершении запроса `getOzonClusters` (в `.finally`). Расчёт `coverage` откладывается до получения справочника, чтобы не выполнять лишние расчёты без названий кластеров. | Нет |
 
 
 

@@ -78,6 +78,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     priorityClusters: '',
   });
   const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
+  // Пункт 29, этап E: признак того, что ответ на запрос справочника
+  // кластеров получен — успешно или с ошибкой, неважно. Пока ответа нет,
+  // расчёт покрытия не запускается, иначе таблица рисуется без названий
+  // кластеров и потом переписывается.
+  const [clusterRefsLoaded, setClusterRefsLoaded] = useState(false);
   const [supplySettings, setSupplySettings] = useState({
     maxBoxesPerCluster: 30,
     dropOffWarehouseId: '',
@@ -195,7 +200,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           }
         }
       }
-    }).catch((err) => console.error('getOzonClusters error:', err));
+    }).catch((err) => console.error('getOzonClusters error:', err))
+      .finally(() => setClusterRefsLoaded(true));
   }, [isAdmin, fetchGas]);
 
   useEffect(() => {
@@ -323,6 +329,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (filteredOzonStocks.length === 0) return null;
+    // Пункт 29, этап E: ждём ответ по справочнику кластеров.
+    if (!clusterRefsLoaded) return null;
     // Пункт 29, этап E: замер времени расчёта. Диагностика, логику не меняет.
     const perfStart = performance.now();
     const articleSet = new Set<string>();
@@ -345,7 +353,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     });
     console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
     return result;
-  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies]);
+  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];
