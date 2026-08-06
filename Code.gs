@@ -1861,20 +1861,29 @@ function loginUser(username, password) {
   const sessionSheet = ss.getSheetByName('Сессии');
   if (!sessionSheet) throw new Error('Ошибка БД: лист Сессии не найден');
   
-  // Очистка старых сессий текущего пользователя или истёкших сессий
+  // Пункт 29, этап F: прежние сессии того же логина больше НЕ удаляются.
+  // Именно это удаление приводило к тому, что вторая вкладка или второй
+  // клиент выбивали первого: вход стирал ещё действующий чужой токен.
+  // Истёкшие сессии отсеиваются, но лист переписывается одной операцией,
+  // а не циклом deleteRow, который смещал индексы строк при параллельной
+  // работе и стирал живые сессии вместо просроченных.
   const now = new Date().getTime();
   const sessionData = sessionSheet.getDataRange().getValues();
-  for (let i = sessionData.length - 1; i >= 1; i--) {
-     // Удалить если сессия истекла или принадлежит тому же пользователю (чтобы не копить дубли сессий на одного)
-     if (Number(sessionData[i][3]) < now || String(sessionData[i][1]) === user.username) {
-        sessionSheet.deleteRow(i + 1);
-     }
+  const keptSessions = [];
+  for (let i = 1; i < sessionData.length; i++) {
+    if (Number(sessionData[i][3]) >= now) {
+      keptSessions.push([sessionData[i][0], sessionData[i][1], sessionData[i][2], sessionData[i][3]]);
+    }
   }
 
   const token = Utilities.getUuid();
   const expiresAt = now + (24 * 60 * 60 * 1000); // 24 hours
   
-  sessionSheet.appendRow([token, user.username, user.role, expiresAt]);
+  keptSessions.push([token, user.username, user.role, expiresAt]);
+  if (sessionData.length > 1) {
+    sessionSheet.getRange(2, 1, sessionData.length - 1, 4).clearContent();
+  }
+  sessionSheet.getRange(2, 1, keptSessions.length, 4).setValues(keptSessions);
   
   return {
     user: user,
