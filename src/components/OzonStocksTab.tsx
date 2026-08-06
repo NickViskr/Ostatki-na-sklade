@@ -323,6 +323,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (filteredOzonStocks.length === 0) return null;
+    // Пункт 29, этап E: замер времени расчёта. Диагностика, логику не меняет.
+    const perfStart = performance.now();
     const articleSet = new Set<string>();
     for (const s of filteredOzonStocks) {
       if (s.offerId) articleSet.add(String(s.offerId));
@@ -331,7 +333,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     for (const s of skus) {
       myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
     }
-    return buildOzonCoverage({
+    const perfAfterAvailability = performance.now();
+    const result = buildOzonCoverage({
       stocks: filteredOzonStocks,
       sales: filteredOzonSales,
       skus,
@@ -340,10 +343,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       myStockAvailability,
       pending: pendingSupplies,
     });
+    console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length} pending=${pendingSupplies.length}`);
+    return result;
   }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];
+    // Пункт 29, этап E: начало отсчёта времени. Диагностика.
+    const rowsPerfStart = performance.now();
     const sumBy = (list: OzonStockRow[]) => ({
       available: list.reduce((s, w) => s + (w.available || 0), 0),
       preparing: list.reduce((s, w) => s + (w.preparing || 0), 0),
@@ -388,6 +395,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       };
     });
     rows.sort((a, b) => (b.perDay - a.perDay) || (b.totals.available - a.totals.available));
+    // Пункт 29, этап E: замер времени. Диагностика, логику не меняет.
+    console.log(`OZONPERF coverageRows total=${Math.round(performance.now() - rowsPerfStart)}ms rows=${rows.length}`);
     return rows;
   }, [coverage, filteredOzonStocks, skus, ozonSettings.minStockDays]);
 
