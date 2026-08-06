@@ -326,6 +326,7 @@
 | 2026-08-04 | Добавление диагностического журналирования GASDIAG и отслеживания gasInFlight в server.ts | `server.ts` | В server.ts: 1) Добавлен счётчик активных параллельных запросов `gasInFlight`. 2) Добавлено диагностическое логирование `GASDIAG` при успешном ответе и при сбоях с выводом статуса, длительности, параллельности и длины ответа. 3) В секции `finally` введён `gasInFlight--`. | Нет |
 | 2026-08-06 | Ограничение одновременных запросов к Apps Script до 3 через очередь в server.ts | `server.ts` | В server.ts: 1) Введены `GAS_MAX_PARALLEL = 3`, `gasSlotsUsed`, `gasWaitQueue`, функции `acquireGasSlot()` и `releaseGasSlot()`. 2) Добавлен `await acquireGasSlot()` перед созданием AbortController в цикле попыток. 3) В блоке `finally` добавлен вызов `releaseGasSlot()`. | Нет |
 | 2026-08-06 | Расширение списка LOCK_FREE_ACTIONS шестью читающими действиями в Code.gs | `Code.gs` | В Code.gs добавлены 6 читающих действий в LOCK_FREE_ACTIONS: getOzonSettings, getOzonClusters, getOzonStocks, getOzonSales, getFactoryOrders, getOzonSyncStatus (пункт 25, волна 3), чтобы исключить ожидание глобального LockService. | Нет |
+| 2026-08-06 | Увеличение лимита слотов Apps Script до 8 и логирование GASBODY в server.ts | `server.ts` | В server.ts: 1) Увеличен параметр GAS_MAX_PARALLEL с 3 до 8. 2) Добавлено логирование GASBODY для запросов с HTTP status != 200 или длиной ответа < 300 байт. | Нет |
 
 
 

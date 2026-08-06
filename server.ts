@@ -241,7 +241,7 @@ async function startServer() {
   // Пункт 29: очередь к Apps Script. Замеры показали до 12 одновременных
   // запросов, при которых скрипт деградирует и отвечает заглушкой doGet.
   // Пропускаем не более трёх одновременно, остальные ждут своей очереди.
-  const GAS_MAX_PARALLEL = 3;
+  const GAS_MAX_PARALLEL = 8;
   let gasSlotsUsed = 0;
   const gasWaitQueue: Array<() => void> = [];
 
@@ -363,6 +363,13 @@ async function startServer() {
           // Пункт 29: диагностическая запись по каждому ответу Apps Script.
           const isStub = rawText.includes("Web App is operational");
           console.log(`GASDIAG action=${action} attempt=${attempt}/${maxTries} http=${gasResponse.status} ms=${Date.now() - gasStartedAt} inflight=${gasInFlight} stub=${isStub} len=${rawText.length}`);
+
+          // Пункт 29: если ответ пришёл с ошибочным кодом или подозрительно
+          // короткий, показываем его начало — иначе причина остаётся неизвестной.
+          if (gasResponse.status !== 200 || rawText.length < 300) {
+            const preview = rawText.replace(/\s+/g, " ").slice(0, 300);
+            console.log(`GASBODY action=${action} http=${gasResponse.status} len=${rawText.length} body=${preview}`);
+          }
 
           // Распознавание заглушки doGet и HTML редиректов
           if (
