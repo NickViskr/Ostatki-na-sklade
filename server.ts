@@ -238,6 +238,30 @@ async function startServer() {
   // прямо сейчас. Нужен, чтобы проверить, связаны ли сбои с параллельностью.
   let gasInFlight = 0;
 
+  // Пункт 29: очередь к Apps Script. Замеры показали до 12 одновременных
+  // запросов, при которых скрипт деградирует и отвечает заглушкой doGet.
+  // Пропускаем не более трёх одновременно, остальные ждут своей очереди.
+  const GAS_MAX_PARALLEL = 3;
+  let gasSlotsUsed = 0;
+  const gasWaitQueue: Array<() => void> = [];
+
+  async function acquireGasSlot(): Promise<void> {
+    if (gasSlotsUsed < GAS_MAX_PARALLEL) {
+      gasSlotsUsed++;
+      return;
+    }
+    await new Promise<void>((resolve) => gasWaitQueue.push(resolve));
+  }
+
+  function releaseGasSlot(): void {
+    const next = gasWaitQueue.shift();
+    if (next) {
+      next();
+    } else {
+      gasSlotsUsed--;
+    }
+  }
+
   const READ_ONLY_ACTIONS = [
     'getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems',
     'verifySession', 'login', 'getGlobalSettings', 'getExternalShipments', 'getOzonSupplyRequests',
@@ -311,6 +335,10 @@ async function startServer() {
       let lastRawText = "";
 
       for (let attempt = 1; attempt <= maxTries; attempt++) {
+        // Ждём свободный слот ДО запуска таймера, чтобы ожидание в очереди
+        // не съедало время, отведённое на сам запрос.
+        await acquireGasSlot();
+
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -406,6 +434,7 @@ async function startServer() {
           throw err;
         } finally {
           gasInFlight--;
+          releaseGasSlot();
         }
       }
     } catch (err: any) {

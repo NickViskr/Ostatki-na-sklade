@@ -345,6 +345,7 @@
 | 2026-08-04 | Ручная обработка редиректов Apps Script в server.ts (пункт 29, шаг 1б) | Проверка количества вхождений `redirect: "manual"` в `server.ts`, сборка `compile_applet` | OK | 1) Выполнена точечная замена в `server.ts`. 2) Подтверждено ровно 2 вхождения строки `redirect: "manual"`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-04 | Откат ручной обработки редиректов Apps Script в server.ts | Проверка вхождений `redirect: "manual"` и `redirectHops` в `server.ts` (0 вхождений), сборка `compile_applet` | OK | 1) Выполнен откат фрагмента с `redirect: "manual"` в `server.ts`. 2) Подтверждено ровно 0 вхождений `redirect: "manual"` и `redirectHops`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-04 | Добавление диагностического логирования GASDIAG и отслеживания gasInFlight в server.ts (пункт 29) | Проверка вхождений `GASDIAG` и `gasInFlight--` в `server.ts`, сборка `compile_applet` | OK | 1) Выполнены 4 точечные замены в `server.ts`. 2) Подтверждены 2 вхождения текста `GASDIAG` и 1 вхождение `gasInFlight--`. 3) Сборка `compile_applet` выполнена успешно. |
+| 2026-08-06 | Ограничение одновременных запросов к Apps Script до 3 через очередь в server.ts (пункт 29) | Проверка вхождений `await acquireGasSlot()` (1) и `releaseGasSlot()` в блоке `finally` в `server.ts`, сборка `compile_applet` | OK | 1) Выполнены 3 точечные замены в `server.ts`. 2) Подтверждено ровно 1 вхождение `await acquireGasSlot()` и ровно 1 вызов `releaseGasSlot()` внутри `finally`. 3) Сборка `compile_applet` выполнена успешно. |
 
 
 
