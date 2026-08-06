@@ -231,7 +231,46 @@ async function startServer() {
 
   
   // ── Server-side GAS Response Cache ─────────────────────────────────────
-  const gasCache = new Map<string, { data: any; cachedAt: number }>();
+  const gasCache = new Map<string, { data: any; cachedAt: number; action: string }>();
+
+  // Пункт 29, этап C: точечная очистка кэша.
+  // Ключ — пишущее действие, значение — список читающих действий,
+  // чьи записи оно делает устаревшими. Действие, которого нет в этой
+  // карте, по-прежнему очищает весь кэш целиком. Список намеренно узкий:
+  // сюда попали только действия, про которые точно известно, что склад,
+  // историю, SKU и комплекты они не затрагивают.
+  const CACHE_INVALIDATION: Record<string, string[]> = {
+    logout: [],
+    saveOzonSettings: ['getOzonSettings'],
+    saveOzonClusters: ['getOzonClusters'],
+    markOzonClustersNotified: ['getOzonClusters'],
+    saveOzonSales: ['getOzonSales'],
+    saveOzonStocks: ['getOzonStocks'],
+    saveExternalShipments: ['getExternalShipments'],
+    updateExternalShipmentStatus: ['getExternalShipments'],
+    saveOzonSupplyRequest: ['getOzonSupplyRequests', 'getExternalShipments'],
+    addUser: ['getUsers'],
+    deleteUser: ['getUsers'],
+    saveGlobalSettings: ['getGlobalSettings'],
+    addService: ['getServices'],
+    updateService: ['getServices'],
+    deleteService: ['getServices'],
+    addServiceRate: ['getServiceRates'],
+    saveFactoryOrder: ['getFactoryOrders']
+  };
+
+  function invalidateCacheFor(writeAction: string): void {
+    const affected = CACHE_INVALIDATION[writeAction];
+    if (!affected) {
+      gasCache.clear();
+      return;
+    }
+    for (const [key, entry] of Array.from(gasCache.entries())) {
+      if (affected.includes(entry.action)) {
+        gasCache.delete(key);
+      }
+    }
+  }
   // Пункт 29, этап B: раздельные сроки жизни кэша вместо общих 30 секунд.
   // Справочники почти не меняются, данные Ozon обновляются триггерами
   // дважды в сутки, а оперативные остатки должны быть свежими.
@@ -311,7 +350,7 @@ async function startServer() {
       }
 
       if (action && !READ_ONLY_ACTIONS.includes(action)) {
-        gasCache.clear();
+        invalidateCacheFor(action);
       }
 
       // Не пропускаем серверные action через клиентский прокси
@@ -438,7 +477,7 @@ async function startServer() {
           // Если GAS ответил успехом для сессии, сохраняем токен в кэш
           if (data && data.status === "success") {
             if (cacheTtlMs > 0) {
-              gasCache.set(cacheKey, { data, cachedAt: Date.now() });
+              gasCache.set(cacheKey, { data, cachedAt: Date.now(), action });
             }
 
             if (token) cacheToken(token);
