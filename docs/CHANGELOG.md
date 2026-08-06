@@ -1222,6 +1222,11 @@
 ### Изменено
 - В `src/components/OzonStocksTab.tsx` реализован этап E пункта 29: добавлены замеры времени и логирование `OZONPERF` для функций `coverage` и `coverageRows` для диагностики производительности вкладки «Остатки Озон».
 
+## [2026-08-06]
+
+### Исправлено
+- В `src/components/OzonStocksTab.tsx` удалено обращение к `pendingSupplies.length` из лога `OZONPERF`, устраняющее ошибку проверки типов TypeScript (TS2339).
+
 
 
 

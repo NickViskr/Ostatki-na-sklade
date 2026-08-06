@@ -343,7 +343,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       myStockAvailability,
       pending: pendingSupplies,
     });
-    console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length} pending=${pendingSupplies.length}`);
+    console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
     return result;
   }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies]);
 
