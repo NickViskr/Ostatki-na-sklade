@@ -1463,7 +1463,10 @@ export const useWarehouseStore = create<WarehouseState>()(
   fetchOzonSales: async () => {
     if (!get().sessionToken) return;
     try {
-      const result = await get().fetchGas('getOzonSales');
+      // Пункт 29: просим только последние 12 недель вместо всей истории.
+      // Расчёт скорости продаж берёт 4 полные недели (настройка speedWeeks),
+      // 12 недель дают тройной запас на случай её увеличения.
+      const result = await get().fetchGas('getOzonSales', { weeksLimit: 12 });
       if (result.status === 'success' && Array.isArray(result.data)) {
         set({ ozonSales: result.data });
       } else {

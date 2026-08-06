@@ -360,6 +360,7 @@
 | 2026-08-06 | Замер времени расчётов на вкладке «Остатки Озон» в OzonStocksTab.tsx (пункт 29, этап E) | Проверка 2 вхождений OZONPERF, 1 perfStart, 1 rowsPerfStart в OzonStocksTab.tsx, сборка compile_applet | OK | 1) Выполнены 3 замены в `src/components/OzonStocksTab.tsx`. 2) Подтверждено: ровно 2 вхождения `OZONPERF`, ровно 1 `perfStart`, ровно 1 `rowsPerfStart`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Исправление TS2339 в OzonStocksTab.tsx | Проверка 0 вхождений pendingSupplies.length, 2 вхождений OZONPERF, сборка compile_applet | OK | 1) Выполнена замена в `src/components/OzonStocksTab.tsx`. 2) Подтверждено: 0 вхождений `pendingSupplies.length`, 2 вхождения `OZONPERF`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Добавление параметра weeksLimit в getOzonSales в Code.gs | Проверка вызовов weeksLimit в Code.gs, 1 вхождения в объявлении функции, передача data && data.weeksLimit в switch, сборка compile_applet | OK | 1) Выполнены 3 замены в `Code.gs`. 2) Подтверждено: `getOzonSales(weeksLimit)` объявлена с параметром, в `switch` передаётся `data && data.weeksLimit`. 3) Сборка `compile_applet` прошла успешно. |
+| 2026-08-06 | Передача weeksLimit: 12 в getOzonSales в useWarehouseStore.ts | Проверка 1 вхождения weeksLimit в useWarehouseStore.ts, проверка сохранности других вызовов fetchGas, сборка compile_applet | OK | 1) Выполнена замена в `src/store/useWarehouseStore.ts`. 2) Подтверждено: ровно 1 вхождение `weeksLimit` в файле. 3) Сборка `compile_applet` прошла успешно. |
 
 
 
