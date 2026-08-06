@@ -340,6 +340,7 @@
 | 2026-08-06 | Исправление ошибки TS2339 в OzonStocksTab.tsx | `src/components/OzonStocksTab.tsx` | Из лога `OZONPERF` удалено обращение к несуществующему свойству `pendingSupplies.length`, приводящему к ошибке компиляции TypeScript. | Нет |
 | 2026-08-06 | Добавление параметра weeksLimit в getOzonSales в Code.gs | `Code.gs` | Добавлен необязательный параметр `weeksLimit` в `getOzonSales` для ограничения выдачи последними N неделями. В обработчике передаётся `data && data.weeksLimit`. Без параметра отдаётся вся история. | Нет |
 | 2026-08-06 | Ограничение выдачи getOzonSales до 12 недель в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В вызове `fetchGas('getOzonSales')` передан объект `{ weeksLimit: 12 }` для запроса только последних 12 недель истории продаж Ozon вместо всей истории. | Нет |
+| 2026-08-06 | Передача weeksLimit внутри поля data в getOzonSales в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В вызове `fetchGas('getOzonSales')` параметр `weeksLimit: 12` перенесён внутрь объекта `data`, чтобы `doPost` в `Code.gs` корректно считывал его из `payload.data`. | Нет |
 
 
 

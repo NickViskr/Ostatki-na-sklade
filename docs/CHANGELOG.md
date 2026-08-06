@@ -1237,6 +1237,11 @@
 ### Изменено
 - В `src/store/useWarehouseStore.ts` при вызове `fetchGas('getOzonSales')` передаётся `{ weeksLimit: 12 }` для ограничения загрузки истории продаж Ozon последними 12 неделями.
 
+## [2026-08-06]
+
+### Изменено
+- В `src/store/useWarehouseStore.ts` вызов `fetchGas('getOzonSales')` переведён на передачу `{ data: { weeksLimit: 12 } }` для успешной доставки параметра `weeksLimit` на сторону Apps Script.
+
 
 
 
