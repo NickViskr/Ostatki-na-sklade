@@ -1242,6 +1242,11 @@
 ### Изменено
 - В `src/store/useWarehouseStore.ts` вызов `fetchGas('getOzonSales')` переведён на передачу `{ data: { weeksLimit: 12 } }` для успешной доставки параметра `weeksLimit` на сторону Apps Script.
 
+## [2026-08-06]
+
+### Изменено
+- В `Code.gs` вызов `getOzonSales()` в блоке быстрых читающих экшенов заменён на `getOzonSales(payload.data && payload.data.weeksLimit)` для корректной передачи параметра `weeksLimit`.
+
 
 
 

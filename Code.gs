@@ -181,7 +181,7 @@ function doPost(e) {
     if (action === 'getOzonStocks' || action === 'getOzonSales' || action === 'getOzonSyncStatus' || action === 'getOzonSettings' || action === 'getOzonClusters' || action === 'getFactoryOrders') {
       let readResult;
       if (action === 'getOzonStocks') readResult = getOzonStocks();
-      else if (action === 'getOzonSales') readResult = getOzonSales();
+      else if (action === 'getOzonSales') readResult = getOzonSales(payload.data && payload.data.weeksLimit);
       else if (action === 'getOzonSyncStatus') readResult = getOzonSyncStatusInfo();
       else if (action === 'getOzonSettings') readResult = getOzonSettings();
       else if (action === 'getFactoryOrders') readResult = getFactoryOrders();
