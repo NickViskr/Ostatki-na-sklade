@@ -35,7 +35,11 @@ async function startServer() {
   // ── Rate Limiting (без внешних пакетов) ───────────────────────────────────────
   const requestCounts = new Map<string, { count: number; resetAt: number }>();
   const RATE_WINDOW_MS = 60 * 1000; // 1 минута
-  const RATE_LIMIT     = 60;        // 60 запросов в минуту с одного IP
+  // Пункт 29: порог поднят с 60 до 300. Перед Node.js стоит nginx,
+  // доверие прокси не настроено, поэтому req.ip у всех запросов один
+  // и тот же внутренний адрес — ограничитель работает на всё приложение
+  // целиком, а не на пользователя. Одна загрузка делает около 17 запросов.
+  const RATE_LIMIT     = 300;       // 300 запросов в минуту суммарно
 
   function rateLimitMiddleware(req: any, res: any, next: any) {
     const ip = req.ip || req.socket.remoteAddress || "unknown";
