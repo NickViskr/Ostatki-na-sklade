@@ -134,35 +134,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
   const notifyCheckDone = useRef(false);
 
-  useEffect(() => {
-    if (notifyCheckDone.current) return;
-    notifyCheckDone.current = true;
-
-    async function checkNewClusters() {
-      try {
-        const res = await fetchGas('getOzonClusters');
-        if (res?.status === 'success' && Array.isArray(res.data)) {
-          const unnotified = res.data.filter((item: any) => item.notified === false);
-          if (unnotified.length > 0) {
-            const names = unnotified
-              .map((item: any) => {
-                const cid = String(item.clusterId || '').trim();
-                const cname = String(item.clusterName || '').trim();
-                return cname || `Кластер ${cid}`;
-              })
-              .join(', ');
-
-            toast.info(`Новые кластеры Ozon: ${names}`, { duration: 10000 });
-            await fetchGas('markOzonClustersNotified');
-          }
-        }
-      } catch (err) {
-        console.error('Ошибка проверки новых кластеров Ozon:', err);
-      }
-    }
-
-    checkNewClusters();
-  }, []);
+  // Пункт 29, этап D: отдельный эффект проверки новых кластеров удалён.
+  // Он делал второй такой же запрос getOzonClusters при каждом открытии
+  // вкладки. Проверка перенесена в эффект ниже, где кластеры уже грузятся.
 
   useEffect(() => {
     if (isAdmin) {
@@ -201,6 +175,25 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           clusterId: String(item.clusterId || '').trim(),
           clusterName: String(item.clusterName || '').trim(),
         })).filter((item: any) => Boolean(item.clusterId)));
+
+        // Пункт 29, этап D: проверка новых кластеров использует уже
+        // полученный ответ, второй запрос к Apps Script не делается.
+        if (!notifyCheckDone.current) {
+          notifyCheckDone.current = true;
+          const unnotified = res.data.filter((item: any) => item.notified === false);
+          if (unnotified.length > 0) {
+            const names = unnotified
+              .map((item: any) => {
+                const cid = String(item.clusterId || '').trim();
+                const cname = String(item.clusterName || '').trim();
+                return cname || `Кластер ${cid}`;
+              })
+              .join(', ');
+
+            toast.info(`Новые кластеры Ozon: ${names}`, { duration: 10000 });
+            fetchGas('markOzonClustersNotified').catch((err) => console.error('markOzonClustersNotified error:', err));
+          }
+        }
       }
     }).catch((err) => console.error('getOzonClusters error:', err));
   }, [isAdmin, fetchGas]);
