@@ -350,6 +350,7 @@
 | 2026-08-06 | Увеличение лимита слотов Apps Script до 8 и журналирование GASBODY в server.ts (пункт 29) | Проверка вхождений `GAS_MAX_PARALLEL = 8` и `GASBODY` (1) в `server.ts`, сборка `compile_applet` | OK | 1) Выполнены 2 точечные замены в `server.ts`. 2) Подтверждены `GAS_MAX_PARALLEL = 8` и ровно 1 вхождение текста `GASBODY`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Отмена удаления строк истекших сессий в verifySession в Code.gs | Проверка отсутствия `deleteRow` внутри `verifySession` в `Code.gs`, сборка `compile_applet` | OK | 1) Выполнена точечная замена в `Code.gs`. 2) Подтверждено отсутствие `deleteRow` в функции `verifySession`. 3) Сборка `compile_applet` прошла успешно. |
 | 2026-08-06 | Добавление пункта 29 в docs/OZON_PLAN.md | Выполнение точечной замены в `docs/OZON_PLAN.md`, проверка корректности разметки и отсутствия искажений текста | OK | 1) В `docs/OZON_PLAN.md` успешно добавлен пункт 29 перед разделом «Известные хвосты вне плана». 2) Проверена разметка markdown и точность совпадения с текстом задачи. |
+| 2026-08-06 | Сужение условия распознавания заглушки doGet в server.ts (пункт 29, этап A) | Проверка вхождений `isDoGetStub` (1), `isHtmlPage` (1), `trimmedText` (1) и `isStub` в `server.ts`, сборка `compile_applet` | OK | 1) Выполнена точечная замена в `server.ts`. 2) Подтверждено ровно по 1 вхождению `isDoGetStub`, `isHtmlPage`, `trimmedText`, а также сохранение строки с `isStub`. 3) Сборка `compile_applet` прошла успешно. |
 
 
 

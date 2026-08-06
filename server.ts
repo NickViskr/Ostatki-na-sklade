@@ -371,13 +371,23 @@ async function startServer() {
             console.log(`GASBODY action=${action} http=${gasResponse.status} len=${rawText.length} body=${preview}`);
           }
 
-          // Распознавание заглушки doGet и HTML редиректов
-          if (
-            rawText.includes("Google Apps Script Web App is operational") ||
-            rawText.includes("Use POST for API requests") ||
-            rawText.includes("<!DOCTYPE html") ||
-            rawText.includes("<html")
-          ) {
+          // Пункт 29, этап A: заглушка doGet распознаётся ТОЛЬКО в коротком
+          // ответе, а HTML — только если ответ с него НАЧИНАЕТСЯ.
+          // Раньше условие срабатывало на любое вхождение фразы в любом месте
+          // ответа. getOzonSyncStatus отдаёт журнал прошлых прогонов, куда эта
+          // фраза попала как запись о старой ошибке, поэтому исправный ответ
+          // на 4835 байт постоянно отбрасывался и виджет автоопроса вечно
+          // показывал спиннер.
+          const trimmedText = rawText.trimStart();
+          const isDoGetStub =
+            rawText.length < 300 &&
+            (rawText.includes("Google Apps Script Web App is operational") ||
+              rawText.includes("Use POST for API requests"));
+          const isHtmlPage =
+            trimmedText.startsWith("<!DOCTYPE") ||
+            trimmedText.startsWith("<html") ||
+            trimmedText.startsWith("<HTML");
+          if (isDoGetStub || isHtmlPage) {
             console.warn(`Attempt ${attempt}/${maxTries}: GAS returned doGet stub/HTML response for action '${action}'`);
             if (attempt < maxTries) {
               await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
