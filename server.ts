@@ -228,10 +228,26 @@ async function startServer() {
   
   // ── Server-side GAS Response Cache ─────────────────────────────────────
   const gasCache = new Map<string, { data: any; cachedAt: number }>();
-  const GAS_CACHE_TTL_MS = 30_000; // 30 секунд
+  // Пункт 29, этап B: раздельные сроки жизни кэша вместо общих 30 секунд.
+  // Справочники почти не меняются, данные Ozon обновляются триггерами
+  // дважды в сутки, а оперативные остатки должны быть свежими.
+  // Любое пишущее действие по-прежнему сбрасывает весь кэш целиком,
+  // поэтому длинные сроки не могут показать устаревшие данные.
+  const CACHE_TTL_REFERENCE_MS = 10 * 60 * 1000; // справочники, 10 минут
+  const CACHE_TTL_OZON_MS = 5 * 60 * 1000;       // данные Ozon, 5 минут
+  const CACHE_TTL_OPERATIONAL_MS = 30_000;       // оперативные данные, 30 секунд
 
-  function isCacheable(action: string): boolean {
-    return ['getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems'].includes(action);
+  function getCacheTtlMs(action: string): number {
+    if (['getServices', 'getServiceRates', 'getUsers', 'getOzonSettings', 'getOzonClusters'].includes(action)) {
+      return CACHE_TTL_REFERENCE_MS;
+    }
+    if (['getOzonStocks', 'getOzonSales', 'getFactoryOrders'].includes(action)) {
+      return CACHE_TTL_OZON_MS;
+    }
+    if (['getInitialData', 'getTransactions', 'getSkus', 'getArchivedItems', 'getStock', 'getExternalShipments', 'getOzonSupplyRequests'].includes(action)) {
+      return CACHE_TTL_OPERATIONAL_MS;
+    }
+    return 0;
   }
 
   // Пункт 29: диагностика. Счётчик запросов к Apps Script, выполняющихся
@@ -282,9 +298,10 @@ async function startServer() {
       const { sessionToken, ...cacheableBody } = req.body;
       const cacheKey = JSON.stringify(cacheableBody);
       
-      if (action && isCacheable(action) && token && isTokenCached(token)) {
+      const cacheTtlMs = action ? getCacheTtlMs(action) : 0;
+      if (cacheTtlMs > 0 && token && isTokenCached(token)) {
         const cached = gasCache.get(cacheKey);
-        if (cached && Date.now() - cached.cachedAt < GAS_CACHE_TTL_MS) {
+        if (cached && Date.now() - cached.cachedAt < cacheTtlMs) {
           return res.json(cached.data);
         }
       }
@@ -416,7 +433,7 @@ async function startServer() {
 
           // Если GAS ответил успехом для сессии, сохраняем токен в кэш
           if (data && data.status === "success") {
-            if (action && isCacheable(action)) {
+            if (cacheTtlMs > 0) {
               gasCache.set(cacheKey, { data, cachedAt: Date.now() });
             }
 
