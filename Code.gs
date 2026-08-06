@@ -1793,7 +1793,6 @@ function verifySession(token) {
       const expiresAt = Number(data[i][3]);
       if (now > expiresAt) {
         // Session expired
-        sheet.deleteRow(i + 1);
         return null;
       }
       return {

@@ -1183,6 +1183,7 @@
 - В `server.ts` добавлено ограничение параллельных запросов к Google Apps Script (`GAS_MAX_PARALLEL = 3`) через встроенную асинхронную очередь `gasWaitQueue` с функциями `acquireGasSlot()` и `releaseGasSlot()`.
 - В `Code.gs` список `LOCK_FREE_ACTIONS` расширен шестью читающими действиями (`getOzonSettings`, `getOzonClusters`, `getOzonStocks`, `getOzonSales`, `getFactoryOrders`, `getOzonSyncStatus`) для устранения задержек на ожиданиях LockService.
 - В `server.ts` увеличен лимит параллельных запросов к Apps Script с 3 до 8 (`GAS_MAX_PARALLEL = 8`) и добавлена фиксация тела ответов в логах `GASBODY` для ошибочных и аномально коротких ответов.
+- В `Code.gs` функция `verifySession` больше не удаляет строки просроченных сессий, исключая конфликт индексов строк при параллельном неблокирующем выполнении запросов.
 
 
 
