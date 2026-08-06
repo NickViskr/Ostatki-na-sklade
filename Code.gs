@@ -210,7 +210,17 @@ function doPost(e) {
       'getGlobalSettings',
       'getExternalShipments',
       'getOzonSupplyRequests',
-      'checkSupplyAvailability'
+      'checkSupplyAvailability',
+      // Волна 3 пункта 25. Замеры 06.08.2026 в логах Cloud Run показали,
+      // что getFactoryOrders падает по таймауту 25 с при листе в 8 строк:
+      // время уходило не на чтение, а на ожидание глобального замка.
+      // Все шесть функций проверены — записи в таблицу не выполняют.
+      'getOzonSettings',
+      'getOzonClusters',
+      'getOzonStocks',
+      'getOzonSales',
+      'getFactoryOrders',
+      'getOzonSyncStatus'
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();

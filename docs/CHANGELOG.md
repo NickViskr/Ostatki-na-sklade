@@ -1181,6 +1181,7 @@
 
 ### Добавлено
 - В `server.ts` добавлено ограничение параллельных запросов к Google Apps Script (`GAS_MAX_PARALLEL = 3`) через встроенную асинхронную очередь `gasWaitQueue` с функциями `acquireGasSlot()` и `releaseGasSlot()`.
+- В `Code.gs` список `LOCK_FREE_ACTIONS` расширен шестью читающими действиями (`getOzonSettings`, `getOzonClusters`, `getOzonStocks`, `getOzonSales`, `getFactoryOrders`, `getOzonSyncStatus`) для устранения задержек на ожиданиях LockService.
 
 
 
