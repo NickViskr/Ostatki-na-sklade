@@ -24,7 +24,7 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import { DashSettingsModal } from './DashSettingsModal';
 import { formatCurrency } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
-import { buildOzonAlerts, buildCoverageAlerts, OzonAlert } from '../lib/ozonAlerts';
+import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonAlert } from '../lib/ozonAlerts';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 
@@ -253,13 +253,51 @@ export const Dashboard: React.FC = React.memo(() => {
     return all.filter((a) => !hidden.has(a.key));
   }, [isAdmin, ozonCoverage, factoryOrders, ozonStocks, skus, ozonSettings, dismissedAlerts]);
 
+  // Алерт «заявка больше остатка»: состав заявки могли изменить в Ozon Seller,
+  // и резерв под заявки стал больше доступного остатка склада.
+  // Приложение исправить это не может — заявку правит пользователь в Ozon Seller.
+  const reserveShortageAlerts = useMemo(() => {
+    if (!isAdmin) return [];
+
+    // В сравнение идут только артикулы из справочника SKU: нераспознанные позиции
+    // заявки дали бы ложную нехватку, потому что остатка по ним нет по определению
+    const knownArticles = new Set(skus.map((s) => s.sku));
+    const reservedByArticle: Record<string, number> = {};
+    for (const article of Object.keys(pendingSupplies.byArticle)) {
+      if (knownArticles.has(article)) {
+        reservedByArticle[article] = pendingSupplies.byArticle[article];
+      }
+    }
+
+    const availableByArticle: Record<string, number> = {};
+    for (const s of skus) {
+      availableByArticle[s.sku] = getEffectiveAvailability(s.sku);
+    }
+
+    const namesByArticle: Record<string, string> = {};
+    for (const s of ozonStocks || []) {
+      const art = resolveOzonArticle(skus, s.offerId, s.sku);
+      if (art && !namesByArticle[art] && s.name) {
+        namesByArticle[art] = s.name;
+      }
+    }
+
+    const all = buildReserveShortageAlerts({
+      reservedByArticle,
+      availableByArticle,
+      namesByArticle,
+    });
+    const hidden = new Set(dismissedAlerts);
+    return all.filter((a) => !hidden.has(a.key));
+  }, [isAdmin, skus, ozonStocks, pendingSupplies, dismissedAlerts, getEffectiveAvailability]);
+
   const alerts = useMemo(() => {
     if (!isAdmin) return [];
     const all = buildOzonAlerts(externalShipments || [], skus || []);
     const hidden = new Set(dismissedAlerts);
     const shipmentAlerts = all.filter(a => !hidden.has(a.key));
-    return [...shipmentAlerts, ...coverageAlerts];
-  }, [isAdmin, externalShipments, skus, dismissedAlerts, coverageAlerts]);
+    return [...reserveShortageAlerts, ...shipmentAlerts, ...coverageAlerts];
+  }, [isAdmin, externalShipments, skus, dismissedAlerts, coverageAlerts, reserveShortageAlerts]);
 
   useEffect(() => {
     // «Внешние отгрузки» грузим всем: по ним строится резерв под заявки в колонке «Свободно».

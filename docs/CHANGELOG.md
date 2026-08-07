@@ -1263,6 +1263,7 @@
 - В `server.ts` включён перезапрос состава для всех неоформленных поставок Ozon (`status === 'new'`) на каждом опросе, а также добавлена защита от сброса ранее сохранённого состава при пустом ответе Ozon API.
 - В `src/lib/ozonPending.ts` локальный резерв под заявку Ozon сохранён до фактического списания со склада или явной отмены/отказа заявки (снято удаление зачёта по `isStockDeparted`, зачёт снимается по `isShipmentSettled` или `PENDING_CLEARED_STATUSES`).
 - В `src/lib/ozonAlerts.ts` добавлен тип алерта `'reserve_shortage'`, интерфейс `ReserveShortageInput` и чистая функция `buildReserveShortageAlerts` для предупреждения о превышении резерва под заявки над доступными остатками.
+- В `src/components/Dashboard.tsx` подключено вычисление алертов `reserveShortageAlerts` через `buildReserveShortageAlerts` для предупреждения пользователя на главной об элементах заявок Ozon, превышающих остатки.
 
 
 
