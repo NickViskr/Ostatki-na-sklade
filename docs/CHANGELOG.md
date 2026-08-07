@@ -1265,6 +1265,7 @@
 - В `src/lib/ozonAlerts.ts` добавлен тип алерта `'reserve_shortage'`, интерфейс `ReserveShortageInput` и чистая функция `buildReserveShortageAlerts` для предупреждения о превышении резерва под заявки над доступными остатками.
 - В `src/components/Dashboard.tsx` подключено вычисление алертов `reserveShortageAlerts` через `buildReserveShortageAlerts` для предупреждения пользователя на главной об элементах заявок Ozon, превышающих остатки.
 - В `src/components/OzonSuppliesTab.tsx` введён хелпер `isActionableItem` для исключения отменённых кластеров Ozon из проверок актуальности поставок.
+- В `src/components/ConfirmModal.tsx` заморожена валидация остатков во время записи операции через `isCommitting` и `lastValidatedRef` для исключения кратковременного отображения ложной ошибки о нехватке товара.
 
 
 

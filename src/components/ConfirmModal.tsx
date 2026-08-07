@@ -187,10 +187,17 @@ export const ConfirmModal: React.FC = () => {
     );
   }, [kitPreviews]);
 
+  // Пока идёт запись операции, остатки в сторе уже уменьшены, а позиции окна ещё старые.
+  // Пересчёт в этот момент давал ложное «Недостаточно на складе» и красную подсветку
+  // за мгновение до закрытия окна. На время записи держим последний корректный результат.
+  const [isCommitting, setIsCommitting] = useState<boolean>(false);
+  const lastValidatedRef = useRef<any[] | null>(null);
+
   const validatedItems = useMemo(() => {
     if (!parsedItems) return null;
     if (opType !== "Расход") return parsedItems;
-    return parsedItems.map((item) => {
+    if (isCommitting && lastValidatedRef.current) return lastValidatedRef.current;
+    const validated = parsedItems.map((item) => {
       if (item.status === "unknown") return item;
       const available = getEffectiveAvailability(item.article);
       if (available < item.quantity) {
@@ -202,7 +209,9 @@ export const ConfirmModal: React.FC = () => {
       }
       return { ...item, status: "ok" as const, errorMsg: "" };
     });
-  }, [parsedItems, opType, stock, kits, getEffectiveAvailability]);
+    lastValidatedRef.current = validated;
+    return validated;
+  }, [parsedItems, opType, stock, kits, getEffectiveAvailability, isCommitting]);
 
   const finalItems = useMemo(() => {
     // Источник — позиции с актуальными статусами, пересчитанными по текущим остаткам
@@ -517,6 +526,9 @@ export const ConfirmModal: React.FC = () => {
 
     // Для Расхода отправляем базовые цены (parsedItems): долю упаковки/услуг
     // сервер распределяет сам по данным из destination. Для остальных типов — как раньше.
+    // Запись пошла: с этого момента остатки в сторе могут обновиться раньше,
+    // чем закроется окно — проверку замораживаем, чтобы не мигала ложная ошибка
+    setIsCommitting(true);
     const success = await commitTransaction(
       opType === "Расход" ? parsedItems : finalItems,
       opType,
@@ -529,6 +541,7 @@ export const ConfirmModal: React.FC = () => {
       setParsedItems(null);
       useUIStore.getState().setRawText("");
     } else {
+      setIsCommitting(false);
       setCommitError("Ответ не получен, операция могла быть записана");
     }
   };
