@@ -454,7 +454,7 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка'
 ];
 
 const OZON_STOCKS_HEADERS = [
@@ -4376,6 +4376,9 @@ function saveExternalShipments(shipments) {
   const timeslotIdx = headers.indexOf('Таймслот');
   const cabinetIdx = headers.indexOf('Кабинет');
   const colClusterId = headers.indexOf('КластерID');
+  // Пункт 31. Виртуальная заявка создана самим Ozon, наш склад в ней не участвует.
+  const colIsVirtual = headers.indexOf('Виртуальная');
+  const colOriginalSupply = headers.indexOf('ИсходнаяПоставка');
   
   if (postingIdIdx === -1) {
     throw new Error('PostingID column not found in Внешние отгрузки');
@@ -4450,6 +4453,17 @@ function saveExternalShipments(shipments) {
       setIfChanged(storageWarehouseIdx, s.storageWarehouse || '');
       setIfChanged(timeslotIdx, s.timeslot || '');
       
+      // Пункт 31. Признак виртуальной заявки приходит от прокси булевым значением.
+      // Старый прокси его не присылает, поэтому отсутствующее значение = не виртуальная.
+      setIfChanged(colIsVirtual, s.isVirtual === true ? 'ДА' : '');
+      
+      // Ссылка на исходную поставку хранится только для справки и в логику не заходит.
+      // Обновляется только непустым значением, чтобы не затирать уже записанное.
+      const newOriginalSupply = String(s.originalSupplyId || '').trim();
+      if (newOriginalSupply) {
+        setIfChanged(colOriginalSupply, newOriginalSupply);
+      }
+      
       // КластерID обновляется только непустым значением: старый прокси его не присылает,
       // а у прямых поставок macrolocal_cluster_id пустой — затирать записанный кластер нельзя
       if (clusterIdVal) {
@@ -4499,6 +4513,8 @@ function saveExternalShipments(shipments) {
       if (timeslotIdx >= 0) newRow[timeslotIdx] = s.timeslot || '';
       if (cabinetIdx >= 0) newRow[cabinetIdx] = s.cabinet || '';
       if (colClusterId >= 0) newRow[colClusterId] = clusterIdVal;
+      if (colIsVirtual >= 0) newRow[colIsVirtual] = (s.isVirtual === true ? 'ДА' : '');
+      if (colOriginalSupply >= 0) newRow[colOriginalSupply] = String(s.originalSupplyId || '').trim();
       
       rowsToAdd.push(newRow);
       addedCount++;
@@ -4538,6 +4554,8 @@ function getExternalShipments() {
   const recalcJsonIdx = headers.indexOf('ПерерасчётJSON');
   const peresortJsonIdx = headers.indexOf('ПересортJSON');
   const colClusterId = headers.indexOf('КластерID');
+  const colIsVirtual = headers.indexOf('Виртуальная');
+  const colOriginalSupply = headers.indexOf('ИсходнаяПоставка');
   
   if (postingIdIdx === -1) return [];
   
@@ -4581,7 +4599,9 @@ function getExternalShipments() {
       acceptedJSON: getVal(acceptedJsonIdx, false),
       recalcJSON: getVal(recalcJsonIdx, false),
       peresortJSON: getVal(peresortJsonIdx, false),
-      clusterId: getVal(colClusterId, false).trim()
+      clusterId: getVal(colClusterId, false).trim(),
+      isVirtual: getVal(colIsVirtual, false).trim().toUpperCase() === 'ДА',
+      originalSupplyId: getVal(colOriginalSupply, false).trim()
     });
   }
   return shipments;
