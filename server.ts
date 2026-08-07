@@ -1080,11 +1080,10 @@ async function startServer() {
           // Новая поставка — состав нужен всегда
           shouldFetchBundle = true;
         } else if (existInfo.status === 'new') {
-          // Уже отслеживается: состав перезапрашиваем только если статус Ozon
-          // изменился или состав в листе почему-то пуст (самовосстановление)
-          if (existInfo.ozonStatus !== s.ozonStatus || !existInfo.hasItems) {
-            shouldFetchBundle = true;
-          }
+          // Состав поставки можно менять в Ozon Seller без смены статуса заявки,
+          // поэтому у всех ещё не оформленных поставок состав перезапрашивается
+          // на каждом опросе — иначе локальный резерв товара остаётся устаревшим
+          shouldFetchBundle = true;
         }
         
         let items: any[] = [];
@@ -1120,7 +1119,13 @@ async function startServer() {
           }
         }
         
-        const itemsJSON = shouldFetchBundle ? JSON.stringify(items) : "";
+        // Непустой состав, уже записанный в лист, не затирается пустым ответом Ozon:
+        // пустой ответ означает сбой запроса, а не «в поставке нет товара»
+        const itemsAreEmpty = items.length === 0;
+        const sheetHasItems = !!(existInfo && existInfo.hasItems);
+        const itemsJSON = (shouldFetchBundle && !(itemsAreEmpty && sheetHasItems))
+          ? JSON.stringify(items)
+          : "";
         
         shipmentsForGas.push({
           postingId: s.postingId,
