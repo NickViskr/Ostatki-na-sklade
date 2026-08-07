@@ -356,6 +356,7 @@
 | 2026-08-07 | Передача флага isVirtual и originalSupplyId в server.ts | `server.ts` | В server.ts извлечены order_tags.is_virtual и order_tags.original_supply_id из ответа Ozon API и проброшены через объекты поставок в Apps Script. | Нет |
 | 2026-08-07 | Добавление колонок Виртуальная и ИсходнаяПоставка в Code.gs | `Code.gs` | Добавлены колонки «Виртуальная» и «ИсходнаяПоставка» в макет «Внешние отгрузки», а также их запись и чтение при обмене с прокси (этап B пункта 31). | Нет |
 | 2026-08-07 | Исключение виртуальных заявок из резерва и списания | `src/types.ts`, `src/lib/ozonPending.ts`, `src/lib/ozonGroups.ts` | В src/types.ts добавлены поля isVirtual и originalSupplyId в ExternalShipment. В ozonPending.ts добавлена функция isVirtualShipment и пропуск таких поставок при расчёте резерва. В ozonGroups.ts добавлен флаг isVirtual в OzonGroup, отключение needsExpense для виртуальных заявок и блокирующий toast при попытке их проведения (этап C пункта 31). | Нет |
+| 2026-08-07 | Отображение виртуальных заявок Ozon и обработка кнопкой Ок | `src/components/OzonSuppliesTab.tsx` | В OzonSuppliesTab.tsx добавлен бейдж «Виртуальная», плашка «Создана самим Ozon — списание со склада не требуется», обработчик handleAcknowledgeVirtualGroup для маркировки 'ignored' кнопкой «Ок» и скрытие контролей дублей/списания для виртуальных заявок (этап D пункта 31). | Нет |
 
 
 

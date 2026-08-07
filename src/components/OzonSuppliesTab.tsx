@@ -1217,6 +1217,23 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
 
   const handleProcessOzonGroup = useProcessOzonGroup();
 
+  // Пункт 31. Виртуальную заявку создал сам Ozon: товар уже находится на его складе,
+  // наш склад в операции не участвует. Кнопка «Ок» только убирает заявку из актуальных —
+  // никаких записей в «Историю» и никакого движения остатков она не делает.
+  const handleAcknowledgeVirtualGroup = useCallback((group: OzonGroup) => {
+    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
+    if (newPostings.length === 0) {
+      toast.error('В заявке нет новых поставок');
+      return;
+    }
+    (async () => {
+      for (const p of newPostings) {
+        await markExternalShipment(p.postingId, 'ignored');
+      }
+      toast.success(`Виртуальная заявка № ${group.label} принята к сведению`);
+    })();
+  }, [markExternalShipment]);
+
   const handleIgnoreOzonGroup = useCallback((group: OzonGroup) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
     if (newPostings.length === 0) {
@@ -1464,7 +1481,12 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       <span className="text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full">
                         Поставок в группе: {group.postingCount}
                       </span>
-                      {group.items.some((i: any) => isActionableItem(i)) && (
+                      {group.isVirtual && (
+                        <span className="text-xs font-semibold px-2.5 py-1 bg-violet-50 text-violet-700 rounded-full border border-violet-100">
+                          Виртуальная
+                        </span>
+                      )}
+                      {!group.isVirtual && group.items.some((i: any) => isActionableItem(i)) && (
                         group.needsExpense ? (
                           <span className="text-xs font-semibold px-2.5 py-1 bg-red-50 text-red-700 rounded-full border border-red-100">
                             Отгружена — оформите списание
@@ -1475,12 +1497,17 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                           </span>
                         )
                       )}
-                      {group.matchResult?.verdict === 'duplicate' && (
+                      {group.isVirtual && group.items.some((i: any) => isActionableItem(i)) && (
+                        <span className="text-xs font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-full">
+                          Создана самим Ozon — списание со склада не требуется
+                        </span>
+                      )}
+                      {!group.isVirtual && group.matchResult?.verdict === 'duplicate' && (
                         <span className="text-xs font-semibold px-2.5 py-1 bg-red-50 text-red-700 rounded-full border border-red-100">
                           Возможный дубль ручной отгрузки
                         </span>
                       )}
-                      {group.matchResult?.verdict === 'suspect' && (
+                      {!group.isVirtual && group.matchResult?.verdict === 'suspect' && (
                         <span className="text-xs font-semibold px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full border border-amber-100">
                           Похожа на ручную — проверьте
                         </span>
@@ -1499,7 +1526,17 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                         {getStatusSummary(group.items)}
                       </div>
                     </div>
-                    {group.items.some((i: any) => isActionableItem(i)) && (
+                    {group.items.some((i: any) => isActionableItem(i)) && group.isVirtual && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleAcknowledgeVirtualGroup(group); }}
+                          className="bg-violet-600 text-white px-6 py-2 rounded-xl font-bold text-sm hover:bg-violet-700 transition-all shadow-md shadow-violet-100 cursor-pointer"
+                        >
+                          Ок
+                        </button>
+                      </div>
+                    )}
+                    {group.items.some((i: any) => isActionableItem(i)) && !group.isVirtual && (
                       <div className="flex gap-2">
                         {group.matchResult?.verdict !== 'none' && (
                           <button
@@ -1550,7 +1587,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       className="border-t border-slate-100 bg-slate-50/30 overflow-hidden"
                     >
                       <div className="p-5 space-y-4">
-                        {group.matchResult && group.matchResult.verdict !== 'none' && group.matchResult.candidates?.[0] && (() => {
+                        {!group.isVirtual && group.matchResult && group.matchResult.verdict !== 'none' && group.matchResult.candidates?.[0] && (() => {
                           const bestCandidate = group.matchResult.candidates[0];
                           const isDuplicate = group.matchResult.verdict === 'duplicate';
                           const cardBorderBg = isDuplicate 
