@@ -2,7 +2,7 @@ import { ExternalShipment, SKUItem } from '../types';
 import { detectPeresort } from './ozonPeresort';
 import { OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
 
-export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit' | 'supply_needed' | 'factory_order';
+export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit' | 'supply_needed' | 'factory_order' | 'reserve_shortage';
 
 export interface OzonAlert {
   key: string;            // `${postingId}:${type}` — уникальный ключ для скрытия
@@ -325,5 +325,58 @@ export function buildCoverageAlerts(
     ...factoryItems.map(item => item.alert),
     ...supplyItems.map(item => item.alert)
   ];
+}
+
+/** Входные данные алерта «резерв под заявки больше остатка». */
+export interface ReserveShortageInput {
+  /** Резерв под созданные заявки Ozon: артикул -> шт. */
+  reservedByArticle: Record<string, number>;
+  /** Доступно на Моём складе: артикул -> шт. */
+  availableByArticle: Record<string, number>;
+  /** Названия товаров для подписи: артикул -> название. Необязательно. */
+  namesByArticle?: Record<string, string>;
+}
+
+/**
+ * Алерт «заявка больше остатка». Состав заявки можно изменить в Ozon Seller,
+ * и после изменения резерв под заявки может превысить остаток на складе.
+ * Автоматически исправить это приложение не может — заявку правит пользователь в Ozon Seller.
+ * Функция чистая: сравнивает два справочника и возвращает список алертов, отсортированный
+ * по величине нехватки, от большей к меньшей.
+ */
+export function buildReserveShortageAlerts(input: ReserveShortageInput): OzonAlert[] {
+  const reserved = (input && input.reservedByArticle) || {};
+  const available = (input && input.availableByArticle) || {};
+  const names = (input && input.namesByArticle) || {};
+
+  const items: { alert: OzonAlert; missing: number }[] = [];
+
+  for (const article of Object.keys(reserved)) {
+    const reservedQty = Math.max(0, Number(reserved[article]) || 0);
+    if (reservedQty <= 0) continue;
+
+    const availableQty = Math.max(0, Number(available[article]) || 0);
+    const missing = reservedQty - availableQty;
+    if (missing <= 0) continue;
+
+    const name = names[article] ? String(names[article]).trim() : '';
+    const namePart = name ? `${article} — ${name}` : article;
+    const description = `${namePart} · в заявках ${Math.round(reservedQty)} шт, на складе ${Math.round(availableQty)} шт, не хватает ${Math.round(missing)} шт`;
+
+    items.push({
+      alert: {
+        key: `reserve_shortage:${article}:${Math.round(missing)}`,
+        article,
+        type: 'reserve_shortage',
+        severity: 'red',
+        title: 'Заявка больше остатка — измените заявку в Ozon Seller',
+        description
+      },
+      missing
+    });
+  }
+
+  items.sort((a, b) => b.missing - a.missing);
+  return items.map(item => item.alert);
 }
 
