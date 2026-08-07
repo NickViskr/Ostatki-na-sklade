@@ -348,6 +348,7 @@
 | 2026-08-07 | Сохранение локального резерва под заявку Ozon до фактического списания в ozonPending.ts | `src/lib/ozonPending.ts` | В PENDING_ACTIVE_STATUSES добавлены все активные и завершённые статусы Ozon, удалён импорт и вызов isStockDeparted, добавлена функция isShipmentSettled для снятия зачёта только при localStatus 'processed' или 'ignored'. | Нет |
 | 2026-08-07 | Добавление алертов нехватки товара под заявки в ozonAlerts.ts | `src/lib/ozonAlerts.ts` | Расширен `OzonAlertType` типом `'reserve_shortage'`, добавлена чистая функция `buildReserveShortageAlerts` и интерфейс `ReserveShortageInput` для генерации алертов о превышении резерва заявками над остатком. | Нет |
 | 2026-08-07 | Подключение алертов нехватки товара под заявки в Dashboard.tsx | `src/components/Dashboard.tsx` | Импортирована функция `buildReserveShortageAlerts`, добавлен `useMemo` блок `reserveShortageAlerts` для отслеживания ситуаций, когда резерв по заявкам превышает доступный остаток на Моём складе, и результат включён в список алертов главной. | Нет |
+| 2026-08-07 | Фильтрация отменённых кластеров Ozon через isActionableItem в OzonSuppliesTab.tsx | `src/components/OzonSuppliesTab.tsx` | Введён хелпер `isActionableItem` (`i.status === 'new'` и `ozonStatus !== 'CANCELLED'`), заменяющий прямую проверку `status === 'new'`. Это решает проблему зависания полностью проведённых многокластерных заявок в статусе «Ожидает отгрузки» из-за отменённых кластеров. | Нет |
 
 
 

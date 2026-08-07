@@ -1326,21 +1326,29 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   }, [sortedGroups, cabinetFilter]);
 
   // Заявка целиком отменена в Ozon Seller: действий по ней не требуется.
-  // Частично отменённые заявки этим правилом НЕ скрываются.
   const isFullyCancelled = (g: any) =>
     g.items.length > 0 &&
     g.items.every((i: any) => String(i.ozonStatus || '').trim().toUpperCase() === 'CANCELLED');
 
-  // Обработанные = заявки без единой новой поставки либо полностью отменённые
+  // Поставка требует действий: локально не обработана и не отменена в Ozon Seller.
+  // Отменённые кластеры многокластерной заявки навсегда остаются в локальном статусе 'new',
+  // потому что списывать по ним нечего. Считать их ожидающими оформления нельзя —
+  // иначе полностью проведённая заявка вечно висит в списке из-за отменённых кластеров.
+  const isActionableItem = (i: any) =>
+    i.status === 'new' &&
+    String(i.ozonStatus || '').trim().toUpperCase() !== 'CANCELLED';
+
+  // Обработанные = заявки без единой поставки, требующей действий, либо полностью отменённые
   const processedGroupsCount = useMemo(
-    () => filteredGroups.filter(g => isFullyCancelled(g) || !g.items.some((i) => i.status === 'new')).length,
+    () => filteredGroups.filter(g => isFullyCancelled(g) || !g.items.some((i: any) => isActionableItem(i))).length,
     [filteredGroups]
   );
 
-  // По умолчанию видны только актуальные заявки: есть новая поставка и заявка не отменена целиком
+  // По умолчанию видны только актуальные заявки: есть поставка, требующая действий,
+  // и заявка не отменена целиком
   const displayedGroups = useMemo(() => {
     if (showProcessed) return filteredGroups;
-    return filteredGroups.filter(g => !isFullyCancelled(g) && g.items.some((i) => i.status === 'new'));
+    return filteredGroups.filter(g => !isFullyCancelled(g) && g.items.some((i: any) => isActionableItem(i)));
   }, [filteredGroups, showProcessed]);
 
   const getStatusSummary = (group: ExternalShipment[]) => {
@@ -1456,7 +1464,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       <span className="text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full">
                         Поставок в группе: {group.postingCount}
                       </span>
-                      {group.items.some(i => i.status === 'new') && (
+                      {group.items.some((i: any) => isActionableItem(i)) && (
                         group.needsExpense ? (
                           <span className="text-xs font-semibold px-2.5 py-1 bg-red-50 text-red-700 rounded-full border border-red-100">
                             Отгружена — оформите списание
@@ -1491,7 +1499,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                         {getStatusSummary(group.items)}
                       </div>
                     </div>
-                    {group.items.some((i) => i.status === 'new') && (
+                    {group.items.some((i: any) => isActionableItem(i)) && (
                       <div className="flex gap-2">
                         {group.matchResult?.verdict !== 'none' && (
                           <button
@@ -1517,7 +1525,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                         </button>
                       </div>
                     )}
-                    {!group.items.some((i) => i.status === 'new') &&
+                    {!group.items.some((i: any) => isActionableItem(i)) &&
                       group.items.some((i) => i.status === 'processed' || i.status === 'ignored') && (
                       <button
                         onClick={(e) => { e.stopPropagation(); handleReturnGroupToNew(group); }}
