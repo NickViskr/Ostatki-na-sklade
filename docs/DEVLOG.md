@@ -350,6 +350,7 @@
 | 2026-08-07 | Подключение алертов нехватки товара под заявки в Dashboard.tsx | `src/components/Dashboard.tsx` | Импортирована функция `buildReserveShortageAlerts`, добавлен `useMemo` блок `reserveShortageAlerts` для отслеживания ситуаций, когда резерв по заявкам превышает доступный остаток на Моём складе, и результат включён в список алертов главной. | Нет |
 | 2026-08-07 | Фильтрация отменённых кластеров Ozon через isActionableItem в OzonSuppliesTab.tsx | `src/components/OzonSuppliesTab.tsx` | Введён хелпер `isActionableItem` (`i.status === 'new'` и `ozonStatus !== 'CANCELLED'`), заменяющий прямую проверку `status === 'new'`. Это решает проблему зависания полностью проведённых многокластерных заявок в статусе «Ожидает отгрузки» из-за отменённых кластеров. | Нет |
 | 2026-08-07 | Заморозка проверки остатков на время записи операции в ConfirmModal.tsx | `src/components/ConfirmModal.tsx` | Введено состояние `isCommitting` и реф `lastValidatedRef` в `ConfirmModal.tsx`, чтобы замораживать результаты проверки остатков при записи операции и предотвращать мерцание ложной ошибки «Недостаточно на складе». | Нет |
+| 2026-08-07 | Добавление метки версии сборки (__APP_BUILD__) | `src/vite-env.d.ts`, `vite.config.ts`, `src/components/Sidebar.tsx` | Создан файл `src/vite-env.d.ts` с типом `__APP_BUILD__`, в `vite.config.ts` добавлена подстановка даты/времени сборки по МСК в `define`, в `src/components/Sidebar.tsx` выведена метка с версией сборки внизу боковой панели. | Нет |
 
 
 

@@ -7,6 +7,13 @@ export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
     plugins: [react(), tailwindcss()],
+    // Метка версии сборки: дата и время в московском времени.
+    // Считается без Intl, чтобы не зависеть от локалей в среде сборки.
+    define: {
+      __APP_BUILD__: JSON.stringify(
+        new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' МСК'
+      ),
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

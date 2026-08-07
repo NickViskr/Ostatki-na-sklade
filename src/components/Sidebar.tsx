@@ -363,6 +363,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <div className={`w-2 h-2 shrink-0 rounded-full ${statusLevel === 'ok' ? 'bg-emerald-500 animate-pulse' : (statusLevel === 'warning' ? 'bg-amber-500' : 'bg-red-500')}`} />
           )}
         </div>
+
+        {/* Метка версии сборки: обновляется при каждой сборке, показывает, что именно задеплоено */}
+        {!isSidebarCollapsed && (
+          <div
+            className="mt-2 text-[10px] text-slate-400 font-mono text-center"
+            title={`Версия сборки: ${__APP_BUILD__}`}
+          >
+            Сборка {__APP_BUILD__}
+          </div>
+        )}
       </div>
 
     </aside>

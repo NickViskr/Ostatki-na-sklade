@@ -1266,6 +1266,7 @@
 - В `src/components/Dashboard.tsx` подключено вычисление алертов `reserveShortageAlerts` через `buildReserveShortageAlerts` для предупреждения пользователя на главной об элементах заявок Ozon, превышающих остатки.
 - В `src/components/OzonSuppliesTab.tsx` введён хелпер `isActionableItem` для исключения отменённых кластеров Ozon из проверок актуальности поставок.
 - В `src/components/ConfirmModal.tsx` заморожена валидация остатков во время записи операции через `isCommitting` и `lastValidatedRef` для исключения кратковременного отображения ложной ошибки о нехватке товара.
+- Добавлена автоформируемая метка версии сборки (`__APP_BUILD__`) внизу бокового меню (`Sidebar.tsx`), с подстановкой времени сборки (МСК) в `vite.config.ts` и объявлением глобального типа в `src/vite-env.d.ts`.
 
 
 
