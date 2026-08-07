@@ -1,34 +1,53 @@
 import { ExternalShipment, SKUItem } from '../types';
-import { isStockDeparted } from './ozonStatus';
 import { resolveOzonArticle } from './ozonCoverage';
 
 // ===== Локальный зачёт потребности после создания заявки (пункт 23) =====
 // Задача: количества из уже созданных заявок на поставку вычитаются из потребности сразу,
 // не дожидаясь, пока Ozon отразит их в колонке «В заявках» (задержка — часы).
-// Зачёт снимается ПО ФАКТУ: отмена, отказ в приёмке, просрочка, уход остатка
-// (ACCEPTED_AT_SUPPLY_WAREHOUSE и далее) либо появление количества в «В заявках».
+// Резерв держится до фактического списания: пока расход по поставке не проведён,
+// товар числится на складе и не должен повторно распределяться в другой кластер.
+// Зачёт снимается ПО ФАКТУ: отмена заявки, отказ в приёмке, просрочка либо обработка
+// строки поставки локально (списание проведено или поставка помечена проигнорированной).
 // Предохранитель — 7 дней: если статус заявки получить не удалось, зачёт истекает сам.
 // Все функции чистые: без обращения к стору и без побочных эффектов.
 
 /** Предохранитель зачёта по умолчанию, дней. */
 export const PENDING_SAFETY_DAYS = 7;
 
-/** Статусы Ozon, при которых зачёт снимается (помимо «остаток уже ушёл»). */
+/** Статусы Ozon, при которых заявка закрыта и зачёт снимается. */
 export const PENDING_CLEARED_STATUSES = ['CANCELLED', 'REJECTED_AT_SUPPLY_WAREHOUSE', 'OVERDUE'];
 
-/** Статусы Ozon, при которых заявка заведомо ещё «висит»: зачёт действует без ограничения по сроку. */
-export const PENDING_ACTIVE_STATUSES = ['DATA_FILLING', 'READY_TO_SUPPLY'];
+/**
+ * Известные статусы Ozon, при которых заявка жива: зачёт действует без ограничения по сроку.
+ * Отгрузка на Ozon зачёт НЕ снимает — его снимает только фактическое списание со склада.
+ */
+export const PENDING_ACTIVE_STATUSES = [
+  'DATA_FILLING',
+  'READY_TO_SUPPLY',
+  'ACCEPTED_AT_SUPPLY_WAREHOUSE',
+  'IN_TRANSIT',
+  'ACCEPTANCE_AT_STORAGE_WAREHOUSE',
+  'REPORTS_CONFIRMATION_AWAITING',
+  'REPORT_REJECTED',
+  'COMPLETED'
+];
+
+/** Локальный статус строки «Внешних отгрузок», при котором зачёт уже не нужен. */
+export function isShipmentSettled(localStatus?: string): boolean {
+  const s = String(localStatus || '').trim().toLowerCase();
+  return s === 'processed' || s === 'ignored';
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Зачёт по этой поставке снят: отменена, отказано, просрочена или остаток уже ушёл со склада. */
+/** Зачёт по этой поставке снят: заявка отменена, отказано в приёмке или просрочена. */
 export function isPendingCleared(ozonStatus?: string): boolean {
   const s = String(ozonStatus || '').toUpperCase().trim();
   if (!s) return false;
-  return PENDING_CLEARED_STATUSES.indexOf(s) >= 0 || isStockDeparted(s);
+  return PENDING_CLEARED_STATUSES.indexOf(s) >= 0;
 }
 
-/** Статус заявки достоверно означает «ещё не отгружена»: предохранитель по сроку не применяется. */
+/** Статус заявки известен и заявка жива: предохранитель по сроку не применяется. */
 export function isPendingActive(ozonStatus?: string): boolean {
   const s = String(ozonStatus || '').toUpperCase().trim();
   return PENDING_ACTIVE_STATUSES.indexOf(s) >= 0;
@@ -149,6 +168,8 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
 
   // Часть 1. Зачёт по данным Ozon.
   for (const row of shipments) {
+    // Списание проведено или поставка проигнорирована — резерв больше не нужен
+    if (isShipmentSettled(row.status)) continue;
     const status = String(row.ozonStatus || '').trim();
     if (isPendingCleared(status)) continue;
     if (!isPendingActive(status)) {
@@ -189,7 +210,7 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
     const orderId = String(req.orderId || '').trim();
     const rows = orderId ? (rowsByOrderId[orderId] || []) : [];
     if (rows.length > 0) {
-      const anyCleared = rows.some(r => isPendingCleared(r.ozonStatus));
+      const anyCleared = rows.some(r => isPendingCleared(r.ozonStatus) || isShipmentSettled(r.status));
       const anyItems = rows.some(r => parseArray(r.itemsJSON).length > 0);
       // Ozon уже знает эту заявку: либо снял зачёт, либо прислал состав — журнал не нужен.
       if (anyCleared || anyItems) continue;
