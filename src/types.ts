@@ -113,6 +113,10 @@ export interface ExternalShipment {
   peresortJSON?: string;
   /** КластерID поставки (MULTI_CLUSTER): у каждой строки свой кластер. */
   clusterId?: string;
+  /** Пункт 31. Заявку создал сам Ozon: резерв не строится, списание не проводится. */
+  isVirtual?: boolean;
+  /** Пункт 31. Исходная поставка виртуальной заявки. Хранится только для справки. */
+  originalSupplyId?: string;
 }
 
 export interface OzonStockRow {

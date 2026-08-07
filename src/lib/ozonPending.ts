@@ -38,6 +38,16 @@ export function isShipmentSettled(localStatus?: string): boolean {
   return s === 'processed' || s === 'ignored';
 }
 
+/**
+ * Пункт 31. Виртуальная заявка создана самим Ozon: оприходование найденного товара
+ * либо допоставка после отказа в приёмке. Товар уже находится на складе Ozon,
+ * наш склад в операции не участвует, поэтому зачёт под такую поставку НЕ строится
+ * с самого начала — это не снятие резерва, а его отсутствие.
+ */
+export function isVirtualShipment(row: { isVirtual?: boolean }): boolean {
+  return row ? row.isVirtual === true : false;
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Зачёт по этой поставке снят: заявка отменена, отказано в приёмке или просрочена. */
@@ -168,6 +178,8 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
 
   // Часть 1. Зачёт по данным Ozon.
   for (const row of shipments) {
+    // Пункт 31. Виртуальная заявка Ozon в резерв не попадает вовсе
+    if (isVirtualShipment(row)) continue;
     // Списание проведено или поставка проигнорирована — резерв больше не нужен
     if (isShipmentSettled(row.status)) continue;
     const status = String(row.ozonStatus || '').trim();

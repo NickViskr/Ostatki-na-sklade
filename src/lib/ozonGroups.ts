@@ -15,6 +15,8 @@ export interface OzonGroup {
   cabinet: string;
   matchResult: MatchResult;
   needsExpense: boolean;
+  /** Пункт 31. Заявку создал сам Ozon: списание со склада по ней не проводится. */
+  isVirtual: boolean;
 }
 
 export function buildOzonGroups(
@@ -53,7 +55,11 @@ export function buildOzonGroups(
       ? matchOzonGroup(newPostings, cabinet, shipmentDate, skus, transactions, externalShipments)
       : { verdict: 'none' as const, candidates: [] };
     
-    const needsExpense = items.some(p => p.status === 'new' && isStockDeparted(p.ozonStatus));
+    // Пункт 31. Признак виртуальности берётся по любой поставке заявки: Ozon помечает
+    // флагом всю заявку целиком, поэтому смешанных групп не бывает.
+    const isVirtual = items.some(p => p.isVirtual === true);
+    // У виртуальной заявки списания не возникает никогда, даже после отгрузки на Ozon
+    const needsExpense = !isVirtual && items.some(p => p.status === 'new' && isStockDeparted(p.ozonStatus));
 
     return {
       id: key,
@@ -64,6 +70,7 @@ export function buildOzonGroups(
       cabinet,
       matchResult,
       needsExpense,
+      isVirtual,
     };
   });
 }
@@ -77,6 +84,11 @@ export function useProcessOzonGroup(): (group: OzonGroup) => void {
   const askConfirmation = useUIStore((state) => state.askConfirmation);
 
   const handleProcessOzonGroup = useCallback((group: OzonGroup) => {
+    // Пункт 31. Предохранитель: по виртуальной заявке списание не проводится никогда
+    if (group.isVirtual) {
+      toast.error('Заявку создал сам Ozon — списание со склада по ней не проводится');
+      return;
+    }
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
       p => p.status === 'new' && isStockDeparted(p.ozonStatus)
     );
