@@ -374,6 +374,8 @@
 | 2026-08-07 | Добавление метки версии сборки (__APP_BUILD__) | Проверка размера vite-env.d.ts (205 байт), подсчёт вхождений __APP_BUILD__ в vite.config.ts (1) и Sidebar.tsx (2), проверка tsc --noEmit, сборка compile_applet | OK | 1) Создан `src/vite-env.d.ts` (205 байт). 2) Выполнены замены в `vite.config.ts` и `src/components/Sidebar.tsx`. 3) Подтверждено: 1 вхождение `__APP_BUILD__` в `vite.config.ts`, 2 вхождения в `src/components/Sidebar.tsx`. 4) `npx tsc --noEmit` и `compile_applet` завершились успешно без ошибок. |
 | 2026-08-07 | Фиксация пункта 30 в паспорте проекта OZON_PLAN.md | Проверка вхождения пункта 30 и хвостов в OZON_PLAN.md, проверка записей в DEVLOG.md, CHANGELOG.md, TEST_LOG.md | OK | 1) В docs/OZON_PLAN.md добавлен пункт 30 и три строки в известные хвосты. 2) Все три журнала обновлены строго добавлением новых строк в конец файлов. |
 | 2026-08-07 | Фиксация пункта 31 в паспорте проекта OZON_PLAN.md | Проверка вхождения пункта 31 в OZON_PLAN.md, проверка grep и wc показателей, проверка записей в DEVLOG.md, CHANGELOG.md, TEST_LOG.md | OK | 1) В docs/OZON_PLAN.md внесены изменения по пункту 31. 2) Проверено вхождение 'Виртуальные заявки Ozon'. 3) Журналы обновлены дозаписью в конец файлов. |
+| 2026-08-07 | Проброс isVirtual и originalSupplyId в server.ts | Проверка размера server.ts (116185 -> 117462 байт), строк (2671 -> 2687), подсчёт is_virtual (2) и isVirtual (3), проверка npx tsc --noEmit, сборка compile_applet | OK | 1) Выполнены 3 замены в `server.ts`. 2) Подтверждено: размер вырос со 116185 до 117462 байт, строки 2671 -> 2687. 3) Подтверждено: 2 вхождения `is_virtual`, 3 вхождения `isVirtual`. 4) `npx tsc --noEmit` прошёл без ошибок, сборка успешна. |
+
 
 
 

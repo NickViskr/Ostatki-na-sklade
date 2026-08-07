@@ -997,6 +997,18 @@ async function startServer() {
         const orderNumber = String(order.order_number || '');
         const ozonStatusDate = String(order.state_updated_date || '');
         const dropOffWarehouse = order.drop_off_warehouse?.name || '';
+
+        // Пункт 31. Виртуальная заявка создана самим Ozon: оприходование найденного
+        // товара либо допоставка после отказа в приёмке. Товар уже находится у Ozon,
+        // наш склад в операции не участвует, поэтому под такую заявку не строится
+        // резерв и не проводится списание. Единственный признак — order_tags.is_virtual.
+        // Поле original_supply_id хранится только для справки и в логику не заложено.
+        const orderTags = order.order_tags || {};
+        const isVirtual = orderTags.is_virtual === true;
+        const originalSupplyIdRaw = orderTags.original_supply_id;
+        const originalSupplyId = (originalSupplyIdRaw === undefined || originalSupplyIdRaw === null || String(originalSupplyIdRaw).trim() === '' || String(originalSupplyIdRaw).trim() === '0')
+          ? ''
+          : String(originalSupplyIdRaw).trim();
         
         let timeslotStr = '';
         let shipmentDate = '';
@@ -1061,6 +1073,8 @@ async function startServer() {
             shipmentDate,
             bundleId,
             clusterId: clusterIdOut,
+            isVirtual,
+            originalSupplyId,
             cabinetIndex,
             cabinet: cabinets[cabinetIndex].name
           });
@@ -1140,6 +1154,8 @@ async function startServer() {
           storageWarehouse: s.storageWarehouse,
           timeslot: s.timeslot,
           clusterId: s.clusterId || '',
+          isVirtual: s.isVirtual === true,
+          originalSupplyId: s.originalSupplyId || '',
           cabinet: s.cabinet
         });
       }

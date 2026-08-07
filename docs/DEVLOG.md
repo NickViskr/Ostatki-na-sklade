@@ -353,6 +353,7 @@
 | 2026-08-07 | Добавление метки версии сборки (__APP_BUILD__) | `src/vite-env.d.ts`, `vite.config.ts`, `src/components/Sidebar.tsx` | Создан файл `src/vite-env.d.ts` с типом `__APP_BUILD__`, в `vite.config.ts` добавлена подстановка даты/времени сборки по МСК в `define`, в `src/components/Sidebar.tsx` выведена метка с версией сборки внизу боковой панели. | Нет |
 | 2026-08-07 | Фиксация пункта 30 в паспорте проекта docs/OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md внесён пункт 30 с описанием проблем резерва, сверки состава и метки версии, решений пользователя и результатов живого регресса; в известные хвосты добавлены три наблюдения. | Нет |
 | 2026-08-07 | Фиксация пункта 31 в паспорте проекта docs/OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md внесён пункт 31 о виртуальных заявках Ozon (не резервировать, не списывать, обработка кнопкой «Ок» без записей в историю), решениях пользователя и этапах A–E. | Нет |
+| 2026-08-07 | Передача флага isVirtual и originalSupplyId в server.ts | `server.ts` | В server.ts извлечены order_tags.is_virtual и order_tags.original_supply_id из ответа Ozon API и проброшены через объекты поставок в Apps Script. | Нет |
 
 
 
