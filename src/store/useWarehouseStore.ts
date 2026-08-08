@@ -94,6 +94,8 @@ interface WarehouseState {
   externalShipments: ExternalShipment[];
   checkOzonShipments: () => Promise<void>;
   markExternalShipment: (postingId: string, status: 'processed' | 'ignored' | 'new', transGroupInfo?: string) => Promise<boolean>;
+  /** Пункт 32. Пакетная пометка: N записей подряд, перезагрузка листа одна в самом конце. */
+  markExternalShipmentsBatch: (postingIds: string[], status: 'processed' | 'ignored' | 'new', transGroupInfo?: string) => Promise<boolean>;
   saveShipmentAcceptance: (postingId: string, acceptedJSON: string) => Promise<boolean>;
   saveShipmentPeresort: (postingId: string, peresortJSON: string) => Promise<boolean>;
   commitShipmentPeresort: (postingId: string) => Promise<boolean>;
@@ -1195,6 +1197,48 @@ export const useWarehouseStore = create<WarehouseState>()(
     } finally {
       set({ isProcessing: false });
     }
+  },
+
+  // Пункт 32. Пакетная пометка поставок. Одиночное действие markExternalShipment
+  // перезагружает весь лист «Внешние отгрузки» после каждой записи, и на пачке
+  // из нескольких поставок это давало вдвое больше обращений к Apps Script,
+  // чем нужно. Здесь записи идут подряд, а перезагрузка выполняется один раз
+  // в конце — и обязательно выполняется даже при ошибке на середине пачки,
+  // иначе интерфейс останется с устаревшими данными.
+  markExternalShipmentsBatch: async (postingIds, status, transGroupInfo) => {
+    const ids = (postingIds || []).map(p => String(p).trim()).filter(p => p !== '');
+    if (ids.length === 0) return false;
+    set({ isProcessing: true });
+    let ok = true;
+    try {
+      for (const postingId of ids) {
+        const payload: any = { postingId, status };
+        if (transGroupInfo !== undefined) {
+          payload.transGroupInfo = transGroupInfo;
+        }
+        const res = await get().fetchGas('updateExternalShipmentStatus', { data: payload });
+        if (res.status !== 'success') {
+          toast.error(res.message || 'Ошибка обновления статуса');
+          ok = false;
+          break;
+        }
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при обновлении статуса: ' + e.message);
+      ok = false;
+    }
+    try {
+      const gasResult = await get().fetchGas('getExternalShipments');
+      if (gasResult.status === 'success' && Array.isArray(gasResult.data)) {
+        set({ externalShipments: gasResult.data });
+      }
+    } catch (e: any) {
+      console.error(e);
+    } finally {
+      set({ isProcessing: false });
+    }
+    return ok;
   },
 
   markExternalShipment: async (postingId, status, transGroupInfo) => {
