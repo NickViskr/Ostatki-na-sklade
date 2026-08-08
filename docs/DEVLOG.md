@@ -360,6 +360,7 @@
 | 2026-08-08 | Завершение пункта 31 (виртуальные заявки Ozon) в OZON_PLAN.md | `docs/OZON_PLAN.md` | Выполнены 6 дословных подстановок в docs/OZON_PLAN.md: отмечены выполненными пункт 31 и его этапы 0, A, B, C, D, E. | Да (п.31 ✅) |
 | 2026-08-08 | Внесение пункта 32 в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md заведён новый пункт 32 (Ложный спиннер синхронизации и медленная массовая пометка поставок), добавлены описания проблем, решения пользователя, ограничения и этапы 0, A, B, C. | Нет |
 | 2026-08-08 | Добавление пакетного действия markExternalShipmentsBatch в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В src/store/useWarehouseStore.ts добавлена функция markExternalShipmentsBatch для пакетного изменения статуса поставок с единой перезагрузкой листа getExternalShipments в конце (этап A пункта 32). | Нет |
+| 2026-08-08 | Локальный спиннер синхронизации и пакетная пометка поставок в OzonSuppliesTab.tsx | `src/components/OzonSuppliesTab.tsx` | В OzonSuppliesTab.tsx переведен спиннер кнопки синхронизации на локальное состояние isSyncing и переведены 4 обработчика (виртуальные заявки, игнорирование, привязка дублей, возврат в новые) на действие markExternalShipmentsBatch (этап B пункта 32). | Нет |
 
 
 

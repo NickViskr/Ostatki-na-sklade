@@ -1170,6 +1170,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const skus = useWarehouseStore((state) => state.skus);
   const stock = useWarehouseStore((state) => state.stock);
   const markExternalShipment = useWarehouseStore((state) => state.markExternalShipment);
+  const markExternalShipmentsBatch = useWarehouseStore((state) => state.markExternalShipmentsBatch);
   const saveShipmentAcceptance = useWarehouseStore((state) => state.saveShipmentAcceptance);
   const setPendingOzonPostingIds = useWarehouseStore((state) => state.setPendingOzonPostingIds);
   const setOpType = useUIStore((state) => state.setOpType);
@@ -1177,6 +1178,10 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const askConfirmation = useUIStore((state) => state.askConfirmation);
 
   const [isLoading, setIsLoading] = useState(true);
+  // Пункт 32. Собственное состояние синхронизации. Раньше спиннер кнопки
+  // «Синхронизировать с Ozon» рисовался по глобальному флагу isProcessing,
+  // из-за чего любая запись через стор выглядела как запущенная синхронизация.
+  const [isSyncing, setIsSyncing] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandedPostings, setExpandedPostings] = useState<Set<string>>(new Set());
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
@@ -1227,12 +1232,12 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       return;
     }
     (async () => {
-      for (const p of newPostings) {
-        await markExternalShipment(p.postingId, 'ignored');
+      const okBatch = await markExternalShipmentsBatch(newPostings.map(p => p.postingId), 'ignored');
+      if (okBatch) {
+        toast.success(`Виртуальная заявка № ${group.label} принята к сведению`);
       }
-      toast.success(`Виртуальная заявка № ${group.label} принята к сведению`);
     })();
-  }, [markExternalShipment]);
+  }, [markExternalShipmentsBatch]);
 
   const handleIgnoreOzonGroup = useCallback((group: OzonGroup) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
@@ -1244,13 +1249,13 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       "Игнорировать заявку Ozon?",
       `Все новые поставки заявки № ${group.label} (${newPostings.length} шт.) будут помечены как проигнорированные.`,
       async () => {
-        for (const p of newPostings) {
-          await markExternalShipment(p.postingId, 'ignored');
+        const okBatch = await markExternalShipmentsBatch(newPostings.map(p => p.postingId), 'ignored');
+        if (okBatch) {
+          toast.success(`Заявка № ${group.label} проигнорирована`);
         }
-        toast.success(`Заявка № ${group.label} проигнорирована`);
       }
     );
-  }, [askConfirmation, markExternalShipment]);
+  }, [askConfirmation, markExternalShipmentsBatch]);
 
   const handleLinkAsDuplicate = useCallback((group: OzonGroup) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
@@ -1269,13 +1274,13 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       `Заявка № ${group.label} будет помечена обработанной и привязана к ручной отгрузке от ${bestCandidate.date}. Новый расход НЕ создаётся. Если позже удалить эту отгрузку из Истории, заявка автоматически вернётся в новые.`,
       async () => {
         const linkInfo = JSON.stringify(bestCandidate.txIds);
-        for (const p of newPostings) {
-          await markExternalShipment(p.postingId, 'processed', linkInfo);
+        const okBatch = await markExternalShipmentsBatch(newPostings.map(p => p.postingId), 'processed', linkInfo);
+        if (okBatch) {
+          toast.success(`Заявка № ${group.label} привязана к ручной отгрузке`);
         }
-        toast.success(`Заявка № ${group.label} привязана к ручной отгрузке`);
       }
     );
-  }, [askConfirmation, markExternalShipment]);
+  }, [askConfirmation, markExternalShipmentsBatch]);
 
   const handleReturnGroupToNew = useCallback((group: OzonGroup) => {
     const donePostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
@@ -1286,13 +1291,13 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       "Вернуть заявку в новые?",
       `Все поставки заявки № ${group.label} (${donePostings.length} шт.) снова станут новыми — их можно будет оформить или игнорировать заново. Убедитесь, что связанная отгрузка удалена из Истории, иначе при повторном оформлении получится дубль расхода.`,
       async () => {
-        for (const p of donePostings) {
-          await markExternalShipment(p.postingId, 'new');
+        const okBatch = await markExternalShipmentsBatch(donePostings.map(p => p.postingId), 'new');
+        if (okBatch) {
+          toast.success(`Заявка № ${group.label} возвращена в новые`);
         }
-        toast.success(`Заявка № ${group.label} возвращена в новые`);
       }
     );
-  }, [askConfirmation, markExternalShipment]);
+  }, [askConfirmation, markExternalShipmentsBatch]);
 
   const groupedShipments = useMemo(() => {
     return buildOzonGroups(externalShipments, skus, transactions);
@@ -1389,11 +1394,14 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
           <p className="text-slate-500 font-medium">Список заявок на поставку Ozon</p>
         </div>
         <button
-          onClick={() => checkOzonShipments()}
+          onClick={() => {
+            setIsSyncing(true);
+            checkOzonShipments().finally(() => setIsSyncing(false));
+          }}
           disabled={isProcessing}
           className="flex items-center gap-2 px-5 py-3 bg-indigo-600 text-white rounded-2xl hover:bg-indigo-700 disabled:opacity-50 transition-all font-bold shadow-lg shadow-indigo-200"
         >
-          {isProcessing ? (
+          {isSyncing ? (
             <Loader2 size={18} className="animate-spin" />
           ) : (
             <RefreshCw size={18} />

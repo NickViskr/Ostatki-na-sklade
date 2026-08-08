@@ -1313,6 +1313,11 @@
 ### Добавлено
 - Стор склада (`src/store/useWarehouseStore.ts`): заведено пакетное действие `markExternalShipmentsBatch` для последовательной записи статуса N поставок с единственным финальным вызовом `getExternalShipments` (этап A пункта 32).
 
+## [2026-08-08]
+
+### Изменено
+- Вкладка поставок Ozon (`src/components/OzonSuppliesTab.tsx`): переведен спиннер кнопки синхронизации на локальное состояние `isSyncing` и переведены 4 обработчика на пакетное действие `markExternalShipmentsBatch` (этап B пункта 32).
+
 
 
 
