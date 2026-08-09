@@ -471,6 +471,7 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
   { key: 'minStockDays',        value: 7,  desc: 'Неснижаемый остаток, дней продаж' },
   { key: 'targetStockDays',     value: 30, desc: 'Целевой запас на Ozon, дней' },
+  { key: 'maxClusterDays',      value: 100, desc: 'Максимальный срок продаж кластера после поставки, дней; 0 — отсекатель выключен' },
   { key: 'factoryOrderDays',    value: 60, desc: 'Объём заказа на фабрике, дней' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
