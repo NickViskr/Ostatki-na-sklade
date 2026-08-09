@@ -188,6 +188,7 @@ export const Dashboard: React.FC = React.memo(() => {
             speedWeeks: Number(res.data.speedWeeks) || 4,
             minStockDays: Number(res.data.minStockDays) || 7,
             targetStockDays: Number(res.data.targetStockDays) || 30,
+            maxClusterDays: res.data.maxClusterDays === undefined || res.data.maxClusterDays === '' ? 100 : Number(res.data.maxClusterDays),
             factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
             returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
             excludedClusters: String(res.data.excludedClusters || ''),

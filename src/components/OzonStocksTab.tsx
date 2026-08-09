@@ -161,6 +161,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           speedWeeks: Number(res.data.speedWeeks) || 4,
           minStockDays: Number(res.data.minStockDays) || 7,
           targetStockDays: Number(res.data.targetStockDays) || 30,
+          maxClusterDays: res.data.maxClusterDays === undefined || res.data.maxClusterDays === '' ? 100 : Number(res.data.maxClusterDays),
           factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
           returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
           excludedClusters: String(res.data.excludedClusters || ''),
@@ -987,7 +988,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('recommendation') && (
                           <th className="p-3 text-right">
                             Рекомендация
-                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Всегда кратно коробке. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
+                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Неснижаемый остаток входит внутрь целевого запаса, а не прибавляется к нему. Всегда кратно коробке. Медленные кластеры, которым даже одна коробка даст запас дольше настройки «Максимальный срок продаж кластера, дней», из рекомендации исключаются и непокрытой потребности не создают. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
                           </th>
                         )}
                         {isColVisible('factory') && (

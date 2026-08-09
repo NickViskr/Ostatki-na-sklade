@@ -371,6 +371,7 @@
 | 2026-08-09 | Уточнение критериев пункта 34 и приоритета пункта 40 в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md обновлены критерий приёмки и этапы пункта 34 (этап 0 ✅); изменён приоритет пункта 40 на выполнение строго по порядку номеров. | Нет |
 | 2026-08-09 | Добавление настройки maxClusterDays в OZON_SETTINGS_DEFAULTS в Code.gs | `Code.gs` | В массив OZON_SETTINGS_DEFAULTS файла Code.gs добавлено значение по умолчанию для настройки maxClusterDays со значением 100 (этап A пункта 34). | Нет |
 | 2026-08-09 | Расчёт целевого запаса без двойного счёта и отсекатель по макс. сроку продаж кластера в ozonCoverage.ts | `src/lib/ozonCoverage.ts` | В `src/lib/ozonCoverage.ts` обновлены `OzonCoverageSettings` (добавлен `maxClusterDays?: number`) и переписана `calcSupplyRecommendation` (убрано слагаемое minStockDays, добавлен отсекатель по maxClusterDays) (этап B пункта 34). | Нет |
+| 2026-08-09 | Прокидка maxClusterDays и обновление ColHint в OzonStocksTab.tsx и Dashboard.tsx | `src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx` | Прокинуто чтение настройки maxClusterDays из ответа API с дефолтом 100 в OzonStocksTab.tsx и Dashboard.tsx, обновлена подсказка ColHint для рекомендации (этап C пункта 34). | Нет |
 
 
 
