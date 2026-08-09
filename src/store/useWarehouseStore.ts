@@ -535,6 +535,25 @@ export const useWarehouseStore = create<WarehouseState>()(
     // и уходит на сервер вместе с расходом, а не отдельными запросами после него.
     const postingIds = get().pendingOzonPostingIds;
     const { notificationEmail } = useSettingsStore.getState();
+
+    // Пункт 33, этап A: приход на виртуальный комплект запрещён.
+    // У виртуального комплекта нет собственного остатка: доступность считается
+    // как минимум остатка компонента, делённый на норму. Проведённый приход
+    // не изменит доступность, но испортит капитализацию на артикуле,
+    // который в расходе не участвует.
+    if (type === 'Приход' || type === 'Корректировка') {
+      for (const item of items) {
+        if (!item.article) continue;
+        const virtualKitOnIncome = get().kits.find(k => k.kitSku === item.article && k.type === 'virtual');
+        if (virtualKitOnIncome) {
+          const compList = virtualKitOnIncome.components
+            .map(c => `${c.componentSku} x${Number(c.quantity) || 1}`)
+            .join(', ');
+          toast.error(`Нельзя оприходовать виртуальный комплект «${item.article}»: у него нет собственного остатка. Оприходуйте компоненты: ${compList}`);
+          return false;
+        }
+      }
+    }
     
     if (type === 'Расход') {
       const requiredQtys: Record<string, number> = {};
