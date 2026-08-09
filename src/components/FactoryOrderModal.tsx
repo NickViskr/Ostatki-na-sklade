@@ -39,6 +39,7 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
   const saveFactoryOrder = useWarehouseStore((state) => state.saveFactoryOrder);
   const setFactoryOrderReceived = useWarehouseStore((state) => state.setFactoryOrderReceived);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
+  const kits = useWarehouseStore((state) => state.kits);
 
   const setActiveTab = useUIStore((state) => state.setActiveTab);
   const setOpType = useUIStore((state) => state.setOpType);
@@ -92,7 +93,16 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
     if (!destinations.includes('Склад')) addDestination('Склад');
     setOpType('Приход');
     setUploadDestination('Склад');
-    setRawText(`Приход партии с фабрики\n${article}  количество ${order.qty} шт`);
+    // Пункт 33, этап B: у виртуального комплекта нет собственного остатка,
+    // приход на него запрещён. Предзаполняем компоненты: количество заказа
+    // умножается на норму компонента в комплекте.
+    const virtualKitOnReceive = kits.find(k => k.kitSku === article && k.type === 'virtual');
+    const receiptLines = virtualKitOnReceive
+      ? virtualKitOnReceive.components.map(
+          c => `${c.componentSku}  количество ${order.qty * (Number(c.quantity) || 1)} шт`
+        )
+      : [`${article}  количество ${order.qty} шт`];
+    setRawText(`Приход партии с фабрики\n${receiptLines.join('\n')}`);
     setActiveTab('upload');
     onClose();
     toast.info('Заказ закрыт. Оформи приход партии — себестоимость укажешь на шаге подтверждения.', { duration: 8000 });
