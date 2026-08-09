@@ -162,8 +162,10 @@ export interface OzonCoverageSettings {
   speedWeeks: number;
   /** Неснижаемый остаток, дней продаж. */
   minStockDays: number;
-  /** Целевой запас на Ozon, дней. */
+  /** Целевой запас на Ozon, дней. Неснижаемый остаток входит ВНУТРЬ этого срока, а не прибавляется к нему. */
   targetStockDays: number;
+  /** Максимальный срок продаж кластера после поставки, дней. 0 или отсутствие значения — отсекатель выключен. */
+  maxClusterDays?: number;
   /** Объём заказа на фабрике, дней. */
   factoryOrderDays: number;
   /** % возвратов, возвращающихся в продажу (0–100). */
@@ -320,9 +322,13 @@ export interface SupplyRecommendation {
 
 /**
  * Рекомендация поставки в кластер.
- * Выдаётся только при покрытии ниже целевого запаса.
- * нужно = скорость × (целевой запас + неснижаемые дни) − расчётный остаток;
- * округление ВВЕРХ до целых коробок; ограничение остатком Моего склада (в целых коробках).
+ * Пункт 34, дефект 1: неснижаемый остаток входит ВНУТРЬ целевого запаса, поэтому
+ * нужно = скорость × целевой запас − расчётный остаток (без слагаемого minStockDays).
+ * Порог включения рекомендации равен целевому запасу.
+ * Пункт 34, дефект 2: округление ВВЕРХ до целых коробок способно завалить медленный
+ * кластер запасом на годы, поэтому кластер исключается целиком, если после поставки
+ * его расчётный срок продаж превысит maxClusterDays.
+ * Дальше — ограничение остатком Моего склада (в целых коробках).
  */
 export function calcSupplyRecommendation(
   perDay: number,
@@ -332,14 +338,16 @@ export function calcSupplyRecommendation(
   myStockAvailable: number
 ): SupplyRecommendation | null {
   if (!(perDay > 0)) return null;
-  const coverage = calcCoverageDays(estimated, perDay, settings.minStockDays, false);
-  if (coverage === null || coverage >= settings.targetStockDays) return null;
 
-  const need = perDay * (settings.targetStockDays + settings.minStockDays) - estimated;
+  const need = perDay * settings.targetStockDays - estimated;
   if (need <= 0) return null;
 
   const box = pcsPerBox > 0 ? pcsPerBox : 1;
   const boxesNeeded = Math.ceil(need / box);
+
+  const maxDays = Number(settings.maxClusterDays) || 0;
+  if (maxDays > 0 && (estimated + boxesNeeded * box) / perDay > maxDays) return null;
+
   const maxBoxes = Math.floor(Math.max(0, myStockAvailable) / box);
   const boxes = Math.min(boxesNeeded, maxBoxes);
 
