@@ -2289,9 +2289,26 @@ async function startServer() {
             });
           }
 
+          // Пункт 41, этап B. Имена кластеров приходят от Ozon строкой и сопоставляются
+          // со справочником по названию. Незнакомое имя не проглатывается молча:
+          // это либо переименование кластера у Ozon, либо кластер СНГ вне справочника
+          // (Беларусь, Алматы, Астана) — оба случая надо видеть.
+          const knownClusterNames = new Set(whClusterMap.values());
+          const unknownClusters: Record<string, number> = {};
+          for (const item of salesMap.values()) {
+            if (item.cluster === 'Без кластера') continue;
+            if (knownClusterNames.has(item.cluster)) continue;
+            unknownClusters[item.cluster] = (unknownClusters[item.cluster] || 0) + item.qty;
+          }
+          const unknownNames = Object.keys(unknownClusters).sort();
+          if (unknownNames.length > 0) {
+            const detail = unknownNames.map((n) => `${n}=${unknownClusters[n]}`).join('; ');
+            console.warn(`SALESGEO cabinet=${name} unknownClusters=${unknownNames.length} ${detail}`);
+          }
+
           okCabinets.push(name);
           allRows.push(...cabRows);
-          cabinetsReport.push({ name, ok: true, rows: cabRows.length });
+          cabinetsReport.push({ name, ok: true, rows: cabRows.length, unknownClusters: unknownNames });
 
         } catch (err: any) {
           console.error(`Ошибка при опросе продаж кабинета Ozon ${name}:`, err);
