@@ -1349,6 +1349,11 @@
 - Ozon Stocks & Dashboard (`src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx`): реализован этап C пункта 34 — прокинуто чтение настройки `maxClusterDays` с дефолтом 100 и обновлена подсказка ColHint для колонки «Рекомендация».
 - Ozon Settings Modal (`src/components/OzonSettingsModal.tsx`): реализован этап D пункта 34 — добавлено поле `maxClusterDays` в интерфейс и состояние с дефолтом 100, обработка чтения с сервера, валидация `checkTargetDays > checkMinDays` при сохранении и передача `maxClusterDays` в payload.
 
+## [2026-08-09]
+
+### Изменено
+- Ozon Settings Modal (`src/components/OzonSettingsModal.tsx`): обновлён текст подсказки у поля «Целевой запас на Ozon, дней» и добавлено новое поле ввода «Максимальный срок продаж кластера, дней» (`form.maxClusterDays`) сразу под полем целевого запаса.
+
 
 
 

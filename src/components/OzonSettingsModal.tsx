@@ -335,7 +335,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Целевой запас на Ozon, дней
-                  <FieldHint position="bottom" text="На сколько дней продаж пополняется запас при поставке. Рекомендация поставки = скорость × (целевой запас + неснижаемые дни) − расчётный остаток кластера. Чем больше значение, тем крупнее и реже поставки." />
+                  <FieldHint position="bottom" text="На сколько дней продаж пополняется запас при поставке. Рекомендация поставки = скорость × целевой запас − расчётный остаток кластера. Неснижаемый остаток входит ВНУТРЬ этого срока и отдельно не прибавляется, поэтому значение обязано быть больше неснижаемого. Чем больше значение, тем крупнее и реже поставки." />
                 </label>
                 <input
                   type="number"
@@ -344,6 +344,23 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   value={form.targetStockDays}
                   onChange={(e) =>
                     setForm({ ...form, targetStockDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Максимальный срок продаж кластера, дней
+                  <FieldHint position="bottom" text="Защита от заваливания медленных кластеров. Поставка идёт целыми коробками, поэтому кластеру со скоростью 0,07 шт в день одна коробка на 42 шт даёт запас почти на два года. Если после поставки расчётный запас кластера превысит это число дней, кластер из рекомендации исключается целиком и непокрытой потребности не создаёт — на сигнал заказа на фабрике он не влияет. Значение 0 полностью выключает эту защиту." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.maxClusterDays}
+                  onChange={(e) =>
+                    setForm({ ...form, maxClusterDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />
