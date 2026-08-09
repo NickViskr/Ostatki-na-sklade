@@ -374,6 +374,7 @@
 | 2026-08-09 | Прокидка maxClusterDays и обновление ColHint в OzonStocksTab.tsx и Dashboard.tsx | `src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx` | Прокинуто чтение настройки maxClusterDays из ответа API с дефолтом 100 в OzonStocksTab.tsx и Dashboard.tsx, обновлена подсказка ColHint для рекомендации (этап C пункта 34). | Нет |
 | 2026-08-09 | Поддержка настройки maxClusterDays и валидация целевого запаса в OzonSettingsModal.tsx | `src/components/OzonSettingsModal.tsx` | В OzonSettingsModal.tsx добавлены тип maxClusterDays, дефолт 100 в useState, чтение с сервера с дефолтом 100, проверка checkTargetDays > checkMinDays в handleSave и отправка maxClusterDays в payload (этап D пункта 34). | Нет |
 | 2026-08-09 | Обновление подсказки целевого запаса и добавление поля maxClusterDays в OzonSettingsModal.tsx | `src/components/OzonSettingsModal.tsx` | Поправлен текст подсказки для целевого запаса Ozon и добавлено поле ввода «Максимальный срок продаж кластера, дней» (form.maxClusterDays) непосредственно под полем целевого запаса. | Нет |
+| 2026-08-09 | Внесение пункта 41 (География спроса) в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md внесён новый внеочередной пункт 41 перед разделом «Известные хвосты вне плана». | Нет |
 
 
 
