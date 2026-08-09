@@ -376,6 +376,7 @@
 | 2026-08-09 | Обновление подсказки целевого запаса и добавление поля maxClusterDays в OzonSettingsModal.tsx | `src/components/OzonSettingsModal.tsx` | Поправлен текст подсказки для целевого запаса Ozon и добавлено поле ввода «Максимальный срок продаж кластера, дней» (form.maxClusterDays) непосредственно под полем целевого запаса. | Нет |
 | 2026-08-09 | Внесение пункта 41 (География спроса) в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md внесён новый внеочередной пункт 41 перед разделом «Известные хвосты вне плана». | Нет |
 | 2026-08-09 | Фиксация фактов разведки географии спроса в OZON_API.md | `docs/OZON_API.md` | В docs/OZON_API.md внесены факты разведки Ozon API от 10.08.2026: cluster_to как источник кластера доставки, свойства financial_data и analytics_data. | Нет |
+| 2026-08-09 | Использование cluster_to как источника кластера продажи в server.ts | `server.ts` | В обработчике `/api/ozon/sales` добавлена заправка `with.financial_data: true` и заменён источник кластера продаж на `posting.financial_data?.cluster_to` (этап A пункта 41). | Нет |
 
 
 

@@ -2230,7 +2230,7 @@ async function startServer() {
                 },
                 limit: 1000,
                 offset,
-                with: { analytics_data: true }
+                with: { analytics_data: true, financial_data: true }
               };
 
               const apiRes = await fetchOzonApi("/v2/posting/fbo/list", cabKeys, body);
@@ -2246,8 +2246,12 @@ async function startServer() {
                   continue;
                 }
 
-                const warehouseId = String(posting.analytics_data?.warehouse_id || '').trim();
-                const cluster = whClusterMap.get(warehouseId) || 'Без кластера';
+                // Пункт 41. Кластер продажи — место доставки ПОКУПАТЕЛЮ, а не склад отгрузки.
+                // Ozon отгружает заказ из соседнего кластера, если в кластере покупателя товара нет,
+                // поэтому прежний источник analytics_data.warehouse_id записывал спрос чужому кластеру:
+                // замер 10.08.2026 показал 14,9 % таких отправлений (80 из 538 за 4 полные недели).
+                // Поле cluster_to заполнено у 100 % отправлений и приходит только при with.financial_data.
+                const cluster = String(posting.financial_data?.cluster_to || '').trim() || 'Без кластера';
 
                 const products = Array.isArray(posting.products) ? posting.products : [];
                 for (const p of products) {
