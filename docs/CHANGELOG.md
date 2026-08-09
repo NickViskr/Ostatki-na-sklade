@@ -1347,6 +1347,7 @@
 - Apps Script Backend (`Code.gs`): добавлена новая настройка `maxClusterDays` со значением по умолчанию 100 в массив `OZON_SETTINGS_DEFAULTS` (этап A пункта 34).
 - Ozon Coverage (`src/lib/ozonCoverage.ts`): реализован этап B пункта 34 — пересчитана рекомендация поставки без прибавления неснижаемого остатка к целевому и добавлен отсекатель `maxClusterDays` по максимальному сроку продаж кластера после поставки.
 - Ozon Stocks & Dashboard (`src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx`): реализован этап C пункта 34 — прокинуто чтение настройки `maxClusterDays` с дефолтом 100 и обновлена подсказка ColHint для колонки «Рекомендация».
+- Ozon Settings Modal (`src/components/OzonSettingsModal.tsx`): реализован этап D пункта 34 — добавлено поле `maxClusterDays` в интерфейс и состояние с дефолтом 100, обработка чтения с сервера, валидация `checkTargetDays > checkMinDays` при сохранении и передача `maxClusterDays` в payload.
 
 
 

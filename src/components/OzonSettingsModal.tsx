@@ -12,6 +12,7 @@ interface OzonSettingsData {
   speedWeeks: number;
   minStockDays: number;
   targetStockDays: number;
+  maxClusterDays: number;
   factoryOrderDays: number;
   returnsToSalePct: number;
   salesRetentionWeeks: number;
@@ -54,6 +55,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     speedWeeks: 4,
     minStockDays: 7,
     targetStockDays: 30,
+    maxClusterDays: 100,
     factoryOrderDays: 60,
     returnsToSalePct: 80,
     salesRetentionWeeks: 78,
@@ -210,6 +212,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               speedWeeks: Number(res.data.speedWeeks) || 4,
               minStockDays: Number(res.data.minStockDays) || 7,
               targetStockDays: Number(res.data.targetStockDays) || 30,
+              maxClusterDays: res.data.maxClusterDays === undefined || res.data.maxClusterDays === '' ? 100 : Number(res.data.maxClusterDays),
               factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
               returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
               salesRetentionWeeks: Number(res.data.salesRetentionWeeks) || 78,
@@ -236,12 +239,19 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   if (!isOpen) return null;
 
   const handleSave = async () => {
+    const checkMinDays = Math.max(0, parseFloat(String(form.minStockDays)) || 0);
+    const checkTargetDays = Math.max(0, parseFloat(String(form.targetStockDays)) || 0);
+    if (checkTargetDays <= checkMinDays) {
+      toast.error('Целевой запас должен быть больше Неснижаемого остатка: неснижаемый входит внутрь целевого, а не прибавляется к нему');
+      return;
+    }
     setSaving(true);
     try {
       const payload: OzonSettingsData = {
         speedWeeks: Math.max(1, parseInt(String(form.speedWeeks), 10) || 1),
         minStockDays: Math.max(0, parseFloat(String(form.minStockDays)) || 0),
         targetStockDays: Math.max(0, parseFloat(String(form.targetStockDays)) || 0),
+        maxClusterDays: Math.max(0, parseFloat(String(form.maxClusterDays)) || 0),
         factoryOrderDays: Math.max(0, parseFloat(String(form.factoryOrderDays)) || 0),
         returnsToSalePct: Math.min(100, Math.max(0, parseFloat(String(form.returnsToSalePct)) || 0)),
         salesRetentionWeeks: Math.max(1, parseInt(String(form.salesRetentionWeeks), 10) || 1),

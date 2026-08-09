@@ -372,6 +372,7 @@
 | 2026-08-09 | Добавление настройки maxClusterDays в OZON_SETTINGS_DEFAULTS в Code.gs | `Code.gs` | В массив OZON_SETTINGS_DEFAULTS файла Code.gs добавлено значение по умолчанию для настройки maxClusterDays со значением 100 (этап A пункта 34). | Нет |
 | 2026-08-09 | Расчёт целевого запаса без двойного счёта и отсекатель по макс. сроку продаж кластера в ozonCoverage.ts | `src/lib/ozonCoverage.ts` | В `src/lib/ozonCoverage.ts` обновлены `OzonCoverageSettings` (добавлен `maxClusterDays?: number`) и переписана `calcSupplyRecommendation` (убрано слагаемое minStockDays, добавлен отсекатель по maxClusterDays) (этап B пункта 34). | Нет |
 | 2026-08-09 | Прокидка maxClusterDays и обновление ColHint в OzonStocksTab.tsx и Dashboard.tsx | `src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx` | Прокинуто чтение настройки maxClusterDays из ответа API с дефолтом 100 в OzonStocksTab.tsx и Dashboard.tsx, обновлена подсказка ColHint для рекомендации (этап C пункта 34). | Нет |
+| 2026-08-09 | Поддержка настройки maxClusterDays и валидация целевого запаса в OzonSettingsModal.tsx | `src/components/OzonSettingsModal.tsx` | В OzonSettingsModal.tsx добавлены тип maxClusterDays, дефолт 100 в useState, чтение с сервера с дефолтом 100, проверка checkTargetDays > checkMinDays в handleSave и отправка maxClusterDays в payload (этап D пункта 34). | Нет |
 
 
 
