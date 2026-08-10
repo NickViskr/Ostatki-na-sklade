@@ -550,6 +550,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     const supplies: any[] = [];
     const factories: any[] = [];
     let orderedCount = 0;
+    let clusterDeficitCount = 0;
     for (const row of coverageRows as any[]) {
       const clusters = row.clusters.filter((c: any) => c.recommendation && (c.recommendation.boxes > 0 || c.needQty > 0));
       if (clusters.length > 0) {
@@ -568,15 +569,18 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           clusters,
         });
       }
-      if (row.factory) {
-        if (activeFactoryOrders[row.article]) orderedCount++;
-        else factories.push({ article: row.article, name: row.name, factory: row.factory, leadTimeDays: row.leadTimeDays });
+      // Пункт 35. В список попадает то, что реально надо дозаказать.
+      // Размещённый заказ входит в ТРУБУ и сам по себе позицию из списка не убирает.
+      if (row.factory && row.factory.orderQty > 0) {
+        factories.push({ article: row.article, name: row.name, factory: row.factory, leadTimeDays: row.leadTimeDays });
       }
+      if (row.factory && row.factory.orderQty === 0 && row.factory.reason === 'clusterDeficit') clusterDeficitCount++;
+      if ((factoryOnOrder[row.article] || 0) > 0) orderedCount++;
     }
     supplies.sort((a, b) => a.minCoverage - b.minCoverage);
     factories.sort((a, b) => a.factory.daysLeft - b.factory.daysLeft);
-    return { supplies, factories, orderedCount };
-  }, [coverageRows, activeFactoryOrders]);
+    return { supplies, factories, orderedCount, clusterDeficitCount };
+  }, [coverageRows, activeFactoryOrders, factoryOnOrder]);
 
   if (!isAdmin) return null;
 
@@ -823,9 +827,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                       <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Заказать на фабрике</div>
                       {recommendations.factories.length === 0 ? (
                         <div className="text-[11px] text-slate-400">
-                          {recommendations.orderedCount > 0
-                            ? `Все сигналы закрыты размещёнными заказами: ${recommendations.orderedCount}.`
-                            : 'Заказывать пока нечего.'}
+                          Заказывать пока нечего.
+                          {recommendations.orderedCount > 0 && <span className="block text-sky-700">Размещённых заказов на фабрике: {recommendations.orderedCount}.</span>}
+                          {recommendations.clusterDeficitCount > 0 && <span className="block text-slate-500">Дефицит в кластерах: {recommendations.clusterDeficitCount} товаров — товар есть, лежит не там.</span>}
                         </div>
                       ) : (
                         <div className="flex flex-col gap-2">
@@ -849,7 +853,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             </button>
                           ))}
                           {recommendations.orderedCount > 0 && (
-                            <div className="text-[11px] text-emerald-700">Уже заказано на фабрике: {recommendations.orderedCount} товаров.</div>
+                            <div className="text-[11px] text-sky-700">Размещённых заказов на фабрике: {recommendations.orderedCount} товаров, они уже учтены в расчёте.</div>
+                          )}
+                          {recommendations.clusterDeficitCount > 0 && (
+                            <div className="text-[11px] text-slate-500">Дефицит в кластерах: {recommendations.clusterDeficitCount} товаров — товар есть, лежит не там, заказывать не нужно.</div>
                           )}
                         </div>
                       )}
