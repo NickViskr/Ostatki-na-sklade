@@ -328,6 +328,43 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       .sort((a, b) => String(b.since || '').localeCompare(String(a.since || '')));
   }, [pendingModalArticle, pendingSupplies]);
 
+  // Пункт 35. Все активные заказы по артикулу, отсортированы по дате ожидания.
+  // Нужны, чтобы показать в плашке весь список, а не только последний заказ.
+  // Объявлено ДО расчёта покрытия: расчёт этими данными пользуется.
+  const factoryOrdersByArticle = useMemo(() => {
+    const map: Record<string, FactoryOrder[]> = {};
+    for (const o of factoryOrders || []) {
+      if (String(o.status || '').trim() === 'received') continue;
+      const key = String(o.article || '').trim();
+      if (!key) continue;
+      if (!map[key]) map[key] = [];
+      map[key].push(o);
+    }
+    for (const key of Object.keys(map)) {
+      map[key].sort((a, b) => String(a.expectedAt || '').localeCompare(String(b.expectedAt || '')));
+    }
+    return map;
+  }, [factoryOrders]);
+
+  // Пункт 35. ТРУБА: в расчёт идёт сумма активных заказов по артикулу.
+  // Просроченный заказ (дата ожидания раньше сегодняшней) в ТРУБУ НЕ входит:
+  // фабрика сроки сорвала, считать этот товар имеющимся нельзя.
+  // Сегодняшняя дата считается здесь же: переменная todayIso объявлена ниже по файлу.
+  const factoryOnOrder = useMemo(() => {
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const map: Record<string, number> = {};
+    for (const list of Object.values(factoryOrdersByArticle)) {
+      for (const o of list) {
+        const expected = String(o.expectedAt || '').trim();
+        if (expected && expected < today) continue;
+        const key = String(o.article || '').trim();
+        map[key] = (map[key] || 0) + (Number(o.qty) || 0);
+      }
+    }
+    return map;
+  }, [factoryOrdersByArticle]);
+
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (filteredOzonStocks.length === 0) return null;
     // Пункт 29, этап E: ждём ответ по справочнику кластеров.
@@ -459,39 +496,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     }
     return map;
   }, [factoryOrders]);
-
-  // Пункт 35. Все активные заказы по артикулу, отсортированы по дате ожидания.
-  // Нужны, чтобы показать в плашке весь список, а не только последний заказ.
-  const factoryOrdersByArticle = useMemo(() => {
-    const map: Record<string, FactoryOrder[]> = {};
-    for (const o of factoryOrders || []) {
-      if (String(o.status || '').trim() === 'received') continue;
-      const key = String(o.article || '').trim();
-      if (!key) continue;
-      if (!map[key]) map[key] = [];
-      map[key].push(o);
-    }
-    for (const key of Object.keys(map)) {
-      map[key].sort((a, b) => String(a.expectedAt || '').localeCompare(String(b.expectedAt || '')));
-    }
-    return map;
-  }, [factoryOrders]);
-
-  // Пункт 35. ТРУБА: в расчёт идёт сумма активных заказов по артикулу.
-  // Просроченный заказ (дата ожидания раньше сегодняшней) в ТРУБУ НЕ входит:
-  // фабрика сроки сорвала, считать этот товар имеющимся нельзя.
-  const factoryOnOrder = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const list of Object.values(factoryOrdersByArticle)) {
-      for (const o of list) {
-        const expected = String(o.expectedAt || '').trim();
-        if (expected && expected < todayIso) continue;
-        const key = String(o.article || '').trim();
-        map[key] = (map[key] || 0) + (Number(o.qty) || 0);
-      }
-    }
-    return map;
-  }, [factoryOrdersByArticle, todayIso]);
 
   const factoryModalRow = useMemo(() => {
     if (!factoryModalArticle) return null;

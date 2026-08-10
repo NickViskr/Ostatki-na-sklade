@@ -383,7 +383,9 @@
 | 2026-08-10 | Фиксация фактов про два кабинета и загрузку CIS-кластеров в OZON_API.md | `docs/OZON_API.md` | В docs/OZON_API.md вставлены факты про два кабинета Ozon (Mercurius и MaxiStore), особенности подсоединения Ozon MCP и загрузку СНГ-кластеров через CLUSTER_TYPE_CIS. | Нет |
 | 2026-08-10 | Фиксация выполнения пункта 34 и решений пункта 35 в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md отмечено выполнение пункта 34 и зафиксированы решения пользователя от 10.08.2026, результат замера эталона и обновлённые этапы пункта 35. | Нет |
 | 2026-08-10 | Перевод сигнала «Заказ на фабрике» на модель ТРУБА в ozonCoverage.ts | `src/lib/ozonCoverage.ts` | В файле `src/lib/ozonCoverage.ts` выполнены три точечные замены: обновлён интерфейс FactorySignal, переписана функция calcFactorySignal на модель ТРУБА (pipelineQty = TotalEstimated + MyStockAvailable + OnOrder) и обновлена передача factoryOnOrder из buildOzonCoverage (этап A пункта 35). | Нет |
-| 2026-08-10 | Передача активных заказов на фабрике в расчёт покрытия Ozon (ТРУБА) | `src/components/OzonStocksTab.tsx` | В компоненте `OzonStocksTab.tsx` выполнены 2 точечные замены (этап B1 пункта 35): добавлены `factoryOrdersByArticle` и `factoryOnOrder` (исключающие просроченные заказы `expectedAt < todayIso`), переменная `factoryOnOrder` передана в `buildOzonCoverage` и добавлена в массив зависимостей `coverage`. | Нет |
+| 2026-08-10 | Передача активных заказов на фабрике в расчёт покрытия Ozon (ТРУБА) | `src/components/OzonStocksTab.tsx` | В компоненте `OzonStocksTab.tsx` выполнены 2 точечные замены (этап B1 пункта 35): добавлены `factoryOrdersByArticle` и `factoryOnOrder` (исключающие просроченные заказы `expectedAt < todayIso`), переменная `factoryOnOrder` передана в `buildOzonCoverage` и добавлена в массив зависимостей `coverage`. | Нет || 2026-08-10 | Перенос factoryOrdersByArticle и factoryOnOrder выше coverage в OzonStocksTab.tsx | `src/components/OzonStocksTab.tsx` | Перенесены объявления `factoryOrdersByArticle` и `factoryOnOrder` выше расчёта `coverage` в `src/components/OzonStocksTab.tsx` для устранения ошибок TS2448/TS2454. | Нет |
+
+
 
 
 
