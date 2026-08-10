@@ -386,6 +386,7 @@
 | 2026-08-10 | Передача активных заказов на фабрике в расчёт покрытия Ozon (ТРУБА) | `src/components/OzonStocksTab.tsx` | В компоненте `OzonStocksTab.tsx` выполнены 2 точечные замены (этап B1 пункта 35): добавлены `factoryOrdersByArticle` и `factoryOnOrder` (исключающие просроченные заказы), переменная `factoryOnOrder` передана в `buildOzonCoverage` и добавлена в массив зависимостей `coverage`. | Нет |
 | 2026-08-10 | Перенос factoryOrdersByArticle и factoryOnOrder выше coverage в OzonStocksTab.tsx | `src/components/OzonStocksTab.tsx` | Перенесены объявления `factoryOrdersByArticle` и `factoryOnOrder` выше расчёта `coverage` в `src/components/OzonStocksTab.tsx` для устранения ошибок TS2448/TS2454. | Нет |
 | 2026-08-10 | Передача активных заказов на фабрике в расчёт покрытия Ozon на Dashboard.tsx | `src/components/Dashboard.tsx` | В компоненте `Dashboard.tsx` добавлен `factoryOnOrder` (активные заказы на фабрике, за исключением просроченных `expectedAt < today`) и передан в `buildOzonCoverage` (этап B2 пункта 35). | Нет |
+| 2026-08-10 | Отображение пяти состояний ячейки «Заказ на фабрике» в OzonStocksTab.tsx | `src/components/OzonStocksTab.tsx` | В компоненте `OzonStocksTab.tsx` выполнены 4 точечные замены (этап C1 пункта 35): обновлён `factoryDaysLeft` с учётом `factoryOnOrder`, добавлена разборка заказов (`factoryOverdueList`, `factoryWaitingQty`, `factoryNearest`, `factoryClusterOnly`), и реализованы 5 состояний отображения ячейки «Заказ на фабрике». | Нет |
 
 
 

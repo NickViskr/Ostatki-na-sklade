@@ -436,7 +436,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         recommendedQty: art.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0),
         recLimited: art.clusters.some((c) => c.recommendation !== null && c.recommendation.limitedByMyStock),
         deficitQty: clustersWithNeed.reduce((s, c) => s + (c.recommendation && c.recommendation.boxes === 0 ? c.needQty : 0), 0),
-        factoryDaysLeft: art.perDay > 0 ? (art.totalEstimated + Math.max(0, art.myStockAvailable)) / art.perDay : null,
+        factoryDaysLeft: art.factory ? art.factory.daysLeft : (art.perDay > 0 ? (art.totalEstimated + Math.max(0, art.myStockAvailable) + (factoryOnOrder[art.article] || 0)) / art.perDay : null),
         factoryThreshold: (Number(art.leadTimeDays) || 0) + ozonSettings.minStockDays,
         clusters: clustersWithNeed,
       };
@@ -1042,6 +1042,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         const isArtExpanded = !!expandedArticles[art.article];
                         const factoryOrder = activeFactoryOrders[art.article] || null;
                         const factoryOverdue = !!(factoryOrder && factoryOrder.expectedAt && factoryOrder.expectedAt < todayIso);
+                        // Пункт 35. Разбор заказов на фабрике для пяти состояний ячейки.
+                        const factoryList = factoryOrdersByArticle[art.article] || [];
+                        const factoryOverdueList = factoryList.filter((o) => o.expectedAt && o.expectedAt < todayIso);
+                        const factoryOverdueQty = factoryOverdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
+                        const factoryWaitingList = factoryList.filter((o) => !o.expectedAt || o.expectedAt >= todayIso);
+                        const factoryWaitingQty = factoryWaitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
+                        const factoryNearest = factoryWaitingList[0] || null;
+                        const factoryOrderQty = art.factory ? art.factory.orderQty : 0;
+                        const factoryClusterOnly = !!(art.factory && art.factory.reason === 'clusterDeficit' && art.factory.orderQty === 0);
                         const factoryBox = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
                         return (
                           <React.Fragment key={art.article}>
@@ -1131,14 +1140,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               )}
                               {isColVisible('factory') && (
                                 <td className="p-3 text-right">
-                                  {factoryOrder ? (
+                                  {factoryOverdueList.length > 0 ? (
                                     <span className="relative inline-flex group justify-end">
                                       <button
                                         type="button"
                                         onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                        className={`text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors ${factoryOverdue ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}
+                                        className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
                                       >
-                                        {factoryOverdue ? `ждали ${fmtDateShort(factoryOrder.expectedAt)}` : `заказ · ${fmtDateShort(factoryOrder.expectedAt)}`}
+                                        просрочен · {fmtDateShort(factoryOverdueList[0].expectedAt)}
+                                        <span className="block text-[10px] font-semibold text-amber-600">{fmtInt(factoryOverdueQty)} шт · нажми, чтобы решить</span>
                                       </button>
                                       <span className="pointer-events-none absolute right-0 top-full mt-1 z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal normal-case text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-normal">
                                         Заказано {fmtInt(factoryOrder.qty)} шт ({fmtInt(Math.ceil(factoryOrder.qty / factoryBox))} кор)<br />
@@ -1149,21 +1159,35 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         Нажми, чтобы изменить заказ или отметить приход партии.
                                       </span>
                                     </span>
-                                  ) : art.factory ? (
+                                  ) : factoryOrderQty > 0 ? (
                                     <button
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
                                       className="text-rose-600 font-bold text-right hover:underline"
-                                      title={
-                                        (art.factory.reason === 'clusterDeficit'
-                                          ? `Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, а на Моём складе товара нет: между кластерами Ozon остаток не перебросить, взять можно только с фабрики. Общего запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при сроке поставки ${art.leadTimeDays || 0} дн.`
-                                          : `Товар кончается везде: общего запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас).`) + ' Нажми, чтобы отметить размещённый заказ.'
-                                      }
+                                      title={`Запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас). В запас входят остаток на Ozon, Мой склад и заказанное на фабрике ${fmtInt(factoryWaitingQty)} шт. Нажми, чтобы отметить размещённый заказ.`}
                                     >
-                                      {fmtInt(art.factory.orderQty)} шт
+                                      {factoryWaitingQty > 0 ? 'дозаказать ' : ''}{fmtInt(factoryOrderQty)} шт
                                       <span className="block text-[10px] font-semibold text-rose-400">
-                                        {fmtInt(art.factory.orderBoxes)} кор · {art.factory.reason === 'clusterDeficit' ? 'нечем пополнить' : 'кончается везде'}
+                                        {fmtInt(art.factory.orderBoxes)} кор · {factoryWaitingQty > 0 ? `уже заказано ${fmtInt(factoryWaitingQty)} шт` : `хватит на ${Math.round(art.factory.daysLeft)} дн.`}
                                       </span>
+                                    </button>
+                                  ) : factoryClusterOnly ? (
+                                    <span
+                                      className="text-[10px] font-semibold text-slate-500"
+                                      title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно.`}
+                                    >
+                                      дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
+                                      <span className="block text-[10px] font-normal text-slate-400">товар есть, лежит не там</span>
+                                    </span>
+                                  ) : factoryWaitingQty > 0 ? (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
+                                      className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100"
+                                      title={`Заказано на фабрике ${fmtInt(factoryWaitingQty)} шт. Заказ входит в запас, дозаказывать не нужно. Нажми, чтобы изменить заказ или отметить приход партии.`}
+                                    >
+                                      заказано {fmtInt(factoryWaitingQty)} шт
+                                      <span className="block text-[10px] font-semibold text-sky-600">ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}</span>
                                     </button>
                                   ) : (Number(art.leadTimeDays) || 0) === 0 ? (
                                     <span

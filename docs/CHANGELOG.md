@@ -1378,6 +1378,7 @@
 - Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): в расчёт покрытия `buildOzonCoverage` переданы активные заказы на фабрике `factoryOnOrder` для учёта в ТРУБЕ, просроченные заказы (`expectedAt < todayIso`) исключаются (этап B1 пункта 35).
 - Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): перенесены объявления `factoryOrdersByArticle` и `factoryOnOrder` выше расчёта `coverage` для устранения ошибок использования переменных до объявления (TS2448/TS2454).
 - Главная страница (`src/components/Dashboard.tsx`): в расчёт покрытия `buildOzonCoverage` переданы активные заказы на фабрике `factoryOnOrder` для учёта в ТРУБЕ (этап B2 пункта 35).
+- Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): ячейка «Заказ на фабрике» переведена на отображение 5 состояний (просрочен, дозаказать, дефицит в кластерах, заказано, заказать/—) согласно решениям пункта 35 (этап C1).
 
 
 
