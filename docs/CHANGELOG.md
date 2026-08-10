@@ -1371,6 +1371,11 @@
 - Документация Ozon API (`docs/OZON_API.md`): добавлены факты про существование двух кабинетов (Mercurius и MaxiStore), особенности подключения Ozon MCP в Claude Code и загрузку кластеров СНГ через CLUSTER_TYPE_CIS.
 - Паспорт проекта (`docs/OZON_PLAN.md`): зафиксированы отметка выполнения пункта 34 и решения пользователя, эталонный замер и обновлённые этапы пункта 35.
 
+## [2026-08-10]
+
+### Изменено
+- Модуль расчёта покрытия Ozon (`src/lib/ozonCoverage.ts`): переведён сигнал «Заказ на фабрике» на модель ТРУБА (этап A пункта 35). Выполнены три точечные замены: обновлён интерфейс `FactorySignal` (добавлены поля `pipelineQty`, `onOrderQty`, `thresholdDays`, `thresholdQty`), переписан `calcFactorySignal` с учётом суммарного запаса в ТРУБЕ (`pipelineQty = TotalEstimated + MyStockAvailable + OnOrder`) и обновлена функция `buildOzonCoverage` для передачи `factoryOnOrder` в `calcFactorySignal`.
+
 
 
 

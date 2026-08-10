@@ -360,25 +360,37 @@ export function calcSupplyRecommendation(
 }
 
 export interface FactorySignal {
-  /** На сколько дней хватит: (остаток всех кластеров + Мой склад) ÷ скорость. */
+  /** На сколько дней хватит ТРУБЫ: ТРУБА ÷ скорость. */
   daysLeft: number;
-  /** Объём заказа, шт: больший из «скорость × дни заказа» и непокрытой потребности кластеров. */
+  /** ТРУБА, шт: остаток всех кластеров Ozon + Мой склад + заказанное на фабрике и ещё не полученное. */
+  pipelineQty: number;
+  /** Заказано на фабрике и ещё не получено, шт. Просроченные заказы сюда НЕ входят. */
+  onOrderQty: number;
+  /** Порог срабатывания в днях: срок поставки + неснижаемый запас. */
+  thresholdDays: number;
+  /** Тот же порог в штуках: скорость × thresholdDays. */
+  thresholdQty: number;
+  /** Сколько дозаказать, шт, кратно коробке. 0 — заказывать не нужно. */
   orderQty: number;
-  /** Тот же объём в коробках, округление вверх. */
+  /** Тот же объём в коробках. */
   orderBoxes: number;
-  /** Причина сигнала: 'total' — кончается общий остаток; 'clusterDeficit' — кластерам нужна поставка, а везти нечего. */
+  /** Причина сигнала: 'total' — ТРУБА ниже порога; 'clusterDeficit' — ТРУБЫ хватает, но кластерам нужна поставка, а везти нечего. */
   reason: 'total' | 'clusterDeficit';
-  /** Непокрытая потребность кластеров, шт (0, если сигнал вызван только общим остатком). */
+  /** Непокрытая потребность кластеров, шт. */
   unmetDeficitQty: number;
 }
 
 /**
- * Сигнал «пора заказать на фабрике». Срабатывает по любой из двух причин:
- * 1) 'total' — (расчётный остаток всех кластеров + Мой склад) ÷ скорость < срок поставки + неснижаемые дни;
- * 2) 'clusterDeficit' — у кластеров есть непокрытая потребность в поставке, а на Моём складе товара нет:
- *    остаток между кластерами Ozon не перебрасывается, взять товар можно только с фабрики.
- * Объём заказа — больший из «скорость × дни заказа» и непокрытой потребности кластеров.
- * Остатки исключённых кластеров и строки без КластерID входят в общий остаток.
+ * Пункт 35. Сигнал «пора заказать на фабрике» по модели ТРУБА.
+ * ТРУБА = остаток всех кластеров Ozon + Мой склад + заказанное на фабрике и ещё не полученное.
+ * ПОРОГ = скорость × (срок поставки + неснижаемый запас).
+ * ОБЪЁМ = скорость × (срок поставки + неснижаемый запас + объём заказа в днях) − ТРУБА,
+ * округление вверх до целых коробок один раз по товару.
+ * Сигнал больше НЕ гасится наличием заказа: заказ входит в ТРУБУ и уменьшает объём дозаказа.
+ * Просроченный заказ в ТРУБУ не входит — вызывающая сторона такие заказы сюда не передаёт.
+ * Если ТРУБЫ хватает, но у кластеров есть непокрытая потребность, возвращается reason
+ * 'clusterDeficit' с orderQty = 0: товар есть, он просто лежит не в том кластере, заказывать не надо.
+ * Остатки исключённых кластеров и строки без КластерID входят в ТРУБУ.
  */
 export function calcFactorySignal(
   totalEstimated: number,
@@ -387,17 +399,28 @@ export function calcFactorySignal(
   leadTimeDays: number,
   pcsPerBox: number,
   settings: OzonCoverageSettings,
-  unmetDeficitQty: number = 0
+  unmetDeficitQty: number = 0,
+  onOrderQty: number = 0
 ): FactorySignal | null {
   if (!(perDay > 0)) return null;
-  const daysLeft = (totalEstimated + Math.max(0, myStockAvailable)) / perDay;
-  const belowThreshold = daysLeft < (Number(leadTimeDays) || 0) + settings.minStockDays;
+  const lead = Number(leadTimeDays) || 0;
+  const onOrder = Math.max(0, Number(onOrderQty) || 0);
+  const pipelineQty = totalEstimated + Math.max(0, myStockAvailable) + onOrder;
+  const thresholdDays = lead + settings.minStockDays;
+  const thresholdQty = perDay * thresholdDays;
+  const belowThreshold = pipelineQty < thresholdQty;
   const unmet = Math.max(0, Number(unmetDeficitQty) || 0);
   if (!belowThreshold && unmet <= 0) return null;
   const box = pcsPerBox > 0 ? pcsPerBox : 1;
-  const orderQty = Math.max(Math.ceil(perDay * settings.factoryOrderDays), unmet);
+  const targetQty = perDay * (thresholdDays + settings.factoryOrderDays);
+  const rawNeed = targetQty - pipelineQty;
+  const orderQty = belowThreshold && rawNeed > 0 ? Math.ceil(rawNeed / box) * box : 0;
   return {
-    daysLeft,
+    daysLeft: pipelineQty / perDay,
+    pipelineQty,
+    onOrderQty: onOrder,
+    thresholdDays,
+    thresholdQty,
     orderQty,
     orderBoxes: Math.ceil(orderQty / box),
     reason: belowThreshold ? 'total' : 'clusterDeficit',
@@ -476,6 +499,8 @@ export interface OzonCoverageInput {
   myStockAvailability: Record<string, number>;
   /** Локальный зачёт по созданным заявкам; не передан — расчёт идёт как раньше. */
   pending?: OzonPendingLike;
+  /** Пункт 35. Заказано на фабрике и ещё не получено, шт по артикулу. Просроченные заказы сюда не попадают. */
+  factoryOnOrder?: Record<string, number>;
   /** Момент расчёта; по умолчанию — текущее время. */
   now?: Date;
 }
@@ -625,6 +650,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
 
     const perDay = speed.perDayByArticle[article] || 0;
     const unmetDeficitQty = clusterRows.reduce((s, r) => s + (r.unmetQty || 0), 0);
+    const onOrderQty = Math.max(0, Number(input.factoryOnOrder && input.factoryOnOrder[article]) || 0);
     const factory = calcFactorySignal(
       stockAgg.totalEstimated,
       myStockAvailable,
@@ -632,7 +658,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       leadTimeDays,
       pcsPerBox,
       input.settings,
-      unmetDeficitQty
+      unmetDeficitQty,
+      onOrderQty
     );
 
     articles.push({
