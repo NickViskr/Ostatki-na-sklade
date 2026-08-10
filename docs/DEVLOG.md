@@ -381,6 +381,7 @@
 | 2026-08-10 | Обновление эндпоинта /api/version в server.ts | `server.ts` | В эндпоинт /api/version добавлены revision (K_REVISION), startedAt, uptimeSec и флаги фич salesClusterTo, salesGeoLogging. | Нет |
 | 2026-08-10 | Фиксация статуса выполнения пункта 41 в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md отмечен выполнение пункта 41 (География спроса) и всех его этапов 0, A, B, C, D с результатом проверки. | Нет |
 | 2026-08-10 | Фиксация фактов про два кабинета и загрузку CIS-кластеров в OZON_API.md | `docs/OZON_API.md` | В docs/OZON_API.md вставлены факты про два кабинета Ozon (Mercurius и MaxiStore), особенности подсоединения Ozon MCP и загрузку СНГ-кластеров через CLUSTER_TYPE_CIS. | Нет |
+| 2026-08-10 | Фиксация выполнения пункта 34 и решений пункта 35 в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md отмечено выполнение пункта 34 и зафиксированы решения пользователя от 10.08.2026, результат замера эталона и обновлённые этапы пункта 35. | Нет |
 
 
 
