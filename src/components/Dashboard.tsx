@@ -269,7 +269,7 @@ export const Dashboard: React.FC = React.memo(() => {
         namesByArticle[art] = s.name;
       }
     }
-    const all = buildCoverageAlerts(ozonCoverage, ozonSettings, orderedArticles, namesByArticle);
+    const all = buildCoverageAlerts(ozonCoverage, ozonSettings, namesByArticle);
     const hidden = new Set(dismissedAlerts);
     return all.filter((a) => !hidden.has(a.key));
   }, [isAdmin, ozonCoverage, factoryOrders, ozonStocks, skus, ozonSettings, dismissedAlerts]);

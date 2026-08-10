@@ -204,16 +204,11 @@ export function buildOzonAlerts(shipments: ExternalShipment[], skus: SKUItem[]):
 export function buildCoverageAlerts(
   coverage: OzonCoverageResult | null,
   settings: OzonCoverageSettings,
-  orderedArticles: string[],
   namesByArticle: Record<string, string>
 ): OzonAlert[] {
   if (!coverage || !coverage.articles || !Array.isArray(coverage.articles) || coverage.articles.length === 0) {
     return [];
   }
-
-  const orderedSet = new Set(
-    (orderedArticles || []).map(a => String(a || '').trim().toLowerCase())
-  );
 
   const factoryItems: { alert: OzonAlert; daysLeft: number }[] = [];
   const supplyItems: { alert: OzonAlert; minCoverageDays: number }[] = [];
@@ -224,16 +219,15 @@ export function buildCoverageAlerts(
     const namePart = name ? `${art.article} — ${name}` : art.article;
 
     // АЛЕРТ «ПОРА ЗАКАЗАТЬ НА ФАБРИКЕ»
-    if (art.factory && !orderedSet.has(artKey)) {
-      let reasonText = '';
-      if (art.factory.reason === 'total') {
-        const threshold = Math.round((Number(art.leadTimeDays) || 0) + settings.minStockDays);
-        reasonText = `хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${threshold} дн.`;
-      } else if (art.factory.reason === 'clusterDeficit') {
-        reasonText = `кластерам нужно ${Math.round(art.factory.unmetDeficitQty)} шт, на своём складе нет`;
-      }
-
-      const orderText = `заказать ${Math.round(art.factory.orderQty)} шт (${art.factory.orderBoxes} кор.)`;
+    // Пункт 35. Алерт зажигается только тогда, когда есть что дозаказать.
+    // Размещённый заказ входит в ТРУБУ и алерт больше не гасит, а уменьшает объём дозаказа.
+    if (art.factory && art.factory.orderQty > 0) {
+      const threshold = Math.round((Number(art.leadTimeDays) || 0) + settings.minStockDays);
+      const onOrder = Math.round(Number(art.factory.onOrderQty) || 0);
+      const reasonText = `хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${threshold} дн.`;
+      const orderText = onOrder > 0
+        ? `дозаказать ${Math.round(art.factory.orderQty)} шт (${art.factory.orderBoxes} кор.), уже заказано ${onOrder} шт`
+        : `заказать ${Math.round(art.factory.orderQty)} шт (${art.factory.orderBoxes} кор.)`;
       const description = `${namePart} · ${reasonText} · ${orderText}`;
 
       factoryItems.push({
