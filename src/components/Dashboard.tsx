@@ -218,6 +218,25 @@ export const Dashboard: React.FC = React.memo(() => {
     });
   }, [externalShipments, ozonSupplyRequests, skus]);
 
+  // Пункт 35. ТРУБА: сумма активных заказов на фабрике по артикулу.
+  // Просроченный заказ (дата ожидания раньше сегодняшней) в ТРУБУ НЕ входит:
+  // фабрика сроки сорвала, считать этот товар имеющимся нельзя.
+  // Объявлено ДО расчёта покрытия: расчёт этими данными пользуется.
+  const factoryOnOrder = useMemo(() => {
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const map: Record<string, number> = {};
+    for (const o of factoryOrders || []) {
+      if (String(o.status || '').trim() === 'received') continue;
+      const key = String(o.article || '').trim();
+      if (!key) continue;
+      const expected = String(o.expectedAt || '').trim();
+      if (expected && expected < today) continue;
+      map[key] = (map[key] || 0) + (Number(o.qty) || 0);
+    }
+    return map;
+  }, [factoryOrders]);
+
   const ozonCoverage = useMemo<OzonCoverageResult | null>(() => {
     if (!isAdmin) return null;
     if (!ozonStocks || ozonStocks.length === 0) return null;
@@ -233,8 +252,9 @@ export const Dashboard: React.FC = React.memo(() => {
       settings: ozonSettings,
       myStockAvailability,
       pending: pendingSupplies,
+      factoryOnOrder,
     });
-  }, [isAdmin, ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies]);
+  }, [isAdmin, ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
 
   const coverageAlerts = useMemo(() => {
     if (!isAdmin || !ozonCoverage) return [];

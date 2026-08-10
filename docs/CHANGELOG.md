@@ -1377,6 +1377,7 @@
 - Модуль расчёта покрытия Ozon (`src/lib/ozonCoverage.ts`): переведён сигнал «Заказ на фабрике» на модель ТРУБА (этап A пункта 35). Выполнены три точечные замены: обновлён интерфейс `FactorySignal` (добавлены поля `pipelineQty`, `onOrderQty`, `thresholdDays`, `thresholdQty`), переписан `calcFactorySignal` с учётом суммарного запаса в ТРУБЕ (`pipelineQty = TotalEstimated + MyStockAvailable + OnOrder`) и обновлена функция `buildOzonCoverage` для передачи `factoryOnOrder` в `calcFactorySignal`.
 - Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): в расчёт покрытия `buildOzonCoverage` переданы активные заказы на фабрике `factoryOnOrder` для учёта в ТРУБЕ, просроченные заказы (`expectedAt < todayIso`) исключаются (этап B1 пункта 35).
 - Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): перенесены объявления `factoryOrdersByArticle` и `factoryOnOrder` выше расчёта `coverage` для устранения ошибок использования переменных до объявления (TS2448/TS2454).
+- Главная страница (`src/components/Dashboard.tsx`): в расчёт покрытия `buildOzonCoverage` переданы активные заказы на фабрике `factoryOnOrder` для учёта в ТРУБЕ (этап B2 пункта 35).
 
 
 
