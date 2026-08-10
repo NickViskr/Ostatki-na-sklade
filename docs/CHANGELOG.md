@@ -1367,6 +1367,7 @@
 
 ### Изменено
 - Эндпоинт версии (`server.ts`): в `/api/version` добавлены поля `revision` (`process.env.K_REVISION`), `startedAt`, `uptimeSec` и флаги фич `salesClusterTo`, `salesGeoLogging`.
+- Паспорт проекта (`docs/OZON_PLAN.md`): отмечен статус выполнения пункта 41 (География спроса) и всех его этапов (0, A, B, C, D) с фиксацией результатов живой проверки от 10.08.2026.
 
 
 

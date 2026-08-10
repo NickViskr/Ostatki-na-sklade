@@ -379,6 +379,7 @@
 | 2026-08-09 | Использование cluster_to как источника кластера продажи в server.ts | `server.ts` | В обработчике `/api/ozon/sales` добавлена заправка `with.financial_data: true` и заменён источник кластера продаж на `posting.financial_data?.cluster_to` (этап A пункта 41). | Нет |
 | 2026-08-09 | Логирование незнакомых кластеров SALESGEO в server.ts | `server.ts` | В обработчике `/api/ozon/sales` добавлена проверка незнакомых названий кластеров с выводом предупреждения SALESGEO в лог и прокидкой unknownClusters в отчёт кабинета (этап B пункта 41). | Нет |
 | 2026-08-10 | Обновление эндпоинта /api/version в server.ts | `server.ts` | В эндпоинт /api/version добавлены revision (K_REVISION), startedAt, uptimeSec и флаги фич salesClusterTo, salesGeoLogging. | Нет |
+| 2026-08-10 | Фиксация статуса выполнения пункта 41 в OZON_PLAN.md | `docs/OZON_PLAN.md` | В docs/OZON_PLAN.md отмечен выполнение пункта 41 (География спроса) и всех его этапов 0, A, B, C, D с результатом проверки. | Нет |
 
 
 
