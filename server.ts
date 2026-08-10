@@ -2672,10 +2672,22 @@ ${wbDictStr}`;
 
   // Метка версии прокси для диагностики развёртывания. Секретов не отдаёт.
   app.get("/api/version", (req, res) => {
+    // Имя редакции Cloud Run подставляет сам в переменную окружения K_REVISION,
+    // а время запуска считается от старта процесса. Вместе они однозначно отвечают
+    // на вопрос «какой код сейчас живой», без ручного обновления строки версии.
+    const startedAt = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString();
     res.json({
       status: "success",
       version: "2026-07-31-cargoes",
-      features: { clusterIdInShipments: true, cargoesAndDocs: true }
+      revision: process.env.K_REVISION || "local",
+      startedAt,
+      uptimeSec: Math.round(process.uptime()),
+      features: {
+        clusterIdInShipments: true,
+        cargoesAndDocs: true,
+        salesClusterTo: true,
+        salesGeoLogging: true
+      }
     });
   });
 

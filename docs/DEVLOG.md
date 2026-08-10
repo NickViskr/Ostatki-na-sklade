@@ -378,6 +378,7 @@
 | 2026-08-09 | Фиксация фактов разведки географии спроса в OZON_API.md | `docs/OZON_API.md` | В docs/OZON_API.md внесены факты разведки Ozon API от 10.08.2026: cluster_to как источник кластера доставки, свойства financial_data и analytics_data. | Нет |
 | 2026-08-09 | Использование cluster_to как источника кластера продажи в server.ts | `server.ts` | В обработчике `/api/ozon/sales` добавлена заправка `with.financial_data: true` и заменён источник кластера продаж на `posting.financial_data?.cluster_to` (этап A пункта 41). | Нет |
 | 2026-08-09 | Логирование незнакомых кластеров SALESGEO в server.ts | `server.ts` | В обработчике `/api/ozon/sales` добавлена проверка незнакомых названий кластеров с выводом предупреждения SALESGEO в лог и прокидкой unknownClusters в отчёт кабинета (этап B пункта 41). | Нет |
+| 2026-08-10 | Обновление эндпоинта /api/version в server.ts | `server.ts` | В эндпоинт /api/version добавлены revision (K_REVISION), startedAt, uptimeSec и флаги фич salesClusterTo, salesGeoLogging. | Нет |
 
 
 

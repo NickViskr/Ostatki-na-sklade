@@ -1363,6 +1363,11 @@
 ### Изменено
 - Серверный обработчик продаж (`server.ts`): реализован этап A пункта 41 — в `/api/ozon/sales` запрашивается блок `financial_data` и место доставки покупателю (`financial_data.cluster_to`) используется как источник кластера продажи; реализован этап B — добавлена проверка незнакомых названий кластеров с выгрузкой предупреждения `SALESGEO` в лог Cloud Run и списка `unknownClusters` в отчёт кабинета.
 
+## [2026-08-10]
+
+### Изменено
+- Эндпоинт версии (`server.ts`): в `/api/version` добавлены поля `revision` (`process.env.K_REVISION`), `startedAt`, `uptimeSec` и флаги фич `salesClusterTo`, `salesGeoLogging`.
+
 
 
 
