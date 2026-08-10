@@ -351,10 +351,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       settings: ozonSettings,
       myStockAvailability,
       pending: pendingSupplies,
+      factoryOnOrder,
     });
     console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
     return result;
-  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies]);
+  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies, factoryOnOrder]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];
@@ -458,6 +459,39 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     }
     return map;
   }, [factoryOrders]);
+
+  // Пункт 35. Все активные заказы по артикулу, отсортированы по дате ожидания.
+  // Нужны, чтобы показать в плашке весь список, а не только последний заказ.
+  const factoryOrdersByArticle = useMemo(() => {
+    const map: Record<string, FactoryOrder[]> = {};
+    for (const o of factoryOrders || []) {
+      if (String(o.status || '').trim() === 'received') continue;
+      const key = String(o.article || '').trim();
+      if (!key) continue;
+      if (!map[key]) map[key] = [];
+      map[key].push(o);
+    }
+    for (const key of Object.keys(map)) {
+      map[key].sort((a, b) => String(a.expectedAt || '').localeCompare(String(b.expectedAt || '')));
+    }
+    return map;
+  }, [factoryOrders]);
+
+  // Пункт 35. ТРУБА: в расчёт идёт сумма активных заказов по артикулу.
+  // Просроченный заказ (дата ожидания раньше сегодняшней) в ТРУБУ НЕ входит:
+  // фабрика сроки сорвала, считать этот товар имеющимся нельзя.
+  const factoryOnOrder = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const list of Object.values(factoryOrdersByArticle)) {
+      for (const o of list) {
+        const expected = String(o.expectedAt || '').trim();
+        if (expected && expected < todayIso) continue;
+        const key = String(o.article || '').trim();
+        map[key] = (map[key] || 0) + (Number(o.qty) || 0);
+      }
+    }
+    return map;
+  }, [factoryOrdersByArticle, todayIso]);
 
   const factoryModalRow = useMemo(() => {
     if (!factoryModalArticle) return null;
