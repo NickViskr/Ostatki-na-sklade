@@ -1368,6 +1368,7 @@
 ### Изменено
 - Эндпоинт версии (`server.ts`): в `/api/version` добавлены поля `revision` (`process.env.K_REVISION`), `startedAt`, `uptimeSec` и флаги фич `salesClusterTo`, `salesGeoLogging`.
 - Паспорт проекта (`docs/OZON_PLAN.md`): отмечен статус выполнения пункта 41 (География спроса) и всех его этапов (0, A, B, C, D) с фиксацией результатов живой проверки от 10.08.2026.
+- Документация Ozon API (`docs/OZON_API.md`): добавлены факты про существование двух кабинетов (Mercurius и MaxiStore), особенности подключения Ozon MCP в Claude Code и загрузку кластеров СНГ через CLUSTER_TYPE_CIS.
 
 
 
