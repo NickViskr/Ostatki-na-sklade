@@ -59,6 +59,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const kits = useWarehouseStore((state) => state.kits);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
   const getEffectiveAvgCost = useWarehouseStore((state) => state.getEffectiveAvgCost);
+  const lastPurchasePrices = useWarehouseStore((state) => state.lastPurchasePrices);
+  const fetchLastPurchasePrices = useWarehouseStore((state) => state.fetchLastPurchasePrices);
   const rawStocks = useWarehouseStore((state) => state.stock);
   const factoryOrders = useWarehouseStore((state) => state.factoryOrders);
   const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
@@ -150,10 +152,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       fetchOzonStocks();
       fetchOzonSales();
       fetchFactoryOrders();
+      fetchLastPurchasePrices();
       fetchExternalShipments();
       fetchOzonSupplyRequests();
     }
-  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchExternalShipments, fetchOzonSupplyRequests]);
+  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchLastPurchasePrices, fetchExternalShipments, fetchOzonSupplyRequests]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -237,6 +240,31 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   };
 
   const fmtInt = (v: number | null | undefined) => Math.round(Number(v) || 0).toLocaleString('ru-RU');
+
+  // Пункт 35. Цена единицы для колонки «Стоимость заказа, ₽».
+  // Берётся цена последнего поступления на склад, а НЕ средняя себестоимость:
+  // средняя искажена накопленной капитализацией и даёт цифры в сотни раз больше.
+  // У виртуального комплекта цена складывается из цен компонентов по нормам.
+  // Если поступлений не было, откатываемся на средняя себестоимость.
+  const getOrderUnitCost = React.useCallback((article: string): { price: number; source: string } => {
+    const virtualKit = kits.find((k: any) => k.kitSku === article && k.type === 'virtual');
+    if (virtualKit && Array.isArray(virtualKit.components) && virtualKit.components.length > 0) {
+      let sum = 0;
+      const parts: string[] = [];
+      for (const comp of virtualKit.components) {
+        const norm = Number(comp.quantity) || 0;
+        const rec = lastPurchasePrices[comp.componentSku];
+        const unit = rec && rec.price > 0 ? rec.price : 0;
+        sum += unit * norm;
+        parts.push(`${comp.componentSku} ${unit.toFixed(2)} ₽ × ${norm}`);
+      }
+      if (sum > 0) return { price: sum, source: 'по последним поступлениям компонентов: ' + parts.join(', ') };
+      return { price: getEffectiveAvgCost(article), source: 'поступлений компонентов не было, взята средняя себестоимость' };
+    }
+    const rec = lastPurchasePrices[article];
+    if (rec && rec.price > 0) return { price: rec.price, source: `по последнему поступлению ${rec.date}` };
+    return { price: getEffectiveAvgCost(article), source: 'поступлений не было, взята средняя себестоимость' };
+  }, [kits, lastPurchasePrices, getEffectiveAvgCost]);
   const fmtSpeed = (v: number | null | undefined) => (Number(v) || 0).toFixed(2);
   const fmtDays = (v: number | null | undefined, estimated: number) => {
     if (v === null || v === undefined) return estimated > 0 ? '∞' : '—';
@@ -1047,7 +1075,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('orderCost') && (
                           <th className="p-3 text-right">
                             Стоимость заказа, ₽
-                            <ColHint text="Сколько денег нужно на заказ: объём заказа умножен на среднюю себестоимость товара. У виртуального комплекта себестоимость складывается из себестоимости компонентов по нормам. Прочерк значит, что заказывать нечего или себестоимость ещё неизвестна — товар ни разу не приходил." />
+                            <ColHint text="Сколько денег нужно на заказ: объём заказа умножен на цену последнего поступления товара на склад. Средняя себестоимость здесь не используется — она искажена накопленной капитализацией. У виртуального комплекта цена складывается из цен компонентов по нормам. Наведи курсор на цифру: там видно цену за штуку и дату поступления, из которого она взята." />
                           </th>
                         )}
                       </tr>
@@ -1239,15 +1267,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               )}
                               {isColVisible('orderCost') && (
                                 <td className="p-3 text-right">
-                                  {factoryOrderQty > 0 && getEffectiveAvgCost(art.article) > 0 ? (
+                                  {factoryOrderQty > 0 && getOrderUnitCost(art.article).price > 0 ? (
                                     <span
                                       className="font-semibold text-slate-700"
-                                      title={`${fmtInt(factoryOrderQty)} шт по средней себестоимости ${getEffectiveAvgCost(art.article).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽ за штуку.`}
+                                      title={`${fmtInt(factoryOrderQty)} шт по ${getOrderUnitCost(art.article).price.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽ за штуку — ${getOrderUnitCost(art.article).source}.`}
                                     >
-                                      {Math.round(factoryOrderQty * getEffectiveAvgCost(art.article)).toLocaleString('ru-RU')}
+                                      {Math.round(factoryOrderQty * getOrderUnitCost(art.article).price).toLocaleString('ru-RU')}
                                     </span>
                                   ) : (
-                                    <span className="text-slate-300" title={factoryOrderQty > 0 ? 'Средняя себестоимость неизвестна: товар ещё ни разу не приходил на склад.' : 'Заказывать нечего.'}>—</span>
+                                    <span className="text-slate-300" title={factoryOrderQty > 0 ? 'Цена неизвестна: товар ещё ни разу не приходил на склад.' : 'Заказывать нечего.'}>—</span>
                                   )}
                                 </td>
                               )}
