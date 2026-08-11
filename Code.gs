@@ -475,6 +475,11 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'targetStockDays',     value: 30, desc: 'Целевой запас на Ozon, дней' },
   { key: 'maxClusterDays',      value: 100, desc: 'Максимальный срок продаж кластера после поставки, дней; 0 — отсекатель выключен' },
   { key: 'factoryOrderDays',    value: 60, desc: 'Объём заказа на фабрике, дней' },
+  { key: 'deficitDays',         value: 7,  desc: 'Порог дефицита, дней: ниже этого запаса товар считается распроданным; 0 — коррекция скорости выключена' },
+  { key: 'trendWeeks',          value: 11, desc: 'Окно тренда, недель' },
+  { key: 'bestWeeks',           value: 4,  desc: 'Лучших недель для коррекции скорости' },
+  { key: 'minSalesForCorrection', value: 50, desc: 'Минимум продаж за окно тренда для коррекции, шт' },
+  { key: 'maxSpeedGrowth',      value: 5,  desc: 'Максимальный рост скорости при дефиците, раз' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
   { key: 'excludedClusters',    value: '', desc: 'КластерID без поставок, через запятую' },
@@ -3741,7 +3746,7 @@ function saveOzonSettings(data) {
       throw new Error('Значение настройки "' + k + '" должно быть числом не меньше 0');
     }
 
-    if (k === 'speedWeeks' || k === 'salesRetentionWeeks') {
+    if (k === 'speedWeeks' || k === 'salesRetentionWeeks' || k === 'trendWeeks' || k === 'bestWeeks') {
       if (!Number.isInteger(numVal) || numVal < 1) {
         throw new Error('Значение настройки "' + k + '" должно быть целым числом не меньше 1');
       }

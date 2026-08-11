@@ -399,6 +399,7 @@
 | 2026-08-11 | Добавление cancelFactoryOrder в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В файле `src/store/useWarehouseStore.ts` выполнены 2 точечные замены (этап E пункта 35): объявлена сигнатура `cancelFactoryOrder` в типе `WarehouseState` и реализовано действие отправки команды `cancelFactoryOrder` с обновлением списка заказов при успешном удалении. | Нет |
 | 2026-08-11 | Добавление отмены заказа и двухэтапного подтверждения в FactoryOrderModal.tsx | `src/components/FactoryOrderModal.tsx` | В компоненте `src/components/FactoryOrderModal.tsx` выполнены 4 точечные замены и добавлен импорт `Trash2` (этап E пункта 35): подключено действие `cancelFactoryOrder`, добавлено состояние `confirmCancel`, обработчик `handleCancel` и кнопки отмены заказа с красной карточкой двухэтапного подтверждения удаления. | Нет |
 | 2026-08-11 | Фиксация выполнения пункта 35 в плане OZON_PLAN.md | `docs/OZON_PLAN.md` | В файле `docs/OZON_PLAN.md` выполнены 2 точечные замены: пункт 35 отмечен как полностью выполненный 11.08.2026, развёрнутый на бою и проверенный пользователем, все этапы (0, A0, A, B1, B2, C1, C2, D, E, F) отмечены как выполненные с подробным описанием результатов. | Нет |
+| 2026-08-11 | Добавление 5 настроек Ozon и правила валидации в Code.gs | `Code.gs` | В файле `Code.gs` выполнены 2 точечные замены: добавлены 5 настроек Ozon со значениями по умолчанию (`deficitDays`, `trendWeeks`, `bestWeeks`, `minSalesForCorrection`, `maxSpeedGrowth`) в `OZON_SETTINGS_DEFAULTS` и обновлена проверка целочисленных значений. | Нет |
 
 
 

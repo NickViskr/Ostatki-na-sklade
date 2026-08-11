@@ -1391,6 +1391,7 @@
 - Хранилище склада (`src/store/useWarehouseStore.ts`): добавлено действие `cancelFactoryOrder` для отправки запроса отмены заказа на фабрике и обновления состояния `factoryOrders` при успешном удалении (этап E пункта 35).
 - Модальное окно заказа на фабрике (`src/components/FactoryOrderModal.tsx`): добавлена кнопка отмены заказа с двухэтапным подтверждением (`confirmCancel`), обработчик `handleCancel` и иконка `Trash2` из `lucide-react` (этап E пункта 35).
 - План Ozon (`docs/OZON_PLAN.md`): пункт 35 «Контур заказа на фабрике: модель «труба» отмечен полностью выполненным (11.08.2026), с фиксацией результатов развёртывания и регрессионного тестирования на боевых данных.
+- Скрипт Google Apps Script (`Code.gs`): добавлены 5 новых числовых настроек Ozon (`deficitDays`, `trendWeeks`, `bestWeeks`, `minSalesForCorrection`, `maxSpeedGrowth`) в `OZON_SETTINGS_DEFAULTS` и обновлена валидация для целых чисел не меньше 1.
 
 
 
