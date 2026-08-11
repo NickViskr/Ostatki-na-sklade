@@ -396,6 +396,7 @@
 | 2026-08-11 | Перевод колонки «Стоимость заказа, ₽» на цены последних поступлений | `src/components/OzonStocksTab.tsx` | В компоненте `src/components/OzonStocksTab.tsx` выполнены 4 точечные замены (этап D пункта 35): подключен вызов `fetchLastPurchasePrices()` в `useEffect`, добавлена функция `getOrderUnitCost` для расчета цены по последнему закупу (с фоллбэком на себестоимость) и виртуальным комплектам, обновлена ячейка и подсказка колонки `orderCost`. | Нет |
 | 2026-08-11 | Функция cancelFactoryOrder и регистрация экшена в Code.gs | `Code.gs` | В файле `Code.gs` выполнены 2 точечные замены (этап E пункта 35): добавлена функция `cancelFactoryOrder` для безвозвратного удаления строки заказа из листа «Заказы на фабрике» при отмене и зарегистрирован экшен в `switch`. | Нет |
 | 2026-08-11 | Перестановка блоков комментариев JSDoc в Code.gs | `Code.gs` | В файле `Code.gs` выполнена перестановка 2 блоков комментариев JSDoc: комментарий с описанием `getLastPurchasePrices` перенесён непосредственно над объявлением функции `getLastPurchasePrices`, а над `cancelFactoryOrder` оставлен соответствующий ей комментарий. | Нет |
+| 2026-08-11 | Добавление cancelFactoryOrder в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В файле `src/store/useWarehouseStore.ts` выполнены 2 точечные замены (этап E пункта 35): объявлена сигнатура `cancelFactoryOrder` в типе `WarehouseState` и реализовано действие отправки команды `cancelFactoryOrder` с обновлением списка заказов при успешном удалении. | Нет |
 
 
 

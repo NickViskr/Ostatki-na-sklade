@@ -1388,6 +1388,7 @@
 - Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): колонка «Стоимость заказа, ₽» (`orderCost`) переведена на расчет по ценам последних поступлений (`lastPurchasePrices`) и компонентам виртуальных комплектов вместо средней себестоимости, добавлен вызов `fetchLastPurchasePrices` при открытии вкладки (этап D пункта 35).
 - Скрипт Google Apps Script (`Code.gs`): добавлена функция `cancelFactoryOrder` и регистрация экшена в `switch` для физического удаления отмененного заказа из листа «Заказы на фабрике» (этап E пункта 35).
 - Скрипт Google Apps Script (`Code.gs`): скорректировано расположение блоков JSDoc комментариев над функциями `cancelFactoryOrder` и `getLastPurchasePrices`.
+- Хранилище склада (`src/store/useWarehouseStore.ts`): добавлено действие `cancelFactoryOrder` для отправки запроса отмены заказа на фабрике и обновления состояния `factoryOrders` при успешном удалении (этап E пункта 35).
 
 
 

@@ -124,6 +124,8 @@ interface WarehouseState {
   fetchFactoryOrders: () => Promise<void>;
   saveFactoryOrder: (order: { id?: string; article: string; qty: number; expectedAt: string; orderedAt?: string; comment?: string }) => Promise<boolean>;
   setFactoryOrderReceived: (id: string) => Promise<boolean>;
+  /** Пункт 35. Отмена заказа на фабрике: строка удаляется на сервере безвозвратно. */
+  cancelFactoryOrder: (id: string) => Promise<boolean>;
   /** Пункт 35. Цена и дата последнего поступления по артикулу. Ключ — артикул. */
   lastPurchasePrices: Record<string, { price: number; date: string }>;
   fetchLastPurchasePrices: () => Promise<void>;
@@ -1590,6 +1592,25 @@ export const useWarehouseStore = create<WarehouseState>()(
       return false;
     } catch (e: any) {
       toast.error('Ошибка сохранения заказа на фабрике: ' + (e?.message || e));
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  cancelFactoryOrder: async (id) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('cancelFactoryOrder', { data: { id } });
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ factoryOrders: result.data });
+        toast.success('Заказ на фабрике отменён');
+        return true;
+      }
+      toast.error(result.message || 'Не удалось отменить заказ на фабрике');
+      return false;
+    } catch (e: any) {
+      toast.error('Ошибка при отмене заказа: ' + (e?.message || e));
       return false;
     } finally {
       set({ isProcessing: false });
