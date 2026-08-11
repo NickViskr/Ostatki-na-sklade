@@ -394,6 +394,7 @@
 | 2026-08-11 | Функция getLastPurchasePrices и регистрация экшена в Code.gs | `Code.gs` | В файле `Code.gs` выполнены 2 точечные замены (этап D пункта 35): добавлена читающая функция `getLastPurchasePrices` для получения цены последнего реального закупа по артикулам и зарегистрирован экшен в `switch`. | Нет |
 | 2026-08-11 | Добавление lastPurchasePrices и fetchLastPurchasePrices в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В файле `src/store/useWarehouseStore.ts` выполнены 3 точечные замены (этап D пункта 35): объявлены интерфейс `lastPurchasePrices` и действие `fetchLastPurchasePrices`, добавлено начальное значение `{}` и реализован метод загрузки справочника без блокировки интерфейса. | Нет |
 | 2026-08-11 | Перевод колонки «Стоимость заказа, ₽» на цены последних поступлений | `src/components/OzonStocksTab.tsx` | В компоненте `src/components/OzonStocksTab.tsx` выполнены 4 точечные замены (этап D пункта 35): подключен вызов `fetchLastPurchasePrices()` в `useEffect`, добавлена функция `getOrderUnitCost` для расчета цены по последнему закупу (с фоллбэком на себестоимость) и виртуальным комплектам, обновлена ячейка и подсказка колонки `orderCost`. | Нет |
+| 2026-08-11 | Функция cancelFactoryOrder и регистрация экшена в Code.gs | `Code.gs` | В файле `Code.gs` выполнены 2 точечные замены (этап E пункта 35): добавлена функция `cancelFactoryOrder` для безвозвратного удаления строки заказа из листа «Заказы на фабрике» при отмене и зарегистрирован экшен в `switch`. | Нет |
 
 
 

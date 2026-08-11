@@ -415,6 +415,7 @@ function doPost(e) {
       case 'saveFactoryOrder': assertAdmin(currentUser); result = saveFactoryOrder(data, currentUser.username); break;
       case 'setFactoryOrderReceived': assertAdmin(currentUser); result = setFactoryOrderReceived(data, currentUser.username); break;
       case 'getLastPurchasePrices': result = getLastPurchasePrices(); break;
+      case 'cancelFactoryOrder': assertAdmin(currentUser); result = cancelFactoryOrder(data, currentUser.username); break;
       case 'checkSupplyAvailability': result = checkSupplyAvailability(data); break;
       case 'saveOzonSupplyRequest': assertAdmin(currentUser); result = saveOzonSupplyRequest(data, currentUser.username); break;
       case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
@@ -6176,6 +6177,35 @@ function saveFactoryOrder(data, username) {
  * Миграция комплектов поступлением СЧИТАЕТСЯ: она несёт реальную себестоимость компонента.
  * Возвращает объект вида { "Артикул": { price: 128.2, date: "2026-07-04" } }.
  */
+/**
+ * Пункт 35. Отмена заказа на фабрике: строка удаляется из листа безвозвратно.
+ * Применяется к просроченным заказам, которые фабрика не выполнила.
+ * Полученные заказы (статус received) отменять нельзя: партия уже пришла,
+ * её удаление исказит историю. Такую запись надо править вручную в таблице.
+ * Складских остатков и листа «История» отмена НЕ касается: заказ на фабрике —
+ * это намерение, а не движение товара.
+ */
+function cancelFactoryOrder(data, username) {
+  const id = data ? String(data.id || '').trim() : '';
+  if (!id) throw new Error('Не указан идентификатор заказа на фабрике');
+  const ctx = readFactoryOrdersSheet();
+  let targetRow = -1;
+  let status = '';
+  for (let i = 1; i < ctx.values.length; i++) {
+    const rowId = String(ctx.values[i][ctx.idx['ID']] || '').trim();
+    if (rowId === id) {
+      targetRow = i + 1;
+      status = String(ctx.values[i][ctx.idx['Статус']] || '').trim();
+      break;
+    }
+  }
+  if (targetRow === -1) throw new Error('Заказ на фабрике не найден: ' + id);
+  if (status === 'received') throw new Error('Полученный заказ отменить нельзя: партия уже пришла на склад');
+  ctx.sheet.deleteRow(targetRow);
+  SpreadsheetApp.flush();
+  return getFactoryOrders();
+}
+
 function getLastPurchasePrices() {
   const ss = getSpreadsheet();
   const sheet = getTransactionSheet(ss);
