@@ -174,6 +174,16 @@ export interface OzonCoverageSettings {
   excludedClusters: string;
   /** Приоритетные кластеры в формате «КластерID:коэффициент», через запятую. */
   priorityClusters?: string;
+  /** Пункт 42. Порог дефицита, дней. 0 или отсутствие значения — коррекция скорости выключена. */
+  deficitDays?: number;
+  /** Пункт 42. Окно тренда, недель. */
+  trendWeeks?: number;
+  /** Пункт 42. Лучших недель окна для коррекции скорости. */
+  bestWeeks?: number;
+  /** Пункт 42. Минимум продаж за окно тренда для коррекции, шт. */
+  minSalesForCorrection?: number;
+  /** Пункт 42. Максимальный рост скорости при дефиците, раз. Меньше 1 — предел не применяется. */
+  maxSpeedGrowth?: number;
 }
 
 export interface OzonClusterRef {
@@ -475,6 +485,8 @@ export interface ArticleCoverage {
   freeMyStock: number;
   clusters: ClusterCoverageRow[];
   factory: FactorySignal | null;
+  /** Пункт 42. Разбор коррекции скорости при дефиците. null — коррекция не применялась. */
+  speedCorrection: SpeedCorrectionInfo | null;
 }
 
 /**
@@ -510,6 +522,162 @@ export interface OzonCoverageResult {
   articles: ArticleCoverage[];
 }
 
+/** Пункт 42. Разбор коррекции скорости по одному товару. */
+export interface SpeedCorrectionInfo {
+  /** Скорость до коррекции, шт/день. */
+  base: number;
+  /** Скорость после коррекции, шт/день. */
+  corrected: number;
+  /** Во сколько раз выросла скорость. При базе 0 равен 0. */
+  factor: number;
+  /** Скорость по лучшим неделям до применения предела роста, шт/день. */
+  raw: number;
+  /** Предел роста сработал и обрезал коррекцию. */
+  capped: boolean;
+  /** Продано за окно тренда, шт. */
+  windowQty: number;
+  /** Недель с продажами в окне тренда. */
+  weeksWithSales: number;
+  /** Фактическая длина окна тренда, недель (может быть меньше настройки). */
+  windowWeeks: number;
+  /** На сколько дней хватало остатка Ozon по старой скорости. При базе 0 равен 0. */
+  daysLeft: number;
+  /** Лучшие недели окна: понедельник и количество. */
+  bestWeeks: { week: string; qty: number }[];
+}
+
+/** Пункт 42. Минимум недель с продажами в окне тренда: защита от новинок. */
+export const MIN_WEEKS_WITH_SALES = 6;
+
+/**
+ * Пункт 42. Коррекция скорости продаж при дефиците.
+ * Скорость за 4 последние недели не отличает падение спроса от отсутствия товара:
+ * у распроданного артикула она занижена в разы, а от неё считаются порог заказа,
+ * потребность кластеров и отсекатель maxClusterDays.
+ * Признак дефицита — ПУСТОЙ СКЛАД, а не падение продаж: если остатка Ozon
+ * (доступно + в пути) хватает меньше чем на deficitDays, скорость берётся как среднее
+ * по bestWeeks лучшим неделям окна тренда.
+ * Скорость 0 при нулевом остатке — тоже дефицит: делить на ноль нельзя, товар считается
+ * распроданным, а предел роста к нулю неприменим и не действует.
+ * Защита от новинок и случайных всплесков: минимум minSalesForCorrection штук за окно
+ * и минимум MIN_WEEKS_WITH_SALES недель с продажами.
+ * В окно берутся только недельные строки («Дней» = 7): 28-дневные блоки архива дали бы
+ * четырёхкратно завышенную «неделю».
+ * Функция ИЗМЕНЯЕТ переданный объект speed и возвращает разбор по скорректированным товарам.
+ */
+export function applyDeficitSpeedCorrection(
+  speed: SalesSpeedResult,
+  stocks: OzonStockRow[],
+  sales: OzonSalesRow[],
+  skus: SKUItem[],
+  settings: OzonCoverageSettings,
+  now: Date
+): Record<string, SpeedCorrectionInfo> {
+  const out: Record<string, SpeedCorrectionInfo> = {};
+  const deficitDays = Number(settings.deficitDays);
+  if (!(deficitDays > 0)) return out;
+  const trendWeeks = Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 11;
+  const bestWeeksN = Number(settings.bestWeeks) > 0 ? Math.floor(Number(settings.bestWeeks)) : 4;
+  const minSales = Number(settings.minSalesForCorrection) >= 0 ? Number(settings.minSalesForCorrection) : 50;
+  const maxGrowth = Number(settings.maxSpeedGrowth);
+
+  // Остаток Ozon по товару: доступно + в пути. Возвраты не берутся: их ещё нет в продаже.
+  const onHand: Record<string, number> = {};
+  for (const row of stocks) {
+    const article = resolveOzonArticle(skus, row.offerId, row.sku);
+    onHand[article] = (onHand[article] || 0) + (Number(row.available) || 0) + (Number(row.transit) || 0);
+  }
+
+  // Окно тренда обрезается по неделям, которые реально пришли с сервера.
+  const presentWeeks = new Set<string>();
+  for (const row of sales) {
+    if ((Number(row.days) || 0) === 7) presentWeeks.add(String(row.week || '').trim());
+  }
+  const window = getLastFullWeeks(now, trendWeeks).filter(w => presentWeeks.has(w));
+  if (window.length < MIN_WEEKS_WITH_SALES) return out;
+  const windowSet = new Set(window);
+
+  // Недельный ряд по товару и по товару с кластером.
+  const byWeek: Record<string, Record<string, number>> = {};
+  const byCluster: Record<string, Record<string, number>> = {};
+  for (const row of sales) {
+    if ((Number(row.days) || 0) !== 7) continue;
+    const week = String(row.week || '').trim();
+    if (!windowSet.has(week)) continue;
+    const qty = Number(row.qty) || 0;
+    if (!(qty > 0)) continue;
+    const article = resolveOzonArticle(skus, row.offerId);
+    if (!byWeek[article]) byWeek[article] = {};
+    byWeek[article][week] = (byWeek[article][week] || 0) + qty;
+    const cluster = String(row.clusterName || '').trim();
+    if (!cluster) continue;
+    if (!byCluster[article]) byCluster[article] = {};
+    byCluster[article][cluster] = (byCluster[article][cluster] || 0) + qty;
+  }
+
+  const candidates = new Set<string>([...Object.keys(speed.perDayByArticle), ...Object.keys(byWeek)]);
+  for (const article of candidates) {
+    const base = Number(speed.perDayByArticle[article]) || 0;
+    const stock = onHand[article] || 0;
+    let daysLeft = 0;
+    if (base > 0) {
+      daysLeft = stock / base;
+      if (daysLeft >= deficitDays) continue;
+    } else if (stock > 0) {
+      continue; // скорость 0 при живом остатке — это не дефицит, а отсутствие спроса
+    }
+
+    const weekQty = byWeek[article] || {};
+    const values = window.map(w => weekQty[w] || 0);
+    const weeksWithSales = values.filter(v => v > 0).length;
+    if (weeksWithSales < MIN_WEEKS_WITH_SALES) continue;
+    const windowQty = values.reduce((sum, v) => sum + v, 0);
+    if (windowQty < minSales) continue;
+
+    const ranked = window.map(w => ({ week: w, qty: weekQty[w] || 0 }))
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, bestWeeksN);
+    if (!ranked.length) continue;
+    const raw = ranked.reduce((sum, r) => sum + r.qty, 0) / ranked.length / 7;
+    if (!(raw > base)) continue;
+
+    // Предел роста применяется только к ненулевой базе: 5 × 0 = 0 обнулило бы коррекцию.
+    const capApplies = base > 0 && maxGrowth >= 1;
+    const corrected = capApplies ? Math.min(raw, base * maxGrowth) : raw;
+
+    speed.perDayByArticle[article] = corrected;
+    const clusterSpeeds = speed.perDayByArticleCluster[article];
+    if (base > 0 && clusterSpeeds) {
+      const factor = corrected / base;
+      for (const name of Object.keys(clusterSpeeds)) clusterSpeeds[name] = clusterSpeeds[name] * factor;
+    } else {
+      // Базы нет: кластерные скорости строятся заново по долям продаж за окно тренда.
+      const clusterQty = byCluster[article] || {};
+      let total = 0;
+      for (const name of Object.keys(clusterQty)) total += clusterQty[name];
+      const fresh: Record<string, number> = {};
+      if (total > 0) {
+        for (const name of Object.keys(clusterQty)) fresh[name] = corrected * (clusterQty[name] / total);
+      }
+      speed.perDayByArticleCluster[article] = fresh;
+    }
+
+    out[article] = {
+      base,
+      corrected,
+      factor: base > 0 ? corrected / base : 0,
+      raw,
+      capped: capApplies && corrected < raw,
+      windowQty,
+      weeksWithSales,
+      windowWeeks: window.length,
+      daysLeft,
+      bestWeeks: ranked
+    };
+  }
+  return out;
+}
+
 /**
  * Сборный расчёт покрытия и рекомендаций по всем товарам.
  * Товары — объединение артикулов из остатков Ozon и продаж за окно скорости.
@@ -520,6 +688,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const weeks = getLastFullWeeks(now, speedWeeks);
   const speed = buildSalesSpeed(input.sales, input.skus, weeks);
   const stocksByArticle = buildClusterStocks(input.stocks, input.skus, input.settings.returnsToSalePct);
+  const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now);
   const nameToId = buildClusterNameToId(input.clusters);
   const excludedIds = parseExcludedClusters(input.settings.excludedClusters);
   const priorityMap = parsePriorityClusters(input.settings.priorityClusters || '');
@@ -676,7 +845,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       pendingTotal,
       freeMyStock,
       clusters: clusterRows,
-      factory
+      factory,
+      speedCorrection: speedCorrections[article] || null
     });
   }
 
