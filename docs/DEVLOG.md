@@ -391,6 +391,7 @@
 | 2026-08-10 | Перевод алертов «Пора заказать на фабрике» под дозаказ и ТРУБУ | `src/lib/ozonAlerts.ts`, `src/components/Dashboard.tsx` | Выполнены 4 точечные замены (этап C2 пункта 35): в `src/lib/ozonAlerts.ts` удалён `orderedArticles` из параметров `buildCoverageAlerts`, `orderedSet` удалён, условие показа алерта переведено на `orderQty > 0` с текстом дозаказа, а в `src/components/Dashboard.tsx` обновлён вызов `buildCoverageAlerts`. | Нет |
 | 2026-08-10 | Отображение размещенного заказа в ячейке при дефиците в кластерах | `src/components/OzonStocksTab.tsx` | В компоненте `src/components/OzonStocksTab.tsx` выполнена 1 точечная замена (пункт 35): в ветке `factoryClusterOnly` при `factoryWaitingQty > 0` отображается информация о размещенном заказе с кнопкой открытия модального окна. | Нет |
 | 2026-08-11 | Колонку «Стоимость заказа, ₽» в таблицу «Остатки Озон» | `src/components/OzonStocksTab.tsx` | В компоненте `src/components/OzonStocksTab.tsx` выполнены 7 точечных замен (этап D пункта 35): добавлена колонка `orderCost` в список колонок, заголовок с подсказкой, расчёт стоимости заказа по `getEffectiveAvgCost` и прочерки для кластеров, складов и служебной строки. | Нет |
+| 2026-08-11 | Функция getLastPurchasePrices и регистрация экшена в Code.gs | `Code.gs` | В файле `Code.gs` выполнены 2 точечные замены (этап D пункта 35): добавлена читающая функция `getLastPurchasePrices` для получения цены последнего реального закупа по артикулам и зарегистрирован экшен в `switch`. | Нет |
 
 
 

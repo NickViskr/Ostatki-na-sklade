@@ -414,6 +414,7 @@ function doPost(e) {
       case 'markOzonClustersNotified': result = markOzonClustersNotified(); break;
       case 'saveFactoryOrder': assertAdmin(currentUser); result = saveFactoryOrder(data, currentUser.username); break;
       case 'setFactoryOrderReceived': assertAdmin(currentUser); result = setFactoryOrderReceived(data, currentUser.username); break;
+      case 'getLastPurchasePrices': result = getLastPurchasePrices(); break;
       case 'checkSupplyAvailability': result = checkSupplyAvailability(data); break;
       case 'saveOzonSupplyRequest': assertAdmin(currentUser); result = saveOzonSupplyRequest(data, currentUser.username); break;
       case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
@@ -6166,6 +6167,63 @@ function saveFactoryOrder(data, username) {
 
   SpreadsheetApp.flush();
   return getFactoryOrders();
+}
+
+/**
+ * Пункт 35. Цена последнего поступления по каждому артикулу.
+ * Поступлением считается операция типа «Приход», кроме оприходования излишков,
+ * корректировки остатка и услуг: это не закупка, и их цена не отражает стоимость партии.
+ * Миграция комплектов поступлением СЧИТАЕТСЯ: она несёт реальную себестоимость компонента.
+ * Возвращает объект вида { "Артикул": { price: 128.2, date: "2026-07-04" } }.
+ */
+function getLastPurchasePrices() {
+  const ss = getSpreadsheet();
+  const sheet = getTransactionSheet(ss);
+  if (!sheet) return {};
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return {};
+  const lastCol = sheet.getLastColumn();
+  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = values[0].map(function (h) { return String(h).trim(); });
+  const iType = headers.indexOf('Тип');
+  const iArticle = headers.indexOf('Артикул');
+  const iPrice = headers.indexOf('Цена');
+  const iDate = headers.indexOf('Дата');
+  const iObject = headers.indexOf('Объект');
+  if (iType === -1 || iArticle === -1 || iPrice === -1 || iDate === -1) return {};
+  const SKIP = ['Излишки', 'Корректировка', 'Услуги'];
+  const result = {};
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (String(row[iType] || '').trim() !== 'Приход') continue;
+    const article = String(row[iArticle] || '').trim();
+    if (!article) continue;
+    const price = Number(row[iPrice]) || 0;
+    if (!(price > 0)) continue;
+    if (iObject !== -1) {
+      const obj = String(row[iObject] || '');
+      let skip = false;
+      for (let k = 0; k < SKIP.length; k++) { if (obj.indexOf(SKIP[k]) !== -1) { skip = true; break; } }
+      if (skip) continue;
+    }
+    let ms = 0;
+    if (row[iDate] instanceof Date) {
+      ms = row[iDate].getTime();
+    } else {
+      const parsed = new Date(String(row[iDate]));
+      ms = isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+    }
+    const prev = result[article];
+    if (!prev || ms >= prev.ms) {
+      result[article] = { ms: ms, price: price, date: ms ? Utilities.formatDate(new Date(ms), 'Europe/Moscow', 'yyyy-MM-dd') : '' };
+    }
+  }
+  const out = {};
+  for (const key in result) {
+    if (!result.hasOwnProperty(key)) continue;
+    out[key] = { price: result[key].price, date: result[key].date };
+  }
+  return out;
 }
 
 function setFactoryOrderReceived(data, username) {
