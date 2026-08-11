@@ -1394,6 +1394,7 @@
 - Скрипт Google Apps Script (`Code.gs`): добавлены 5 новых числовых настроек Ozon (`deficitDays`, `trendWeeks`, `bestWeeks`, `minSalesForCorrection`, `maxSpeedGrowth`) в `OZON_SETTINGS_DEFAULTS` и обновлена валидация для целых чисел не меньше 1.
 - Расчёт покрытия Ozon (`src/lib/ozonCoverage.ts`): реализована функция `applyDeficitSpeedCorrection` для коррекции заниженной скорости продаж при дефиците товара на складе (пункт 42), расширен `OzonCoverageSettings` и разбор покрытия товара полем `speedCorrection`.
 - Интеграция настроек Ozon (`src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx`): добавлены дефолты и считывание пяти настроек дефицита (`deficitDays`, `trendWeeks`, `bestWeeks`, `minSalesForCorrection`, `maxSpeedGrowth`) из БД и передача их в расчёт покрытия товара.
+- Модальное окно настроек Ozon (`src/components/OzonSettingsModal.tsx`): добавлены 5 новых полей ввода и подробные подсказки для настройки параметров коррекции скорости при дефиците (пункт 42).
 
 
 

@@ -16,6 +16,11 @@ interface OzonSettingsData {
   factoryOrderDays: number;
   returnsToSalePct: number;
   salesRetentionWeeks: number;
+  deficitDays: number;
+  trendWeeks: number;
+  bestWeeks: number;
+  minSalesForCorrection: number;
+  maxSpeedGrowth: number;
   excludedClusters: string;
   priorityClusters: string;
   maxBoxesPerCluster: number;
@@ -59,6 +64,11 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     factoryOrderDays: 60,
     returnsToSalePct: 80,
     salesRetentionWeeks: 78,
+    deficitDays: 7,
+    trendWeeks: 11,
+    bestWeeks: 4,
+    minSalesForCorrection: 50,
+    maxSpeedGrowth: 5,
     excludedClusters: '',
     priorityClusters: '',
     maxBoxesPerCluster: 30,
@@ -216,6 +226,11 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
               returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
               salesRetentionWeeks: Number(res.data.salesRetentionWeeks) || 78,
+              deficitDays: res.data.deficitDays === undefined || res.data.deficitDays === '' ? 7 : Number(res.data.deficitDays),
+              trendWeeks: Number(res.data.trendWeeks) || 11,
+              bestWeeks: Number(res.data.bestWeeks) || 4,
+              minSalesForCorrection: res.data.minSalesForCorrection === undefined || res.data.minSalesForCorrection === '' ? 50 : Number(res.data.minSalesForCorrection),
+              maxSpeedGrowth: res.data.maxSpeedGrowth === undefined || res.data.maxSpeedGrowth === '' ? 5 : Number(res.data.maxSpeedGrowth),
               excludedClusters: String(res.data.excludedClusters || ''),
               priorityClusters: String(res.data.priorityClusters || ''),
               maxBoxesPerCluster: Number(res.data.maxBoxesPerCluster) || 30,
@@ -255,6 +270,11 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         factoryOrderDays: Math.max(0, parseFloat(String(form.factoryOrderDays)) || 0),
         returnsToSalePct: Math.min(100, Math.max(0, parseFloat(String(form.returnsToSalePct)) || 0)),
         salesRetentionWeeks: Math.max(1, parseInt(String(form.salesRetentionWeeks), 10) || 1),
+        deficitDays: Math.max(0, parseFloat(String(form.deficitDays)) || 0),
+        trendWeeks: Math.max(1, parseInt(String(form.trendWeeks), 10) || 1),
+        bestWeeks: Math.max(1, parseInt(String(form.bestWeeks), 10) || 1),
+        minSalesForCorrection: Math.max(0, parseFloat(String(form.minSalesForCorrection)) || 0),
+        maxSpeedGrowth: Math.max(0, parseFloat(String(form.maxSpeedGrowth)) || 0),
         excludedClusters: form.excludedClusters,
         priorityClusters: form.priorityClusters,
         maxBoxesPerCluster: Math.max(1, parseInt(String(form.maxBoxesPerCluster), 10) || 1),
@@ -361,6 +381,91 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   value={form.maxClusterDays}
                   onChange={(e) =>
                     setForm({ ...form, maxClusterDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Порог дефицита, дней
+                  <FieldHint position="bottom" text="Признак того, что товар распродан, а не перестал продаваться. Если остатка на Ozon (Доступно + В пути) хватает меньше чем на это число дней, скорость продаж считается заниженной и берётся по лучшим неделям окна тренда. Значение 0 полностью выключает коррекцию скорости." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.deficitDays}
+                  onChange={(e) =>
+                    setForm({ ...form, deficitDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Окно тренда, недель
+                  <FieldHint position="bottom" text="Сколько последних полных недель просматривается в поисках лучших недель продаж. Окно ограничено историей, которую приложение загружает с сервера: если пришло меньше недель, берётся столько, сколько есть. Учитываются только недельные строки продаж, 28-дневные блоки архива в расчёт не идут." />
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={form.trendWeeks}
+                  onChange={(e) =>
+                    setForm({ ...form, trendWeeks: e.target.value === '' ? 1 : parseInt(e.target.value, 10) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Лучших недель для коррекции
+                  <FieldHint position="bottom" text="Сколько самых удачных недель окна тренда усредняется, чтобы получить скорость товара при полном наличии. Чем больше недель, тем осторожнее оценка." />
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={form.bestWeeks}
+                  onChange={(e) =>
+                    setForm({ ...form, bestWeeks: e.target.value === '' ? 1 : parseInt(e.target.value, 10) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Минимум продаж за окно тренда, шт
+                  <FieldHint position="bottom" text="Защита от новинок и случайных всплесков: товар с продажами меньше этого числа за всё окно тренда коррекцию не получает. Второе условие защиты зашито в код: продажи должны быть хотя бы в шести неделях окна." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.minSalesForCorrection}
+                  onChange={(e) =>
+                    setForm({ ...form, minSalesForCorrection: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Максимальный рост скорости при дефиците, раз
+                  <FieldHint position="bottom" text="Потолок коррекции: скорость не может вырасти больше чем во столько раз. Страховка от единственного всплеска в далёкой неделе, который иначе раздул бы заказ. Значение меньше 1 снимает потолок совсем. К товарам с нулевой скоростью потолок неприменим." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.maxSpeedGrowth}
+                  onChange={(e) =>
+                    setForm({ ...form, maxSpeedGrowth: e.target.value === '' ? 0 : parseFloat(e.target.value) })
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />
