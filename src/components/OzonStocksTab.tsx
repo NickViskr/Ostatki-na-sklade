@@ -1179,13 +1179,25 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       </span>
                                     </button>
                                   ) : factoryClusterOnly ? (
-                                    <span
-                                      className="text-[10px] font-semibold text-slate-500"
-                                      title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно.`}
-                                    >
-                                      дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
-                                      <span className="block text-[10px] font-normal text-slate-400">товар есть, лежит не там</span>
-                                    </span>
+                                    factoryWaitingQty > 0 ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
+                                        className="text-[10px] font-semibold text-slate-500 text-right hover:underline"
+                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. с учётом заказанных на фабрике ${fmtInt(factoryWaitingQty)} шт. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно. Нажми, чтобы изменить заказ.`}
+                                      >
+                                        дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
+                                        <span className="block text-[10px] font-normal text-sky-600">заказано {fmtInt(factoryWaitingQty)} шт · ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}</span>
+                                      </button>
+                                    ) : (
+                                      <span
+                                        className="text-[10px] font-semibold text-slate-500"
+                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно.`}
+                                      >
+                                        дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
+                                        <span className="block text-[10px] font-normal text-slate-400">товар есть, лежит не там</span>
+                                      </span>
+                                    )
                                   ) : factoryWaitingQty > 0 ? (
                                     <button
                                       type="button"
