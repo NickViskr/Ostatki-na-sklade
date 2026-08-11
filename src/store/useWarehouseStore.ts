@@ -124,6 +124,9 @@ interface WarehouseState {
   fetchFactoryOrders: () => Promise<void>;
   saveFactoryOrder: (order: { id?: string; article: string; qty: number; expectedAt: string; orderedAt?: string; comment?: string }) => Promise<boolean>;
   setFactoryOrderReceived: (id: string) => Promise<boolean>;
+  /** Пункт 35. Цена и дата последнего поступления по артикулу. Ключ — артикул. */
+  lastPurchasePrices: Record<string, { price: number; date: string }>;
+  fetchLastPurchasePrices: () => Promise<void>;
 }
 
 export const useWarehouseStore = create<WarehouseState>()(
@@ -131,6 +134,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     (set, get) => ({
   stock: [],
   transactions: [],
+  lastPurchasePrices: {},
   skus: [],
   services: [],
   serviceRates: [],
@@ -1589,6 +1593,17 @@ export const useWarehouseStore = create<WarehouseState>()(
       return false;
     } finally {
       set({ isProcessing: false });
+    }
+  },
+
+  fetchLastPurchasePrices: async () => {
+    try {
+      const result = await get().fetchGas('getLastPurchasePrices');
+      if (result.status === 'success' && result.data && typeof result.data === 'object') {
+        set({ lastPurchasePrices: result.data });
+      }
+    } catch (e) {
+      console.error('Не удалось загрузить цены последних поступлений:', e);
     }
   },
 

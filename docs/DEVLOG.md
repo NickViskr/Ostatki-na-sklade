@@ -392,6 +392,7 @@
 | 2026-08-10 | Отображение размещенного заказа в ячейке при дефиците в кластерах | `src/components/OzonStocksTab.tsx` | В компоненте `src/components/OzonStocksTab.tsx` выполнена 1 точечная замена (пункт 35): в ветке `factoryClusterOnly` при `factoryWaitingQty > 0` отображается информация о размещенном заказе с кнопкой открытия модального окна. | Нет |
 | 2026-08-11 | Колонку «Стоимость заказа, ₽» в таблицу «Остатки Озон» | `src/components/OzonStocksTab.tsx` | В компоненте `src/components/OzonStocksTab.tsx` выполнены 7 точечных замен (этап D пункта 35): добавлена колонка `orderCost` в список колонок, заголовок с подсказкой, расчёт стоимости заказа по `getEffectiveAvgCost` и прочерки для кластеров, складов и служебной строки. | Нет |
 | 2026-08-11 | Функция getLastPurchasePrices и регистрация экшена в Code.gs | `Code.gs` | В файле `Code.gs` выполнены 2 точечные замены (этап D пункта 35): добавлена читающая функция `getLastPurchasePrices` для получения цены последнего реального закупа по артикулам и зарегистрирован экшен в `switch`. | Нет |
+| 2026-08-11 | Добавление lastPurchasePrices и fetchLastPurchasePrices в useWarehouseStore.ts | `src/store/useWarehouseStore.ts` | В файле `src/store/useWarehouseStore.ts` выполнены 3 точечные замены (этап D пункта 35): объявлены интерфейс `lastPurchasePrices` и действие `fetchLastPurchasePrices`, добавлено начальное значение `{}` и реализован метод загрузки справочника без блокировки интерфейса. | Нет |
 
 
 
