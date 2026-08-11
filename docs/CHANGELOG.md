@@ -1393,6 +1393,7 @@
 - План Ozon (`docs/OZON_PLAN.md`): пункт 35 «Контур заказа на фабрике: модель «труба» отмечен полностью выполненным (11.08.2026), с фиксацией результатов развёртывания и регрессионного тестирования на боевых данных.
 - Скрипт Google Apps Script (`Code.gs`): добавлены 5 новых числовых настроек Ozon (`deficitDays`, `trendWeeks`, `bestWeeks`, `minSalesForCorrection`, `maxSpeedGrowth`) в `OZON_SETTINGS_DEFAULTS` и обновлена валидация для целых чисел не меньше 1.
 - Расчёт покрытия Ozon (`src/lib/ozonCoverage.ts`): реализована функция `applyDeficitSpeedCorrection` для коррекции заниженной скорости продаж при дефиците товара на складе (пункт 42), расширен `OzonCoverageSettings` и разбор покрытия товара полем `speedCorrection`.
+- Интеграция настроек Ozon (`src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx`): добавлены дефолты и считывание пяти настроек дефицита (`deficitDays`, `trendWeeks`, `bestWeeks`, `minSalesForCorrection`, `maxSpeedGrowth`) из БД и передача их в расчёт покрытия товара.
 
 
 

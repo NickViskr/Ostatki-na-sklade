@@ -80,6 +80,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     returnsToSalePct: 80,
     excludedClusters: '',
     priorityClusters: '',
+    deficitDays: 7,
+    trendWeeks: 11,
+    bestWeeks: 4,
+    minSalesForCorrection: 50,
+    maxSpeedGrowth: 5,
   });
   const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
   // Пункт 29, этап E: признак того, что ответ на запрос справочника
@@ -171,6 +176,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
           excludedClusters: String(res.data.excludedClusters || ''),
           priorityClusters: String(res.data.priorityClusters || ''),
+          deficitDays: res.data.deficitDays === undefined || res.data.deficitDays === '' ? 7 : Number(res.data.deficitDays),
+          trendWeeks: Number(res.data.trendWeeks) || 11,
+          bestWeeks: Number(res.data.bestWeeks) || 4,
+          minSalesForCorrection: res.data.minSalesForCorrection === undefined || res.data.minSalesForCorrection === '' ? 50 : Number(res.data.minSalesForCorrection),
+          maxSpeedGrowth: res.data.maxSpeedGrowth === undefined || res.data.maxSpeedGrowth === '' ? 5 : Number(res.data.maxSpeedGrowth),
         });
         setSupplySettings({
           maxBoxesPerCluster: Number(res.data.maxBoxesPerCluster) || 30,
