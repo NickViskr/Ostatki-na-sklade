@@ -1389,6 +1389,7 @@
 - Скрипт Google Apps Script (`Code.gs`): добавлена функция `cancelFactoryOrder` и регистрация экшена в `switch` для физического удаления отмененного заказа из листа «Заказы на фабрике» (этап E пункта 35).
 - Скрипт Google Apps Script (`Code.gs`): скорректировано расположение блоков JSDoc комментариев над функциями `cancelFactoryOrder` и `getLastPurchasePrices`.
 - Хранилище склада (`src/store/useWarehouseStore.ts`): добавлено действие `cancelFactoryOrder` для отправки запроса отмены заказа на фабрике и обновления состояния `factoryOrders` при успешном удалении (этап E пункта 35).
+- Модальное окно заказа на фабрике (`src/components/FactoryOrderModal.tsx`): добавлена кнопка отмены заказа с двухэтапным подтверждением (`confirmCancel`), обработчик `handleCancel` и иконка `Trash2` из `lucide-react` (этап E пункта 35).
 
 
 

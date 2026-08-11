@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Save, Loader2, PackageCheck } from 'lucide-react';
+import { X, Save, Loader2, PackageCheck, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -38,6 +38,7 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
 }) => {
   const saveFactoryOrder = useWarehouseStore((state) => state.saveFactoryOrder);
   const setFactoryOrderReceived = useWarehouseStore((state) => state.setFactoryOrderReceived);
+  const cancelFactoryOrder = useWarehouseStore((state) => state.cancelFactoryOrder);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const kits = useWarehouseStore((state) => state.kits);
 
@@ -51,6 +52,8 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
   const [qty, setQty] = useState(0);
   const [expectedAt, setExpectedAt] = useState('');
   const [comment, setComment] = useState('');
+  // Пункт 35. Отмена удаляет заказ безвозвратно, поэтому идёт в два нажатия.
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -80,6 +83,13 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
       expectedAt,
       comment,
     });
+    if (ok) onClose();
+  };
+
+  const handleCancel = async () => {
+    if (!order) return;
+    const ok = await cancelFactoryOrder(order.id);
+    setConfirmCancel(false);
     if (ok) onClose();
   };
 
@@ -227,6 +237,48 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
                 <span className="text-[11px] text-slate-500 text-center">
                   Закроет заказ и откроет «Загрузка» с приходом {order.qty} шт на склад
                 </span>
+              </div>
+            )}
+            {order && !confirmCancel && (
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => setConfirmCancel(true)}
+                  disabled={isProcessing}
+                  className="w-full py-3 rounded-2xl font-bold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                >
+                  <Trash2 size={18} />
+                  Отменить заказ
+                </button>
+                <span className="text-[11px] text-slate-500 text-center">
+                  Если фабрика заказ не выполнит: запись удалится, потребность пересчитается заново
+                </span>
+              </div>
+            )}
+            {order && confirmCancel && (
+              <div className="flex flex-col gap-2 bg-rose-50 border border-rose-200 rounded-2xl p-3">
+                <div className="text-[12px] text-rose-800 font-semibold leading-snug">
+                  Удалить заказ на {order.qty} шт безвозвратно? Восстановить его из приложения будет нельзя. Остатки и себестоимость не изменятся.
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmCancel(false)}
+                    disabled={isProcessing}
+                    className="flex-1 py-2 rounded-xl font-bold text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-50 transition-all text-sm"
+                  >
+                    Не удалять
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCancel}
+                    disabled={isProcessing}
+                    className="flex-1 py-2 rounded-xl font-bold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 transition-all text-sm flex items-center justify-center gap-2"
+                  >
+                    {isProcessing ? <Loader2 className="animate-spin" size={16} /> : <Trash2 size={16} />}
+                    Да, удалить
+                  </button>
+                </div>
               </div>
             )}
           </div>
