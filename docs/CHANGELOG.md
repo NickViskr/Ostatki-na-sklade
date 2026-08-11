@@ -1395,6 +1395,7 @@
 - Расчёт покрытия Ozon (`src/lib/ozonCoverage.ts`): реализована функция `applyDeficitSpeedCorrection` для коррекции заниженной скорости продаж при дефиците товара на складе (пункт 42), расширен `OzonCoverageSettings` и разбор покрытия товара полем `speedCorrection`.
 - Интеграция настроек Ozon (`src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx`): добавлены дефолты и считывание пяти настроек дефицита (`deficitDays`, `trendWeeks`, `bestWeeks`, `minSalesForCorrection`, `maxSpeedGrowth`) из БД и передача их в расчёт покрытия товара.
 - Модальное окно настроек Ozon (`src/components/OzonSettingsModal.tsx`): добавлены 5 новых полей ввода и подробные подсказки для настройки параметров коррекции скорости при дефиците (пункт 42).
+- Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): добавлена подсветка товаров со скорректированной из-за дефицита скоростью продаж (иконка `TrendingUp`, янтарный цвет) и всплывающая подсказка с подробным разбором факторов коррекции (пункт 42).
 
 
 

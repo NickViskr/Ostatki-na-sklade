@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Columns3, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings } from 'lucide-react';
+import { ChevronDown, ChevronRight, Columns3, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonStockRow, FactoryOrder } from '../types';
@@ -1126,7 +1126,28 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 </div>
                               </td>
                               {isColVisible('sold') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.qtySold)}</td>}
-                              {isColVisible('speed') && <td className="p-3 text-right font-semibold text-slate-800">{fmtSpeed(art.perDay)}</td>}
+                              {isColVisible('speed') && (
+                                <td className="p-3 text-right font-semibold text-slate-800">
+                                  {art.speedCorrection ? (
+                                    <span className="relative inline-flex items-center gap-1 group cursor-help">
+                                      <TrendingUp size={13} className="text-amber-500" />
+                                      <span className="text-amber-600">{fmtSpeed(art.perDay)}</span>
+                                      <span className="absolute right-0 bottom-full mb-1.5 hidden group-hover:block z-30 w-72 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl">
+                                        <span className="block font-bold mb-1">Скорость скорректирована: товар был распродан</span>
+                                        <span className="block">Было {fmtSpeed(art.speedCorrection.base)} шт/д, стало {fmtSpeed(art.speedCorrection.corrected)} шт/д{art.speedCorrection.base > 0 ? ` (рост в ${art.speedCorrection.factor.toFixed(2)} раза)` : ''}.</span>
+                                        <span className="block mt-1">Остатка Ozon хватало на {art.speedCorrection.daysLeft.toFixed(1)} дн — меньше порога дефицита, поэтому скорость взята по лучшим неделям, а не по последним.</span>
+                                        <span className="block mt-1">Лучшие недели окна: {art.speedCorrection.bestWeeks.map((b: any) => `${b.week} — ${fmtInt(b.qty)} шт`).join('; ')}.</span>
+                                        <span className="block mt-1 text-slate-300">В окне {art.speedCorrection.windowWeeks} нед: продано {fmtInt(art.speedCorrection.windowQty)} шт, недель с продажами {art.speedCorrection.weeksWithSales}.</span>
+                                        {art.speedCorrection.capped && (
+                                          <span className="block mt-1 text-amber-300">Рост упёрся в предел: по лучшим неделям вышло бы {fmtSpeed(art.speedCorrection.raw)} шт/д.</span>
+                                        )}
+                                      </span>
+                                    </span>
+                                  ) : (
+                                    fmtSpeed(art.perDay)
+                                  )}
+                                </td>
+                              )}
                               {isColVisible('share') && <td className="p-3 text-right text-slate-300">—</td>}
                               {isColVisible('available') && <td className={`p-3 text-right font-semibold ${art.totals.available === 0 ? 'text-slate-300' : 'text-slate-900'}`}>{fmtInt(art.totals.available)}</td>}
                               {isColVisible('preparing') && <td className={`p-3 text-right ${art.totals.preparing === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.preparing)}</td>}
