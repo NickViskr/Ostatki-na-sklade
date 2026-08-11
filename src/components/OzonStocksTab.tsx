@@ -29,6 +29,7 @@ const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
   { key: 'myStock', label: 'Мой склад' },
   { key: 'recommendation', label: 'Рекомендация' },
   { key: 'factory', label: 'Заказ на фабрике' },
+  { key: 'orderCost', label: 'Стоимость заказа, ₽' },
 ];
 
 const OZON_DEFAULT_HIDDEN_COLS = ['preparing', 'requested', 'excess', 'other'];
@@ -57,6 +58,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const skus = useWarehouseStore((state) => state.skus);
   const kits = useWarehouseStore((state) => state.kits);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
+  const getEffectiveAvgCost = useWarehouseStore((state) => state.getEffectiveAvgCost);
   const rawStocks = useWarehouseStore((state) => state.stock);
   const factoryOrders = useWarehouseStore((state) => state.factoryOrders);
   const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
@@ -1042,6 +1044,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             <ColHint text="Сигнал «пора заказывать новую партию». Загорается по одной из двух причин: «кончается везде» — товара на Ozon и на твоём складе вместе хватит меньше, чем на срок поставки плюс неснижаемый запас; «нечем пополнить» — кластерам нужна поставка, а на твоём складе пусто, и перебросить остаток между кластерами Ozon нельзя. Объём заказа — больший из расчёта по настройке «Объём заказа на фабрике, дней» и непокрытой потребности кластеров. Наведи курсор на ячейку: там видно, на сколько дней хватит запаса и какой порог срабатывания." />
                           </th>
                         )}
+                        {isColVisible('orderCost') && (
+                          <th className="p-3 text-right">
+                            Стоимость заказа, ₽
+                            <ColHint text="Сколько денег нужно на заказ: объём заказа умножен на среднюю себестоимость товара. У виртуального комплекта себестоимость складывается из себестоимости компонентов по нормам. Прочерк значит, что заказывать нечего или себестоимость ещё неизвестна — товар ни разу не приходил." />
+                          </th>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
@@ -1229,6 +1237,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   )}
                                 </td>
                               )}
+                              {isColVisible('orderCost') && (
+                                <td className="p-3 text-right">
+                                  {factoryOrderQty > 0 && getEffectiveAvgCost(art.article) > 0 ? (
+                                    <span
+                                      className="font-semibold text-slate-700"
+                                      title={`${fmtInt(factoryOrderQty)} шт по средней себестоимости ${getEffectiveAvgCost(art.article).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽ за штуку.`}
+                                    >
+                                      {Math.round(factoryOrderQty * getEffectiveAvgCost(art.article)).toLocaleString('ru-RU')}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-300" title={factoryOrderQty > 0 ? 'Средняя себестоимость неизвестна: товар ещё ни разу не приходил на склад.' : 'Заказывать нечего.'}>—</span>
+                                  )}
+                                </td>
+                              )}
                             </tr>
 
                             {/* LEVEL 2: CLUSTERS */}
@@ -1300,6 +1322,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       </td>
                                     )}
                                     {isColVisible('factory') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                    {isColVisible('orderCost') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                   </tr>
 
                                   {/* LEVEL 3: WAREHOUSES */}
@@ -1333,6 +1356,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       {isColVisible('myStock') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('recommendation') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('factory') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('orderCost') && <td className="p-2 text-right text-slate-300">—</td>}
                                     </tr>
                                   ))}
                                 </React.Fragment>
@@ -1374,6 +1398,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('recommendation') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('factory') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('orderCost') && <td className="p-2.5 text-right text-slate-300">—</td>}
                               </tr>
                             )}
                           </React.Fragment>
