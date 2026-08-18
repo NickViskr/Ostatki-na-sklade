@@ -55,6 +55,7 @@ const logs = [];
 function makeFakeSheet(headers) {
   // data[0] всегда заголовки; строки 1.. — данные (может быть пусто).
   let data = [headers.slice()];
+  let setValuesCallCount = 0; // сервисный счётчик стенда: сколько раз реально вызвали setValues на этом листе
   return {
     getLastRow() {
       for (let i = data.length - 1; i >= 0; i--) {
@@ -66,7 +67,13 @@ function makeFakeSheet(headers) {
     getLastColumn() {
       return data[0] ? data[0].length : headers.length;
     },
+    getDataRange() {
+      const lastRow = Math.max(this.getLastRow(), 1);
+      return this.getRange(1, 1, lastRow, this.getLastColumn());
+    },
     getRange(startRow, startCol, numRows, numCols) {
+      if (numRows === undefined) numRows = 1;
+      if (numCols === undefined) numCols = 1;
       return {
         getValues() {
           const result = [];
@@ -84,6 +91,7 @@ function makeFakeSheet(headers) {
           return result;
         },
         setValues(values) {
+          setValuesCallCount++;
           for (let r = 0; r < values.length; r++) {
             const rowIdx = startRow - 1 + r;
             while (data.length <= rowIdx) data.push([]);
@@ -92,6 +100,11 @@ function makeFakeSheet(headers) {
               data[rowIdx][colIdx] = values[r][c];
             }
           }
+        },
+        setValue(value) {
+          const rowIdx = startRow - 1;
+          while (data.length <= rowIdx) data.push([]);
+          data[rowIdx][startCol - 1] = value;
         },
         clearContent() {
           for (let r = 0; r < numRows; r++) {
@@ -108,7 +121,9 @@ function makeFakeSheet(headers) {
     },
     // сервисные методы стенда (не часть Apps Script API)
     __dump() { return data.map(r => r.slice()); },
-    __setData(d) { data = d.map(r => r.slice()); }
+    __setData(d) { data = d.map(r => r.slice()); },
+    __getSetValuesCallCount() { return setValuesCallCount; },
+    __resetSetValuesCallCount() { setValuesCallCount = 0; }
   };
 }
 
@@ -124,7 +139,12 @@ const sandbox = {
   Logger: {
     log: (msg) => { logs.push(String(msg)); }
   },
-  Date: FakeDate
+  Date: FakeDate,
+  SpreadsheetApp: {
+    getActiveSpreadsheet: () => ({
+      getSheetByName: (name) => (name === 'SKU' ? skuSheet : null)
+    })
+  }
 };
 const context = vm.createContext(sandbox);
 
@@ -151,6 +171,9 @@ context.getOzonStockHistorySheet = function () {
   return historySheet;
 };
 
+// ---------- Фальшивый лист SKU: по умолчанию отсутствует (null), пока тест его не создаст ----------
+let skuSheet = null;
+
 // ---------- Экспортируемые для теста хелперы ----------
 module.exports = {
   context,
@@ -174,5 +197,19 @@ module.exports = {
   OZON_STOCKS_HEADERS: context.OZON_STOCKS_HEADERS,
   OZON_STOCK_HISTORY_HEADERS: context.OZON_STOCK_HISTORY_HEADERS,
   updateOzonStockHistory: (...args) => context.updateOzonStockHistory(...args),
+  // rows — массив массивов данных (без заголовка) листа SKU; headers — заголовки листа.
+  setSkuSheet(headers, rows) {
+    skuSheet = makeFakeSheet(headers);
+    if (rows && rows.length > 0) skuSheet.__setData([headers.slice(), ...rows]);
+  },
+  clearSkuSheet() { skuSheet = null; },
+  getSkuSheet() { return skuSheet; },
+  dumpSkuSheet() {
+    if (!skuSheet) return null;
+    const data = skuSheet.__dump();
+    const lastRow = skuSheet.getLastRow();
+    return { headers: data[0].slice(), rows: data.slice(1, Math.max(lastRow, 1)) };
+  },
+  updateSkuNamesFromOzonStocks: (...args) => context.updateSkuNamesFromOzonStocks(...args),
   vm
 };

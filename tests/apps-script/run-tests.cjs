@@ -339,6 +339,179 @@ function freshHarness() {
     `получено Дней в наличии: ${matching[0] && matching[0][dAvail]}`);
 })();
 
+// ============================================================================
+// Проверки updateSkuNamesFromOzonStocks() — дублирование названий Ozon в лист
+// SKU, чтобы название переживало распродажу товара в ноль (лист "Остатки Ozon"
+// перезаписывается целиком, и у распроданной позиции строки остатков просто нет).
+// ============================================================================
+
+// Заголовки листа SKU, которые ensureColumns требует внутри проверяемой функции.
+// Порядок и состав скопированы из вызова ensureColumns в Code.gs — если там
+// список изменится, тест не заметит новые поля (это нормально: они здесь не при делах),
+// но должен продолжать работать, т.к. ensureColumns лишь ДОБАВЛЯЕТ недостающие колонки.
+const SKU_FULL_HEADERS = ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon'];
+const SKU_HEADERS_WITHOUT_NAME = SKU_FULL_HEADERS.filter(h => h !== 'Название Ozon');
+
+// Строит строку листа SKU по названиям колонок (аналог buildFinalRows выше, но по объекту).
+function buildSkuRow(headers, obj) {
+  const row = new Array(headers.length).fill('');
+  Object.keys(obj).forEach(key => {
+    const idx = headers.indexOf(key);
+    if (idx !== -1) row[idx] = obj[key];
+  });
+  return row;
+}
+
+// ================= Пункт 9: колонки "Название Ozon" в листе SKU ещё нет =================
+(function test9() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_HEADERS_WITHOUT_NAME, [
+    buildSkuRow(SKU_HEADERS_WITHOUT_NAME, { SKU: 'ART1', 'ШК Ozon': '111' }),
+    buildSkuRow(SKU_HEADERS_WITHOUT_NAME, { SKU: 'ART2', 'ШК Ozon': '222' })
+  ]);
+  const rows = [
+    { offerId: 'ART1', sku: '111', name: 'Товар 1' },
+    { offerId: 'ART2', sku: '222', name: 'Товар 2' }
+  ];
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+
+  check('П9: колонка "Название Ozon" появилась в листе', nameIdx !== -1, `заголовки: ${dump.headers}`);
+  check('П9: название ART1 проставлено', nameIdx !== -1 && dump.rows[0][nameIdx] === 'Товар 1', `получено: ${nameIdx !== -1 && dump.rows[0][nameIdx]}`);
+  check('П9: название ART2 проставлено', nameIdx !== -1 && dump.rows[1][nameIdx] === 'Товар 2', `получено: ${nameIdx !== -1 && dump.rows[1][nameIdx]}`);
+})();
+
+// ================= Пункт 10: товар распродан (в rows его нет) — название в листе НЕ стирается =================
+(function test10() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ART1', 'ШК Ozon': '111', 'Название Ozon': 'Уже сохранённое название' })
+  ]);
+  // В выгрузке остатков есть данные, но только по ДРУГОМУ товару — ART1 распродан в ноль
+  // и его строки в "Остатки Ozon" не существует вовсе, поэтому в rows его тоже нет.
+  const rows = [
+    { offerId: 'ДРУГОЙ-АРТИКУЛ', sku: '999', name: 'Другой товар' }
+  ];
+  h.getSkuSheet().__resetSetValuesCallCount();
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+
+  check('П10: название распроданного товара ОСТАЛОСЬ прежним', dump.rows[0][nameIdx] === 'Уже сохранённое название', `получено: ${dump.rows[0][nameIdx]}`);
+  check('П10: запись в лист не выполнялась (нечего менять)', h.getSkuSheet().__getSetValuesCallCount() === 0, `вызовов setValues: ${h.getSkuSheet().__getSetValuesCallCount()}`);
+})();
+
+// ================= Пункт 11: название в Ozon изменилось — в листе обновилось на новое =================
+(function test11() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ART1', 'ШК Ozon': '111', 'Название Ozon': 'Старое название' })
+  ]);
+  const rows = [{ offerId: 'ART1', sku: '111', name: 'Новое название' }];
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+  check('П11: название обновилось на новое', dump.rows[0][nameIdx] === 'Новое название', `получено: ${dump.rows[0][nameIdx]}`);
+})();
+
+// ================= Пункт 12: ничего не изменилось — в лист не было НИ ОДНОЙ записи =================
+(function test12() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ART1', 'ШК Ozon': '111', 'Название Ozon': 'Имя без изменений' })
+  ]);
+  const rows = [{ offerId: 'ART1', sku: '111', name: 'Имя без изменений' }];
+  h.getSkuSheet().__resetSetValuesCallCount();
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  check('П12: setValues на лист SKU не вызывался ни разу', h.getSkuSheet().__getSetValuesCallCount() === 0, `вызовов setValues: ${h.getSkuSheet().__getSetValuesCallCount()}`);
+})();
+
+// ================= Пункт 13: связывание по ШК Ozon, когда артикул в листе не совпадает с offerId =================
+(function test13() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    // Внутренний артикул склада не похож на offerId Ozon — связь возможна только по ШК Ozon.
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ВНУТРЕННИЙ-КОД-42', 'ШК Ozon': '555555', 'Название Ozon': '' })
+  ]);
+  const rows = [{ offerId: 'OZON-OFFER-XYZ', sku: '555555', name: 'Связано по ШК Ozon' }];
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+  check('П13: название подставилось по совпадению ШК Ozon (артикулы разные)', dump.rows[0][nameIdx] === 'Связано по ШК Ozon', `получено: ${dump.rows[0][nameIdx]}`);
+})();
+
+// ================= Пункт 14: ШК Ozon приходит числом, в листе тоже хранится числом =================
+(function test14() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'НЕ-СОВПАДАЕТ', 'ШК Ozon': 777777, 'Название Ozon': '' })
+  ]);
+  const rows = [{ offerId: 'ANY-OFFER', sku: 777777, name: 'Числовой ШК связался' }];
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+  check('П14: связывание по ШК Ozon работает при числовых типах с обеих сторон', dump.rows[0][nameIdx] === 'Числовой ШК связался', `получено: ${dump.rows[0][nameIdx]}`);
+})();
+
+// ================= Пункт 15: в листе SKU ШК Ozon = '0' ("баркода нет") — связывания НЕ происходит =================
+(function test15() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'АРТИКУЛ-БЕЗ-БАРКОДА', 'ШК Ozon': '0', 'Название Ozon': '' })
+  ]);
+  // Чужой товар случайно тоже пришёл с sku='0' -- по этому ключу подстановки быть не должно.
+  const rows = [{ offerId: 'ЧУЖОЙ-АРТИКУЛ', sku: '0', name: 'Чужое название не должно подставиться' }];
+  h.getSkuSheet().__resetSetValuesCallCount();
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+  check('П15: название по ключу ШК Ozon="0" НЕ подставилось', dump.rows[0][nameIdx] === '', `получено: ${dump.rows[0][nameIdx]}`);
+  check('П15: запись в лист не выполнялась', h.getSkuSheet().__getSetValuesCallCount() === 0, `вызовов setValues: ${h.getSkuSheet().__getSetValuesCallCount()}`);
+})();
+
+// ================= Пункт 16: пустое название в rows не затирает уже сохранённое =================
+(function test16() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ART1', 'ШК Ozon': '111', 'Название Ozon': 'Сохранённое имя' })
+  ]);
+  const rows = [{ offerId: 'ART1', sku: '111', name: '' }];
+  h.getSkuSheet().__resetSetValuesCallCount();
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+  check('П16: пустое название из Ozon не затёрло сохранённое', dump.rows[0][nameIdx] === 'Сохранённое имя', `получено: ${dump.rows[0][nameIdx]}`);
+  check('П16: запись в лист не выполнялась', h.getSkuSheet().__getSetValuesCallCount() === 0, `вызовов setValues: ${h.getSkuSheet().__getSetValuesCallCount()}`);
+})();
+
+// ================= Пункт 17: строки одного товара с разных складов — берётся первое непустое, без дублей =================
+(function test17() {
+  const h = freshHarness();
+  h.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ART1', 'ШК Ozon': '111', 'Название Ozon': '' })
+  ]);
+  const rows = [
+    { offerId: 'ART1', sku: '111', name: '' }, // склад без имени в выгрузке
+    { offerId: 'ART1', sku: '111', name: 'Имя со склада 1' },
+    { offerId: 'ART1', sku: '111', name: 'Имя со склада 2 (должно быть проигнорировано)' }
+  ];
+  h.updateSkuNamesFromOzonStocks(rows);
+
+  const dump = h.dumpSkuSheet();
+  const nameIdx = dump.headers.indexOf('Название Ozon');
+  check('П17: взято первое непустое название среди складов', dump.rows[0][nameIdx] === 'Имя со склада 1', `получено: ${dump.rows[0][nameIdx]}`);
+  check('П17: запись в лист выполнена ровно один раз (без дублирования)', h.getSkuSheet().__getSetValuesCallCount() === 1, `вызовов setValues: ${h.getSkuSheet().__getSetValuesCallCount()}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
