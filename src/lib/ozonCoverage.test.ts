@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildOzonCoverage,
   calcCoverageDays,
   calcSupplyRecommendation,
   getLastFullWeeks,
   getMskWeekMonday,
+  OzonCoverageInput,
   OzonCoverageSettings,
   parseExcludedClusters,
   parsePriorityClusters,
   resolveOzonArticle
 } from './ozonCoverage';
-import { SKUItem } from '../types';
+import { KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
 
 // Фабрика SKU для тестов resolveOzonArticle: заполняет только обязательные поля.
 function makeSku(overrides: Partial<SKUItem> & { sku: string }): SKUItem {
@@ -224,5 +226,200 @@ describe('calcSupplyRecommendation', () => {
     expect(rec).not.toBeNull();
     expect(rec!.boxes).toBe(50);
     expect(rec!.qty).toBe(50);
+  });
+});
+// ===== Пункт 36: компоненты виртуальных комплектов =====
+
+const NOW = new Date('2024-01-10T10:00:00Z'); // среда; последняя полная неделя — 2024-01-01
+const SALES_WEEK = '2024-01-01';
+
+// Строка продаж без кластера: окно скорости = 4 недели = 28 дней, поэтому qty 28 даёт 1 шт/день.
+function makeSalesRow(offerId: string, qty: number): OzonSalesRow {
+  return { week: SALES_WEEK, cabinet: 'test', offerId, clusterName: '', qty, updatedAt: '', days: 7 };
+}
+
+// Строка остатков без КластерID: попадает только в totalEstimated, кластерных рекомендаций нет.
+function makeStockRow(offerId: string, available: number): OzonStockRow {
+  return {
+    cabinet: 'test',
+    sku: '',
+    offerId,
+    name: offerId,
+    warehouseName: '',
+    clusterName: '',
+    clusterId: '',
+    available,
+    preparing: 0,
+    requested: 0,
+    transit: 0,
+    excess: 0,
+    returns: 0,
+    other: 0,
+    updatedAt: ''
+  };
+}
+
+// Карточки SKU: у PACK карточки намеренно НЕТ — проверяем, что расчёт это переживает.
+const KIT_SKUS: SKUItem[] = [
+  makeSku({ sku: 'KIT-A', pcsPerBox: 1, leadTimeDays: 20 }),
+  makeSku({ sku: 'KIT-B', pcsPerBox: 1, leadTimeDays: 20 }),
+  makeSku({ sku: 'KIT-L', pcsPerBox: 1, leadTimeDays: 30 }),
+  makeSku({ sku: 'MISKA', pcsPerBox: 10, leadTimeDays: 50 }),
+  makeSku({ sku: 'BOTTLE', pcsPerBox: 100, leadTimeDays: 10 })
+];
+
+// BOTTLE входит в ОБА виртуальных комплекта — это случай «Бутылок» из ТЗ.
+const KITS: KitItem[] = [
+  {
+    kitSku: 'KIT-A',
+    type: 'virtual',
+    components: [
+      { componentSku: 'MISKA', quantity: 1 },
+      { componentSku: 'BOTTLE', quantity: 2 }
+    ]
+  },
+  {
+    kitSku: 'KIT-B',
+    type: 'virtual',
+    components: [
+      { componentSku: 'BOTTLE', quantity: 1 },
+      { componentSku: 'PACK', quantity: 3 }
+    ]
+  },
+  { kitSku: 'KIT-L', type: 'legacy', components: [{ componentSku: 'MISKA', quantity: 5 }] }
+];
+
+/**
+ * Базовый вход:
+ * скорости комплектов: KIT-A = 28/28 = 1 шт/д, KIT-B = 56/28 = 2 шт/д, KIT-L = 28/28 = 1 шт/д;
+ * расчётные остатки на Ozon: KIT-A = 20, KIT-B = 30, KIT-L = 5 (возвратов и «в пути» нет).
+ */
+function makeKitsInput(overrides: Partial<OzonCoverageInput> = {}): OzonCoverageInput {
+  return {
+    stocks: [makeStockRow('KIT-A', 20), makeStockRow('KIT-B', 30), makeStockRow('KIT-L', 5)],
+    sales: [makeSalesRow('KIT-A', 28), makeSalesRow('KIT-B', 56), makeSalesRow('KIT-L', 28)],
+    skus: KIT_SKUS,
+    clusters: [],
+    settings: makeSettings({ minStockDays: 7, targetStockDays: 20, factoryOrderDays: 14 }),
+    myStockAvailability: { MISKA: 13, BOTTLE: 40, PACK: 9 },
+    factoryOnOrder: { PACK: 15 },
+    kits: KITS,
+    now: NOW,
+    ...overrides
+  };
+}
+
+describe('buildOzonCoverage: компоненты виртуальных комплектов (пункт 36)', () => {
+  it('компонент одного комплекта: скорость и запас считаются по формуле', () => {
+    // MISKA входит только в KIT-A с нормой 1.
+    // скорость = 1 шт/д × 1 = 1; запас из комплектов = 20 × 1 = 20;
+    // труба = 20 + Мой склад 13 + заказано 0 = 33.
+    const miska = buildOzonCoverage(makeKitsInput()).components.find(c => c.component === 'MISKA')!;
+    expect(miska.perDay).toBe(1);
+    expect(miska.fromKitsQty).toBe(20);
+    expect(miska.myStockQty).toBe(13);
+    expect(miska.onOrderQty).toBe(0);
+    expect(miska.pipelineQty).toBe(33);
+    expect(miska.usedInKits).toEqual(['KIT-A']);
+  });
+
+  it('сигнал заказа по компоненту берёт срок поставки и коробку из карточки компонента', () => {
+    // MISKA: срок 50 дн, коробка 10 шт. Порог = 50 + 7 = 57 дн = 1 × 57 = 57 шт > трубы 33 — сигнал есть.
+    // Объём: 1 × (57 + 14) = 71; 71 − 33 = 38; ceil(38 / 10) = 4 коробки = 40 шт. Хватит на 33/1 = 33 дня.
+    const miska = buildOzonCoverage(makeKitsInput()).components.find(c => c.component === 'MISKA')!;
+    expect(miska.leadTimeDays).toBe(50);
+    expect(miska.pcsPerBox).toBe(10);
+    expect(miska.factory).not.toBeNull();
+    expect(miska.factory!.thresholdDays).toBe(57);
+    expect(miska.factory!.thresholdQty).toBe(57);
+    expect(miska.factory!.pipelineQty).toBe(33);
+    expect(miska.factory!.daysLeft).toBe(33);
+    expect(miska.factory!.orderQty).toBe(40);
+    expect(miska.factory!.orderBoxes).toBe(4);
+  });
+
+  it('компонент в ДВУХ комплектах: скорость и запас складываются', () => {
+    // BOTTLE: KIT-A норма 2 и KIT-B норма 1.
+    // скорость = 1 × 2 + 2 × 1 = 4; запас из комплектов = 20 × 2 + 30 × 1 = 40 + 30 = 70;
+    // труба = 70 + Мой склад 40 = 110. Порог = (10 + 7) × 4 = 68 шт < 110 — сигнала нет.
+    const bottle = buildOzonCoverage(makeKitsInput()).components.find(c => c.component === 'BOTTLE')!;
+    expect(bottle.perDay).toBe(4);
+    expect(bottle.fromKitsQty).toBe(70);
+    expect(bottle.pipelineQty).toBe(110);
+    expect(bottle.usedInKits).toEqual(['KIT-A', 'KIT-B']);
+    expect(bottle.factory).toBeNull();
+  });
+
+  it('норма расхода не равна 1: скорость и запас умножаются на норму', () => {
+    // PACK входит только в KIT-B с нормой 3: скорость = 2 × 3 = 6; запас = 30 × 3 = 90;
+    // труба = 90 + Мой склад 9 + заказано на фабрике 15 = 114.
+    const pack = buildOzonCoverage(makeKitsInput()).components.find(c => c.component === 'PACK')!;
+    expect(pack.perDay).toBe(6);
+    expect(pack.fromKitsQty).toBe(90);
+    expect(pack.onOrderQty).toBe(15);
+    expect(pack.pipelineQty).toBe(114);
+  });
+
+  it('компонент без карточки в SKU Базе не роняет расчёт: коробка 1, срок поставки 0', () => {
+    // У PACK карточки нет. Порог = (0 + 7) × 6 = 42 шт < трубы 114 — сигнала нет.
+    const pack = buildOzonCoverage(makeKitsInput()).components.find(c => c.component === 'PACK')!;
+    expect(pack.pcsPerBox).toBe(1);
+    expect(pack.leadTimeDays).toBe(0);
+    expect(pack.factory).toBeNull();
+  });
+
+  it('legacy-комплект игнорируется полностью', () => {
+    const res = buildOzonCoverage(makeKitsInput());
+    // KIT-L (legacy) требует MISKA по 5 шт, но в расчёт компонентов не входит:
+    // скорость MISKA осталась 1 (а не 1 + 1 × 5 = 6), запас — 20 (а не 20 + 5 × 5 = 45).
+    const miska = res.components.find(c => c.component === 'MISKA')!;
+    expect(miska.perDay).toBe(1);
+    expect(miska.fromKitsQty).toBe(20);
+    expect(miska.usedInKits).toEqual(['KIT-A']);
+    expect(res.bottlenecks.map(b => b.kitSku)).toEqual(['KIT-A', 'KIT-B']);
+    // Сигнал самого legacy-комплекта не меняется: труба 5 < порога (30 + 7) × 1 = 37.
+    const kitL = res.articles.find(a => a.article === 'KIT-L')!;
+    expect(kitL.factory).not.toBeNull();
+    expect(kitL.factory!.thresholdQty).toBe(37);
+  });
+
+  it('у виртуального комплекта factory === null', () => {
+    const res = buildOzonCoverage(makeKitsInput());
+    expect(res.articles.find(a => a.article === 'KIT-A')!.factory).toBeNull();
+    expect(res.articles.find(a => a.article === 'KIT-B')!.factory).toBeNull();
+  });
+
+  it('узкое место комплекта — компонент с наименьшим покрытием в днях', () => {
+    const res = buildOzonCoverage(makeKitsInput());
+    // KIT-A: MISKA 33 / 1 = 33 дня, BOTTLE 110 / 4 = 27.5 дня -> узкое место BOTTLE.
+    const kitA = res.bottlenecks.find(b => b.kitSku === 'KIT-A')!;
+    expect(kitA.componentSku).toBe('BOTTLE');
+    expect(kitA.daysLeft).toBe(27.5);
+    // KIT-B: BOTTLE 27.5 дня, PACK 114 / 6 = 19 дней -> узкое место PACK.
+    const kitB = res.bottlenecks.find(b => b.kitSku === 'KIT-B')!;
+    expect(kitB.componentSku).toBe('PACK');
+    expect(kitB.daysLeft).toBe(19);
+  });
+
+  it('canAssembleQty = минимум по floor(остаток компонента ÷ норма)', () => {
+    const res = buildOzonCoverage(makeKitsInput());
+    // KIT-A: min(floor(13 / 1) = 13, floor(40 / 2) = 20) = 13.
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-A')!.canAssembleQty).toBe(13);
+    // KIT-B: min(floor(40 / 1) = 40, floor(9 / 3) = 3) = 3.
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-B')!.canAssembleQty).toBe(3);
+  });
+
+  it('kits не передан: components и bottlenecks пустые, сигнал по товарам прежний', () => {
+    const res = buildOzonCoverage(makeKitsInput({ kits: undefined }));
+    expect(res.components).toEqual([]);
+    expect(res.bottlenecks).toEqual([]);
+    // KIT-A считается как обычный товар: труба = 20 + 0 = 20 < порога (20 + 7) × 1 = 27.
+    // Объём: 1 × (27 + 14) = 41; 41 − 20 = 21; коробка 1 -> 21 шт. Хватит на 20 / 1 = 20 дней.
+    const kitA = res.articles.find(a => a.article === 'KIT-A')!;
+    expect(kitA.factory).not.toBeNull();
+    expect(kitA.factory!.thresholdQty).toBe(27);
+    expect(kitA.factory!.pipelineQty).toBe(20);
+    expect(kitA.factory!.daysLeft).toBe(20);
+    expect(kitA.factory!.orderQty).toBe(21);
   });
 });

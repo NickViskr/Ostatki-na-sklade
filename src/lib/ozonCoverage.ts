@@ -1,4 +1,4 @@
-import { OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
 
 // ===== Модуль планирования поставок Ozon =====
 // Часть 1: недели по МСК, сопоставление артикулов, скорость продаж.
@@ -501,6 +501,48 @@ export interface OzonPendingLike {
   byArticle: Record<string, number>;
 }
 
+// ===== Пункт 36: компоненты виртуальных комплектов =====
+
+/**
+ * Покрытие по одному компоненту виртуальных комплектов.
+ * У фабрики заказывают не комплекты, а компоненты: сроки поставки и размеры коробок у них
+ * свои, а один компонент может входить сразу в несколько комплектов и расходоваться кратно
+ * быстрее. Поэтому сигнал заказа на фабрике считается здесь, а не по комплекту.
+ */
+export interface ComponentCoverage {
+  /** Артикул компонента. */
+  component: string;
+  /** Скорость расхода, шт/день: Σ по комплектам (скорость комплекта × норма расхода). */
+  perDay: number;
+  /** ТРУБА, шт: fromKitsQty + Мой склад + заказанное на фабрике по этому компоненту. */
+  pipelineQty: number;
+  /** Собственный остаток компонента на Моём складе, шт. */
+  myStockQty: number;
+  /** Заказано на фабрике по самому компоненту и ещё не получено, шт. */
+  onOrderQty: number;
+  /** Пришло из расчётных остатков комплектов на Ozon, шт: Σ (totalEstimated комплекта × норма). */
+  fromKitsQty: number;
+  /** Срок поставки из карточки КОМПОНЕНТА в SKU Базе, дней. */
+  leadTimeDays: number;
+  /** Размер коробки из карточки КОМПОНЕНТА в SKU Базе, шт. */
+  pcsPerBox: number;
+  /** Сигнал «пора заказать на фабрике» по компоненту. */
+  factory: FactorySignal | null;
+  /** Артикулы виртуальных комплектов, в которые входит компонент. */
+  usedInKits: string[];
+}
+
+/** Узкое место виртуального комплекта — компонент с наименьшим покрытием в днях. */
+export interface KitBottleneck {
+  kitSku: string;
+  /** Артикул компонента с наименьшим покрытием. */
+  componentSku: string;
+  /** Покрытие узкого места, дней. null — скорость расхода 0, покрытие «бесконечное». */
+  daysLeft: number | null;
+  /** Сколько комплектов можно собрать прямо сейчас: min floor(остаток компонента ÷ норма). */
+  canAssembleQty: number;
+}
+
 export interface OzonCoverageInput {
   stocks: OzonStockRow[];
   sales: OzonSalesRow[];
@@ -513,6 +555,8 @@ export interface OzonCoverageInput {
   pending?: OzonPendingLike;
   /** Пункт 35. Заказано на фабрике и ещё не получено, шт по артикулу. Просроченные заказы сюда не попадают. */
   factoryOnOrder?: Record<string, number>;
+  /** Пункт 36. Состав комплектов; не передан — расчёт по компонентам не выполняется. */
+  kits?: KitItem[];
   /** Момент расчёта; по умолчанию — текущее время. */
   now?: Date;
 }
@@ -520,6 +564,10 @@ export interface OzonCoverageInput {
 export interface OzonCoverageResult {
   speed: SalesSpeedResult;
   articles: ArticleCoverage[];
+  /** Пункт 36. Покрытие по компонентам виртуальных комплектов. Без input.kits — пустой массив. */
+  components: ComponentCoverage[];
+  /** Пункт 36. Узкие места виртуальных комплектов. Без input.kits — пустой массив. */
+  bottlenecks: KitBottleneck[];
 }
 
 /** Пункт 42. Разбор коррекции скорости по одному товару. */
@@ -679,6 +727,136 @@ export function applyDeficitSpeedCorrection(
 }
 
 /**
+ * Пункт 36. Покрытие по компонентам виртуальных комплектов и узкие места комплектов.
+ * Скорость компонента = Σ по комплектам (скорость комплекта шт/д × норма расхода).
+ * Запас (ТРУБА) = Σ по комплектам (расчётный остаток комплекта на Ozon × норма)
+ * + собственный остаток компонента на Моём складе + заказанное на фабрике по компоненту.
+ * Расчётный остаток комплекта — готовое поле totalEstimated агрегата остатков: так цифры
+ * компонента и комплекта не расходятся между собой.
+ * Комплекты legacy игнорируются полностью: у них есть собственный остаток, их поведение прежнее.
+ * Заказы на фабрике, оформленные на КОМПЛЕКТ, в компоненты НЕ разворачиваются: такой заказ
+ * означает заказ одного конкретного компонента, а не всего состава.
+ * Функция чистая: ничего не читает из стора и не изменяет входные объекты.
+ */
+export function buildComponentCoverage(
+  kits: KitItem[],
+  speed: SalesSpeedResult,
+  stocksByArticle: Record<string, ArticleStockAgg>,
+  skus: SKUItem[],
+  myStockAvailability: Record<string, number>,
+  factoryOnOrder: Record<string, number>,
+  settings: OzonCoverageSettings
+): { components: ComponentCoverage[]; bottlenecks: KitBottleneck[] } {
+  const virtualKits = (kits || []).filter(k => k && k.type === 'virtual');
+  if (!virtualKits.length) return { components: [], bottlenecks: [] };
+
+  // Накопление по компоненту: скорость и запас складываются по всем комплектам, где компонент
+  // участвует (случай «Бутылок» и «Пакетов» — они входят сразу в два комплекта).
+  const acc = new Map<string, { perDay: number; fromKitsQty: number; usedInKits: string[] }>();
+
+  for (const kit of virtualKits) {
+    const kitSku = String(kit.kitSku || '').trim();
+    if (!kitSku) continue;
+    const kitPerDay = Number(speed.perDayByArticle[kitSku]) || 0;
+    const kitStock = stocksByArticle[kitSku];
+    const kitEstimated = kitStock ? kitStock.totalEstimated : 0;
+
+    for (const comp of kit.components || []) {
+      const componentSku = String(comp.componentSku || '').trim();
+      const norm = Number(comp.quantity) || 0;
+      if (!componentSku || !(norm > 0)) continue;
+
+      let row = acc.get(componentSku);
+      if (!row) {
+        row = { perDay: 0, fromKitsQty: 0, usedInKits: [] };
+        acc.set(componentSku, row);
+      }
+      row.perDay += kitPerDay * norm;
+      row.fromKitsQty += kitEstimated * norm;
+      if (!row.usedInKits.includes(kitSku)) row.usedInKits.push(kitSku);
+    }
+  }
+
+  const components: ComponentCoverage[] = [];
+  const byComponent: Record<string, ComponentCoverage> = {};
+  for (const [componentSku, row] of acc) {
+    // Карточки компонента в SKU Базе может не быть: тогда коробка 1, срок поставки 0 —
+    // так же, как для обычного товара без карточки в buildOzonCoverage.
+    const skuItem = skus.find(s => s.sku === componentSku);
+    const pcsPerBox = skuItem && skuItem.pcsPerBox > 0 ? skuItem.pcsPerBox : 1;
+    const leadTimeDays = skuItem ? (Number(skuItem.leadTimeDays) || 0) : 0;
+    const myStockQty = Number(myStockAvailability[componentSku]) || 0;
+    const onOrderQty = Math.max(0, Number(factoryOnOrder[componentSku]) || 0);
+    // Сигнал считается той же функцией, что и по обычным товарам: роль «остатка Ozon» играет
+    // запас, пришедший из расчётных остатков комплектов. Дефицита кластеров у компонента нет.
+    const factory = calcFactorySignal(
+      row.fromKitsQty,
+      myStockQty,
+      row.perDay,
+      leadTimeDays,
+      pcsPerBox,
+      settings,
+      0,
+      onOrderQty
+    );
+
+    const coverage: ComponentCoverage = {
+      component: componentSku,
+      perDay: row.perDay,
+      pipelineQty: row.fromKitsQty + Math.max(0, myStockQty) + onOrderQty,
+      myStockQty,
+      onOrderQty,
+      fromKitsQty: row.fromKitsQty,
+      leadTimeDays,
+      pcsPerBox,
+      factory,
+      usedInKits: row.usedInKits
+    };
+    components.push(coverage);
+    byComponent[componentSku] = coverage;
+  }
+
+  const bottlenecks: KitBottleneck[] = [];
+  for (const kit of virtualKits) {
+    const kitSku = String(kit.kitSku || '').trim();
+    if (!kitSku) continue;
+
+    let worstSku = '';
+    let worstDays: number | null = null;
+    let canAssembleQty = Number.POSITIVE_INFINITY;
+
+    for (const comp of kit.components || []) {
+      const componentSku = String(comp.componentSku || '').trim();
+      const norm = Number(comp.quantity) || 0;
+      if (!componentSku || !(norm > 0)) continue;
+      const row = byComponent[componentSku];
+      if (!row) continue;
+
+      // Покрытие компонента: запас ÷ скорость. Скорость 0 — покрытие «бесконечное» (null).
+      const days = row.perDay > 0 ? row.pipelineQty / row.perDay : null;
+      const current = days === null ? Number.POSITIVE_INFINITY : days;
+      const worst = worstDays === null ? Number.POSITIVE_INFINITY : worstDays;
+      if (!worstSku || current < worst) {
+        worstSku = componentSku;
+        worstDays = days;
+      }
+      // Собрать можно столько комплектов, на сколько хватает самого дефицитного компонента.
+      canAssembleQty = Math.min(canAssembleQty, Math.floor(Math.max(0, row.myStockQty) / norm));
+    }
+
+    if (!worstSku) continue;
+    bottlenecks.push({
+      kitSku,
+      componentSku: worstSku,
+      daysLeft: worstDays,
+      canAssembleQty: isFinite(canAssembleQty) ? canAssembleQty : 0
+    });
+  }
+
+  return { components, bottlenecks };
+}
+
+/**
  * Сборный расчёт покрытия и рекомендаций по всем товарам.
  * Товары — объединение артикулов из остатков Ozon и продаж за окно скорости.
  */
@@ -697,6 +875,14 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     ...Object.keys(stocksByArticle),
     ...Object.keys(speed.qtyByArticle)
   ]);
+
+  // Пункт 36: заказ на фабрике по виртуальному комплекту не считается — только по компонентам.
+  const virtualKitSkus = new Set<string>(
+    (input.kits || [])
+      .filter(k => k && k.type === 'virtual')
+      .map(k => String(k.kitSku || '').trim())
+      .filter(Boolean)
+  );
 
   const articles: ArticleCoverage[] = [];
 
@@ -820,16 +1006,18 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     const perDay = speed.perDayByArticle[article] || 0;
     const unmetDeficitQty = clusterRows.reduce((s, r) => s + (r.unmetQty || 0), 0);
     const onOrderQty = Math.max(0, Number(input.factoryOnOrder && input.factoryOnOrder[article]) || 0);
-    const factory = calcFactorySignal(
-      stockAgg.totalEstimated,
-      myStockAvailable,
-      perDay,
-      leadTimeDays,
-      pcsPerBox,
-      input.settings,
-      unmetDeficitQty,
-      onOrderQty
-    );
+    const factory = virtualKitSkus.has(article)
+      ? null
+      : calcFactorySignal(
+          stockAgg.totalEstimated,
+          myStockAvailable,
+          perDay,
+          leadTimeDays,
+          pcsPerBox,
+          input.settings,
+          unmetDeficitQty,
+          onOrderQty
+        );
 
     articles.push({
       article,
@@ -852,6 +1040,16 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
 
   articles.sort((a, b) => b.perDay - a.perDay);
 
-  return { speed, articles };
+  const { components, bottlenecks } = buildComponentCoverage(
+    input.kits || [],
+    speed,
+    stocksByArticle,
+    input.skus,
+    input.myStockAvailability,
+    input.factoryOnOrder || {},
+    input.settings
+  );
+
+  return { speed, articles, components, bottlenecks };
 }
 
