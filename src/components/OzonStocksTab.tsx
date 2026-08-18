@@ -448,6 +448,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       returns: list.reduce((s, w) => s + (w.returns || 0), 0),
       other: list.reduce((s, w) => s + (w.other || 0), 0),
     });
+    // Запасной источник кабинетов: у распроданного в ноль товара строк остатков нет,
+    // а бейдж кабинета показать всё равно надо. Карта строится один раз — продаж тысячи строк,
+    // а фильтр внутри цикла по артикулам дал бы квадрат.
+    const cabinetsByArticle: Record<string, Set<string>> = {};
+    for (const sale of filteredOzonSales) {
+      const cab = String(sale.cabinet || '').trim();
+      if (!cab) continue;
+      const article = resolveOzonArticle(skus, sale.offerId);
+      if (!cabinetsByArticle[article]) cabinetsByArticle[article] = new Set<string>();
+      cabinetsByArticle[article].add(cab);
+    }
     const rows = coverage.articles.map((art) => {
       const stockRows = filteredOzonStocks.filter(
         (s) => resolveOzonArticle(skus, s.offerId, s.sku) === art.article
@@ -466,10 +477,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           warehouses: stockRows.filter((s) => String(s.clusterId || '').trim() === cls.clusterId),
         };
       });
+      // Название и кабинеты берутся из остатков, но у распроданного товара остатков нет:
+      // название тогда достаётся из карточки SKU, кабинеты — из продаж.
+      const stockName = stockRows.length > 0 ? (stockRows[0].name || '') : '';
+      const skuCard = skus.find((s) => s.sku === art.article);
+      const stockCabinets = Array.from(new Set(stockRows.map((s) => s.cabinet).filter(Boolean)));
       return {
         ...art,
-        name: stockRows.length > 0 ? (stockRows[0].name || '') : '',
-        cabinets: Array.from(new Set(stockRows.map((s) => s.cabinet).filter(Boolean))),
+        name: stockName || (skuCard ? (skuCard.name || '') : ''),
+        cabinets: stockCabinets.length > 0
+          ? stockCabinets
+          : Array.from(cabinetsByArticle[art.article] || []),
         totals: sumBy(stockRows),
         unboundRows,
         unboundTotals: sumBy(unboundRows),
@@ -486,7 +504,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     // Пункт 29, этап E: замер времени. Диагностика, логику не меняет.
     console.log(`OZONPERF coverageRows total=${Math.round(performance.now() - rowsPerfStart)}ms rows=${rows.length}`);
     return rows;
-  }, [coverage, filteredOzonStocks, skus, ozonSettings.minStockDays]);
+  }, [coverage, filteredOzonStocks, filteredOzonSales, skus, ozonSettings.minStockDays]);
 
   // Пункт 36. Компоненты виртуальных комплектов: на фабрике заказывают их, а не комплект.
   // Порядок тот же, что в основной таблице — от самых быстрых к самым медленным.

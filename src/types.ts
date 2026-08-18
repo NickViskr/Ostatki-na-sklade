@@ -63,6 +63,8 @@ export interface SKUItem {
   boxesPerPallet: number;
   volumeLiters: number;
   leadTimeDays: number;
+  /** Название товара из Ozon: хранится в SKU Базе, чтобы пережить распродажу товара в ноль. */
+  name?: string;
 }
 
 export interface User {

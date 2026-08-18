@@ -1133,7 +1133,7 @@ function getSkus() {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) return [];
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon']);
   
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
@@ -1147,6 +1147,9 @@ function getSkus() {
   const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
   const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
   const leadIdx = headers.indexOf('Срок поставки (дни)') !== -1 ? headers.indexOf('Срок поставки (дни)') : 7;
+  // Запасного номера колонки тут быть не может: «Название Ozon» дописывается в конец листа,
+  // и её позиция зависит от того, сколько колонок уже было в конкретной базе.
+  const nameIdx = headers.indexOf('Название Ozon');
   
   const rows = data.slice(1);
   
@@ -1161,7 +1164,8 @@ function getSkus() {
       wbBarcode: wb === '0' ? '' : wb,
       boxesPerPallet: bppIdx !== -1 && bppIdx < row.length ? Number(row[bppIdx]) || 0 : 0,
       volumeLiters: volIdx !== -1 && volIdx < row.length ? Number(row[volIdx]) || 0 : 0,
-      leadTimeDays: leadIdx !== -1 && leadIdx < row.length ? Number(row[leadIdx]) || 0 : 0
+      leadTimeDays: leadIdx !== -1 && leadIdx < row.length ? Number(row[leadIdx]) || 0 : 0,
+      name: nameIdx !== -1 && nameIdx < row.length ? String(row[nameIdx] || '') : ''
     };
   });
 }
@@ -1171,7 +1175,7 @@ function addSku(skuData) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден. Выполните инициализацию.');
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon']);
   
   const data = sheet.getDataRange().getValues();
   const headers = data[0].map(h => String(h).trim());
@@ -1217,7 +1221,7 @@ function updateSku(skuData, oldSku) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден.');
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon']);
   
   const data = sheet.getDataRange().getValues();
   const headers = data[0].map(h => String(h).trim());
@@ -1284,7 +1288,7 @@ function ensureSkuExists(article) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) return;
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Название Ozon']);
   
   const data = sheet.getDataRange().getValues();
   const exists = data.some(row => String(row[0]) === String(article));
@@ -4035,11 +4039,81 @@ function saveOzonStocks(payload) {
     Logger.log('Не удалось обновить историю остатков Ozon: ' + e);
   }
 
+  // Дублирование названий в лист SKU — тоже вспомогательная задача и тоже не должна срывать сохранение.
+  try {
+    updateSkuNamesFromOzonStocks(payload.rows);
+  } catch (e) {
+    Logger.log('Не удалось обновить названия Ozon в листе SKU: ' + e);
+  }
+
   return {
     savedRows: newRows.length,
     keptRows: keptRows.length,
     cabinets: okCabinets
   };
+}
+
+// Сохраняет актуальные названия товаров Ozon в лист SKU.
+// Зачем: лист "Остатки Ozon" перезаписывается целиком при каждой синхронизации, и у распроданного
+// в ноль товара строк остатков нет вообще — вместе с ними пропадает и название. В листе SKU название
+// живёт постоянно и распродажу переживает.
+// rows — payload.rows функции saveOzonStocks (поля offerId, sku, name).
+function updateSkuNamesFromOzonStocks(rows) {
+  if (!rows || !Array.isArray(rows) || rows.length === 0) return;
+
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('SKU');
+  if (!sheet) return;
+  // Колонка создаётся здесь же: автоопрос по расписанию вызывает сохранение остатков раньше,
+  // чем кто-либо откроет приложение, и без этого первый прогон прошёл бы вхолостую.
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon']);
+
+  // Названия по двум ключам связывания: артикул Ozon и ШК Ozon. Берётся первое непустое —
+  // по одному товару приходит много строк (склады, кабинеты) с одинаковым названием.
+  const nameByArticle = {};
+  const nameByOzonSku = {};
+  for (let i = 0; i < rows.length; i++) {
+    const item = rows[i];
+    if (!item) continue;
+    const name = String(item.name || '').trim();
+    if (!name) continue;
+    const article = String(item.offerId || '').trim().toLowerCase();
+    if (article && !nameByArticle[article]) nameByArticle[article] = name;
+    // ШК Ozon приходит числом, а из таблицы читается то числом, то строкой — только String().
+    const ozonSku = String(item.sku || '').trim();
+    if (ozonSku && ozonSku !== '0' && !nameByOzonSku[ozonSku]) nameByOzonSku[ozonSku] = name;
+  }
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return;
+  const headers = data[0].map(h => String(h).trim());
+  const skuIdx = headers.indexOf('SKU') !== -1 ? headers.indexOf('SKU') : 0;
+  const ozonIdx = headers.indexOf('ШК Ozon');
+  const nameIdx = headers.indexOf('Название Ozon');
+  if (nameIdx === -1) return;
+
+  // Готовится весь столбец названий целиком: построчная запись в Apps Script слишком дорога.
+  const nameColumn = [];
+  let hasChanges = false;
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const currentName = nameIdx < row.length ? String(row[nameIdx] || '') : '';
+    const article = String(row[skuIdx] || '').trim().toLowerCase();
+    // В листе SKU пустой ШК Ozon хранится как '0' — такой ключ ничего не связывает.
+    const ozonSku = ozonIdx !== -1 && ozonIdx < row.length ? String(row[ozonIdx] || '').trim() : '';
+    let freshName = article && nameByArticle[article] ? nameByArticle[article] : '';
+    if (!freshName && ozonSku && ozonSku !== '0' && nameByOzonSku[ozonSku]) freshName = nameByOzonSku[ozonSku];
+    // Пустое название не затирает старое: товара просто нет в этой выгрузке остатков — он распродан.
+    if (freshName && freshName !== currentName) {
+      nameColumn.push([freshName]);
+      hasChanges = true;
+    } else {
+      nameColumn.push([currentName]);
+    }
+  }
+
+  if (!hasChanges) return;
+  sheet.getRange(2, nameIdx + 1, nameColumn.length, 1).setValues(nameColumn);
 }
 
 // Понедельник ISO-недели, к которой относится дата dateStr (yyyy-MM-dd).
