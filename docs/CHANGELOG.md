@@ -1397,6 +1397,18 @@
 - Модальное окно настроек Ozon (`src/components/OzonSettingsModal.tsx`): добавлены 5 новых полей ввода и подробные подсказки для настройки параметров коррекции скорости при дефиците (пункт 42).
 - Таблица остатков Ozon (`src/components/OzonStocksTab.tsx`): добавлена подсветка товаров со скорректированной из-за дефицита скоростью продаж (иконка `TrendingUp`, янтарный цвет) и всплывающая подсказка с подробным разбором факторов коррекции (пункт 42).
 
+## [2026-08-18]
+
+### Добавлено
+- `Dockerfile` для сборки Docker-образа: базовый образ `node:22-slim`, установка зависимостей `npm ci`, сборка проекта `npm run build`, экспорт переменных окружения `NODE_ENV=production`, `PORT=8080`, инструкция `EXPOSE 8080` и команда запуска `CMD ["npm", "start"]`
+- `.dockerignore`: исключены `node_modules`, `.git`, `dist`, `docs`, `.env*` (кроме `.env.example`), `Code.gs`, `patch.cjs` для оптимизации размера образа
+- Инфраструктура тестирования `vitest` (версия 4.1.10 в devDependencies): конфиг в отдельном файле `vitest.config.ts` (окружение `node`, маска `src/**/*.test.ts` для поиска тестов), скрипты `test` и `test:watch` в `package.json`
+- Модульные тесты в `src/lib/ozonCoverage.test.ts`: 29 тестов на чистые функции `getMskWeekMonday`, `getLastFullWeeks`, `resolveOzonArticle`, `parseExcludedClusters`, `parsePriorityClusters`, `calcCoverageDays`, `calcSupplyRecommendation`
+
+### Изменено
+- `package.json`: добавлен скрипт `"start": "tsx server.ts"` для запуска сервера из Docker и локально
+- `server.ts` (строка 17): `const PORT = 3000;` → `const PORT = Number(process.env.PORT) || 3000;` для получения порта из переменной окружения `PORT` в Cloud Run (обратно совместимо с локальным запуском без переменной)
+
 
 
 
