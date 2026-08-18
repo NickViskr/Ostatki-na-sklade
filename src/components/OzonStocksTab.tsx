@@ -1528,18 +1528,28 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         <th className="py-2 pr-2 text-right">Срок поставки, дней</th>
                         <th className="py-2 pr-2 text-right">Хватит на</th>
                         <th className="py-2 pr-2 text-right">Требуемый заказ</th>
-                        <th className="py-2 text-right"></th>
                       </tr>
                     </thead>
                     <tbody>
                       {componentRows.map((c) => {
                         const needOrder = !!(c.factory && c.factory.orderQty > 0);
                         const threshold = (Number(c.leadTimeDays) || 0) + ozonSettings.minStockDays;
+                        // Разбор заказов на фабрике для компонента — по образцу основной таблицы (строки 1129-1134),
+                        // иначе после оформления заказа он пропадал бы из вида: сигнал гас, а сам заказ было не видно и не открыть.
+                        const list = factoryOrdersByArticle[c.component] || [];
+                        const overdueList = list.filter((o) => o.expectedAt && o.expectedAt < todayIso);
+                        const overdueQty = overdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
+                        const waitingList = list.filter((o) => !o.expectedAt || o.expectedAt >= todayIso);
+                        const waitingQty = waitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
+                        const nearest = waitingList[0] || null;
+                        // Сколько дней хватит запаса без сигнала — нужно показывать даже когда заказывать не надо,
+                        // иначе после оформления заказа рост покрытия остаётся невидимым.
+                        const daysLeftNoSignal = c.perDay > 0 ? Math.round(c.pipelineQty / c.perDay) : null;
                         return (
                           <tr
                             key={c.component}
                             id={`ozon-comp-row-${c.component}`}
-                            className={`border-b border-slate-100 ${needOrder ? 'bg-rose-50/60' : ''}`}
+                            className={`border-b border-slate-100 ${needOrder ? 'bg-rose-50/60' : overdueList.length > 0 ? 'bg-amber-50/60' : ''}`}
                           >
                             <td className="py-2 pr-2">
                               <span className="font-mono font-bold text-slate-800">{c.component}</span>
@@ -1558,7 +1568,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {(Number(c.leadTimeDays) || 0) === 0 ? '—' : fmtInt(c.leadTimeDays)}
                             </td>
                             <td className="py-2 pr-2 text-right">
-                              {c.factory ? (
+                              {c.perDay === 0 ? (
+                                <span
+                                  className="text-slate-300"
+                                  title="Комплекты с этим компонентом за расчётное окно не продавались — сигнал не считается."
+                                >
+                                  —
+                                </span>
+                              ) : c.factory ? (
                                 <span
                                   className="font-semibold text-slate-700"
                                   title={`Запаса хватит на ${Math.round(c.factory.daysLeft)} дн. при пороге ${Math.round(threshold)} дн. (срок поставки компонента ${fmtInt(c.leadTimeDays)} дн. + неснижаемый запас).`}
@@ -1567,33 +1584,47 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 </span>
                               ) : (
                                 <span
-                                  className="text-slate-300"
-                                  title={c.perDay > 0 ? `Заказ не нужен: запаса хватит дольше порога в ${Math.round(threshold)} дн.` : 'Комплекты с этим компонентом за расчётное окно не продавались — сигнал не считается.'}
+                                  className="text-slate-500"
+                                  title={`Заказ не нужен: запаса хватит на ${daysLeftNoSignal} дн. при пороге ${Math.round(threshold)} дн.`}
                                 >
-                                  —
+                                  {daysLeftNoSignal} дн
                                 </span>
                               )}
                             </td>
                             <td className="py-2 pr-2 text-right">
-                              {needOrder ? (
-                                <span className="text-rose-600 font-bold">
-                                  {fmtInt(c.factory!.orderQty)} шт
-                                  <span className="block text-[10px] font-semibold text-rose-400">{fmtInt(c.factory!.orderBoxes)} кор.</span>
-                                </span>
-                              ) : (
-                                <span className="text-slate-300">не нужно</span>
-                              )}
-                            </td>
-                            <td className="py-2 text-right">
-                              {needOrder && (
+                              {overdueList.length > 0 ? (
                                 <button
                                   type="button"
                                   onClick={() => setFactoryModalArticle(c.component)}
-                                  className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100"
-                                  title="Отметить размещённый на фабрике заказ по этому компоненту"
+                                  className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+                                  title="Фабрика сорвала срок. Просроченный заказ в запас НЕ входит. Нажми, чтобы изменить дату или отметить приход партии."
                                 >
-                                  Заказать
+                                  просрочен · {fmtDateShort(overdueList[0].expectedAt)}
+                                  <span className="block text-[10px] font-semibold text-amber-600">{fmtInt(overdueQty)} шт · нажми, чтобы решить</span>
                                 </button>
+                              ) : c.factory && c.factory.orderQty > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setFactoryModalArticle(c.component)}
+                                  className="text-rose-600 font-bold text-right hover:underline"
+                                >
+                                  {waitingQty > 0 ? 'дозаказать ' : ''}{fmtInt(c.factory.orderQty)} шт
+                                  <span className="block text-[10px] font-semibold text-rose-400">
+                                    {fmtInt(c.factory.orderBoxes)} кор · {waitingQty > 0 ? `уже заказано ${fmtInt(waitingQty)} шт` : `хватит на ${Math.round(c.factory.daysLeft)} дн.`}
+                                  </span>
+                                </button>
+                              ) : waitingQty > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setFactoryModalArticle(c.component)}
+                                  className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100"
+                                  title={`Заказано на фабрике ${waitingQty} шт. Заказ входит в запас, дозаказывать не нужно. Нажми, чтобы изменить заказ или отметить приход партии.`}
+                                >
+                                  заказано {fmtInt(waitingQty)} шт
+                                  <span className="block text-[10px] font-semibold text-sky-600">ждём {nearest && nearest.expectedAt ? fmtDateShort(nearest.expectedAt) : '—'}</span>
+                                </button>
+                              ) : (
+                                <span className="text-slate-300">не нужно</span>
                               )}
                             </td>
                           </tr>
