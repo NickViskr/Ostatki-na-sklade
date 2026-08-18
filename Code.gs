@@ -464,6 +464,11 @@ const OZON_STOCKS_HEADERS = [
   'Доступно', 'Готовим к продаже', 'В заявках', 'В пути', 'Излишки', 'Возвраты', 'Прочее', 'Обновлено', 'КластерID'
 ];
 
+const OZON_STOCK_HISTORY_HEADERS = [
+  'Неделя', 'Кабинет', 'Артикул', 'КластерID', 'Кластер',
+  'Дней в наличии', 'Дней наблюдений', 'Последний учтённый день', 'Обновлено'
+];
+
 const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено', 'Дней'];
 const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
 const OZON_CLUSTERS_HEADERS = ['КластерID', 'Название', 'Добавлен', 'Уведомлён'];
@@ -476,10 +481,11 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'maxClusterDays',      value: 100, desc: 'Максимальный срок продаж кластера после поставки, дней; 0 — отсекатель выключен' },
   { key: 'factoryOrderDays',    value: 60, desc: 'Объём заказа на фабрике, дней' },
   { key: 'deficitDays',         value: 7,  desc: 'Порог дефицита, дней: ниже этого запаса товар считается распроданным; 0 — коррекция скорости выключена' },
-  { key: 'trendWeeks',          value: 11, desc: 'Окно тренда, недель' },
+  { key: 'trendWeeks',          value: 13, desc: 'Окно тренда, недель' },
   { key: 'bestWeeks',           value: 4,  desc: 'Лучших недель для коррекции скорости' },
   { key: 'minSalesForCorrection', value: 50, desc: 'Минимум продаж за окно тренда для коррекции, шт' },
   { key: 'maxSpeedGrowth',      value: 5,  desc: 'Максимальный рост скорости при дефиците, раз' },
+  { key: 'stockHistoryRetentionWeeks', value: 15, desc: 'Срок хранения истории остатков Ozon, недель' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
   { key: 'excludedClusters',    value: '', desc: 'КластерID без поставок, через запятую' },
@@ -705,6 +711,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Тарифы услуг', ['ServiceID', 'Стоимость', 'ДействуетС']);
   getOrCreateSheet(ss, 'Внешние отгрузки', EXTERNAL_SHIPMENTS_HEADERS);
   getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
+  getOrCreateSheet(ss, 'История остатков Ozon', OZON_STOCK_HISTORY_HEADERS);
   getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
   getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
   getOrCreateSheet(ss, 'Кластеры Ozon', OZON_CLUSTERS_HEADERS);
@@ -3606,6 +3613,13 @@ function getOzonStocksSheet() {
   return sheet;
 }
 
+function getOzonStockHistorySheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'История остатков Ozon', OZON_STOCK_HISTORY_HEADERS);
+  ensureColumns(sheet, OZON_STOCK_HISTORY_HEADERS);
+  return sheet;
+}
+
 function getOzonSalesSheet() {
   const ss = getSpreadsheet();
   const sheet = getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
@@ -3746,7 +3760,7 @@ function saveOzonSettings(data) {
       throw new Error('Значение настройки "' + k + '" должно быть числом не меньше 0');
     }
 
-    if (k === 'speedWeeks' || k === 'salesRetentionWeeks' || k === 'trendWeeks' || k === 'bestWeeks') {
+    if (k === 'speedWeeks' || k === 'salesRetentionWeeks' || k === 'trendWeeks' || k === 'bestWeeks' || k === 'stockHistoryRetentionWeeks') {
       if (!Number.isInteger(numVal) || numVal < 1) {
         throw new Error('Значение настройки "' + k + '" должно быть целым числом не меньше 1');
       }
@@ -4014,11 +4028,188 @@ function saveOzonStocks(payload) {
     sheet.getRange(2, 1, combinedRows.length, headers.length).setValues(combinedRows);
   }
 
+  // Накопление истории остатков (п.42) — вспомогательная задача, не должна срывать сохранение остатков.
+  try {
+    updateOzonStockHistory(combinedRows, headers);
+  } catch (e) {
+    Logger.log('Не удалось обновить историю остатков Ozon: ' + e);
+  }
+
   return {
     savedRows: newRows.length,
     keptRows: keptRows.length,
     cabinets: okCabinets
   };
+}
+
+// Понедельник ISO-недели, к которой относится дата dateStr (yyyy-MM-dd).
+// Неделя начинается с понедельника: воскресенье относится к начавшейся в понедельник неделе, а не к следующей.
+function getIsoWeekMonday(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const dow = d.getUTCDay(); // 0 = воскресенье, 1 = понедельник, ..., 6 = суббота
+  const diffToMonday = dow === 0 ? 6 : dow - 1;
+  d.setUTCDate(d.getUTCDate() - diffToMonday);
+  return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
+}
+
+// Сдвигает дату-строку yyyy-MM-dd на заданное число недель (может быть отрицательным).
+function shiftIsoWeek(dateStr, deltaWeeks) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + deltaWeeks * 7);
+  return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
+}
+
+// Копит недельную историю наличия остатков Ozon по сочетанию Кабинет+Артикул+КластерID (п.42 плана):
+// сколько дней на неделе товар реально был в наличии и сколько дней автоопрос вообще отработал.
+// Количество остатков здесь не хранится — только счётчики дней, они нужны будущему расчёту скорости продаж.
+// finalRows/headers — итоговые данные листа "Остатки Ozon" после его перезаписи в saveOzonStocks (лист повторно не читается).
+function updateOzonStockHistory(finalRows, headers) {
+  const cabinetIdx = headers.indexOf('Кабинет');
+  const articleIdx = headers.indexOf('Артикул');
+  const clusterIdx = headers.indexOf('Кластер');
+  const availableIdx = headers.indexOf('Доступно');
+  const transitIdx = headers.indexOf('В пути');
+  const clusterIdIdx = headers.indexOf('КластерID');
+
+  if (cabinetIdx === -1 || articleIdx === -1 || clusterIdx === -1 || availableIdx === -1 || transitIdx === -1 || clusterIdIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в данных остатков Ozon');
+  }
+
+  // Сегодняшняя дата и понедельник текущей ISO-недели по московскому времени.
+  const todayStr = Utilities.formatDate(new Date(), 'Europe/Moscow', 'yyyy-MM-dd');
+  const currentWeekStr = getIsoWeekMonday(todayStr);
+
+  // Сворачиваем строки остатков по Кабинет+Артикул+КластерID: суммируем Доступно и В пути по складам кластера.
+  const combos = {};
+  finalRows.forEach(function(row) {
+    const cabinet = String(row[cabinetIdx] || '').trim();
+    const article = String(row[articleIdx] || '').trim();
+    const clusterId = String(row[clusterIdIdx] || '').trim();
+    if (!cabinet || !article || !clusterId) return;
+    const key = cabinet + '|' + article + '|' + clusterId;
+    if (!combos[key]) {
+      combos[key] = {
+        cabinet: cabinet,
+        article: article,
+        clusterId: clusterId,
+        clusterName: String(row[clusterIdx] || '').trim(),
+        available: 0,
+        transit: 0
+      };
+    }
+    combos[key].available += Number(row[availableIdx]) || 0;
+    combos[key].transit += Number(row[transitIdx]) || 0;
+  });
+
+  // Срок хранения истории — из настроек, при ошибке используем дефолт 15 недель.
+  let retentionWeeks = 15;
+  try {
+    const settings = getOzonSettings();
+    const val = Number(settings.stockHistoryRetentionWeeks);
+    if (Number.isFinite(val) && val >= 1) retentionWeeks = val;
+  } catch (e) {
+    // используем дефолт
+  }
+  const oldestKeptWeek = shiftIsoWeek(currentWeekStr, -(retentionWeeks - 1));
+
+  const sheet = getOzonStockHistorySheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), OZON_STOCK_HISTORY_HEADERS.length);
+  const data = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  const hdrs = data[0].map(h => String(h).trim());
+
+  const weekIdx = hdrs.indexOf('Неделя');
+  const hCabinetIdx = hdrs.indexOf('Кабинет');
+  const hArticleIdx = hdrs.indexOf('Артикул');
+  const hClusterIdIdx = hdrs.indexOf('КластерID');
+  const hClusterIdx = hdrs.indexOf('Кластер');
+  const daysAvailIdx = hdrs.indexOf('Дней в наличии');
+  const daysObsIdx = hdrs.indexOf('Дней наблюдений');
+  const lastDayIdx = hdrs.indexOf('Последний учтённый день');
+  const hUpdatedIdx = hdrs.indexOf('Обновлено');
+
+  if (weekIdx === -1 || hCabinetIdx === -1 || hArticleIdx === -1 || hClusterIdIdx === -1 || hClusterIdx === -1 || daysAvailIdx === -1 || daysObsIdx === -1 || lastDayIdx === -1 || hUpdatedIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "История остатков Ozon"');
+  }
+
+  // Google Sheets возвращает даты-ячейки как объект Date, а не как записанную строку yyyy-MM-dd.
+  // Приводим к строке ровно как normWeek() в saveOzonSales.
+  function normDateCell(v) {
+    if (v instanceof Date) {
+      return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    }
+    return String(v || '').trim();
+  }
+
+  // Отбрасываем строки старше срока хранения.
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+    const weekVal = normDateCell(row[weekIdx]);
+    if (weekVal && weekVal < oldestKeptWeek) continue;
+    rows.push(row);
+  }
+
+  // Индекс существующих строк текущей недели по ключу сочетания.
+  const rowIndexByKey = {};
+  rows.forEach(function(row, idx) {
+    const weekVal = normDateCell(row[weekIdx]);
+    if (weekVal !== currentWeekStr) return;
+    const key = String(row[hCabinetIdx] || '').trim() + '|' + String(row[hArticleIdx] || '').trim() + '|' + String(row[hClusterIdIdx] || '').trim();
+    rowIndexByKey[key] = idx;
+  });
+
+  const nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+
+  // Применяем сегодняшний опрос к каждому сочетанию: создаём строку недели либо докручиваем счётчики.
+  Object.keys(combos).forEach(function(key) {
+    const combo = combos[key];
+    const inStock = (combo.available + combo.transit) > 0;
+    const existingIdx = rowIndexByKey[key];
+
+    if (existingIdx === undefined) {
+      const newRow = new Array(hdrs.length).fill('');
+      newRow[weekIdx] = currentWeekStr;
+      newRow[hCabinetIdx] = combo.cabinet;
+      newRow[hArticleIdx] = combo.article;
+      newRow[hClusterIdIdx] = combo.clusterId;
+      newRow[hClusterIdx] = combo.clusterName;
+      newRow[daysAvailIdx] = inStock ? 1 : 0;
+      newRow[daysObsIdx] = 1;
+      newRow[lastDayIdx] = todayStr;
+      newRow[hUpdatedIdx] = nowStr;
+      rows.push(newRow);
+      rowIndexByKey[key] = rows.length - 1;
+      return;
+    }
+
+    const row = rows[existingIdx];
+    const lastDay = normDateCell(row[lastDayIdx]);
+    if (lastDay === todayStr) return; // опрос уже учтён сегодня, второй запуск ничего не меняет
+
+    row[daysObsIdx] = (Number(row[daysObsIdx]) || 0) + 1;
+    if (inStock) {
+      row[daysAvailIdx] = (Number(row[daysAvailIdx]) || 0) + 1;
+    }
+    row[lastDayIdx] = todayStr;
+    row[hUpdatedIdx] = nowStr;
+    row[hClusterIdx] = combo.clusterName;
+  });
+
+  // Порядок строк сохраняем: старые недели выше, новые ниже.
+  rows.sort(function(a, b) {
+    const wa = normDateCell(a[weekIdx]);
+    const wb = normDateCell(b[weekIdx]);
+    return wa < wb ? -1 : wa > wb ? 1 : 0;
+  });
+
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  }
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, hdrs.length).setValues(rows);
+  }
 }
 
 function saveOzonSales(payload) {
@@ -5612,7 +5803,7 @@ function createOrUpdateTestDatabase() {
   };
 }
 
-const PROXY_URL = 'https://service-415081166309.us-west1.run.app';
+const PROXY_URL = 'https://sklad-415081166309.europe-central2.run.app';
 
 /**
  * Единая точка записи результата прогона автоопроса Ozon.

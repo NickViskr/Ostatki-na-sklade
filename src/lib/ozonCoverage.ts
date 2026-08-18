@@ -576,7 +576,7 @@ export function applyDeficitSpeedCorrection(
   const out: Record<string, SpeedCorrectionInfo> = {};
   const deficitDays = Number(settings.deficitDays);
   if (!(deficitDays > 0)) return out;
-  const trendWeeks = Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 11;
+  const trendWeeks = Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 13;
   const bestWeeksN = Number(settings.bestWeeks) > 0 ? Math.floor(Number(settings.bestWeeks)) : 4;
   const minSales = Number(settings.minSalesForCorrection) >= 0 ? Number(settings.minSalesForCorrection) : 50;
   const maxGrowth = Number(settings.maxSpeedGrowth);

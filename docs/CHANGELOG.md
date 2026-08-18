@@ -1409,6 +1409,25 @@
 - `package.json`: добавлен скрипт `"start": "tsx server.ts"` для запуска сервера из Docker и локально
 - `server.ts` (строка 17): `const PORT = 3000;` → `const PORT = Number(process.env.PORT) || 3000;` для получения порта из переменной окружения `PORT` в Cloud Run (обратно совместимо с локальным запуском без переменной)
 
+## [2026-08-18]
+
+### Добавлено
+- Этап E пункта 42: накопление истории остатков Ozon (`Code.gs`):
+  - Добавлена константа `OZON_STOCK_HISTORY_HEADERS` (9 колонок для недельного агрегата).
+  - Реализована функция `getOzonStockHistorySheet()` для создания листа истории в идемпотентном блоке.
+  - Добавлены хелперы дат `getIsoWeekMonday()` и `shiftIsoWeek()` для работы с неделями.
+  - Реализована функция `updateOzonStockHistory(finalRows, headers)` с вызовом из конца `saveOzonStocks` внутри `try/catch`.
+  - Настройка `stockHistoryRetentionWeeks` = 15 с проверкой на целое ≥1.
+  - Логика идемпотентности: если колонка «Последний учтённый день» равна сегодняшней дате, строка не обновляется.
+  - Нормализация дат из ячеек Google Sheets через локальный `normDateCell` для предотвращения двойного учёта при суточных опросах.
+
+### Изменено
+- Значение `trendWeeks` с 11 на 13 недель (`Code.gs`, `src/lib/ozonCoverage.ts`, `src/components/OzonStocksTab.tsx`, `src/components/Dashboard.tsx`, `src/components/OzonSettingsModal.tsx`):
+  - Значение зашито в 8 местах пяти файлов, все исправлены по требованию плана пункта 42.
+- Адрес прокси-сервера (`Code.gs`):
+  - `PROXY_URL` переведён с `https://service-415081166309.us-west1.run.app` (Орегон) на `https://sklad-415081166309.europe-central2.run.app` (Варшава).
+  - По новому адресу триггеры Apps Script в 05:00 и 17:00 опрашивают данные Ozon.
+
 
 
 
