@@ -11,7 +11,8 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:gas": "node tests/apps-script/run-tests.cjs"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
