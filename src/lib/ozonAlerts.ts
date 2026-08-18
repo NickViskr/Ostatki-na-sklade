@@ -312,6 +312,40 @@ export function buildCoverageAlerts(
     }
   }
 
+  // Пункт 36. Алерты по компонентам виртуальных комплектов.
+  // Сам комплект на фабрике не заказывают, поэтому сигнал приходит по компоненту.
+  // Поле components появилось позже: у старого результата расчёта его нет.
+  if (coverage.components && Array.isArray(coverage.components)) {
+    for (const comp of coverage.components) {
+      if (!comp.factory || comp.factory.orderQty <= 0) continue;
+
+      const name = namesByArticle && namesByArticle[comp.component] ? String(namesByArticle[comp.component]).trim() : '';
+      const namePart = name ? `${name} (компонент ${comp.component})` : `компонент ${comp.component}`;
+      const threshold = Math.round((Number(comp.leadTimeDays) || 0) + settings.minStockDays);
+      const onOrder = Math.round(Number(comp.factory.onOrderQty) || 0);
+      const reasonText = `хватит на ${Math.round(comp.factory.daysLeft)} дн. при пороге ${threshold} дн.`;
+      const orderText = onOrder > 0
+        ? `дозаказать ${Math.round(comp.factory.orderQty)} шт (${comp.factory.orderBoxes} кор.), уже заказано ${onOrder} шт`
+        : `заказать ${Math.round(comp.factory.orderQty)} шт (${comp.factory.orderBoxes} кор.)`;
+      const kitsText = comp.usedInKits && comp.usedInKits.length > 0
+        ? ` · входит в комплекты: ${comp.usedInKits.join(', ')}`
+        : '';
+      const description = `${namePart} · ${reasonText} · ${orderText}${kitsText}`;
+
+      factoryItems.push({
+        alert: {
+          key: `factory:${comp.component}:${comp.factory.orderQty}`,
+          article: comp.component,
+          type: 'factory_order',
+          severity: 'orange',
+          title: 'Пора заказать на фабрике',
+          description
+        },
+        daysLeft: comp.factory.daysLeft
+      });
+    }
+  }
+
   factoryItems.sort((a, b) => a.daysLeft - b.daysLeft);
   supplyItems.sort((a, b) => a.minCoverageDays - b.minCoverageDays);
 

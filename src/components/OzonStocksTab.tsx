@@ -6,7 +6,7 @@ import { OzonStockRow, FactoryOrder } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
-import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, resolveOzonArticle } from '../lib/ozonCoverage';
+import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
 
@@ -429,6 +429,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       myStockAvailability,
       pending: pendingSupplies,
       factoryOnOrder,
+      kits,
     });
     console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
     return result;
@@ -487,6 +488,22 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return rows;
   }, [coverage, filteredOzonStocks, skus, ozonSettings.minStockDays]);
 
+  // Пункт 36. Компоненты виртуальных комплектов: на фабрике заказывают их, а не комплект.
+  // Порядок тот же, что в основной таблице — от самых быстрых к самым медленным.
+  const componentRows = useMemo<ComponentCoverage[]>(() => {
+    if (!coverage || !Array.isArray(coverage.components)) return [];
+    return [...coverage.components].sort((a, b) => b.perDay - a.perDay);
+  }, [coverage]);
+
+  // Пункт 36. Узкое место по артикулу комплекта: у самого комплекта сигнала заказа нет,
+  // поэтому в колонке «Заказ на фабрике» показывается его самый дефицитный компонент.
+  const bottleneckByKit = useMemo<Record<string, KitBottleneck>>(() => {
+    const map: Record<string, KitBottleneck> = {};
+    if (!coverage || !Array.isArray(coverage.bottlenecks)) return map;
+    for (const b of coverage.bottlenecks) map[b.kitSku] = b;
+    return map;
+  }, [coverage]);
+
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return coverageRows.filter((row: any) => {
@@ -539,8 +556,21 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
   const factoryModalRow = useMemo(() => {
     if (!factoryModalArticle) return null;
-    return (coverageRows as any[]).find((r) => r.article === factoryModalArticle) || null;
-  }, [coverageRows, factoryModalArticle]);
+    const row = (coverageRows as any[]).find((r) => r.article === factoryModalArticle);
+    if (row) return row;
+    // Пункт 36. Заказ открывают и по компоненту комплекта, а его в строках основной таблицы
+    // нет. Без этой подстановки в окно ушли бы коробка 1 и срок поставки 0 — заказ посчитался
+    // бы неверно. Название берём пустым: в SKU Базе названий нет, окно покажет артикул.
+    const comp = componentRows.find((c) => c.component === factoryModalArticle);
+    if (!comp) return null;
+    return {
+      article: comp.component,
+      name: '',
+      factory: comp.factory,
+      pcsPerBox: comp.pcsPerBox,
+      leadTimeDays: comp.leadTimeDays,
+    };
+  }, [coverageRows, componentRows, factoryModalArticle]);
 
   const supplyPlan = useMemo(() => {
     const rows: any[] = [];
@@ -1275,6 +1305,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       заказано {fmtInt(factoryWaitingQty)} шт
                                       <span className="block text-[10px] font-semibold text-sky-600">ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}</span>
                                     </button>
+                                  ) : bottleneckByKit[art.article] ? (
+                                    <span
+                                      className="text-[10px] font-semibold text-slate-500"
+                                      title={`Комплект на фабрике не заказывают — заказывают его компоненты. Самый дефицитный компонент комплекта: ${bottleneckByKit[art.article].componentSku}. Заказ по нему — в блоке «Заказ на фабрике — компоненты» под таблицей. «Собрать» — сколько комплектов можно собрать из остатков компонентов на Моём складе прямо сейчас.`}
+                                    >
+                                      узкое место: {bottleneckByKit[art.article].componentSku}
+                                      <span className="block text-[10px] font-normal text-slate-400">
+                                        хватит на {bottleneckByKit[art.article].daysLeft === null ? '∞' : `${Math.round(bottleneckByKit[art.article].daysLeft as number)} дн`} · собрать: {fmtInt(bottleneckByKit[art.article].canAssembleQty)} шт
+                                      </span>
+                                    </span>
                                   ) : (Number(art.leadTimeDays) || 0) === 0 ? (
                                     <span
                                       className="text-[10px] font-semibold text-slate-400"
@@ -1461,6 +1501,102 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               </tr>
                             )}
                           </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {componentRows.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-components-factory">
+                <div className="text-xs font-bold text-slate-700 mb-1">
+                  Заказ на фабрике — компоненты
+                  <span className="font-normal text-slate-400 ml-2">компонентов в расчёте: {componentRows.length}</span>
+                </div>
+                <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
+                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма скоростей комплектов, куда он входит, умноженная на норму расхода. Запас — расчётный остаток комплектов на Ozon, пересчитанный в компоненты, плюс собственный остаток компонента на Моём складе и заказанное на фабрике.
+                </div>
+                <div className="overflow-auto">
+                  <table className="w-full text-left text-[11px] border-collapse" id="ozon-components-table">
+                    <thead>
+                      <tr className="text-slate-500 font-semibold border-b border-slate-200">
+                        <th className="py-2 pr-2 min-w-[200px]">Компонент</th>
+                        <th className="py-2 pr-2 text-right">Скорость, шт/д</th>
+                        <th className="py-2 pr-2 text-right">Запас</th>
+                        <th className="py-2 pr-2 text-right">Срок поставки, дней</th>
+                        <th className="py-2 pr-2 text-right">Хватит на</th>
+                        <th className="py-2 pr-2 text-right">Требуемый заказ</th>
+                        <th className="py-2 text-right"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {componentRows.map((c) => {
+                        const needOrder = !!(c.factory && c.factory.orderQty > 0);
+                        const threshold = (Number(c.leadTimeDays) || 0) + ozonSettings.minStockDays;
+                        return (
+                          <tr
+                            key={c.component}
+                            id={`ozon-comp-row-${c.component}`}
+                            className={`border-b border-slate-100 ${needOrder ? 'bg-rose-50/60' : ''}`}
+                          >
+                            <td className="py-2 pr-2">
+                              <span className="font-mono font-bold text-slate-800">{c.component}</span>
+                              <span className="block text-[10px] text-slate-400" title="Комплекты, в которые входит компонент">
+                                ({c.usedInKits.join(', ')})
+                              </span>
+                            </td>
+                            <td className="py-2 pr-2 text-right font-semibold text-slate-800">{fmtSpeed(c.perDay)}</td>
+                            <td className="py-2 pr-2 text-right">
+                              <span className="font-semibold text-slate-800">{fmtInt(c.pipelineQty)}</span>
+                              <span className="block text-[10px] font-normal text-slate-400">
+                                из комплектов {fmtInt(c.fromKitsQty)} / склад {fmtInt(c.myStockQty)} / заказано {fmtInt(c.onOrderQty)}
+                              </span>
+                            </td>
+                            <td className={`py-2 pr-2 text-right ${(Number(c.leadTimeDays) || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
+                              {(Number(c.leadTimeDays) || 0) === 0 ? '—' : fmtInt(c.leadTimeDays)}
+                            </td>
+                            <td className="py-2 pr-2 text-right">
+                              {c.factory ? (
+                                <span
+                                  className="font-semibold text-slate-700"
+                                  title={`Запаса хватит на ${Math.round(c.factory.daysLeft)} дн. при пороге ${Math.round(threshold)} дн. (срок поставки компонента ${fmtInt(c.leadTimeDays)} дн. + неснижаемый запас).`}
+                                >
+                                  {Math.round(c.factory.daysLeft)} дн
+                                </span>
+                              ) : (
+                                <span
+                                  className="text-slate-300"
+                                  title={c.perDay > 0 ? `Заказ не нужен: запаса хватит дольше порога в ${Math.round(threshold)} дн.` : 'Комплекты с этим компонентом за расчётное окно не продавались — сигнал не считается.'}
+                                >
+                                  —
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2 pr-2 text-right">
+                              {needOrder ? (
+                                <span className="text-rose-600 font-bold">
+                                  {fmtInt(c.factory!.orderQty)} шт
+                                  <span className="block text-[10px] font-semibold text-rose-400">{fmtInt(c.factory!.orderBoxes)} кор.</span>
+                                </span>
+                              ) : (
+                                <span className="text-slate-300">не нужно</span>
+                              )}
+                            </td>
+                            <td className="py-2 text-right">
+                              {needOrder && (
+                                <button
+                                  type="button"
+                                  onClick={() => setFactoryModalArticle(c.component)}
+                                  className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100"
+                                  title="Отметить размещённый на фабрике заказ по этому компоненту"
+                                >
+                                  Заказать
+                                </button>
+                              )}
+                            </td>
+                          </tr>
                         );
                       })}
                     </tbody>

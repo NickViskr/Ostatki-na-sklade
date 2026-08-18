@@ -263,6 +263,7 @@ export const Dashboard: React.FC = React.memo(() => {
       myStockAvailability,
       pending: pendingSupplies,
       factoryOnOrder,
+      kits,
     });
   }, [isAdmin, ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
 
