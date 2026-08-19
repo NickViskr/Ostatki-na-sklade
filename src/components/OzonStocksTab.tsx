@@ -15,6 +15,7 @@ const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
 const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
   { key: 'sold', label: 'Продано' },
   { key: 'speed', label: 'Скорость' },
+  { key: 'trend', label: 'Тренд' },
   { key: 'share', label: 'Доля' },
   { key: 'available', label: 'Доступно' },
   { key: 'preparing', label: 'Готовим' },
@@ -278,6 +279,24 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return { price: getEffectiveAvgCost(article), source: 'поступлений не было, взята средняя себестоимость' };
   }, [kits, lastPurchasePrices, getEffectiveAvgCost]);
   const fmtSpeed = (v: number | null | undefined) => (Number(v) || 0).toFixed(2);
+  // Пункт 38. Множитель тренда — как остальные дробные величины в интерфейсе, с запятой вместо точки.
+  const fmtTrend = (v: number | null | undefined) => (Number(v) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const TREND_REASON_SHORT: Record<string, string> = {
+    shortWindow: 'мало данных',
+    correction: 'скорость скорректирована',
+    zeroWeek: 'нулевые недели',
+    fewSales: 'мелкая выборка',
+    deficit: 'распродан',
+    clamped: 'упёрся в предел',
+  };
+  const TREND_REASON_LONG: Record<string, (t: any) => string> = {
+    shortWindow: () => 'В окне меньше шести недель с данными — тренд считать не на чем.',
+    correction: () => 'Скорость уже поднята коррекцией из-за распродажи товара. Тренд поверх неё не применяется: оба механизма поднимают скорость одним и тем же способом.',
+    zeroWeek: (t) => `В окне ${t.zeroWeeks} нед. с нулевыми продажами. Это чаще старт продаж или отсутствие товара, а не спрос.`,
+    fewSales: (t) => `За окно продано ${fmtInt(t.windowQty)} шт — меньше порога в 50 шт. На такой выборке наклон это шум.`,
+    deficit: () => 'Товар распродан. Понижающий тренд не применяется: падение продаж неотличимо от отсутствия товара.',
+    clamped: () => 'Множитель ограничен диапазоном 0,7…1,5.',
+  };
   const fmtDays = (v: number | null | undefined, estimated: number) => {
     if (v === null || v === undefined) return estimated > 0 ? '∞' : '—';
     return `${Math.round(v)}`;
@@ -1048,6 +1067,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             <ColHint text="Средние продажи в штуках за день: продано за окно ÷ число дней окна. На этой скорости строятся покрытие и рекомендации." />
                           </th>
                         )}
+                        {isColVisible('trend') && (
+                          <th className="p-3 text-right">
+                            Тренд
+                            <ColHint text="Тренд — направление спроса за окно тренда, посчитанное линейной регрессией по недельному ряду и переведённое в месячный множитель. Применяется ТОЛЬКО к заказу на фабрике: прогнозная скорость = фактическая × тренд × (1 + прирост объёма продаж). Рекомендации на поставку в кластеры Ozon считаются по фактической скорости и от тренда не зависят. Множитель ограничен диапазоном 0,7…1,5 и гасится до 1,00 пятью фильтрами — наведи курсор на значение, там написана причина." />
+                          </th>
+                        )}
                         {isColVisible('share') && (
                           <th className="p-3 text-right">
                             Доля
@@ -1195,6 +1220,42 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     </span>
                                   ) : (
                                     fmtSpeed(art.perDay)
+                                  )}
+                                </td>
+                              )}
+                              {isColVisible('trend') && (
+                                <td className="p-3 text-right">
+                                  {!art.trend ? (
+                                    <span className="text-slate-300" title="Продаж за окно тренда нет — тренд не считается.">—</span>
+                                  ) : (
+                                    <span className="relative inline-flex group cursor-help">
+                                      <span className="flex flex-col items-end">
+                                        <span className={`font-semibold ${art.trend.applied > 1 ? 'text-emerald-600' : art.trend.applied < 1 ? 'text-rose-600' : 'text-slate-400'}`}>
+                                          {fmtTrend(art.trend.applied)}
+                                        </span>
+                                        {art.trend.reason && (
+                                          <span className="block text-[10px] text-slate-400">{TREND_REASON_SHORT[art.trend.reason]}</span>
+                                        )}
+                                      </span>
+                                      <span className="absolute right-0 bottom-full mb-1.5 hidden group-hover:block z-30 w-96 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl whitespace-normal">
+                                        <span className="block font-bold mb-1">Тренд продаж</span>
+                                        <span className="block">
+                                          Прогноз для заказа на фабрике: {fmtSpeed(art.perDay)}{' × '}{fmtTrend(art.trend.applied)}
+                                          {ozonSettings.salesGrowthPct ? ` × ${fmtTrend(1 + ozonSettings.salesGrowthPct / 100)}` : ''}
+                                          {' = '}{fmtSpeed(art.forecastPerDay)} шт/д
+                                        </span>
+                                        <span className="block mt-1">Расчётный множитель: {fmtTrend(art.trend.raw)}</span>
+                                        {art.trend.reason && art.trend.applied !== art.trend.raw && (
+                                          <span className="block mt-1 text-amber-300">{TREND_REASON_LONG[art.trend.reason](art.trend)}</span>
+                                        )}
+                                        <span className="block mt-1 text-slate-300">
+                                          Окно: {art.trend.weeks.length} нед, {fmtDateShort(art.trend.weeks[0])}…{fmtDateShort(art.trend.weeks[art.trend.weeks.length - 1])}, продано {fmtInt(art.trend.windowQty)} шт
+                                        </span>
+                                        <span className="block mt-1 text-slate-300">
+                                          {art.trend.weeks.map((w: string, i: number) => `${fmtDateShort(w)} — ${fmtInt(art.trend.weekQty[i])}`).join('; ')}
+                                        </span>
+                                      </span>
+                                    </span>
                                   )}
                                 </td>
                               )}
@@ -1399,6 +1460,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     </td>
                                     {isColVisible('sold') && <td className="p-2.5 text-right text-slate-700">{fmtInt(cls.qtySold)}</td>}
                                     {isColVisible('speed') && <td className="p-2.5 text-right text-slate-700">{fmtSpeed(cls.perDay)}</td>}
+                                    {isColVisible('trend') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                     {isColVisible('share') && <td className="p-2.5 text-right text-slate-600">{cls.sharePct > 0 ? `${cls.sharePct.toFixed(1)}%` : '—'}</td>}
                                     {isColVisible('available') && <td className={`p-2.5 text-right ${cls.available === 0 ? 'text-slate-300' : 'text-slate-800 font-medium'}`}>{fmtInt(cls.available)}</td>}
                                     {isColVisible('preparing') && <td className="p-2.5 text-right text-slate-300">—</td>}
@@ -1461,6 +1523,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       </td>
                                       {isColVisible('sold') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('speed') && <td className="p-2 text-right text-slate-300">—</td>}
+                                      {isColVisible('trend') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('share') && <td className="p-2 text-right text-slate-300">—</td>}
                                       {isColVisible('available') && <td className={`p-2 text-right ${(wh.available || 0) === 0 ? 'text-slate-300' : 'text-slate-700'}`}>{fmtInt(wh.available)}</td>}
                                       {isColVisible('preparing') && <td className={`p-2 text-right ${(wh.preparing || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.preparing)}</td>}
@@ -1493,6 +1556,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 </td>
                                 {isColVisible('sold') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundQtySold)}</td>}
                                 {isColVisible('speed') && <td className="p-2.5 text-right text-slate-300">—</td>}
+                                {isColVisible('trend') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('share') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('available') && <td className="p-2.5 text-right text-slate-700">{fmtInt(art.unboundTotals.available)}</td>}
                                 {isColVisible('preparing') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.preparing)}</td>}
@@ -1536,7 +1600,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                   <span className="font-normal text-slate-400 ml-2">компонентов в расчёте: {componentRows.length}</span>
                 </div>
                 <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
-                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма скоростей комплектов, куда он входит, умноженная на норму расхода. Запас — расчётный остаток комплектов на Ozon, пересчитанный в компоненты, плюс собственный остаток компонента на Моём складе и заказанное на фабрике.
+                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма ПРОГНОЗНЫХ скоростей комплектов, куда он входит (фактическая скорость комплекта × его тренд продаж), умноженная на норму расхода. Запас — расчётный остаток комплектов на Ozon, пересчитанный в компоненты, плюс собственный остаток компонента на Моём складе и заказанное на фабрике.
                 </div>
                 <div className="overflow-auto">
                   <table className="w-full text-left text-[11px] border-collapse" id="ozon-components-table">
@@ -1564,7 +1628,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         const nearest = waitingList[0] || null;
                         // Сколько дней хватит запаса без сигнала — нужно показывать даже когда заказывать не надо,
                         // иначе после оформления заказа рост покрытия остаётся невидимым.
-                        const daysLeftNoSignal = c.perDay > 0 ? Math.round(c.pipelineQty / c.perDay) : null;
+                        // Пункт 38: делить надо на ПРОГНОЗНУЮ скорость — по ней же считается и сам сигнал,
+                        // иначе колонка показывала бы одни дни, а порог срабатывания считался бы по другим.
+                        const daysLeftNoSignal = c.forecastPerDay > 0 ? Math.round(c.pipelineQty / c.forecastPerDay) : null;
                         return (
                           <tr
                             key={c.component}
@@ -1577,7 +1643,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 ({c.usedInKits.join(', ')})
                               </span>
                             </td>
-                            <td className="py-2 pr-2 text-right font-semibold text-slate-800">{fmtSpeed(c.perDay)}</td>
+                            <td className="py-2 pr-2 text-right font-semibold text-slate-800">
+                              {fmtSpeed(c.forecastPerDay)}
+                              {Math.abs(c.forecastPerDay - c.perDay) > 0.005 && (
+                                <span
+                                  className="block text-[10px] text-slate-400"
+                                  title="Заказ на фабрике считается по прогнозной скорости: фактическая скорость комплектов умножена на их тренд продаж. Рекомендации на поставку в кластеры считаются по фактической."
+                                >
+                                  факт {fmtSpeed(c.perDay)}
+                                </span>
+                              )}
+                            </td>
                             <td className="py-2 pr-2 text-right">
                               <span className="font-semibold text-slate-800">{fmtInt(c.pipelineQty)}</span>
                               <span className="block text-[10px] font-normal text-slate-400">
