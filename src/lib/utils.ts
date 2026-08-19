@@ -59,3 +59,60 @@ export const newOperationId = (): string => {
   }
   return 'op-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
 };
+
+/**
+ * Пункт 40, этап E. Порог тревоги по «долгу себестоимости».
+ * Почему именно 1,5, а не что-то строже: средняя себестоимость законно расходится
+ * с ценой последнего прихода, когда партии приходили по разным ценам, — это норма,
+ * а не ошибка. Поэтому сигналим только на грубом расхождении. Реальные случаи,
+ * ради которых сделан бейдж, дают 7,7x и 12x, так что запас до них огромный.
+ */
+const COST_DEBT_ALERT_FACTOR = 1.5;
+
+/**
+ * Пункт 40, этап E. Сколько капитализации «висит» сверх того, во что реально
+ * мог обойтись текущий остаток.
+ *
+ * Откуда берётся долг: при списании брака («Списание - Брак») количество на артикуле
+ * уменьшается, а капитализация — нет. Себестоимость списанных штук остаётся на артикуле
+ * и тихо расползается по тому, что осталось, а при следующем приходе размазывается
+ * по новой партии и становится неотслеживаемой.
+ *
+ * Только показ: функция ничего не пересчитывает и не сохраняет.
+ */
+export function calcCostDebt(
+  quantity: number,
+  capitalization: number,
+  lastPurchasePrice: number | null | undefined
+): number {
+  if (!Number.isFinite(quantity) || !Number.isFinite(capitalization)) return 0;
+
+  // Товара нет, а капитализация есть — весь остаток капитализации и есть долг.
+  if (quantity <= 0) return capitalization > 0 ? capitalization : 0;
+
+  // Без цены последнего прихода сравнивать не с чем — молчим, а не гадаем.
+  if (lastPurchasePrice === null || lastPurchasePrice === undefined) return 0;
+  if (!Number.isFinite(lastPurchasePrice) || lastPurchasePrice <= 0) return 0;
+
+  return Math.max(0, capitalization - quantity * lastPurchasePrice);
+}
+
+/**
+ * Пункт 40, этап E. Показывать ли бейдж «долг себестоимости».
+ * Порог живёт здесь же, рядом с объяснением, чтобы не разъезжаться с расчётом долга.
+ */
+export function hasCostDebt(
+  quantity: number,
+  capitalization: number,
+  lastPurchasePrice: number | null | undefined
+): boolean {
+  if (!Number.isFinite(quantity) || !Number.isFinite(capitalization)) return false;
+
+  // Капитализация без товара за ней — сигналим независимо от цены прихода.
+  if (quantity <= 0) return capitalization > 0;
+
+  if (lastPurchasePrice === null || lastPurchasePrice === undefined) return false;
+  if (!Number.isFinite(lastPurchasePrice) || lastPurchasePrice <= 0) return false;
+
+  return capitalization > quantity * lastPurchasePrice * COST_DEBT_ALERT_FACTOR;
+}

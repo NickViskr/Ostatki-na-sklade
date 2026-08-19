@@ -22,7 +22,7 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { DashSettingsModal } from './DashSettingsModal';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, calcCostDebt, hasCostDebt } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonAlert } from '../lib/ozonAlerts';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
@@ -70,6 +70,8 @@ export const Dashboard: React.FC = React.memo(() => {
   const ozonSupplyRequests = useWarehouseStore((state) => state.ozonSupplyRequests);
   const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
+  const lastPurchasePrices = useWarehouseStore((state) => state.lastPurchasePrices);
+  const fetchLastPurchasePrices = useWarehouseStore((state) => state.fetchLastPurchasePrices);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -196,6 +198,7 @@ export const Dashboard: React.FC = React.memo(() => {
       fetchOzonStocks();
       fetchOzonSales();
       fetchFactoryOrders();
+      fetchLastPurchasePrices();
       fetchGas('getOzonSettings').then((res: any) => {
         if (res?.status === 'success' && res.data) {
           setOzonSettings({
@@ -229,7 +232,7 @@ export const Dashboard: React.FC = React.memo(() => {
       }).catch((err: any) => console.error('getOzonClusters error:', err));
     }, 1200);
     return () => clearTimeout(timer);
-  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchGas]);
+  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchLastPurchasePrices, fetchGas]);
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
   // На главной кабинеты не разделяются — берутся все записи.
@@ -1115,7 +1118,28 @@ export const Dashboard: React.FC = React.memo(() => {
                 className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors cursor-pointer group"
                 title="Нажмите, чтобы просмотреть историю товарных операций"
               >
-                <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium group-hover:underline">{item.article}</td>
+                <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium group-hover:underline">
+                  {item.article}
+                  {(() => {
+                    // Пункт 40, этап E. Только показ: ни одно сохранённое число здесь не меняется.
+                    const qty = Number((item as any).quantity) || 0;
+                    const lastPrice = lastPurchasePrices[item.article]?.price;
+                    if (!hasCostDebt(qty, item.capitalization, lastPrice)) return null;
+                    const debt = calcCostDebt(qty, item.capitalization, lastPrice);
+                    const avgPerUnit = qty > 0 ? item.capitalization / qty : item.capitalization;
+                    const comparison = lastPrice
+                      ? ` Средняя сейчас ${formatCurrency(avgPerUnit)} ₽/шт против ${formatCurrency(lastPrice)} ₽/шт по последнему приходу.`
+                      : ' Товара на остатке нет, а капитализация осталась.';
+                    return (
+                      <span
+                        className="ml-2 align-middle text-[10px] px-2 py-0.5 rounded-lg font-bold tracking-wide whitespace-nowrap bg-amber-50 text-amber-700 border border-amber-200"
+                        title={`Списанный брак уменьшает количество, но не уменьшает капитализацию, поэтому себестоимость списанного товара осталась висеть на артикуле. Она уже подняла среднюю себестоимость, а при следующем приходе размажется по новой партии.${comparison}`}
+                      >
+                        долг себестоимости {formatCurrency(debt)} ₽
+                      </span>
+                    );
+                  })()}
+                </td>
                 {isColVisible('quantity') && (
                 <td className="px-6 py-4 text-right">
                   <div className="inline-flex flex-col items-end">
