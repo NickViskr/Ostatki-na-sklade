@@ -423,3 +423,255 @@ describe('buildOzonCoverage: компоненты виртуальных ком�
     expect(kitA.factory!.orderQty).toBe(21);
   });
 });
+
+// ===== Пункт 38: тренд продаж =====
+
+const TREND_NOW = new Date('2024-01-10T10:00:00Z'); // среда; последняя полная неделя — 2024-01-01
+
+/**
+ * Строки продаж по неделям окна тренда: qtyByWeek[0] — самая старая неделя, последняя — свежая.
+ * Строка пишется даже при нулевом количестве: иначе неделя не считается пришедшей с сервера
+ * и вообще выпадет из окна, а нам нужен именно ноль внутри окна.
+ */
+function makeTrendSales(offerId: string, qtyByWeek: number[], clusterName = ''): OzonSalesRow[] {
+  const weeks = getLastFullWeeks(TREND_NOW, qtyByWeek.length);
+  return weeks.map((week, i) => ({
+    week, cabinet: 'test', offerId, clusterName, qty: qtyByWeek[i], updatedAt: '', days: 7
+  }));
+}
+
+function makeTrendInput(sales: OzonSalesRow[], overrides: Partial<OzonCoverageInput> = {}): OzonCoverageInput {
+  return {
+    stocks: [],
+    sales,
+    skus: [],
+    clusters: [],
+    settings: makeSettings({ trendWeeks: 13 }),
+    myStockAvailability: {},
+    now: TREND_NOW,
+    ...overrides
+  };
+}
+
+/** Тренд одного товара из полного расчёта покрытия. */
+function trendOf(sales: OzonSalesRow[], overrides: Partial<OzonCoverageInput> = {}, article = 'X') {
+  return buildOzonCoverage(makeTrendInput(sales, overrides)).trends[article];
+}
+
+// Ряды окна тренда: 13 недель, среднее 16 или 40, наклон ±1 или ±5 шт/неделю.
+const GROW = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
+const FALL = [22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10];
+const FLAT = [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10];
+
+describe('buildSalesTrend: сырой множитель (пункт 38)', () => {
+  it('ровно растущий ряд даёт множитель больше 1', () => {
+    // среднее 16, наклон +1 шт/нед; raw = (16 + 1 × 4.345) ÷ 16 = 1.2715625.
+    const t = trendOf(makeTrendSales('X', GROW));
+    expect(t.mean).toBe(16);
+    expect(t.slope).toBeCloseTo(1, 10);
+    expect(t.raw).toBeCloseTo(1.2715625, 10);
+    expect(t.raw).toBeGreaterThan(1);
+  });
+
+  it('ровно падающий ряд даёт множитель меньше 1', () => {
+    // среднее 16, наклон −1 шт/нед; raw = (16 − 4.345) ÷ 16 = 0.7284375.
+    const t = trendOf(makeTrendSales('X', FALL));
+    expect(t.slope).toBeCloseTo(-1, 10);
+    expect(t.raw).toBeCloseTo(0.7284375, 10);
+    expect(t.raw).toBeLessThan(1);
+  });
+
+  it('плоский ряд даёт ровно 1.00 и множитель применяется без причины отклонения', () => {
+    const t = trendOf(makeTrendSales('X', FLAT));
+    expect(t.slope).toBe(0);
+    expect(t.raw).toBe(1);
+    expect(t.applied).toBe(1);
+    expect(t.reason).toBeNull();
+  });
+
+  it('недельный ряд и итоги окна сохраняются для подсказки в интерфейсе', () => {
+    const t = trendOf(makeTrendSales('X', GROW));
+    expect(t.weeks).toHaveLength(13);
+    expect(t.weekQty).toEqual(GROW);
+    expect(t.windowQty).toBe(208);
+    expect(t.zeroWeeks).toBe(0);
+  });
+});
+
+describe('buildSalesTrend: фильтры (пункт 38)', () => {
+  it('shortWindow: в окне меньше 6 недель с данными', () => {
+    const t = trendOf(makeTrendSales('X', [20, 20, 20, 20, 20]));
+    expect(t.applied).toBe(1);
+    expect(t.reason).toBe('shortWindow');
+  });
+
+  it('correction: по товару сработала коррекция скорости при дефиците (пункт 42)', () => {
+    // 9 недель по 100 шт, затем 4 недели по 10 — товар кончился. Остатка нет, значит дефицит;
+    // лучшие 4 недели дают 100 ÷ 7 шт/д против базы 40 ÷ 28 — коррекция срабатывает.
+    const sales = makeTrendSales('X', [100, 100, 100, 100, 100, 100, 100, 100, 100, 10, 10, 10, 10]);
+    const res = buildOzonCoverage(makeTrendInput(sales, {
+      stocks: [makeStockRow('X', 0)],
+      settings: makeSettings({ trendWeeks: 13, deficitDays: 30 })
+    }));
+    expect(res.articles[0].speedCorrection).not.toBeNull();
+    expect(res.trends['X'].applied).toBe(1);
+    expect(res.trends['X'].reason).toBe('correction');
+  });
+
+  it('zeroWeek: в окне есть хотя бы одна неделя с нулевыми продажами', () => {
+    const t = trendOf(makeTrendSales('X', [20, 20, 20, 0, 20, 20, 20, 20, 20, 20, 20, 20, 20]));
+    expect(t.zeroWeeks).toBe(1);
+    expect(t.applied).toBe(1);
+    expect(t.reason).toBe('zeroWeek');
+  });
+
+  it('fewSales: за окно продано меньше 50 шт', () => {
+    const t = trendOf(makeTrendSales('X', [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]));
+    expect(t.windowQty).toBe(39);
+    expect(t.applied).toBe(1);
+    expect(t.reason).toBe('fewSales');
+  });
+
+  it('deficit: понижающий тренд при дефиците не применяется', () => {
+    // minSalesForCorrection задран, чтобы коррекция скорости (фильтр выше по списку) не сработала.
+    const t = trendOf(makeTrendSales('X', FALL), {
+      stocks: [makeStockRow('X', 10)],
+      settings: makeSettings({ trendWeeks: 13, deficitDays: 30, minSalesForCorrection: 100000 })
+    });
+    expect(t.raw).toBeCloseTo(0.7284375, 10);
+    expect(t.applied).toBe(1);
+    expect(t.reason).toBe('deficit');
+  });
+
+  it('deficit: ПОВЫШАЮЩИЙ тренд при дефиците применяется как обычно', () => {
+    const t = trendOf(makeTrendSales('X', GROW), {
+      stocks: [makeStockRow('X', 10)],
+      settings: makeSettings({ trendWeeks: 13, deficitDays: 30, minSalesForCorrection: 100000 })
+    });
+    expect(t.applied).toBeCloseTo(1.2715625, 10);
+    expect(t.reason).toBeNull();
+  });
+});
+
+describe('buildSalesTrend: порядок фильтров и ограничение диапазоном (пункт 38)', () => {
+  it('shortWindow побеждает zeroWeek и fewSales', () => {
+    const t = trendOf(makeTrendSales('X', [3, 0, 3, 3, 3]));
+    expect(t.reason).toBe('shortWindow');
+  });
+
+  it('correction побеждает deficit (падающий ряд у распроданного товара)', () => {
+    const sales = makeTrendSales('X', [100, 100, 100, 100, 100, 100, 100, 100, 100, 10, 10, 10, 10]);
+    const t = trendOf(sales, {
+      stocks: [makeStockRow('X', 0)],
+      settings: makeSettings({ trendWeeks: 13, deficitDays: 30 })
+    });
+    expect(t.raw).toBeLessThan(1); // сам по себе ряд попал бы и под фильтр дефицита
+    expect(t.reason).toBe('correction');
+  });
+
+  it('zeroWeek побеждает fewSales', () => {
+    const t = trendOf(makeTrendSales('X', [3, 3, 3, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3]));
+    expect(t.windowQty).toBe(36); // меньше 50, то есть fewSales тоже подходит
+    expect(t.reason).toBe('zeroWeek');
+  });
+
+  it('ограничение сверху: raw больше 1.5 обрезается до 1.5 с причиной clamped', () => {
+    const t = trendOf(makeTrendSales('X', [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]));
+    expect(t.raw).toBeCloseTo(1.543125, 10);
+    expect(t.applied).toBe(1.5);
+    expect(t.reason).toBe('clamped');
+  });
+
+  it('ограничение снизу: raw меньше 0.7 обрезается до 0.7 с причиной clamped', () => {
+    const t = trendOf(makeTrendSales('X', [70, 65, 60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10]));
+    expect(t.raw).toBeCloseTo(0.456875, 10);
+    expect(t.applied).toBe(0.7);
+    expect(t.reason).toBe('clamped');
+  });
+
+  it('внутри диапазона множитель применяется как есть, причины нет', () => {
+    const t = trendOf(makeTrendSales('X', GROW));
+    expect(t.applied).toBe(t.raw);
+    expect(t.reason).toBeNull();
+  });
+});
+
+describe('buildOzonCoverage: применение тренда (пункт 38)', () => {
+  it('прогнозная скорость = факт × тренд × (1 + прирост, %)', () => {
+    const res = buildOzonCoverage(makeTrendInput(makeTrendSales('X', GROW), {
+      settings: makeSettings({ trendWeeks: 13, salesGrowthPct: 10 })
+    }));
+    const a = res.articles[0];
+    // Скорость считается за speedWeeks = 4 последние недели: (19 + 20 + 21 + 22) ÷ 28.
+    expect(a.perDay).toBeCloseTo(82 / 28, 10);
+    expect(a.trend!.applied).toBeCloseTo(1.2715625, 10);
+    expect(a.forecastPerDay).toBeCloseTo((82 / 28) * 1.2715625 * 1.1, 10);
+  });
+
+  it('прирост 0 и тренд 1 оставляют прогнозную скорость равной фактической', () => {
+    const a = buildOzonCoverage(makeTrendInput(makeTrendSales('X', FLAT))).articles[0];
+    expect(a.forecastPerDay).toBe(a.perDay);
+  });
+
+  it('сигнал заказа на фабрике считается по ПРОГНОЗНОЙ скорости', () => {
+    // Растущий ряд: порог = прогноз × (срок 0 + неснижаемые 7). Прогноз 82/28 × 1.2715625 = 3.7238 шт/д,
+    // порог 26.07 шт; труба 20 шт ниже порога. По факту (2.9286 шт/д) порог 20.5 — сигнала бы не было.
+    const res = buildOzonCoverage(makeTrendInput(makeTrendSales('X', GROW), {
+      stocks: [makeStockRow('X', 20)]
+    }));
+    const a = res.articles[0];
+    expect(a.factory).not.toBeNull();
+    expect(a.factory!.thresholdQty).toBeCloseTo(a.forecastPerDay * 7, 10);
+    expect(a.factory!.thresholdQty).toBeGreaterThan(a.perDay * 7);
+  });
+
+  it('рекомендации на поставку в кластеры НЕ зависят от тренда и прироста', () => {
+    // Один и тот же набор данных считается дважды: с приростом 50% и без него.
+    const sales = makeTrendSales('X', GROW, 'Москва');
+    const common: Partial<OzonCoverageInput> = {
+      sales,
+      stocks: [{ ...makeStockRow('X', 10), clusterId: '1', clusterName: 'Москва' }],
+      clusters: [{ clusterId: '1', clusterName: 'Москва' }],
+      myStockAvailability: { X: 1000 }
+    };
+    const withGrowth = buildOzonCoverage(makeTrendInput(sales, {
+      ...common,
+      settings: makeSettings({ trendWeeks: 13, salesGrowthPct: 50 })
+    })).articles[0];
+    const without = buildOzonCoverage(makeTrendInput(sales, {
+      ...common,
+      settings: makeSettings({ trendWeeks: 13, salesGrowthPct: 0 })
+    })).articles[0];
+
+    // Проверка имеет смысл только если тренд и прирост действительно живые.
+    expect(withGrowth.trend!.applied).toBeGreaterThan(1);
+    expect(withGrowth.forecastPerDay).toBeGreaterThan(without.forecastPerDay);
+
+    expect(withGrowth.perDay).toBe(without.perDay);
+    expect(withGrowth.clusters.map(c => c.perDay)).toEqual(without.clusters.map(c => c.perDay));
+    expect(withGrowth.clusters.map(c => c.coverageDays)).toEqual(without.clusters.map(c => c.coverageDays));
+    expect(withGrowth.clusters.map(c => c.recommendation)).toEqual(without.clusters.map(c => c.recommendation));
+    expect(withGrowth.clusters[0].recommendation!.qty).toBeGreaterThan(0);
+    expect(withGrowth.unmetDeficitQty).toBe(without.unmetDeficitQty);
+  });
+
+  it('компоненты виртуального комплекта считаются по ПРОГНОЗНОЙ скорости комплекта', () => {
+    const kits: KitItem[] = [
+      { kitSku: 'KIT-T', type: 'virtual', components: [{ componentSku: 'COMP-T', quantity: 2 }] }
+    ];
+    const res = buildOzonCoverage(makeTrendInput(makeTrendSales('KIT-T', GROW), {
+      kits,
+      skus: [makeSku({ sku: 'COMP-T', pcsPerBox: 1, leadTimeDays: 30 })],
+      myStockAvailability: { 'COMP-T': 0 },
+      settings: makeSettings({ trendWeeks: 13, salesGrowthPct: 10 })
+    }));
+    const kit = res.articles.find(a => a.article === 'KIT-T')!;
+    const comp = res.components.find(c => c.component === 'COMP-T')!;
+    // Фактическая скорость компонента остаётся фактической, прогнозная — по прогнозу комплекта.
+    expect(comp.perDay).toBeCloseTo(kit.perDay * 2, 10);
+    expect(comp.forecastPerDay).toBeCloseTo(kit.forecastPerDay * 2, 10);
+    expect(comp.forecastPerDay).toBeGreaterThan(comp.perDay);
+    // Сигнал заказа компонента считается от прогнозной скорости: порог = прогноз × (30 + 7).
+    expect(comp.factory!.thresholdQty).toBeCloseTo(comp.forecastPerDay * 37, 10);
+  });
+});

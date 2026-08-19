@@ -165,6 +165,7 @@ export const Dashboard: React.FC = React.memo(() => {
     bestWeeks: 4,
     minSalesForCorrection: 50,
     maxSpeedGrowth: 5,
+    salesGrowthPct: 0,
   });
   const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
 
@@ -203,6 +204,7 @@ export const Dashboard: React.FC = React.memo(() => {
             bestWeeks: Number(res.data.bestWeeks) || 4,
             minSalesForCorrection: res.data.minSalesForCorrection === undefined || res.data.minSalesForCorrection === '' ? 50 : Number(res.data.minSalesForCorrection),
             maxSpeedGrowth: res.data.maxSpeedGrowth === undefined || res.data.maxSpeedGrowth === '' ? 5 : Number(res.data.maxSpeedGrowth),
+            salesGrowthPct: res.data.salesGrowthPct === undefined || res.data.salesGrowthPct === '' ? 0 : Number(res.data.salesGrowthPct),
           });
         }
       }).catch((err: any) => console.error('getOzonSettings error:', err));

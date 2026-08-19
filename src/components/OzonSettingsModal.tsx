@@ -21,6 +21,7 @@ interface OzonSettingsData {
   bestWeeks: number;
   minSalesForCorrection: number;
   maxSpeedGrowth: number;
+  salesGrowthPct: number;
   excludedClusters: string;
   priorityClusters: string;
   maxBoxesPerCluster: number;
@@ -69,6 +70,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     bestWeeks: 4,
     minSalesForCorrection: 50,
     maxSpeedGrowth: 5,
+    salesGrowthPct: 0,
     excludedClusters: '',
     priorityClusters: '',
     maxBoxesPerCluster: 30,
@@ -231,6 +233,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               bestWeeks: Number(res.data.bestWeeks) || 4,
               minSalesForCorrection: res.data.minSalesForCorrection === undefined || res.data.minSalesForCorrection === '' ? 50 : Number(res.data.minSalesForCorrection),
               maxSpeedGrowth: res.data.maxSpeedGrowth === undefined || res.data.maxSpeedGrowth === '' ? 5 : Number(res.data.maxSpeedGrowth),
+              salesGrowthPct: res.data.salesGrowthPct === undefined || res.data.salesGrowthPct === '' ? 0 : Number(res.data.salesGrowthPct),
               excludedClusters: String(res.data.excludedClusters || ''),
               priorityClusters: String(res.data.priorityClusters || ''),
               maxBoxesPerCluster: Number(res.data.maxBoxesPerCluster) || 30,
@@ -275,6 +278,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         bestWeeks: Math.max(1, parseInt(String(form.bestWeeks), 10) || 1),
         minSalesForCorrection: Math.max(0, parseFloat(String(form.minSalesForCorrection)) || 0),
         maxSpeedGrowth: Math.max(0, parseFloat(String(form.maxSpeedGrowth)) || 0),
+        salesGrowthPct: Math.max(0, parseFloat(String(form.salesGrowthPct)) || 0),
         excludedClusters: form.excludedClusters,
         priorityClusters: form.priorityClusters,
         maxBoxesPerCluster: Math.max(1, parseInt(String(form.maxBoxesPerCluster), 10) || 1),
@@ -466,6 +470,23 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   value={form.maxSpeedGrowth}
                   onChange={(e) =>
                     setForm({ ...form, maxSpeedGrowth: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Прирост объёма продаж, %
+                  <FieldHint position="bottom" text="Ручная надбавка к прогнозной скорости в контуре заказа на фабрике: прогноз = скорость × тренд × (1 + этот %). На рекомендации поставок в кластеры Ozon не влияет. 0 — надбавки нет." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.salesGrowthPct}
+                  onChange={(e) =>
+                    setForm({ ...form, salesGrowthPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />

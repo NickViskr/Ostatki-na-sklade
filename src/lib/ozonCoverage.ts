@@ -184,6 +184,8 @@ export interface OzonCoverageSettings {
   minSalesForCorrection?: number;
   /** Пункт 42. Максимальный рост скорости при дефиците, раз. Меньше 1 — предел не применяется. */
   maxSpeedGrowth?: number;
+  /** Пункт 38. Прирост объёма продаж, %: ручная надбавка к прогнозной скорости в контуре заказа на фабрике. */
+  salesGrowthPct?: number;
 }
 
 export interface OzonClusterRef {
@@ -469,7 +471,12 @@ export interface ClusterCoverageRow {
 export interface ArticleCoverage {
   article: string;
   qtySold: number;
+  /** ФАКТИЧЕСКАЯ скорость продаж, шт/день. Тренд её не трогает: по ней считаются кластеры. */
   perDay: number;
+  /** Пункт 38. Прогнозная скорость = perDay × тренд × (1 + прирост, %). Только для заказа на фабрике. */
+  forecastPerDay: number;
+  /** Пункт 38. Разбор тренда продаж. null — тренд не считался (продаж за окно нет). */
+  trend: SalesTrend | null;
   pcsPerBox: number;
   leadTimeDays: number;
   myStockAvailable: number;
@@ -514,6 +521,8 @@ export interface ComponentCoverage {
   component: string;
   /** Скорость расхода, шт/день: Σ по комплектам (скорость комплекта × норма расхода). */
   perDay: number;
+  /** Пункт 38. Прогнозная скорость расхода: то же, но по ПРОГНОЗНОЙ скорости комплектов. */
+  forecastPerDay: number;
   /** ТРУБА, шт: fromKitsQty + Мой склад + заказанное на фабрике по этому компоненту. */
   pipelineQty: number;
   /** Собственный остаток компонента на Моём складе, шт. */
@@ -568,6 +577,8 @@ export interface OzonCoverageResult {
   components: ComponentCoverage[];
   /** Пункт 36. Узкие места виртуальных комплектов. Без input.kits — пустой массив. */
   bottlenecks: KitBottleneck[];
+  /** Пункт 38. Тренд продаж по артикулу. */
+  trends: Record<string, SalesTrend>;
 }
 
 /** Пункт 42. Разбор коррекции скорости по одному товару. */
@@ -726,6 +737,162 @@ export function applyDeficitSpeedCorrection(
   return out;
 }
 
+// ===== Пункт 38: тренд продаж =====
+
+/**
+ * Недель в месяце. Наклон регрессии измеряется в шт/неделю, а множитель нужен месячный:
+ * именно так формула была восстановлена сверкой с замером 09.08.2026.
+ */
+const WEEKS_PER_MONTH = 4.345;
+
+/** Пункт 38. Нижняя граница применённого тренда. */
+const TREND_MIN = 0.7;
+
+/** Пункт 38. Верхняя граница применённого тренда. */
+const TREND_MAX = 1.5;
+
+/**
+ * Пункт 38. Минимум продаж за окно тренда, шт: на мелкой выборке наклон регрессии — шум
+ * (в замере 09.08.2026 Этажерка_25_белая давала +95% на выборке в 23 штуки).
+ * Порог из решения пользователя 09.08.2026, отдельной настройки для него намеренно не заводится.
+ */
+export const MIN_SALES_FOR_TREND = 50;
+
+export interface SalesTrend {
+  /** Сырой множитель до фильтров. */
+  raw: number;
+  /** Применённый множитель: 1.00, если сработал любой фильтр. */
+  applied: number;
+  /** Почему множитель отличается от сырого: null — фильтры не срабатывали. */
+  reason: 'correction' | 'zeroWeek' | 'fewSales' | 'deficit' | 'clamped' | 'shortWindow' | null;
+  /** Недельный ряд, по которому считался тренд (для подсказки в интерфейсе). */
+  weeks: string[];
+  weekQty: number[];
+  /** Всего продано за окно, шт. */
+  windowQty: number;
+  /** Наклон регрессии, шт/неделю. */
+  slope: number;
+  /** Среднее за окно, шт/неделю. */
+  mean: number;
+  /** Сколько недель окна с нулевыми продажами. */
+  zeroWeeks: number;
+}
+
+/**
+ * Пункт 38. Тренд продаж по каждому товару.
+ * Скорость за окно — плоское среднее, оно не видит направления спроса, а горизонт заказа
+ * на фабрике около 110 дней, поэтому партия систематически расходится с реальностью.
+ * По недельному ряду за окно строится линейная регрессия методом наименьших квадратов,
+ * тренд = (среднее + наклон × WEEKS_PER_MONTH) ÷ среднее.
+ * Окно и правила сборки ряда те же, что у коррекции скорости: берутся только недельные
+ * строки («Дней» = 7), а окно урезается по неделям, реально пришедшим с сервера.
+ * ФИЛЬТРЫ применяются строго по порядку, первый сработавший даёт множитель 1.00:
+ * 1) короткое окно — меньше MIN_WEEKS_WITH_SALES недель с данными, тренд считать не на чем;
+ * 2) сработала коррекция скорости при дефиците (пункт 42) — решение пользователя 19.08.2026:
+ *    коррекция и тренд поднимают скорость одним и тем же способом, перемножение их пределов
+ *    5× и 1,5× дало бы рост в 7,5 раза и затоваривание;
+ * 3) в окне есть неделя с нулевыми продажами — это чаще старт продаж или отсутствие товара,
+ *    а не спрос (в замере Миска_двойная получала +71% из-за пяти нулевых недель на старте);
+ * 4) за окно продано меньше MIN_SALES_FOR_TREND штук — выборка слишком мелкая;
+ * 5) товар в дефиците И тренд понижающий — падение продаж неотличимо от отсутствия товара.
+ *    ПОВЫШАЮЩИЙ тренд при дефиците применяется как обычно.
+ * Если не сработал ни один фильтр, тренд ограничивается диапазоном TREND_MIN…TREND_MAX.
+ * Функция чистая: входные объекты не изменяются.
+ */
+export function buildSalesTrend(
+  sales: OzonSalesRow[],
+  skus: SKUItem[],
+  settings: OzonCoverageSettings,
+  now: Date,
+  speed: SalesSpeedResult,
+  stocks: OzonStockRow[],
+  corrections: Record<string, SpeedCorrectionInfo>
+): Record<string, SalesTrend> {
+  const trendWeeks = Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 13;
+  const deficitDays = Number(settings.deficitDays) > 0 ? Number(settings.deficitDays) : 0;
+
+  // Остаток Ozon по товару: доступно + в пути, как в applyDeficitSpeedCorrection.
+  const onHand: Record<string, number> = {};
+  for (const row of stocks) {
+    const article = resolveOzonArticle(skus, row.offerId, row.sku);
+    onHand[article] = (onHand[article] || 0) + (Number(row.available) || 0) + (Number(row.transit) || 0);
+  }
+
+  // Окно тренда обрезается по неделям, которые реально пришли с сервера.
+  const presentWeeks = new Set<string>();
+  for (const row of sales) {
+    if ((Number(row.days) || 0) === 7) presentWeeks.add(String(row.week || '').trim());
+  }
+  const window = getLastFullWeeks(now, trendWeeks).filter(w => presentWeeks.has(w));
+  const windowSet = new Set(window);
+
+  // Недельный ряд по товару. Артикул определяется через resolveOzonArticle БЕЗ «ШК Ozon» —
+  // ровно так же, как в buildSalesSpeed и applyDeficitSpeedCorrection: расхождение способов
+  // связывания продаж и остатков вынесено отдельным пунктом 39 плана и здесь не лечится.
+  const byWeek: Record<string, Record<string, number>> = {};
+  for (const row of sales) {
+    if ((Number(row.days) || 0) !== 7) continue;
+    const week = String(row.week || '').trim();
+    if (!windowSet.has(week)) continue;
+    const qty = Number(row.qty) || 0;
+    if (!(qty > 0)) continue;
+    const article = resolveOzonArticle(skus, row.offerId);
+    if (!byWeek[article]) byWeek[article] = {};
+    byWeek[article][week] = (byWeek[article][week] || 0) + qty;
+  }
+
+  const out: Record<string, SalesTrend> = {};
+  const candidates = new Set<string>([...Object.keys(speed.perDayByArticle), ...Object.keys(byWeek)]);
+  for (const article of candidates) {
+    const weekQtyMap = byWeek[article] || {};
+    const weekQty = window.map(w => weekQtyMap[w] || 0);
+    const windowQty = weekQty.reduce((sum, v) => sum + v, 0);
+    const zeroWeeks = weekQty.filter(v => v === 0).length;
+    const mean = weekQty.length > 0 ? windowQty / weekQty.length : 0;
+
+    // Наклон методом наименьших квадратов, x — порядковый номер недели от 0.
+    let slope = 0;
+    if (weekQty.length > 1) {
+      const meanX = (weekQty.length - 1) / 2;
+      let cov = 0;
+      let varX = 0;
+      for (let i = 0; i < weekQty.length; i++) {
+        cov += (i - meanX) * (weekQty[i] - mean);
+        varX += (i - meanX) * (i - meanX);
+      }
+      slope = varX > 0 ? cov / varX : 0;
+    }
+    // Среднее 0 — делить не на что, движения спроса нет.
+    const raw = mean > 0 ? (mean + slope * WEEKS_PER_MONTH) / mean : 1;
+
+    // Дефицит определяется так же, как в applyDeficitSpeedCorrection: пустой склад, а не
+    // падение продаж. Скорость 0 при нулевом остатке — тоже дефицит, делить на ноль нельзя.
+    const perDay = Number(speed.perDayByArticle[article]) || 0;
+    const stock = onHand[article] || 0;
+    const inDeficit = deficitDays > 0 && (perDay > 0 ? stock / perDay < deficitDays : stock <= 0);
+
+    let reason: SalesTrend['reason'] = null;
+    let applied = 1;
+    if (window.length < MIN_WEEKS_WITH_SALES) {
+      reason = 'shortWindow';
+    } else if (corrections[article]) {
+      reason = 'correction';
+    } else if (zeroWeeks > 0) {
+      reason = 'zeroWeek';
+    } else if (windowQty < MIN_SALES_FOR_TREND) {
+      reason = 'fewSales';
+    } else if (inDeficit && raw < 1) {
+      reason = 'deficit';
+    } else {
+      applied = Math.min(TREND_MAX, Math.max(TREND_MIN, raw));
+      if (applied !== raw) reason = 'clamped';
+    }
+
+    out[article] = { raw, applied, reason, weeks: window, weekQty, windowQty, slope, mean, zeroWeeks };
+  }
+  return out;
+}
+
 /**
  * Пункт 36. Покрытие по компонентам виртуальных комплектов и узкие места комплектов.
  * Скорость компонента = Σ по комплектам (скорость комплекта шт/д × норма расхода).
@@ -745,19 +912,25 @@ export function buildComponentCoverage(
   skus: SKUItem[],
   myStockAvailability: Record<string, number>,
   factoryOnOrder: Record<string, number>,
-  settings: OzonCoverageSettings
+  settings: OzonCoverageSettings,
+  forecastPerDayByArticle?: Record<string, number>
 ): { components: ComponentCoverage[]; bottlenecks: KitBottleneck[] } {
   const virtualKits = (kits || []).filter(k => k && k.type === 'virtual');
   if (!virtualKits.length) return { components: [], bottlenecks: [] };
 
   // Накопление по компоненту: скорость и запас складываются по всем комплектам, где компонент
   // участвует (случай «Бутылок» и «Пакетов» — они входят сразу в два комплекта).
-  const acc = new Map<string, { perDay: number; fromKitsQty: number; usedInKits: string[] }>();
+  const acc = new Map<string, { perDay: number; forecastPerDay: number; fromKitsQty: number; usedInKits: string[] }>();
 
   for (const kit of virtualKits) {
     const kitSku = String(kit.kitSku || '').trim();
     if (!kitSku) continue;
     const kitPerDay = Number(speed.perDayByArticle[kitSku]) || 0;
+    // Пункт 38: заказ на фабрике считается по компонентам, поэтому в него идёт ПРОГНОЗНАЯ
+    // скорость комплекта; без неё тренд не работал бы на большей части оборота.
+    const kitForecastPerDay = forecastPerDayByArticle && forecastPerDayByArticle[kitSku] !== undefined
+      ? Number(forecastPerDayByArticle[kitSku]) || 0
+      : kitPerDay;
     const kitStock = stocksByArticle[kitSku];
     const kitEstimated = kitStock ? kitStock.totalEstimated : 0;
 
@@ -768,10 +941,11 @@ export function buildComponentCoverage(
 
       let row = acc.get(componentSku);
       if (!row) {
-        row = { perDay: 0, fromKitsQty: 0, usedInKits: [] };
+        row = { perDay: 0, forecastPerDay: 0, fromKitsQty: 0, usedInKits: [] };
         acc.set(componentSku, row);
       }
       row.perDay += kitPerDay * norm;
+      row.forecastPerDay += kitForecastPerDay * norm;
       row.fromKitsQty += kitEstimated * norm;
       if (!row.usedInKits.includes(kitSku)) row.usedInKits.push(kitSku);
     }
@@ -792,7 +966,7 @@ export function buildComponentCoverage(
     const factory = calcFactorySignal(
       row.fromKitsQty,
       myStockQty,
-      row.perDay,
+      row.forecastPerDay,
       leadTimeDays,
       pcsPerBox,
       settings,
@@ -803,6 +977,7 @@ export function buildComponentCoverage(
     const coverage: ComponentCoverage = {
       component: componentSku,
       perDay: row.perDay,
+      forecastPerDay: row.forecastPerDay,
       pipelineQty: row.fromKitsQty + Math.max(0, myStockQty) + onOrderQty,
       myStockQty,
       onOrderQty,
@@ -867,6 +1042,16 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const speed = buildSalesSpeed(input.sales, input.skus, weeks);
   const stocksByArticle = buildClusterStocks(input.stocks, input.skus, input.settings.returnsToSalePct);
   const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now);
+  // Пункт 38. Тренд считается ПОСЛЕ коррекции скорости: сработавшая коррекция гасит тренд.
+  const trends = buildSalesTrend(input.sales, input.skus, input.settings, now, speed, input.stocks, speedCorrections);
+  // Прогнозная скорость = факт × тренд × (1 + прирост, %). Используется ТОЛЬКО в контуре заказа
+  // на фабрике; рекомендации на поставку в кластеры Ozon считаются по фактической скорости.
+  const salesGrowthK = 1 + (Number(input.settings.salesGrowthPct) || 0) / 100;
+  const forecastPerDayByArticle: Record<string, number> = {};
+  for (const article of Object.keys(speed.perDayByArticle)) {
+    const trend = trends[article];
+    forecastPerDayByArticle[article] = speed.perDayByArticle[article] * (trend ? trend.applied : 1) * salesGrowthK;
+  }
   const nameToId = buildClusterNameToId(input.clusters);
   const excludedIds = parseExcludedClusters(input.settings.excludedClusters);
   const priorityMap = parsePriorityClusters(input.settings.priorityClusters || '');
@@ -1006,12 +1191,13 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     const perDay = speed.perDayByArticle[article] || 0;
     const unmetDeficitQty = clusterRows.reduce((s, r) => s + (r.unmetQty || 0), 0);
     const onOrderQty = Math.max(0, Number(input.factoryOnOrder && input.factoryOnOrder[article]) || 0);
+    const forecastPerDay = forecastPerDayByArticle[article] || 0;
     const factory = virtualKitSkus.has(article)
       ? null
       : calcFactorySignal(
           stockAgg.totalEstimated,
           myStockAvailable,
-          perDay,
+          forecastPerDay,
           leadTimeDays,
           pcsPerBox,
           input.settings,
@@ -1023,6 +1209,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       article,
       qtySold: articleQtySold,
       perDay,
+      forecastPerDay,
+      trend: trends[article] || null,
       pcsPerBox,
       leadTimeDays,
       myStockAvailable,
@@ -1047,9 +1235,10 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     input.skus,
     input.myStockAvailability,
     input.factoryOnOrder || {},
-    input.settings
+    input.settings,
+    forecastPerDayByArticle
   );
 
-  return { speed, articles, components, bottlenecks };
+  return { speed, articles, components, bottlenecks, trends };
 }
 
