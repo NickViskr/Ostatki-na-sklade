@@ -1626,7 +1626,12 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
           let newCompCap;
           let newCompAvg;
           if (isWriteOffDestination(destination)) {
-            newCompCap = newCompQty === 0 ? 0 : compStock.capitalization;
+            // Пункт 40, этап B. Списание уменьшает количество, но НЕ себестоимость:
+            // стоимость брака остаётся на артикуле. При нулевом остатке капитализацию
+            // тоже не обнуляем — это «долг себестоимости», который пока не нашёл носителя:
+            // он ляжет на ближайший приход, а владельцу виден по бейджу «долг себестоимости»
+            // на вкладке «Склад». Средняя при нулевом количестве не определена, поэтому 0.
+            newCompCap = compStock.capitalization;
             newCompAvg = newCompQty > 0 ? roundToTwo(newCompCap / newCompQty) : 0;
           } else {
             newCompCap = roundToTwo(compStock.capitalization - compTotal);
@@ -1715,7 +1720,12 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
           let newCap;
           let newAvgCost;
           if (isWriteOffDestination(destination)) {
-            newCap = newQty === 0 ? 0 : curr.capitalization;
+            // Пункт 40, этап B. Списание уменьшает количество, но НЕ себестоимость:
+            // стоимость брака остаётся на артикуле. При нулевом остатке капитализацию
+            // тоже не обнуляем — это «долг себестоимости», который пока не нашёл носителя:
+            // он ляжет на ближайший приход, а владельцу виден по бейджу «долг себестоимости»
+            // на вкладке «Склад». Средняя при нулевом количестве не определена, поэтому 0.
+            newCap = curr.capitalization;
             newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
           } else {
             newCap = roundToTwo(curr.capitalization - writeOffCost);
@@ -2156,9 +2166,9 @@ function restoreTransaction(payload) {
             throw new Error(`Недостаточно товара "${article}" на складе. Доступно: ${newQty + qty}, откат расхода: ${qty}`);
           }
           if (isWriteOffDestination(payload.destination)) {
-            if (newQty === 0) {
-              newCap = 0;
-            }
+            // Пункт 40, этап B. Симметрично проведению: восстановленное списание снимает
+            // количество, но капитализацию не трогает даже при нулевом остатке — это
+            // «долг себестоимости», он перейдёт на ближайший приход.
           } else {
             newCap -= writeOffCost;
           }
@@ -2556,8 +2566,12 @@ function restoreMultipleArchivedItems(archiveIds) {
       change.currentCap += change.capDiff;
       if (change.currentQty <= 0) {
         change.currentQty = 0;
-        change.currentCap = 0;
-      } else if (change.currentCap < 0) {
+      }
+      // Пункт 40, этап B. При нулевом остатке капитализацию не обнуляем: это «долг
+      // себестоимости», который ещё не нашёл носителя — он ляжет на ближайший приход
+      // и виден владельцу по бейджу «долг себестоимости» на вкладке «Склад».
+      // Отрицательную капитализацию по-прежнему подтягиваем к нулю.
+      if (change.currentCap < 0) {
         change.currentCap = 0;
       }
       const newAvgCost = change.currentQty > 0 ? change.currentCap / change.currentQty : 0;
@@ -5747,6 +5761,11 @@ function saveShipmentShortageRecalc(postingId, recalcJSON, historyNotes, usernam
   return { success: true, historyRowsAdded: historyRowsAdded };
 }
 
+// ОСТОРОЖНО. Функция пересчитывает капитализацию как количество × среднюю себестоимость,
+// то есть СТИРАЕТ «долг себестоимости» (пункт 40): у артикула с нулевым остатком средняя равна
+// нулю, и накопленная стоимость брака после пересчёта пропадёт безвозвратно. Из интерфейса
+// функция не вызывается, только прямым обращением к API. Запускать её можно лишь тогда, когда
+// на складе заведомо нет ни одного артикула с бейджем «долг себестоимости».
 function recalcCapitalizationFromAvg() {
   const ss = getSpreadsheet();
   const sheet = getSheetByNameRobust(ss, 'Остатки');

@@ -21,6 +21,14 @@ interface PendingItem {
   price: number;
 }
 
+// Пункт 40, этап G. Ноль допустим только для «Корректировки остатка»: там количество —
+// это ИТОГОВЫЙ остаток, поэтому 0 означает «выставить остаток в ноль». Для остальных типов
+// операций приходовать или списывать 0 штук бессмысленно, поэтому нужно строго больше нуля.
+const isQuantityAllowed = (type: string, quantity: number | string): boolean =>
+  type === 'Корректировка остатка'
+    ? quantity !== '' && Number(quantity) >= 0
+    : Number(quantity) > 0;
+
 export const ManualTab: React.FC = React.memo(() => {
   // Пункт 28, этап B: ключ операции рождается при первом нажатии кнопки
   // и очищается только после успеха, поэтому повтор после ошибки идёт с тем же ключом.
@@ -95,8 +103,10 @@ export const ManualTab: React.FC = React.memo(() => {
 
   const addPendingItem = useCallback(() => {
     const qty = Number(manualForm.quantity);
-    if (!manualForm.article || !qty || qty <= 0) {
-      toast.error('Заполните артикул и количество (положительное число)');
+    if (!manualForm.article || !isQuantityAllowed(manualForm.type, manualForm.quantity)) {
+      toast.error(manualForm.type === 'Корректировка остатка'
+        ? 'Заполните артикул и количество (ноль допустим — это итоговый остаток)'
+        : 'Заполните артикул и количество (положительное число)');
       return;
     }
     const cost = Number(manualForm.price) || 0;
@@ -120,10 +130,7 @@ export const ManualTab: React.FC = React.memo(() => {
     let itemsToSubmit = [...pendingItems];
     
     // Auto-add current form if completely valid but not added yet
-    const isCorrectionType = manualForm.type === 'Корректировка остатка';
-    const isValidQty = isCorrectionType
-      ? manualForm.quantity !== '' && Number(manualForm.quantity) >= 0
-      : Number(manualForm.quantity) > 0;
+    const isValidQty = isQuantityAllowed(manualForm.type, manualForm.quantity);
 
     if (manualForm.article && isValidQty) {
       itemsToSubmit.push({
@@ -456,7 +463,7 @@ export const ManualTab: React.FC = React.memo(() => {
           className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold text-lg hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center justify-center gap-2 mt-4"
         >
           {isProcessing ? <Loader2 className="animate-spin" /> : <Database size={20} />}
-          Сохранить операции ({pendingItems.length + (manualForm.article && Number(manualForm.quantity) > 0 ? 1 : 0)})
+          Сохранить операции ({pendingItems.length + (manualForm.article && isQuantityAllowed(manualForm.type, manualForm.quantity) ? 1 : 0)})
         </button>
       </div>
     </div>
