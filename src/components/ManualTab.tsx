@@ -24,9 +24,11 @@ interface PendingItem {
 // Пункт 40, этап G. Ноль допустим только для «Корректировки остатка»: там количество —
 // это ИТОГОВЫЙ остаток, поэтому 0 означает «выставить остаток в ноль». Для остальных типов
 // операций приходовать или списывать 0 штук бессмысленно, поэтому нужно строго больше нуля.
+// ВАЖНО: поле ввода хранит ЧИСЛО (parseInt), поэтому проверять его через `!quantity` нельзя —
+// ноль ложен, и кнопки отключались именно на том значении, ради которого этап и делался.
 const isQuantityAllowed = (type: string, quantity: number | string): boolean =>
   type === 'Корректировка остатка'
-    ? quantity !== '' && Number(quantity) >= 0
+    ? quantity !== '' && quantity !== null && quantity !== undefined && Number.isFinite(Number(quantity)) && Number(quantity) >= 0
     : Number(quantity) > 0;
 
 export const ManualTab: React.FC = React.memo(() => {
@@ -415,7 +417,7 @@ export const ManualTab: React.FC = React.memo(() => {
             <div className={manualForm.type.includes('Оприходование') ? 'md:col-span-1' : 'md:col-span-4'}>
               <button 
                 onClick={addPendingItem}
-                disabled={!manualForm.article || !manualForm.quantity}
+                disabled={!manualForm.article || !isQuantityAllowed(manualForm.type, manualForm.quantity)}
                 className="w-full h-[50px] bg-slate-100 text-slate-700 rounded-xl font-bold hover:bg-slate-200 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
               >
                 <Plus size={20} />
@@ -459,7 +461,7 @@ export const ManualTab: React.FC = React.memo(() => {
 
         <button 
           onClick={handleManualSubmit}
-          disabled={isProcessing || (pendingItems.length === 0 && (!manualForm.article || !manualForm.quantity))}
+          disabled={isProcessing || (pendingItems.length === 0 && (!manualForm.article || !isQuantityAllowed(manualForm.type, manualForm.quantity)))}
           className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold text-lg hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center justify-center gap-2 mt-4"
         >
           {isProcessing ? <Loader2 className="animate-spin" /> : <Database size={20} />}

@@ -1118,28 +1118,7 @@ export const Dashboard: React.FC = React.memo(() => {
                 className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors cursor-pointer group"
                 title="Нажмите, чтобы просмотреть историю товарных операций"
               >
-                <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium group-hover:underline">
-                  {item.article}
-                  {(() => {
-                    // Пункт 40, этап E. Только показ: ни одно сохранённое число здесь не меняется.
-                    const qty = Number((item as any).quantity) || 0;
-                    const lastPrice = lastPurchasePrices[item.article]?.price;
-                    if (!hasCostDebt(qty, item.capitalization, lastPrice)) return null;
-                    const debt = calcCostDebt(qty, item.capitalization, lastPrice);
-                    const avgPerUnit = qty > 0 ? item.capitalization / qty : item.capitalization;
-                    const comparison = lastPrice
-                      ? ` Средняя сейчас ${formatCurrency(avgPerUnit)} ₽/шт против ${formatCurrency(lastPrice)} ₽/шт по последнему приходу.`
-                      : ' Товара на остатке нет, а капитализация осталась.';
-                    return (
-                      <span
-                        className="ml-2 align-middle text-[10px] px-2 py-0.5 rounded-lg font-bold tracking-wide whitespace-nowrap bg-amber-50 text-amber-700 border border-amber-200"
-                        title={`Списанный брак уменьшает количество, но не уменьшает капитализацию, поэтому себестоимость списанного товара осталась висеть на артикуле. Она уже подняла среднюю себестоимость, а при следующем приходе размажется по новой партии.${comparison}`}
-                      >
-                        долг себестоимости {formatCurrency(debt)} ₽
-                      </span>
-                    );
-                  })()}
-                </td>
+                <td className="px-6 py-4 font-mono text-sm text-indigo-600 font-medium group-hover:underline">{item.article}</td>
                 {isColVisible('quantity') && (
                 <td className="px-6 py-4 text-right">
                   <div className="inline-flex flex-col items-end">
@@ -1189,7 +1168,31 @@ export const Dashboard: React.FC = React.memo(() => {
                 </td>
                 )}
                 {isColVisible('avgCost') && <td className="px-6 py-4 text-right font-medium whitespace-nowrap">{formatCurrency(item.avgCost)} ₽</td>}
-                {isColVisible('capitalization') && <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">{formatCurrency(item.capitalization)} ₽</td>}
+                {isColVisible('capitalization') && (
+                  <td className="px-6 py-4 text-right font-bold text-slate-900 whitespace-nowrap">
+                    {formatCurrency(item.capitalization)} ₽
+                    {(() => {
+                      // Пункт 40, этап E. Долг показан прямо под суммой капитализации — там, где
+                      // владелец на него и смотрит. Только показ: ни одно сохранённое число не меняется.
+                      const qty = Number((item as any).quantity) || 0;
+                      const lastPrice = lastPurchasePrices[item.article]?.price;
+                      if (!hasCostDebt(qty, item.capitalization, lastPrice)) return null;
+                      const debt = calcCostDebt(qty, item.capitalization, lastPrice);
+                      const avgPerUnit = qty > 0 ? item.capitalization / qty : item.capitalization;
+                      const comparison = lastPrice
+                        ? ` Средняя сейчас ${formatCurrency(avgPerUnit)} ₽/шт против ${formatCurrency(lastPrice)} ₽/шт по последнему приходу.`
+                        : ' Товара на остатке нет, а капитализация осталась.';
+                      return (
+                        <span
+                          className="block mt-1 text-[10px] font-bold text-amber-700 whitespace-nowrap"
+                          title={`Списанный брак уменьшает количество, но не уменьшает капитализацию, поэтому себестоимость списанного товара осталась висеть на артикуле. Она уже подняла среднюю себестоимость, а при следующем приходе размажется по новой партии.${comparison}`}
+                        >
+                          в том числе долг {formatCurrency(debt)} ₽
+                        </span>
+                      );
+                    })()}
+                  </td>
+                )}
                 {isColVisible('storage') && (
                 <td className="px-6 py-4 text-right font-medium whitespace-nowrap text-slate-700">
                   {(() => {
