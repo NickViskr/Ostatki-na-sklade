@@ -738,6 +738,67 @@ function buildSkuRow(headers, obj) {
   check('П28: капитализация компонента обнулилась вместе с товаром (30-30=0)', row && row.capitalization === 0, `получено: ${row && row.capitalization}`);
 })();
 
+// ================= Пункт 22, этап I: окно недель в getOzonSales =================
+// Дефект, найденный живым регрессом 19.08.2026: окно отбиралось по числу РАЗЛИЧНЫХ
+// значений колонки «Неделя» и включало текущую незавершённую неделю, поэтому из
+// запрошенных 12 недель полных до расчёта доходило 11, а окно тренда настроено на 13.
+(() => {
+  const H = freshHarness();
+  // «Сейчас» — среда 07.01.2026, понедельник текущей недели 05.01.2026.
+  H.setNow('2026-01-07T09:00:00Z');
+
+  // Ряд недельных строк на 20 понедельников назад от текущего.
+  const mondays = [];
+  for (let i = 0; i < 21; i++) {
+    const dt = new Date(Date.UTC(2026, 0, 5) - i * 7 * 86400000);
+    mondays.push(dt.toISOString().slice(0, 10));
+  }
+  const weekly = mondays.map(w => ({ week: w, offerId: 'ART', qty: 10, days: 7 }));
+  H.setOzonSalesSheet(weekly);
+  H.setOzonSettings({ trendWeeks: 13, speedWeeks: 4 });
+
+  const auto = H.getOzonSales();
+  const autoWeeks = Array.from(new Set(auto.map(r => r.week))).sort();
+  const current = '2026-01-05';
+  const fullAuto = autoWeeks.filter(w => w < current);
+
+  check('П71: без явного окна getOzonSales берёт его из настроек (13 тренд + 2 запаса = 15 полных недель)',
+    fullAuto.length === 15, `получено полных недель: ${fullAuto.length} (${autoWeeks.length} всего, с ${autoWeeks[0]})`);
+  check('П71: текущая незавершённая неделя тоже отдаётся, но НЕ занимает место полной',
+    autoWeeks.indexOf(current) !== -1 && autoWeeks.length === 16,
+    `недель всего: ${autoWeeks.length}`);
+
+  // Рост настройки должен сразу расширять окно — раньше он упирался в число на клиенте.
+  H.setOzonSettings({ trendWeeks: 18, speedWeeks: 4 });
+  const wider = H.getOzonSales();
+  const widerFull = Array.from(new Set(wider.map(r => r.week))).filter(w => w < current);
+  check('П72: увеличение настройки «Окно тренда» сразу расширяет окно выдачи',
+    widerFull.length === 20, `получено полных недель: ${widerFull.length}`);
+
+  // Явно переданное окно имеет приоритет над настройками.
+  H.setOzonSettings({ trendWeeks: 13, speedWeeks: 4 });
+  const explicit = H.getOzonSales(6);
+  const explicitFull = Array.from(new Set(explicit.map(r => r.week))).filter(w => w < current);
+  check('П73: явно переданное окно имеет приоритет над настройками',
+    explicitFull.length === 6, `получено полных недель: ${explicitFull.length}`);
+
+  // Архивные строки по 28 дней стоят на той же сетке понедельников. Отбор по дате
+  // не должен считать их отдельными неделями и укорачивать окно.
+  const archiveOnly = [
+    { week: '2025-11-24', offerId: 'ART', qty: 40, days: 28 },
+    { week: '2025-12-01', offerId: 'ART', qty: 40, days: 28 }
+  ];
+  H.setOzonSalesSheet(weekly.concat(archiveOnly));
+  const mixed = H.getOzonSales(6);
+  const mixedFull = Array.from(new Set(mixed.map(r => r.week))).filter(w => w < current);
+  check('П74: архивные строки по 28 дней не съедают окно (те же 6 полных недель)',
+    mixedFull.length === 6, `получено полных недель: ${mixedFull.length}`);
+
+  // Строки старше окна отсекаются целиком.
+  const oldest = mixed.filter(r => r.week < '2025-11-24');
+  check('П74: строки старше окна не отдаются', oldest.length === 0, `лишних строк: ${oldest.length}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

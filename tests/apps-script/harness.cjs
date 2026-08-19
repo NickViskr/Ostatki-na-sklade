@@ -185,6 +185,7 @@ const context = vm.createContext(sandbox);
 const exportLine = `
 ;this.OZON_STOCK_HISTORY_HEADERS = OZON_STOCK_HISTORY_HEADERS;
 this.OZON_STOCKS_HEADERS = OZON_STOCKS_HEADERS;
+this.OZON_SALES_HEADERS = OZON_SALES_HEADERS;
 `;
 vm.runInContext(src + exportLine, context, { filename: 'Code.gs' });
 
@@ -278,5 +279,22 @@ module.exports = {
     return sheet;
   },
   commitTransaction: (...args) => context.commitTransaction(...args),
+
+  // ---------- Хелперы для getOzonSales (пункт 22, этап I: окно недель) ----------
+  OZON_SALES_HEADERS: context.OZON_SALES_HEADERS,
+  // Подменяет весь набор настроек Ozon целиком: getOzonSales читает из него окно,
+  // когда вызывающая сторона своё не передала.
+  setOzonSettings(obj) { ozonSettingsStore = Object.assign({}, obj); },
+  // rows — массив {week, cabinet, offerId, clusterName, qty, updatedAt, days}
+  setOzonSalesSheet(rows) {
+    const headers = context.OZON_SALES_HEADERS;
+    const data = rows.map(r => [r.week, r.cabinet || 'Mercurius', r.offerId, r.clusterName || 'Екатеринбург',
+      r.qty, r.updatedAt || '2026-01-05 12:00:00', r.days]);
+    const sheet = makeFakeSheet(headers, 'Продажи Ozon');
+    if (data.length > 0) sheet.__setData([headers.slice(), ...data]);
+    sheetRegistry['Продажи Ozon'] = sheet;
+    return sheet;
+  },
+  getOzonSales: (...args) => context.getOzonSales(...args),
   vm
 };

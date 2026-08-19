@@ -4579,27 +4579,39 @@ function getOzonSales(weeksLimit) {
     });
   }
 
-  // Пункт 29: если запрошено ограничение, оставляем строки только
-  // последних N недель. Недели отбираются по значению колонки «Неделя»,
-  // формат yyyy-MM-dd сортируется как обычный текст.
-  const limit = Number(weeksLimit);
-  if (limit > 0) {
-    const weekSet = {};
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].week) weekSet[rows[i].week] = true;
-    }
-    const allWeeks = Object.keys(weekSet).sort();
-    if (allWeeks.length > limit) {
-      const keepFrom = allWeeks[allWeeks.length - limit];
-      const filtered = [];
-      for (let i = 0; i < rows.length; i++) {
-        if (rows[i].week >= keepFrom) filtered.push(rows[i]);
-      }
-      return filtered;
-    }
+  // Пункт 29: отдаём не всю историю, а только нужное окно недель.
+  //
+  // Пункт 22, этап I (19.08.2026). ДВЕ ПРАВКИ ПО ИТОГАМ ЖИВОГО РЕГРЕССА.
+  // ПЕРВАЯ: окно отбирается ПО ДАТЕ, а не по числу различных значений колонки
+  // «Неделя». Счётчик различных недель включал ТЕКУЩУЮ НЕЗАВЕРШЁННУЮ неделю, и из
+  // 12 запрошенных недель полных до расчёта доходило 11, тогда как окно тренда
+  // настроено на 13: тренд и коррекция скорости считались по укороченному ряду.
+  // Отбор по дате заодно снимает вторую ловушку того же счётчика: в листе продаж
+  // две зоны хранения — недельная и архивная по 28 дней, — архивные строки стоят
+  // на той же сетке понедельников и тоже считались бы отдельными неделями.
+  // ВТОРАЯ: если окно не задано вызывающей стороной, оно берётся ИЗ НАСТРОЕК —
+  // самое длинное из окон расчёта плюс запас в две недели. Иначе увеличение
+  // настройки «Окно тренда» молча упиралось бы в жёсткое число на клиенте.
+  let limit = Number(weeksLimit);
+  if (!(limit > 0)) {
+    const s = getOzonSettings();
+    const trend = Number(s.trendWeeks) > 0 ? Number(s.trendWeeks) : 13;
+    const speed = Number(s.speedWeeks) > 0 ? Number(s.speedWeeks) : 4;
+    limit = Math.max(trend, speed) + 2;
   }
 
-  return rows;
+  const todayStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  const todayParts = todayStr.split('-');
+  const monday = new Date(Number(todayParts[0]), Number(todayParts[1]) - 1, Number(todayParts[2]));
+  const dow = monday.getDay() === 0 ? 7 : monday.getDay();
+  monday.setDate(monday.getDate() - (dow - 1) - limit * 7);
+  const keepFrom = Utilities.formatDate(monday, tz, 'yyyy-MM-dd');
+
+  const filtered = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].week && rows[i].week >= keepFrom) filtered.push(rows[i]);
+  }
+  return filtered;
 }
 
 function getOzonStocks() {
