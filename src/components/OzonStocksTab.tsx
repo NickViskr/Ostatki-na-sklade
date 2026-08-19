@@ -35,6 +35,14 @@ const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
 
 const OZON_DEFAULT_HIDDEN_COLS = ['preparing', 'requested', 'excess', 'other'];
 
+// Чтение числовой настройки Ozon с сервера. Не использовать `Number(value) || fallback` —
+// ноль является законным значением настройки, а `||` считает его ложью и подменяет умолчанием.
+const numSetting = (value: unknown, fallback: number): number => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
 const ColHint: React.FC<{ text: string }> = ({ text }) => (
   <span className="relative inline-flex group align-middle ml-1">
     <HelpCircle size={12} className="text-slate-300 hover:text-indigo-500 cursor-help" />
@@ -170,23 +178,27 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     fetchGas('getOzonSettings').then((res) => {
       if (res?.status === 'success' && res.data) {
         setOzonSettings({
-          speedWeeks: Number(res.data.speedWeeks) || 4,
-          minStockDays: Number(res.data.minStockDays) || 7,
-          targetStockDays: Number(res.data.targetStockDays) || 30,
-          maxClusterDays: res.data.maxClusterDays === undefined || res.data.maxClusterDays === '' ? 100 : Number(res.data.maxClusterDays),
-          factoryOrderDays: Number(res.data.factoryOrderDays) || 60,
-          returnsToSalePct: Number(res.data.returnsToSalePct) || 80,
+          // Счётчик недель, ноль бессмысленен — нижняя граница 1.
+          speedWeeks: Math.max(1, numSetting(res.data.speedWeeks, 4)),
+          minStockDays: numSetting(res.data.minStockDays, 7),
+          targetStockDays: numSetting(res.data.targetStockDays, 30),
+          maxClusterDays: numSetting(res.data.maxClusterDays, 100),
+          factoryOrderDays: numSetting(res.data.factoryOrderDays, 60),
+          returnsToSalePct: numSetting(res.data.returnsToSalePct, 80),
           excludedClusters: String(res.data.excludedClusters || ''),
           priorityClusters: String(res.data.priorityClusters || ''),
-          deficitDays: res.data.deficitDays === undefined || res.data.deficitDays === '' ? 7 : Number(res.data.deficitDays),
-          trendWeeks: Number(res.data.trendWeeks) || 13,
-          bestWeeks: Number(res.data.bestWeeks) || 4,
-          minSalesForCorrection: res.data.minSalesForCorrection === undefined || res.data.minSalesForCorrection === '' ? 50 : Number(res.data.minSalesForCorrection),
-          maxSpeedGrowth: res.data.maxSpeedGrowth === undefined || res.data.maxSpeedGrowth === '' ? 5 : Number(res.data.maxSpeedGrowth),
-          salesGrowthPct: res.data.salesGrowthPct === undefined || res.data.salesGrowthPct === '' ? 0 : Number(res.data.salesGrowthPct),
+          deficitDays: numSetting(res.data.deficitDays, 7),
+          // Счётчик недель, ноль бессмысленен — нижняя граница 1.
+          trendWeeks: Math.max(1, numSetting(res.data.trendWeeks, 13)),
+          // Счётчик недель, ноль бессмысленен — нижняя граница 1.
+          bestWeeks: Math.max(1, numSetting(res.data.bestWeeks, 4)),
+          minSalesForCorrection: numSetting(res.data.minSalesForCorrection, 50),
+          maxSpeedGrowth: numSetting(res.data.maxSpeedGrowth, 5),
+          salesGrowthPct: numSetting(res.data.salesGrowthPct, 0),
         });
         setSupplySettings({
-          maxBoxesPerCluster: Number(res.data.maxBoxesPerCluster) || 30,
+          // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.
+          maxBoxesPerCluster: Math.max(1, numSetting(res.data.maxBoxesPerCluster, 30)),
           dropOffWarehouseId: String(res.data.dropOffWarehouseId || ''),
           dropOffWarehouseName: String(res.data.dropOffWarehouseName || ''),
           dropOffWarehouseType: String(res.data.dropOffWarehouseType || ''),
