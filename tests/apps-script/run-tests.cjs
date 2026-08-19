@@ -602,6 +602,142 @@ function buildSkuRow(headers, obj) {
   check('П22: капитализация компонента НЕ обнулилась (долг себестоимости сохранён)', row && row.capitalization === 30, `получено: ${row && row.capitalization}`);
 })();
 
+// ================= Пункт 23: Списание С МЕТКОЙ «себестоимость обнулена», опустошающее остаток =================
+// Пункт 40, этап A: владелец выбрал не копить долг — товар списывается ПОЛНОСТЬЮ,
+// как обычный Расход: капитализация уменьшается на стоимость списанного, вплоть до нуля.
+// Средняя себестоимость при этом не пересчитывается на 0 отдельной веткой, а остаётся
+// прежней (как у обычного Расхода — см. П20/П26), потому что код обнулённого списания
+// буквально переиспользует формулу обычного Расхода (newAvgCost = curr.avgCost).
+(function test23() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART5', quantity: 10, avgCost: 5, capitalization: 50 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'ART5', quantity: 10, price: 5 }],
+    'Расход', 'Склад [Списание - Брак] [себестоимость обнулена]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'ART5');
+
+  check('П23: количество обнулилось', row && row.quantity === 0, `получено: ${row && row.quantity}`);
+  check('П23: капитализация обнулилась вместе с товаром (50-50=0)', row && row.capitalization === 0, `получено: ${row && row.capitalization}`);
+  check('П23: средняя себестоимость не пересчитана отдельно, как у обычного Расхода (осталась 5)', row && row.avgCost === 5, `получено: ${row && row.avgCost}`);
+})();
+
+// ================= Пункт 24: то же самое списание, но БЕЗ метки — капитализация остаётся долгом =================
+// Гвардия: единственное различие с П23 — строка объекта операции (метка внутри неё).
+// Без метки действует поведение по умолчанию (Пункт 40, этап B) — капитализация НЕ трогается.
+(function test24() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART6', quantity: 10, avgCost: 5, capitalization: 50 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'ART6', quantity: 10, price: 5 }],
+    'Расход', 'Склад [Списание - Брак]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'ART6');
+
+  check('П24: количество обнулилось', row && row.quantity === 0, `получено: ${row && row.quantity}`);
+  check('П24: капитализация НЕ обнулилась без метки (долг себестоимости сохранён, 50)', row && row.capitalization === 50, `получено: ${row && row.capitalization}`);
+})();
+
+// ================= Пункт 25: Списание С МЕТКОЙ, оставляющее остаток > 0 =================
+// Капитализация уменьшается на стоимость списанного (как у обычного Расхода),
+// средняя себестоимость НЕ пересчитывается (остаётся прежней) — это и есть поведение
+// обычного Расхода, которое метка воспроизводит для списания.
+(function test25() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART7', quantity: 10, avgCost: 4, capitalization: 40 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'ART7', quantity: 6, price: 4 }],
+    'Расход', 'Склад [Списание - Утеря] [себестоимость обнулена]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'ART7');
+
+  check('П25: количество уменьшилось на списанное', row && row.quantity === 4, `получено: ${row && row.quantity}`);
+  check('П25: капитализация уменьшилась на себестоимость списания (40-24=16)', row && row.capitalization === 16, `получено: ${row && row.capitalization}`);
+  check('П25: средняя себестоимость не изменилась (4)', row && row.avgCost === 4, `получено: ${row && row.avgCost}`);
+})();
+
+// ================= Пункт 26: метка «себестоимость обнулена» не влияет на обычный (не-списание) Расход =================
+// Строка объекта не содержит «Списание», значит isWriteOffDestination === false и
+// формула та же независимо от присутствия метки. Два прогона с одинаковым стартовым
+// остатком должны дать идентичный результат при destination с меткой и без.
+(function test26() {
+  const hA = freshHarness();
+  hA.ensureTransSheet();
+  hA.setStockSheet([{ article: 'ART8', quantity: 10, avgCost: 3, capitalization: 30 }]);
+  const resA = hA.commitTransaction(
+    [{ article: 'ART8', quantity: 4, price: 3 }],
+    'Расход', 'Продажа Ozon', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const rowA = resA.stock.find(r => r.article === 'ART8');
+
+  const hB = freshHarness();
+  hB.ensureTransSheet();
+  hB.setStockSheet([{ article: 'ART8', quantity: 10, avgCost: 3, capitalization: 30 }]);
+  const resB = hB.commitTransaction(
+    [{ article: 'ART8', quantity: 4, price: 3 }],
+    'Расход', 'Продажа Ozon [себестоимость обнулена]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const rowB = resB.stock.find(r => r.article === 'ART8');
+
+  check('П26: обычный Расход без метки — капитализация уменьшилась (30-12=18)', rowA && rowA.capitalization === 18, `получено: ${rowA && rowA.capitalization}`);
+  check('П26: обычный Расход с посторонней меткой — результат тот же (метка не сработала без "Списание")',
+    rowB && rowB.quantity === rowA.quantity && rowB.capitalization === rowA.capitalization && rowB.avgCost === rowA.avgCost,
+    `A: ${JSON.stringify(rowA)}, B: ${JSON.stringify(rowB)}`);
+})();
+
+// ================= Пункт 27: метка «себестоимость обнулена» не влияет на Приход =================
+// Ветка Приход вообще не проверяет isWriteOffDestination/isCapitalizationZeroed — метка
+// в строке объекта поставки должна быть полностью безразлична.
+(function test27() {
+  const hA = freshHarness();
+  hA.ensureTransSheet();
+  hA.setStockSheet([{ article: 'ART9', quantity: 0, avgCost: 0, capitalization: 50 }]);
+  const resA = hA.commitTransaction(
+    [{ article: 'ART9', quantity: 20, price: 10 }],
+    'Приход', 'Поставка', '2026-01-06', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const rowA = resA.stock.find(r => r.article === 'ART9');
+
+  const hB = freshHarness();
+  hB.ensureTransSheet();
+  hB.setStockSheet([{ article: 'ART9', quantity: 0, avgCost: 0, capitalization: 50 }]);
+  const resB = hB.commitTransaction(
+    [{ article: 'ART9', quantity: 20, price: 10 }],
+    'Приход', 'Поставка [себестоимость обнулена]', '2026-01-06', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const rowB = resB.stock.find(r => r.article === 'ART9');
+
+  check('П27: Приход без метки — долг поглощён партией (50+200=250)', rowA && rowA.capitalization === 250, `получено: ${rowA && rowA.capitalization}`);
+  check('П27: Приход с меткой в строке объекта — результат тот же (метка не влияет на Приход)',
+    rowB && rowB.quantity === rowA.quantity && rowB.capitalization === rowA.capitalization && rowB.avgCost === rowA.avgCost,
+    `A: ${JSON.stringify(rowA)}, B: ${JSON.stringify(rowB)}`);
+})();
+
+// ================= Пункт 28: Списание С МЕТКОЙ компонента виртуального комплекта =================
+// Ветка компонентов (~1646) зеркалит ветку обычного артикула (~1742): с меткой капитализация
+// компонента уменьшается на его долю стоимости, как у обычного Расхода.
+(function test28() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setKitSheet([{ kitSku: 'KIT2', componentSku: 'COMP2', quantity: 2, kitType: 'virtual' }]);
+  h.setStockSheet([{ article: 'COMP2', quantity: 6, avgCost: 5, capitalization: 30 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'KIT2', quantity: 3, price: 0 }],
+    'Расход', 'Склад [Списание - Брак] [себестоимость обнулена]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'COMP2');
+
+  check('П28: остаток компонента списан полностью (6 - 2*3=0)', row && row.quantity === 0, `получено: ${row && row.quantity}`);
+  check('П28: капитализация компонента обнулилась вместе с товаром (30-30=0)', row && row.capitalization === 0, `получено: ${row && row.capitalization}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
