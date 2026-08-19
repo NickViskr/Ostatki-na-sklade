@@ -52,11 +52,18 @@ FakeDate.__now = Date.parse('2026-01-05T09:00:00Z'); // понедельник, 
 const logs = [];
 
 // ---------- Фальшивый лист (мини-модель Google Sheets) ----------
-function makeFakeSheet(headers) {
+// name — необязательное имя листа (для getName(), нужно getSheetByNameRobust из Code.gs,
+// которая ищет лист перебором ss.getSheets(), а не по прямому ключу).
+function makeFakeSheet(headers, name) {
   // data[0] всегда заголовки; строки 1.. — данные (может быть пусто).
   let data = [headers.slice()];
   let setValuesCallCount = 0; // сервисный счётчик стенда: сколько раз реально вызвали setValues на этом листе
   return {
+    getName() { return name; },
+    appendRow(row) {
+      data.push(row.slice());
+    },
+    setFrozenRows() { /* нет визуального представления в стенде — заглушка */ },
     getLastRow() {
       for (let i = data.length - 1; i >= 0; i--) {
         const row = data[i];
@@ -127,11 +134,20 @@ function makeFakeSheet(headers) {
   };
 }
 
+// ---------- UUID для Utilities.getUuid: детерминированный счётчик, сбрасывается при каждом freshHarness() ----------
+let uuidCounter = 0;
+
+// ---------- Реестр «прочих» листов (Остатки, Транзакции, Комплекты и т.п.) ----------
+// SKU-лист исторически хранится в отдельной переменной skuSheet (см. ниже) — оставляем
+// как есть ради обратной совместимости с уже существующими 42 проверками.
+const sheetRegistry = {};
+
 // ---------- Сборка контекста vm ----------
 const sandbox = {
   console,
   Utilities: {
-    formatDate: (date, tz, fmt) => formatDateImpl(date, tz, fmt)
+    formatDate: (date, tz, fmt) => formatDateImpl(date, tz, fmt),
+    getUuid: () => 'uuid-' + (++uuidCounter)
   },
   Session: {
     getScriptTimeZone: () => 'Europe/Moscow'
@@ -142,8 +158,20 @@ const sandbox = {
   Date: FakeDate,
   SpreadsheetApp: {
     getActiveSpreadsheet: () => ({
-      getSheetByName: (name) => (name === 'SKU' ? skuSheet : null)
-    })
+      getSheetByName: (name) => (name === 'SKU' ? skuSheet : (sheetRegistry[name] || null)),
+      getSheets: () => {
+        const all = [];
+        if (skuSheet) all.push(skuSheet);
+        Object.keys(sheetRegistry).forEach(k => all.push(sheetRegistry[k]));
+        return all;
+      },
+      insertSheet: (name) => {
+        const sheet = makeFakeSheet([], name);
+        sheetRegistry[name] = sheet;
+        return sheet;
+      }
+    }),
+    flush: () => { /* нет очереди отложенной записи в стенде — заглушка */ }
   }
 };
 const context = vm.createContext(sandbox);
@@ -211,5 +239,44 @@ module.exports = {
     return { headers: data[0].slice(), rows: data.slice(1, Math.max(lastRow, 1)) };
   },
   updateSkuNamesFromOzonStocks: (...args) => context.updateSkuNamesFromOzonStocks(...args),
+
+  // ---------- Хелперы для commitTransaction (Пункт 40, этап B: долг себестоимости) ----------
+  // Заголовки листа "Остатки" и "Транзакции" — как в setupDatabase() из Code.gs.
+  STOCK_HEADERS: ['Артикул', 'Количество на складе', 'Средняя себестоимость', 'Капитализация', 'Продажи за 120д', 'Оборачиваемость (дн)'],
+  TRANS_HEADERS: ['ID', 'Дата', 'Тип', 'Артикул', 'Количество', 'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки', 'Пользователь'],
+  KIT_HEADERS: ['kitSku', 'componentSku', 'quantity', 'kitType'],
+  // items — массив {article, quantity, avgCost, capitalization, sales120?, turnover?}
+  setStockSheet(items) {
+    const headers = this.STOCK_HEADERS;
+    const rows = items.map(it => [it.article, it.quantity, it.avgCost, it.capitalization, it.sales120 || 0, it.turnover || 0]);
+    const sheet = makeFakeSheet(headers, 'Остатки');
+    if (rows.length > 0) sheet.__setData([headers.slice(), ...rows]);
+    sheetRegistry['Остатки'] = sheet;
+    return sheet;
+  },
+  dumpStockSheet() {
+    const sheet = sheetRegistry['Остатки'];
+    if (!sheet) return null;
+    const data = sheet.__dump();
+    const lastRow = sheet.getLastRow();
+    return { headers: data[0].slice(), rows: data.slice(1, Math.max(lastRow, 1)) };
+  },
+  // Лист "Транзакции" обязателен для commitTransaction: без него код падает на transSheet.getLastRow().
+  ensureTransSheet() {
+    if (!sheetRegistry['Транзакции']) {
+      sheetRegistry['Транзакции'] = makeFakeSheet(this.TRANS_HEADERS, 'Транзакции');
+    }
+    return sheetRegistry['Транзакции'];
+  },
+  // items — массив {kitSku, componentSku, quantity, kitType} ('legacy' | 'virtual')
+  setKitSheet(items) {
+    const headers = this.KIT_HEADERS;
+    const rows = items.map(it => [it.kitSku, it.componentSku, it.quantity, it.kitType]);
+    const sheet = makeFakeSheet(headers, 'Комплекты');
+    if (rows.length > 0) sheet.__setData([headers.slice(), ...rows]);
+    sheetRegistry['Комплекты'] = sheet;
+    return sheet;
+  },
+  commitTransaction: (...args) => context.commitTransaction(...args),
   vm
 };

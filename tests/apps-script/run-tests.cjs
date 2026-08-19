@@ -512,6 +512,96 @@ function buildSkuRow(headers, obj) {
   check('П17: запись в лист выполнена ровно один раз (без дублирования)', h.getSkuSheet().__getSetValuesCallCount() === 1, `вызовов setValues: ${h.getSkuSheet().__getSetValuesCallCount()}`);
 })();
 
+// ================= Пункт 18: Списание до нулевого остатка не обнуляет капитализацию (долг себестоимости) =================
+// Регресс-гвардия на Пункт 40, этап B: раньше newCap принудительно зануляли при newQty===0,
+// молча уничтожая стоимость брака. Сейчас капитализация должна остаться прежней.
+(function test18() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART1', quantity: 10, avgCost: 5, capitalization: 50 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'ART1', quantity: 10, price: 5 }],
+    'Расход', 'Списание - Брак', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'ART1');
+
+  check('П18: количество обнулилось', row && row.quantity === 0, `получено: ${row && row.quantity}`);
+  check('П18: капитализация НЕ обнулилась (долг себестоимости сохранён)', row && row.capitalization === 50, `получено: ${row && row.capitalization}`);
+  check('П18: средняя себестоимость при нулевом остатке = 0', row && row.avgCost === 0, `получено: ${row && row.avgCost}`);
+})();
+
+// ================= Пункт 19: Списание, оставляющее остаток > 0 — капитализация не трогается, средняя пересчитывается =================
+(function test19() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART2', quantity: 10, avgCost: 4, capitalization: 40 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'ART2', quantity: 6, price: 4 }],
+    'Расход', 'Списание - Утеря', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'ART2');
+
+  check('П19: количество уменьшилось на списанное', row && row.quantity === 4, `получено: ${row && row.quantity}`);
+  check('П19: капитализация не изменилась', row && row.capitalization === 40, `получено: ${row && row.capitalization}`);
+  check('П19: средняя пересчитана как капитализация/остаток (40/4=10)', row && row.avgCost === 10, `получено: ${row && row.avgCost}`);
+})();
+
+// ================= Пункт 20: обычный Расход (не списание) по-прежнему уменьшает капитализацию =================
+// Доказывает, что фикс Пункта 40 не задел нормальное потребление остатка.
+(function test20() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART3', quantity: 10, avgCost: 3, capitalization: 30 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'ART3', quantity: 4, price: 3 }],
+    'Расход', 'Продажа Ozon', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'ART3');
+
+  check('П20: количество уменьшилось на отгруженное', row && row.quantity === 6, `получено: ${row && row.quantity}`);
+  check('П20: капитализация уменьшилась на себестоимость отгрузки (30-12=18)', row && row.capitalization === 18, `получено: ${row && row.capitalization}`);
+  check('П20: средняя себестоимость не изменилась', row && row.avgCost === 3, `получено: ${row && row.avgCost}`);
+})();
+
+// ================= Пункт 21: Приход на артикул с долгом себестоимости при нулевом остатке поглощает долг =================
+// Это то самое поведение, ради которого сделан фикс: долг остаётся на артикуле до прихода,
+// а пришедшая партия забирает его в свою капитализацию и среднюю.
+(function test21() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART4', quantity: 0, avgCost: 0, capitalization: 50 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'ART4', quantity: 20, price: 10 }],
+    'Приход', 'Поставка', '2026-01-06', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'ART4');
+
+  check('П21: количество увеличилось на пришедшее', row && row.quantity === 20, `получено: ${row && row.quantity}`);
+  check('П21: капитализация = старый долг + стоимость партии (50+200=250)', row && row.capitalization === 250, `получено: ${row && row.capitalization}`);
+  check('П21: средняя = (долг+партия)/новое количество (250/20=12.5)', row && row.avgCost === 12.5, `получено: ${row && row.avgCost}`);
+})();
+
+// ================= Пункт 22: Списание компонента виртуального комплекта до нуля тоже не обнуляет капитализацию =================
+(function test22() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setKitSheet([{ kitSku: 'KIT1', componentSku: 'COMP1', quantity: 2, kitType: 'virtual' }]);
+  h.setStockSheet([{ article: 'COMP1', quantity: 6, avgCost: 5, capitalization: 30 }]);
+
+  const res = h.commitTransaction(
+    [{ article: 'KIT1', quantity: 3, price: 0 }],
+    'Расход', 'Списание - Брак', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const row = res.stock.find(r => r.article === 'COMP1');
+
+  check('П22: остаток компонента списан полностью (6 - 2*3=0)', row && row.quantity === 0, `получено: ${row && row.quantity}`);
+  check('П22: капитализация компонента НЕ обнулилась (долг себестоимости сохранён)', row && row.capitalization === 30, `получено: ${row && row.capitalization}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
