@@ -26,6 +26,18 @@ interface PendingItem {
 // операций приходовать или списывать 0 штук бессмысленно, поэтому нужно строго больше нуля.
 // ВАЖНО: поле ввода хранит ЧИСЛО (parseInt), поэтому проверять его через `!quantity` нельзя —
 // ноль ложен, и кнопки отключались именно на том значении, ради которого этап и делался.
+// Пункт 40, этап A. Метка выбора «обнулить себестоимость» едет внутри строки объекта
+// (например: «Склад [Списание - Брак] [себестоимость обнулена]»), потому что именно эта строка
+// попадает в лист «История» и потом читается при удалении и восстановлении операции.
+// Текст должен слово в слово совпадать с тем, что ищет isCapitalizationZeroed в Code.gs,
+// поэтому он объявлен ровно один раз здесь.
+const CAPITALIZATION_ZEROED_MARKER = '[себестоимость обнулена]';
+
+// Выбор судьбы себестоимости имеет смысл только для списаний: у «Корректировки остатка»
+// капитализация пересчитывается по своим правилам, у оприходования её нечего обнулять.
+const isWriteOffType = (type: string): boolean =>
+  type === 'Списание - Брак' || type === 'Списание - Утеря';
+
 const isQuantityAllowed = (type: string, quantity: number | string): boolean =>
   type === 'Корректировка остатка'
     ? quantity !== '' && quantity !== null && quantity !== undefined && Number.isFinite(Number(quantity)) && Number(quantity) >= 0
@@ -54,6 +66,11 @@ export const ManualTab: React.FC = React.memo(() => {
   const [isAddingDest, setIsAddingDest] = useState(false);
   const [newDest, setNewDest] = useState('');
   
+  // Пункт 40, этап A. Что делать с себестоимостью списанного товара:
+  // 'debt' — оставить долгом на артикуле (поведение по умолчанию), 'zero' — обнулить.
+  // Значение живёт только в форме: в бэкенд оно уезжает меткой в строке объекта.
+  const [writeOffCapMode, setWriteOffCapMode] = useState<'debt' | 'zero'>('debt');
+
   const [pendingItems, setPendingItems] = useState<PendingItem[]>([]);
   const [isArticleDropdownOpen, setIsArticleDropdownOpen] = useState(false);
   const [articleSearch, setArticleSearch] = useState(manualForm.article);
@@ -206,6 +223,7 @@ export const ManualTab: React.FC = React.memo(() => {
           price: ''
         });
         setArticleSearch('');
+        setWriteOffCapMode('debt');
       }
       return;
     }
@@ -223,7 +241,11 @@ export const ManualTab: React.FC = React.memo(() => {
       typeToStandard[type] ?? (type as 'Приход' | 'Расход' | 'Корректировка');
 
     // Preserve the original label in destination so it's visible in History
-    const labeledDestination = destination ? `${destination} [${type}]` : `[${type}]`;
+    const baseDestination = destination ? `${destination} [${type}]` : `[${type}]`;
+    // Пункт 40, этап A: метку добавляем только для списаний и только при выборе «обнулить».
+    const labeledDestination = (isWriteOffType(type) && writeOffCapMode === 'zero')
+      ? `${baseDestination} ${CAPITALIZATION_ZEROED_MARKER}`
+      : baseDestination;
 
     const parsedItems = itemsToSubmit.map(item => ({
       ...item,
@@ -248,8 +270,11 @@ export const ManualTab: React.FC = React.memo(() => {
         price: ''
       });
       setArticleSearch('');
+      // Пункт 40, этап A: возвращаем безопасный выбор по умолчанию,
+      // чтобы обнуление не «прилипло» к следующему списанию незаметно для владельца.
+      setWriteOffCapMode('debt');
     }
-  }, [manualForm, commitTransaction, setManualForm, pendingItems, kits, stock]);
+  }, [manualForm, commitTransaction, setManualForm, pendingItems, kits, stock, writeOffCapMode]);
 
   const removePendingItem = (index: number) => {
     setPendingItems(prev => prev.filter((_, i) => i !== index));
@@ -327,6 +352,46 @@ export const ManualTab: React.FC = React.memo(() => {
             )}
           </div>
         </div>
+
+        {/* Пункт 40, этап A. Судьба себестоимости списанного товара. Выбор виден только у
+            списаний: у «Корректировки остатка» капитализация пересчитывается по своим
+            правилам, у оприходования обнулять нечего. По умолчанию — долг, потому что это
+            прежнее поведение, и молча менять учёт денег нельзя. */}
+        {isWriteOffType(manualForm.type) && (
+          <div className="space-y-2">
+            <label className="text-sm font-bold text-slate-500 uppercase">Себестоимость списанного товара</label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setWriteOffCapMode('debt')}
+                className={`text-left px-4 py-3 rounded-xl border transition-colors ${
+                  writeOffCapMode === 'debt'
+                    ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-500'
+                    : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                }`}
+              >
+                <span className="block font-bold text-slate-800">Оставить долгом себестоимости</span>
+                <span className="block text-xs text-slate-500 mt-1">
+                  Сумма останется на артикуле и ляжет на ближайший приход, подняв его себестоимость. Видна на вкладке «Склад» под капитализацией.
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setWriteOffCapMode('zero')}
+                className={`text-left px-4 py-3 rounded-xl border transition-colors ${
+                  writeOffCapMode === 'zero'
+                    ? 'border-amber-500 bg-amber-50 ring-2 ring-amber-500'
+                    : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                }`}
+              >
+                <span className="block font-bold text-slate-800">Обнулить себестоимость</span>
+                <span className="block text-xs text-slate-500 mt-1">
+                  Сумма спишется вместе с товаром и не вернётся. Капитализация склада уменьшится сразу.
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {manualForm.type.includes('Списание') && (
           <div className="space-y-2">

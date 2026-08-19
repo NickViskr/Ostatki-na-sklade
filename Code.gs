@@ -1423,8 +1423,11 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
           newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
         } else if (type === 'Расход') {
           newQty += qty;
-          if (isWriteOffDestination(dest)) {
-            // Капитализация НЕ увеличивается при удалении списания
+          if (isWriteOffDestination(dest) && !isCapitalizationZeroed(dest)) {
+            // Капитализация НЕ увеличивается при удалении списания:
+            // при проведении её не снимали, значит и возвращать нечего.
+            // Пункт 40, этап A: если списание было проведено с меткой «себестоимость обнулена»,
+            // деньги с артикула реально сняли — тогда идём в общую ветку и возвращаем их.
           } else {
             newCap = roundToTwo(newCap + writeOffCost);
           }
@@ -1448,7 +1451,9 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
               const componentWoc = Number(transDataAll[k][wocIdx !== -1 ? wocIdx : 6]) || 0;
               const componentDest = String(transDataAll[k][destIdx] || '');
               let nCap;
-              if (isWriteOffDestination(componentDest)) {
+              // Пункт 40, этап A: обнулённое списание компонента забрало себестоимость,
+              // поэтому при удалении она возвращается наравне с обычным расходом.
+              if (isWriteOffDestination(componentDest) && !isCapitalizationZeroed(componentDest)) {
                 nCap = Number(stockData[j][3]);
               } else {
                 nCap = roundToTwo(Number(stockData[j][3]) + componentWoc);
@@ -1481,6 +1486,19 @@ function updateTransaction(id, data, username) {
 
 function isWriteOffDestination(dest) {
   return String(dest || '').indexOf('Списание') !== -1;
+}
+
+/**
+ * Пункт 40, этап A. Списание бывает двух видов, и владелец выбирает вид в момент проведения:
+ * либо себестоимость остаётся «долгом» на артикуле (поведение по умолчанию), либо она
+ * обнуляется вместе с товаром. Метка «себестоимость обнулена» едет ВНУТРИ строки объекта
+ * (например: «Склад [Списание - Брак] [себестоимость обнулена]»), а не в отдельной колонке.
+ * Так выбор попадает в лист «История» вместе с операцией, и удаление, восстановление
+ * и массовые операции спустя годы отличат один вид списания от другого по той же строке,
+ * без миграции таблицы и без новых параметров.
+ */
+function isCapitalizationZeroed(dest) {
+  return String(dest || '').indexOf('себестоимость обнулена') !== -1;
 }
 
 /**
@@ -1625,12 +1643,14 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
           const newCompQty = compStock.quantity - compQty;
           let newCompCap;
           let newCompAvg;
-          if (isWriteOffDestination(destination)) {
+          if (isWriteOffDestination(destination) && !isCapitalizationZeroed(destination)) {
             // Пункт 40, этап B. Списание уменьшает количество, но НЕ себестоимость:
             // стоимость брака остаётся на артикуле. При нулевом остатке капитализацию
             // тоже не обнуляем — это «долг себестоимости», который пока не нашёл носителя:
             // он ляжет на ближайший приход, а владельцу виден по бейджу «долг себестоимости»
             // на вкладке «Склад». Средняя при нулевом количестве не определена, поэтому 0.
+            // Пункт 40, этап A: с меткой «себестоимость обнулена» владелец выбрал не копить долг,
+            // и компонент уходит по обычным правилам расхода — капитализация уменьшается.
             newCompCap = compStock.capitalization;
             newCompAvg = newCompQty > 0 ? roundToTwo(newCompCap / newCompQty) : 0;
           } else {
@@ -1719,12 +1739,14 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
           const newQty = curr.quantity - qty;
           let newCap;
           let newAvgCost;
-          if (isWriteOffDestination(destination)) {
+          if (isWriteOffDestination(destination) && !isCapitalizationZeroed(destination)) {
             // Пункт 40, этап B. Списание уменьшает количество, но НЕ себестоимость:
             // стоимость брака остаётся на артикуле. При нулевом остатке капитализацию
             // тоже не обнуляем — это «долг себестоимости», который пока не нашёл носителя:
             // он ляжет на ближайший приход, а владельцу виден по бейджу «долг себестоимости»
             // на вкладке «Склад». Средняя при нулевом количестве не определена, поэтому 0.
+            // Пункт 40, этап A: с меткой «себестоимость обнулена» владелец выбрал не копить долг,
+            // и товар уходит по обычным правилам расхода — капитализация уменьшается.
             newCap = curr.capitalization;
             newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
           } else {
@@ -2165,10 +2187,12 @@ function restoreTransaction(payload) {
           if (newQty < 0) {
             throw new Error(`Недостаточно товара "${article}" на складе. Доступно: ${newQty + qty}, откат расхода: ${qty}`);
           }
-          if (isWriteOffDestination(payload.destination)) {
+          if (isWriteOffDestination(payload.destination) && !isCapitalizationZeroed(payload.destination)) {
             // Пункт 40, этап B. Симметрично проведению: восстановленное списание снимает
             // количество, но капитализацию не трогает даже при нулевом остатке — это
             // «долг себестоимости», он перейдёт на ближайший приход.
+            // Пункт 40, этап A: списание с меткой «себестоимость обнулена» при проведении
+            // снимало капитализацию, поэтому при восстановлении она снимается снова.
           } else {
             newCap -= writeOffCost;
           }
@@ -2317,7 +2341,9 @@ function deleteMultipleTransactions(ids, deletedBy) {
             // НЕ изменяем qtyDiff и capDiff для виртуального комплекта
           } else {
             stockChanges[article].qtyDiff += qty;
-            if (!isWriteOffDestination(dest)) {
+            // Пункт 40, этап A: обычному списанию капитализацию не возвращаем (её и не снимали),
+            // а списанию с меткой «себестоимость обнулена» — возвращаем, как обычному расходу.
+            if (!isWriteOffDestination(dest) || isCapitalizationZeroed(dest)) {
               stockChanges[article].capDiff += writeOffCost;
             }
           }
@@ -2508,7 +2534,10 @@ function restoreMultipleArchivedItems(archiveIds) {
           if (writeOffCost === 0 && isVirtualKit) {
             // НЕ изменяем qtyDiff и capDiff для виртуального комплекта
           } else {
-            if (isWriteOffDestination(dest) === true) {
+            // Пункт 40, этап A: обычное списание снимает только количество,
+            // а списание с меткой «себестоимость обнулена» снимает и капитализацию —
+            // ровно так же, как это было при его первоначальном проведении.
+            if (isWriteOffDestination(dest) === true && isCapitalizationZeroed(dest) === false) {
               stockChanges[article].qtyDiff -= qty;
             } else {
               stockChanges[article].qtyDiff -= qty;
