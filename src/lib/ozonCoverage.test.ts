@@ -231,11 +231,17 @@ describe('calcSupplyRecommendation', () => {
 // ===== Пункт 36: компоненты виртуальных комплектов =====
 
 const NOW = new Date('2024-01-10T10:00:00Z'); // среда; последняя полная неделя — 2024-01-01
-const SALES_WEEK = '2024-01-01';
+// Все четыре недели окна скорости, а не одна: знаменатель считается по неделям, которые
+// реально присутствуют в данных (пункт 39, этап B). Продажи в одной неделе означали бы окно
+// в 7 дней, а не в 28, и скорости выросли бы вчетверо.
+const SALES_WEEKS = ['2023-12-11', '2023-12-18', '2023-12-25', '2024-01-01'];
 
-// Строка продаж без кластера: окно скорости = 4 недели = 28 дней, поэтому qty 28 даёт 1 шт/день.
-function makeSalesRow(offerId: string, qty: number): OzonSalesRow {
-  return { week: SALES_WEEK, cabinet: 'test', offerId, clusterName: '', qty, updatedAt: '', days: 7 };
+// Продажи без кластера, разложенные поровну по окну: окно = 4 недели = 28 дней,
+// поэтому суммарный qty 28 даёт 1 шт/день.
+function makeSalesRows(offerId: string, qty: number): OzonSalesRow[] {
+  return SALES_WEEKS.map(week => ({
+    week, cabinet: 'test', offerId, clusterName: '', qty: qty / SALES_WEEKS.length, updatedAt: '', days: 7
+  }));
 }
 
 // Строка остатков без КластерID: попадает только в totalEstimated, кластерных рекомендаций нет.
@@ -297,7 +303,7 @@ const KITS: KitItem[] = [
 function makeKitsInput(overrides: Partial<OzonCoverageInput> = {}): OzonCoverageInput {
   return {
     stocks: [makeStockRow('KIT-A', 20), makeStockRow('KIT-B', 30), makeStockRow('KIT-L', 5)],
-    sales: [makeSalesRow('KIT-A', 28), makeSalesRow('KIT-B', 56), makeSalesRow('KIT-L', 28)],
+    sales: [...makeSalesRows('KIT-A', 28), ...makeSalesRows('KIT-B', 56), ...makeSalesRows('KIT-L', 28)],
     skus: KIT_SKUS,
     clusters: [],
     settings: makeSettings({ minStockDays: 7, targetStockDays: 20, factoryOrderDays: 14 }),
@@ -673,5 +679,140 @@ describe('buildOzonCoverage: применение тренда (пункт 38)',
     expect(comp.forecastPerDay).toBeGreaterThan(comp.perDay);
     // Сигнал заказа компонента считается от прогнозной скорости: порог = прогноз × (30 + 7).
     expect(comp.factory!.thresholdQty).toBeCloseTo(comp.forecastPerDay * 37, 10);
+  });
+});
+
+// ===== Пункт 39: связывание продаж с остатками и знаменатель скорости =====
+
+const P39_NOW = new Date('2024-01-10T10:00:00Z'); // среда; окно скорости — 4 недели по 2024-01-01
+const P39_WEEKS = getLastFullWeeks(P39_NOW, 4);
+
+// Товар, у которого артикул Ozon НЕ совпадает с внутренним SKU: связь идёт только по «ШК Ozon».
+const P39_SKUS: SKUItem[] = [makeSku({ sku: 'INNER-1', ozonBarcode: '777' })];
+
+// Строка остатков без КластерID: поле sku — это «ШК Ozon», по нему и идёт сопоставление.
+function makeP39Stock(offerId: string, ozonSku: string, available: number): OzonStockRow {
+  return {
+    cabinet: 'test',
+    sku: ozonSku,
+    offerId,
+    name: offerId,
+    warehouseName: '',
+    clusterName: '',
+    clusterId: '',
+    available,
+    preparing: 0,
+    requested: 0,
+    transit: 0,
+    excess: 0,
+    returns: 0,
+    other: 0,
+    updatedAt: ''
+  };
+}
+
+// Строка продаж: days по умолчанию 7 (недельная зона), 28 — архивный блок.
+function makeP39Sale(offerId: string, week: string, qty: number, days = 7): OzonSalesRow {
+  return { week, cabinet: 'test', offerId, clusterName: '', qty, updatedAt: '', days };
+}
+
+function makeP39Input(overrides: Partial<OzonCoverageInput> = {}): OzonCoverageInput {
+  return {
+    stocks: [],
+    sales: [],
+    skus: [],
+    clusters: [],
+    settings: makeSettings(),
+    myStockAvailability: {},
+    now: P39_NOW,
+    ...overrides
+  };
+}
+
+describe('buildOzonCoverage: продажи связываются с остатками одинаково (пункт 39A)', () => {
+  it('связь через «ШК Ozon»: остаток и скорость сходятся на ОДНОМ внутреннем артикуле', () => {
+    // До правки продажи дали бы фантом 'ozon-offer-1' со скоростью и нулевым остатком,
+    // а остаток лёг бы на 'INNER-1' с нулевой скоростью.
+    const res = buildOzonCoverage(makeP39Input({
+      stocks: [makeP39Stock('ozon-offer-1', '777', 100)],
+      sales: P39_WEEKS.map(w => makeP39Sale('ozon-offer-1', w, 7)),
+      skus: P39_SKUS
+    }));
+    expect(res.articles.map(a => a.article)).toEqual(['INNER-1']);
+    const a = res.articles[0];
+    expect(a.totalEstimated).toBe(100);
+    expect(a.qtySold).toBe(28);
+    expect(a.perDay).toBe(1); // 28 шт ÷ 28 дней
+    expect(res.speed.qtyByArticle['ozon-offer-1']).toBeUndefined();
+  });
+
+  it('артикула нет ни в остатках, ни в SKU Базе: продажи дают offer_id как есть', () => {
+    const res = buildOzonCoverage(makeP39Input({
+      stocks: [makeP39Stock('ozon-offer-1', '777', 10)],
+      sales: P39_WEEKS.map(w => makeP39Sale('НЕТ-НИГДЕ', w, 7)),
+      skus: P39_SKUS
+    }));
+    expect(res.speed.qtyByArticle['НЕТ-НИГДЕ']).toBe(28);
+    expect(res.speed.perDayByArticle['НЕТ-НИГДЕ']).toBe(1);
+  });
+
+  it('скорость, коррекция и тренд разрешают артикул ОДИНАКОВО', () => {
+    // Товар распродан: 9 недель по 20 шт, последние 4 — по 1 шт, остаток на Ozon 1 шт.
+    // Коррекция при дефиците срабатывает, поэтому тренд гасится причиной 'correction' —
+    // а это возможно только если все три расчёта попали в один и тот же артикул.
+    const sales = getLastFullWeeks(P39_NOW, 13)
+      .map((w, i) => makeP39Sale('ozon-offer-1', w, i < 9 ? 20 : 1));
+    const res = buildOzonCoverage(makeP39Input({
+      stocks: [makeP39Stock('ozon-offer-1', '777', 1)],
+      sales,
+      skus: P39_SKUS,
+      settings: makeSettings({ trendWeeks: 13, deficitDays: 30 })
+    }));
+    expect(Object.keys(res.speed.perDayByArticle)).toEqual(['INNER-1']);
+    expect(Object.keys(res.trends)).toEqual(['INNER-1']);
+    expect(res.articles.find(a => a.article === 'INNER-1')!.speedCorrection).not.toBeNull();
+    expect(res.trends['INNER-1'].reason).toBe('correction');
+  });
+});
+
+describe('buildSalesSpeed: только недельные строки и реальный знаменатель (пункт 39B)', () => {
+  it('строки с «Дней» = 28 в расчёт скорости не попадают', () => {
+    const sales = [
+      ...P39_WEEKS.map(w => makeP39Sale('X', w, 7)),
+      makeP39Sale('X', P39_WEEKS[0], 400, 28) // архивный 28-дневный блок на той же неделе
+    ];
+    const res = buildOzonCoverage(makeP39Input({ sales }));
+    expect(res.speed.qtyByArticle['X']).toBe(28);
+    expect(res.speed.windowDays).toBe(28);
+    expect(res.speed.perDayByArticle['X']).toBe(1);
+  });
+
+  it('знаменатель — только реально присутствующие недели окна: 3 недели из 4 дают 21 день', () => {
+    const sales = P39_WEEKS.slice(1).map(w => makeP39Sale('X', w, 7));
+    const res = buildOzonCoverage(makeP39Input({ sales }));
+    expect(res.speed.windowDays).toBe(21);
+    expect(res.speed.qtyByArticle['X']).toBe(21);
+    expect(res.speed.perDayByArticle['X']).toBe(1); // 21 ÷ 21, а не 21 ÷ 28
+  });
+
+  it('speed.weeks содержит только фактически использованные недели', () => {
+    const sales = P39_WEEKS.slice(1).map(w => makeP39Sale('X', w, 7));
+    const res = buildOzonCoverage(makeP39Input({ sales }));
+    expect(res.speed.weeks).toEqual(P39_WEEKS.slice(1));
+  });
+
+  it('окно целиком отсутствует в данных: нулевые скорости, расчёт не падает', () => {
+    const res = buildOzonCoverage(makeP39Input({
+      stocks: [makeP39Stock('ozon-offer-1', '777', 50)],
+      sales: [makeP39Sale('ozon-offer-1', '2023-01-02', 100)], // неделя далеко за окном
+      skus: P39_SKUS
+    }));
+    expect(res.speed.weeks).toEqual([]);
+    expect(res.speed.windowDays).toBe(0);
+    expect(res.speed.totalQty).toBe(0);
+    expect(res.speed.totalPerDay).toBe(0);
+    expect(res.articles.map(a => a.article)).toEqual(['INNER-1']);
+    expect(res.articles[0].perDay).toBe(0);
+    expect(res.articles[0].factory).toBeNull();
   });
 });

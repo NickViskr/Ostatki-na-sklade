@@ -54,8 +54,44 @@ export function resolveOzonArticle(skus: SKUItem[], offerId: string, ozonSku?: s
   return offer || ozon || 'НЕИЗВЕСТНО';
 }
 
+/**
+ * Пункт 39A. Карта «артикул Ozon (offer_id) в нижнем регистре -> внутренний артикул»,
+ * построенная ПО ОСТАТКАМ полным сопоставлением resolveOzonArticle (с «ШК Ozon»).
+ * Зачем: в листе «Продажи Ozon» колонки «ШК Ozon» нет, поэтому продажи умеют связываться
+ * только по имени артикула. Товар, у которого связь идёт через «ШК Ozon», разъехался бы на
+ * два фантомных артикула: один с остатком и нулевой скоростью, другой со скоростью без остатка.
+ * Замер боевой базы 19.08.2026: дефект пока не проявляется — все 12 артикулов остатков нашлись
+ * в SKU Базе по имени (8 из 19 баркодов записаны с префиксом OZN, а Ozon отдаёт голое число,
+ * поэтому путь через «ШК Ozon» почти не срабатывает). Именно поэтому он и незаметен.
+ * Первое значение выигрывает: строк остатков по одному offer_id много (склады, кластеры).
+ */
+export function buildOfferIdToArticle(stocks: OzonStockRow[], skus: SKUItem[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const row of stocks) {
+    const key = String(row.offerId || '').trim().toLowerCase();
+    if (!key || map[key]) continue;
+    map[key] = resolveOzonArticle(skus, row.offerId, row.sku);
+  }
+  return map;
+}
+
+/**
+ * Пункт 39A. Артикул строки ПРОДАЖ: сначала карта, построенная по остаткам
+ * (buildOfferIdToArticle), иначе прежнее сопоставление по одному offer_id.
+ * Карта необязательна: без неё поведение ровно такое, каким было раньше.
+ */
+export function resolveSalesArticle(
+  skus: SKUItem[],
+  offerId: string,
+  offerIdToArticle?: Record<string, string>
+): string {
+  const key = String(offerId || '').trim().toLowerCase();
+  if (offerIdToArticle && key && offerIdToArticle[key]) return offerIdToArticle[key];
+  return resolveOzonArticle(skus, offerId);
+}
+
 export interface SalesSpeedResult {
-  /** Понедельники недель окна расчёта, по возрастанию. */
+  /** ФАКТИЧЕСКИ использованные недели окна, по возрастанию: запрошенные минус отсутствующие в данных. */
   weeks: string[];
   /** Длина окна в днях (= weeks.length * 7). */
   windowDays: number;
@@ -81,13 +117,31 @@ export interface SalesSpeedResult {
 
 /**
  * Скорость продаж по последним полным неделям.
- * По ТЗ v3: скорость = сумма продаж за weeks ÷ (число недель × 7 дней).
- * В расчёт берутся только строки листа «Продажи Ozon», чья «Неделя» входит в weeks
- * (28-дневные блоки в это окно попасть не могут — они старше свежей зоны).
+ * По ТЗ v3: скорость = сумма продаж за окно ÷ (число недель окна × 7 дней).
+ * Пункт 39B. В расчёт берутся ТОЛЬКО недельные строки («Дней» = 7) — так же, как в
+ * applyDeficitSpeedCorrection и buildSalesTrend. Замер боевой базы 19.08.2026: в листе
+ * «Продажи Ozon» две зоны хранения — недельная (1385 строк, «Дней» = 7, 18.05.2026–17.08.2026)
+ * и архивная (1805 строк, «Дней» = 28, 16.06.2025–20.04.2026). Даты 28-дневных блоков — тоже
+ * понедельники и стоят ровно на сетке getLastFullWeeks, поэтому окна 4 и 13 недель помещаются
+ * в недельную зону лишь по случайности: при окне 17 недель блок 20.04 зачёлся бы как неделя
+ * и завысил скорость вчетверо.
+ * Знаменатель — не «сколько недель заказали», а сколько недель окна РЕАЛЬНО есть в данных
+ * (неделя присутствует, если по ней пришла хотя бы одна строка с «Дней» = 7 у любого товара
+ * и кластера). Иначе окно глубже недельной зоны молча занижало бы скорость.
  */
-export function buildSalesSpeed(sales: OzonSalesRow[], skus: SKUItem[], weeks: string[]): SalesSpeedResult {
-  const weekSet = new Set(weeks);
-  const windowDays = weeks.length * 7;
+export function buildSalesSpeed(
+  sales: OzonSalesRow[],
+  skus: SKUItem[],
+  weeks: string[],
+  offerIdToArticle?: Record<string, string>
+): SalesSpeedResult {
+  const presentWeeks = new Set<string>();
+  for (const row of sales) {
+    if ((Number(row.days) || 0) === 7) presentWeeks.add(String(row.week || '').trim());
+  }
+  const usedWeeks = weeks.filter(w => presentWeeks.has(w));
+  const weekSet = new Set(usedWeeks);
+  const windowDays = usedWeeks.length * 7;
 
   let totalQty = 0;
   const qtyByArticle: Record<string, number> = {};
@@ -95,13 +149,14 @@ export function buildSalesSpeed(sales: OzonSalesRow[], skus: SKUItem[], weeks: s
   const qtyByArticleCluster: Record<string, Record<string, number>> = {};
 
   for (const row of sales) {
+    if ((Number(row.days) || 0) !== 7) continue;
     const week = String(row.week || '').trim();
     if (!weekSet.has(week)) continue;
 
     const qty = Number(row.qty) || 0;
     if (qty === 0) continue;
 
-    const article = resolveOzonArticle(skus, row.offerId);
+    const article = resolveSalesArticle(skus, row.offerId, offerIdToArticle);
     const clusterName = String(row.clusterName || '').trim() || NO_CLUSTER_NAME;
 
     totalQty += qty;
@@ -141,7 +196,7 @@ export function buildSalesSpeed(sales: OzonSalesRow[], skus: SKUItem[], weeks: s
   }
 
   return {
-    weeks,
+    weeks: usedWeeks,
     windowDays,
     totalQty,
     totalPerDay: windowDays > 0 ? totalQty / windowDays : 0,
@@ -622,6 +677,8 @@ export const MIN_WEEKS_WITH_SALES = 6;
  * и минимум MIN_WEEKS_WITH_SALES недель с продажами.
  * В окно берутся только недельные строки («Дней» = 7): 28-дневные блоки архива дали бы
  * четырёхкратно завышенную «неделю».
+ * Пункт 39A: артикул продаж разрешается через ту же карту offer_id, что и в buildSalesSpeed,
+ * иначе скорость и её коррекция считались бы по разным артикулам.
  * Функция ИЗМЕНЯЕТ переданный объект speed и возвращает разбор по скорректированным товарам.
  */
 export function applyDeficitSpeedCorrection(
@@ -630,7 +687,8 @@ export function applyDeficitSpeedCorrection(
   sales: OzonSalesRow[],
   skus: SKUItem[],
   settings: OzonCoverageSettings,
-  now: Date
+  now: Date,
+  offerIdToArticle?: Record<string, string>
 ): Record<string, SpeedCorrectionInfo> {
   const out: Record<string, SpeedCorrectionInfo> = {};
   const deficitDays = Number(settings.deficitDays);
@@ -665,7 +723,7 @@ export function applyDeficitSpeedCorrection(
     if (!windowSet.has(week)) continue;
     const qty = Number(row.qty) || 0;
     if (!(qty > 0)) continue;
-    const article = resolveOzonArticle(skus, row.offerId);
+    const article = resolveSalesArticle(skus, row.offerId, offerIdToArticle);
     if (!byWeek[article]) byWeek[article] = {};
     byWeek[article][week] = (byWeek[article][week] || 0) + qty;
     const cluster = String(row.clusterName || '').trim();
@@ -806,7 +864,8 @@ export function buildSalesTrend(
   now: Date,
   speed: SalesSpeedResult,
   stocks: OzonStockRow[],
-  corrections: Record<string, SpeedCorrectionInfo>
+  corrections: Record<string, SpeedCorrectionInfo>,
+  offerIdToArticle?: Record<string, string>
 ): Record<string, SalesTrend> {
   const trendWeeks = Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 13;
   const deficitDays = Number(settings.deficitDays) > 0 ? Number(settings.deficitDays) : 0;
@@ -826,9 +885,9 @@ export function buildSalesTrend(
   const window = getLastFullWeeks(now, trendWeeks).filter(w => presentWeeks.has(w));
   const windowSet = new Set(window);
 
-  // Недельный ряд по товару. Артикул определяется через resolveOzonArticle БЕЗ «ШК Ozon» —
-  // ровно так же, как в buildSalesSpeed и applyDeficitSpeedCorrection: расхождение способов
-  // связывания продаж и остатков вынесено отдельным пунктом 39 плана и здесь не лечится.
+  // Недельный ряд по товару. Пункт 39A: артикул разрешается через ту же карту offer_id,
+  // что и в buildSalesSpeed и applyDeficitSpeedCorrection, — иначе тренд считался бы по
+  // артикулу, отличному от артикула скорости, и множитель применился бы не к тому товару.
   const byWeek: Record<string, Record<string, number>> = {};
   for (const row of sales) {
     if ((Number(row.days) || 0) !== 7) continue;
@@ -836,7 +895,7 @@ export function buildSalesTrend(
     if (!windowSet.has(week)) continue;
     const qty = Number(row.qty) || 0;
     if (!(qty > 0)) continue;
-    const article = resolveOzonArticle(skus, row.offerId);
+    const article = resolveSalesArticle(skus, row.offerId, offerIdToArticle);
     if (!byWeek[article]) byWeek[article] = {};
     byWeek[article][week] = (byWeek[article][week] || 0) + qty;
   }
@@ -1039,11 +1098,14 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const now = input.now || new Date();
   const speedWeeks = input.settings.speedWeeks > 0 ? input.settings.speedWeeks : 4;
   const weeks = getLastFullWeeks(now, speedWeeks);
-  const speed = buildSalesSpeed(input.sales, input.skus, weeks);
+  // Пункт 39A. Карта строится ОДИН раз и передаётся во все три расчёта по продажам: получи
+  // они разные карты, скорость, коррекция и тренд разошлись бы между собой по артикулам.
+  const offerIdToArticle = buildOfferIdToArticle(input.stocks, input.skus);
+  const speed = buildSalesSpeed(input.sales, input.skus, weeks, offerIdToArticle);
   const stocksByArticle = buildClusterStocks(input.stocks, input.skus, input.settings.returnsToSalePct);
-  const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now);
+  const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, offerIdToArticle);
   // Пункт 38. Тренд считается ПОСЛЕ коррекции скорости: сработавшая коррекция гасит тренд.
-  const trends = buildSalesTrend(input.sales, input.skus, input.settings, now, speed, input.stocks, speedCorrections);
+  const trends = buildSalesTrend(input.sales, input.skus, input.settings, now, speed, input.stocks, speedCorrections, offerIdToArticle);
   // Прогнозная скорость = факт × тренд × (1 + прирост, %). Используется ТОЛЬКО в контуре заказа
   // на фабрике; рекомендации на поставку в кластеры Ozon считаются по фактической скорости.
   const salesGrowthK = 1 + (Number(input.settings.salesGrowthPct) || 0) / 100;
