@@ -7,10 +7,15 @@ import { parseInvoiceWithGemini } from '../lib/gemini';
 import { OzonSupplyRequestRow } from '../lib/ozonPending';
 import { toast } from 'sonner';
 
+// Пункт 40. Капитализацию здесь обнулять НЕЛЬЗЯ: у артикула с нулевым остатком она несёт
+// «долг себестоимости» — стоимость списанного брака, которая ляжет на ближайший приход.
+// Раньше это правило дублировало принудительное обнуление в Code.gs; там оно снято, и если
+// оставить его здесь, сервер будет хранить долг, а приложение — показывать ноль.
+// Средняя себестоимость при нулевом остатке действительно ноль: она не определена.
 const normalizeStock = (items: StockItem[]): StockItem[] =>
   items.map(item =>
     Number(item.quantity) <= 0
-      ? { ...item, quantity: 0, avgCost: 0, capitalization: 0, turnover: 0, sales120: 0 }
+      ? { ...item, quantity: 0, avgCost: 0, turnover: 0, sales120: 0 }
       : item
   );
 
