@@ -1681,8 +1681,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             </td>
                             <td className="py-2 pr-2 text-right">
                               <span className="font-semibold text-slate-800">{fmtInt(c.pipelineQty)}</span>
-                              <span className="block text-[10px] font-normal text-slate-400">
+                              <span
+                                className="block text-[10px] font-normal text-slate-400"
+                                title="В резерве — остаток склада, уже расписанный по созданным заявкам на поставку. В трубе он учитывается: товар никуда не делся и будет продан, он просто едет на Ozon. Но собрать из него комплекты прямо сейчас нельзя."
+                              >
                                 из комплектов {fmtInt(c.fromKitsQty)} / склад {fmtInt(c.myStockQty)} / заказано {fmtInt(c.onOrderQty)}
+                                {c.reservedQty > 0 && <> / в резерве {fmtInt(c.reservedQty)}</>}
                               </span>
                             </td>
                             <td className={`py-2 pr-2 text-right ${(Number(c.leadTimeDays) || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>

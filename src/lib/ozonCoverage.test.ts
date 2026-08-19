@@ -430,6 +430,90 @@ describe('buildOzonCoverage: компоненты виртуальных ком�
   });
 });
 
+/** Зачёт по созданным заявкам в форме, которую отдаёт buildPendingSupplies: заявки пишутся на комплект. */
+function makePending(byArticle: Record<string, number>) {
+  return { byArticleCluster: {}, byArticle };
+}
+
+describe('buildOzonCoverage: резерв заявок разворачивается в компоненты', () => {
+  it('резерв комплекта уменьшает свободный остаток каждого компонента на резерв × норму', () => {
+    // Заявка на 5 шт KIT-A: MISKA (норма 1) -> 5, BOTTLE (норма 2) -> 10.
+    const res = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-A': 5 }) }));
+    const miska = res.components.find(c => c.component === 'MISKA')!;
+    expect(miska.myStockQty).toBe(13); // сырой остаток не переопределяется
+    expect(miska.reservedQty).toBe(5);
+    expect(miska.freeMyStockQty).toBe(8);
+    const bottle = res.components.find(c => c.component === 'BOTTLE')!;
+    expect(bottle.myStockQty).toBe(40);
+    expect(bottle.reservedQty).toBe(10);
+    expect(bottle.freeMyStockQty).toBe(30);
+  });
+
+  it('canAssembleQty считается по свободному остатку', () => {
+    const res = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-A': 5 }) }));
+    // KIT-A: min(floor(8 / 1) = 8, floor(30 / 2) = 15) = 8 вместо прежних 13.
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-A')!.canAssembleQty).toBe(8);
+    // KIT-B: min(floor(30 / 1) = 30, floor(9 / 3) = 3) = 3 — узкое место PACK, резерва на него нет.
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-B')!.canAssembleQty).toBe(3);
+  });
+
+  it('резерв съел весь остаток компонента: собрать нельзя ни одного комплекта', () => {
+    // Заявка на 13 шт KIT-A забирает всю MISKA (13 × 1 = 13).
+    const res = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-A': 13 }) }));
+    expect(res.components.find(c => c.component === 'MISKA')!.freeMyStockQty).toBe(0);
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-A')!.canAssembleQty).toBe(0);
+  });
+
+  it('резерв больше остатка не даёт отрицательных чисел', () => {
+    const res = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-A': 100 }) }));
+    const miska = res.components.find(c => c.component === 'MISKA')!;
+    expect(miska.reservedQty).toBe(100);
+    expect(miska.freeMyStockQty).toBe(0);
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-A')!.canAssembleQty).toBe(0);
+  });
+
+  it('компонент в ДВУХ комплектах: резервы обоих складываются', () => {
+    // BOTTLE: KIT-A 5 × норма 2 = 10 плюс KIT-B 3 × норма 1 = 3, итого 13.
+    const res = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-A': 5, 'KIT-B': 3 }) }));
+    const bottle = res.components.find(c => c.component === 'BOTTLE')!;
+    expect(bottle.reservedQty).toBe(13);
+    expect(bottle.freeMyStockQty).toBe(27);
+  });
+
+  it('норма расхода не равна 1: резерв умножается на норму', () => {
+    // PACK входит в KIT-B с нормой 3: заявка на 2 комплекта резервирует 6 шт.
+    const res = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-B': 2 }) }));
+    const pack = res.components.find(c => c.component === 'PACK')!;
+    expect(pack.reservedQty).toBe(6);
+    expect(pack.freeMyStockQty).toBe(3);
+    // KIT-B: min(floor(BOTTLE 38 / 1) = 38, floor(3 / 3) = 1) = 1.
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-B')!.canAssembleQty).toBe(1);
+  });
+
+  it('ТРУБА и сигнал фабрики от резерва НЕ меняются', () => {
+    // Инвариант: зарезервированный товар лежит на складе и будет продан, он просто едет на Ozon.
+    // Вычесть его из трубы — посчитать одну потерю дважды и завысить заказ на фабрике.
+    const before = buildOzonCoverage(makeKitsInput());
+    const after = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-A': 5, 'KIT-B': 3 }) }));
+    for (const c of after.components) {
+      const old = before.components.find(x => x.component === c.component)!;
+      expect(c.pipelineQty).toBe(old.pipelineQty);
+      expect(c.myStockQty).toBe(old.myStockQty);
+      expect(c.factory?.orderQty ?? null).toBe(old.factory?.orderQty ?? null);
+    }
+  });
+
+  it('pending не передан: поведение прежнее, резерв нулевой', () => {
+    const res = buildOzonCoverage(makeKitsInput());
+    for (const c of res.components) {
+      expect(c.reservedQty).toBe(0);
+      expect(c.freeMyStockQty).toBe(c.myStockQty);
+    }
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-A')!.canAssembleQty).toBe(13);
+    expect(res.bottlenecks.find(b => b.kitSku === 'KIT-B')!.canAssembleQty).toBe(3);
+  });
+});
+
 // ===== Пункт 38: тренд продаж =====
 
 const TREND_NOW = new Date('2024-01-10T10:00:00Z'); // среда; последняя полная неделя — 2024-01-01

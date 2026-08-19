@@ -580,8 +580,12 @@ export interface ComponentCoverage {
   forecastPerDay: number;
   /** ТРУБА, шт: fromKitsQty + Мой склад + заказанное на фабрике по этому компоненту. */
   pipelineQty: number;
-  /** Собственный остаток компонента на Моём складе, шт. */
+  /** Собственный остаток компонента на Моём складе, шт (сырой, без вычета резервов). */
   myStockQty: number;
+  /** Зарезервировано под созданные заявки на поставку, шт: Σ по комплектам (резерв комплекта × норма). */
+  reservedQty: number;
+  /** Свободный остаток на Моём складе, шт: myStockQty − reservedQty, не меньше нуля. */
+  freeMyStockQty: number;
   /** Заказано на фабрике по самому компоненту и ещё не получено, шт. */
   onOrderQty: number;
   /** Пришло из расчётных остатков комплектов на Ozon, шт: Σ (totalEstimated комплекта × норма). */
@@ -603,7 +607,7 @@ export interface KitBottleneck {
   componentSku: string;
   /** Покрытие узкого места, дней. null — скорость расхода 0, покрытие «бесконечное». */
   daysLeft: number | null;
-  /** Сколько комплектов можно собрать прямо сейчас: min floor(остаток компонента ÷ норма). */
+  /** Сколько комплектов можно собрать прямо сейчас: min floor(СВОБОДНЫЙ остаток компонента ÷ норма). */
   canAssembleQty: number;
 }
 
@@ -962,6 +966,8 @@ export function buildSalesTrend(
  * Комплекты legacy игнорируются полностью: у них есть собственный остаток, их поведение прежнее.
  * Заказы на фабрике, оформленные на КОМПЛЕКТ, в компоненты НЕ разворачиваются: такой заказ
  * означает заказ одного конкретного компонента, а не всего состава.
+ * Заявки на поставку оформляются на КОМПЛЕКТ, а списываются с компонентов, поэтому резерв
+ * комплекта разворачивается в резерв каждого его компонента по норме расхода.
  * Функция чистая: ничего не читает из стора и не изменяет входные объекты.
  */
 export function buildComponentCoverage(
@@ -972,14 +978,17 @@ export function buildComponentCoverage(
   myStockAvailability: Record<string, number>,
   factoryOnOrder: Record<string, number>,
   settings: OzonCoverageSettings,
-  forecastPerDayByArticle?: Record<string, number>
+  forecastPerDayByArticle?: Record<string, number>,
+  // Зачёт по созданным заявкам, шт по артикулу КОМПЛЕКТА (поле byArticle из OzonPendingLike).
+  // Тип — простой Record, а не импорт модуля заявок: обратная зависимость дала бы цикл модулей.
+  pendingByArticle?: Record<string, number>
 ): { components: ComponentCoverage[]; bottlenecks: KitBottleneck[] } {
   const virtualKits = (kits || []).filter(k => k && k.type === 'virtual');
   if (!virtualKits.length) return { components: [], bottlenecks: [] };
 
   // Накопление по компоненту: скорость и запас складываются по всем комплектам, где компонент
   // участвует (случай «Бутылок» и «Пакетов» — они входят сразу в два комплекта).
-  const acc = new Map<string, { perDay: number; forecastPerDay: number; fromKitsQty: number; usedInKits: string[] }>();
+  const acc = new Map<string, { perDay: number; forecastPerDay: number; fromKitsQty: number; reservedQty: number; usedInKits: string[] }>();
 
   for (const kit of virtualKits) {
     const kitSku = String(kit.kitSku || '').trim();
@@ -992,6 +1001,8 @@ export function buildComponentCoverage(
       : kitPerDay;
     const kitStock = stocksByArticle[kitSku];
     const kitEstimated = kitStock ? kitStock.totalEstimated : 0;
+    // Заявка на поставку пишется на артикул комплекта, но забирает со склада его компоненты.
+    const kitPending = pendingByArticle ? Math.max(0, Number(pendingByArticle[kitSku]) || 0) : 0;
 
     for (const comp of kit.components || []) {
       const componentSku = String(comp.componentSku || '').trim();
@@ -1000,12 +1011,13 @@ export function buildComponentCoverage(
 
       let row = acc.get(componentSku);
       if (!row) {
-        row = { perDay: 0, forecastPerDay: 0, fromKitsQty: 0, usedInKits: [] };
+        row = { perDay: 0, forecastPerDay: 0, fromKitsQty: 0, reservedQty: 0, usedInKits: [] };
         acc.set(componentSku, row);
       }
       row.perDay += kitPerDay * norm;
       row.forecastPerDay += kitForecastPerDay * norm;
       row.fromKitsQty += kitEstimated * norm;
+      row.reservedQty += kitPending * norm;
       if (!row.usedInKits.includes(kitSku)) row.usedInKits.push(kitSku);
     }
   }
@@ -1019,6 +1031,9 @@ export function buildComponentCoverage(
     const pcsPerBox = skuItem && skuItem.pcsPerBox > 0 ? skuItem.pcsPerBox : 1;
     const leadTimeDays = skuItem ? (Number(skuItem.leadTimeDays) || 0) : 0;
     const myStockQty = Number(myStockAvailability[componentSku]) || 0;
+    const reservedQty = row.reservedQty;
+    // Свободно к сборке — только то, что ещё никому не обещано.
+    const freeMyStockQty = Math.max(0, myStockQty - reservedQty);
     const onOrderQty = Math.max(0, Number(factoryOnOrder[componentSku]) || 0);
     // Сигнал считается той же функцией, что и по обычным товарам: роль «остатка Ozon» играет
     // запас, пришедший из расчётных остатков комплектов. Дефицита кластеров у компонента нет.
@@ -1037,8 +1052,15 @@ export function buildComponentCoverage(
       component: componentSku,
       perDay: row.perDay,
       forecastPerDay: row.forecastPerDay,
+      // ТРУБА считается по СЫРОМУ остатку, резерв из неё НЕ вычитается — и это не ошибка.
+      // Зарезервированный товар физически лежит на складе и будет продан, он просто едет на Ozon.
+      // Вычесть его из трубы значило бы посчитать одну и ту же потерю дважды: сначала как нехватку
+      // на Ozon, потом как нехватку на своём складе, и заказ на фабрике вышел бы завышенным.
+      // Так же устроен сигнал фабрики на уровне комплекта: он идёт по сырому myStockAvailable.
       pipelineQty: row.fromKitsQty + Math.max(0, myStockQty) + onOrderQty,
       myStockQty,
+      reservedQty,
+      freeMyStockQty,
       onOrderQty,
       fromKitsQty: row.fromKitsQty,
       leadTimeDays,
@@ -1075,7 +1097,9 @@ export function buildComponentCoverage(
         worstDays = days;
       }
       // Собрать можно столько комплектов, на сколько хватает самого дефицитного компонента.
-      canAssembleQty = Math.min(canAssembleQty, Math.floor(Math.max(0, row.myStockQty) / norm));
+      // Здесь берётся СВОБОДНЫЙ остаток: товар, уже обещанный созданной заявкой, второй раз
+      // собрать нельзя, иначе сборка выглядит возможной там, где брать уже нечего.
+      canAssembleQty = Math.min(canAssembleQty, Math.floor(row.freeMyStockQty / norm));
     }
 
     if (!worstSku) continue;
@@ -1298,7 +1322,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     input.myStockAvailability,
     input.factoryOnOrder || {},
     input.settings,
-    forecastPerDayByArticle
+    forecastPerDayByArticle,
+    input.pending?.byArticle
   );
 
   return { speed, articles, components, bottlenecks, trends };
