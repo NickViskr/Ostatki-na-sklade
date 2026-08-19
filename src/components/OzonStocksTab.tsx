@@ -1166,8 +1166,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                       </tr>
                     </thead>
                     <tbody>
-                      {visibleRows.map((art: any) => {
+                      {visibleRows.map((art: any, rowIdx: number) => {
                         const isArtExpanded = !!expandedArticles[art.article];
+                        // Подсказки раскрываются вверх, а у первых строк сверху нет места: таблица лежит
+                        // в контейнере с прокруткой и обрезает всё, что вышло за его край. У них раскрываем вниз.
+                        const tipUp = rowIdx > 1 ? 'bottom-full mb-1.5' : 'top-full mt-1.5';
                         const factoryOrder = activeFactoryOrders[art.article] || null;
                         const factoryOverdue = !!(factoryOrder && factoryOrder.expectedAt && factoryOrder.expectedAt < todayIso);
                         // Пункт 35. Разбор заказов на фабрике для пяти состояний ячейки.
@@ -1204,10 +1207,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {isColVisible('speed') && (
                                 <td className="p-3 text-right font-semibold text-slate-800">
                                   {art.speedCorrection ? (
-                                    <span className="relative inline-flex items-center gap-1 group cursor-help">
-                                      <TrendingUp size={13} className="text-amber-500" />
-                                      <span className="text-amber-600">{fmtSpeed(art.perDay)}</span>
-                                      <span className="absolute right-0 bottom-full mb-1.5 hidden group-hover:block z-30 w-72 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl">
+                                    <span className="relative inline-flex group cursor-help">
+                                      {/* Значок читается как «тренд», хотя это другой механизм — коррекция при
+                                          распродаже. Подпись снизу убирает путаницу с колонкой «Тренд». */}
+                                      <span className="flex flex-col items-end">
+                                        <span className="inline-flex items-center gap-1">
+                                          <TrendingUp size={13} className="text-amber-500" />
+                                          <span className="text-amber-600">{fmtSpeed(art.perDay)}</span>
+                                        </span>
+                                        <span className="block text-[10px] font-normal text-slate-400">коррекция</span>
+                                      </span>
+                                      <span className={`absolute right-0 ${tipUp} hidden group-hover:block z-30 w-72 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl`}>
                                         <span className="block font-bold mb-1">Скорость скорректирована: товар был распродан</span>
                                         <span className="block">Было {fmtSpeed(art.speedCorrection.base)} шт/д, стало {fmtSpeed(art.speedCorrection.corrected)} шт/д{art.speedCorrection.base > 0 ? ` (рост в ${art.speedCorrection.factor.toFixed(2)} раза)` : ''}.</span>
                                         <span className="block mt-1">Остатка Ozon хватало на {art.speedCorrection.daysLeft.toFixed(1)} дн — меньше порога дефицита, поэтому скорость взята по лучшим неделям, а не по последним.</span>
@@ -1237,7 +1247,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                           <span className="block text-[10px] text-slate-400">{TREND_REASON_SHORT[art.trend.reason]}</span>
                                         )}
                                       </span>
-                                      <span className="absolute right-0 bottom-full mb-1.5 hidden group-hover:block z-30 w-96 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl whitespace-normal">
+                                      <span className={`absolute right-0 ${tipUp} hidden group-hover:block z-30 w-96 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl whitespace-normal`}>
                                         <span className="block font-bold mb-1">Тренд продаж</span>
                                         <span className="block">
                                           Прогноз для заказа на фабрике: {fmtSpeed(art.perDay)}{' × '}{fmtTrend(art.trend.applied)}
@@ -1600,7 +1610,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                   <span className="font-normal text-slate-400 ml-2">компонентов в расчёте: {componentRows.length}</span>
                 </div>
                 <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
-                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма ПРОГНОЗНЫХ скоростей комплектов, куда он входит (фактическая скорость комплекта × его тренд продаж), умноженная на норму расхода. Запас — расчётный остаток комплектов на Ozon, пересчитанный в компоненты, плюс собственный остаток компонента на Моём складе и заказанное на фабрике.
+                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма скоростей комплектов, куда он входит, умноженная на норму расхода: у компонента с нормой 1 она в точности равна скорости комплекта из таблицы выше. Заказ считается не по ней, а по прогнозной скорости (факт × тренд продаж комплекта) — она показана второй строкой, когда отличается от факта. Запас — расчётный остаток комплектов на Ozon, пересчитанный в компоненты, плюс собственный остаток компонента на Моём складе и заказанное на фабрике.
                 </div>
                 <div className="overflow-auto">
                   <table className="w-full text-left text-[11px] border-collapse" id="ozon-components-table">
@@ -1643,14 +1653,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 ({c.usedInKits.join(', ')})
                               </span>
                             </td>
+                            {/* Крупно — ФАКТИЧЕСКИЙ расход: это та же величина, что скорость комплекта в
+                                таблице выше (норма расхода на комплект), и расходиться с ней она не может.
+                                Прогноз — производная от неё, поэтому идёт второй строкой. */}
                             <td className="py-2 pr-2 text-right font-semibold text-slate-800">
-                              {fmtSpeed(c.forecastPerDay)}
+                              {fmtSpeed(c.perDay)}
                               {Math.abs(c.forecastPerDay - c.perDay) > 0.005 && (
                                 <span
-                                  className="block text-[10px] text-slate-400"
+                                  className="block text-[10px] font-normal text-slate-400"
                                   title="Заказ на фабрике считается по прогнозной скорости: фактическая скорость комплектов умножена на их тренд продаж. Рекомендации на поставку в кластеры считаются по фактической."
                                 >
-                                  факт {fmtSpeed(c.perDay)}
+                                  прогноз {fmtSpeed(c.forecastPerDay)}
                                 </span>
                               )}
                             </td>
