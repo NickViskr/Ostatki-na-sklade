@@ -194,7 +194,11 @@ export const Dashboard: React.FC = React.memo(() => {
 
   useEffect(() => {
     if (!isAdmin) return;
-    const timer = setTimeout(() => {
+    // Item 26 (2026-08-20): the Ozon block used to be delayed by 1200 ms. The delay arrived with
+    // the alerts feature and was never explained; measurement showed it simply postponed the
+    // LONGEST request on the page, so the whole start-up finished 1.2 s later than it had to.
+    // It now starts immediately, together with the rest.
+    {
       // Item 26 stage A1 (2026-08-20): Ozon stocks, sales, factory orders, settings and cluster
       // references now arrive in ONE composite call instead of five. Each round trip to Apps Script
       // costs 2-4 s no matter how little it carries, so the old wave was as slow as its slowest
@@ -230,8 +234,7 @@ export const Dashboard: React.FC = React.memo(() => {
           })).filter((item: any) => Boolean(item.clusterId)));
         }
       }).catch((err: any) => console.error('getOzonInitialData error:', err));
-    }, 1200);
-    return () => clearTimeout(timer);
+    }
   }, [isAdmin, fetchOzonInitialData, fetchLastPurchasePrices]);
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».

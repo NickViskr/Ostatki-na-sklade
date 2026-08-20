@@ -277,7 +277,17 @@ async function startServer() {
   // Любое пишущее действие по-прежнему сбрасывает весь кэш целиком,
   // поэтому длинные сроки не могут показать устаревшие данные.
   const CACHE_TTL_REFERENCE_MS = 10 * 60 * 1000; // справочники, 10 минут
-  const CACHE_TTL_OZON_MS = 5 * 60 * 1000;       // данные Ozon, 5 минут
+  // Item 26 (2026-08-20): raised from 5 to 60 minutes. Measurement showed the whole start-up
+  // is one request — getOzonSales takes 9-13 s because it reads the entire «Продажи Ozon»
+  // sheet, of which 57% are archive rows the date window always discards. Served from cache
+  // the same call takes 250 ms, so keeping the cache alive is worth far more than bundling
+  // calls together. STALENESS TRADE-OFF, stated plainly: the twice-daily sync trigger runs
+  // INSIDE Apps Script and never passes through this proxy, so it cannot invalidate this
+  // cache — after a sync the app may show data up to one hour old. Three things keep that
+  // acceptable: the screen always shows the data's own «Обновлено» timestamp, any write
+  // action through the proxy clears the cache, and with max-instances=1 an idle night scales
+  // the container to zero, so the first visit of the day starts from an empty cache anyway.
+  const CACHE_TTL_OZON_MS = 60 * 60 * 1000;     // данные Ozon, 60 минут
   const CACHE_TTL_OPERATIONAL_MS = 30_000;       // оперативные данные, 30 секунд
 
   function getCacheTtlMs(action: string): number {
