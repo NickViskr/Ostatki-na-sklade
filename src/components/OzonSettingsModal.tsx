@@ -53,6 +53,7 @@ const FieldHint: React.FC<{ text: string; position?: 'top' | 'bottom' }> = ({ te
 
 export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
+  const fetchOzonInitialData = useWarehouseStore((state) => state.fetchOzonInitialData);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
   const sessionToken = useWarehouseStore((state) => state.sessionToken);
   const devMode = useWarehouseStore((state) => state.devMode);
@@ -303,6 +304,11 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
       const res = await fetchGas('saveOzonSettings', { data: payload });
       if (res?.status === 'success') {
         toast.success('Настройки Ozon сохранены');
+        // Item 26 stage A2: settings now live in the store and are no longer re-fetched when the
+        // «Остатки Озон» tab mounts, so the saved values have to be pulled back explicitly —
+        // otherwise the screen would keep calculating on the old ones until a full page reload.
+        // The proxy drops its cached copy on saveOzonSettings, so this re-read returns fresh data.
+        await fetchOzonInitialData();
         onClose();
       } else {
         toast.error(res?.message || 'Ошибка сохранения настроек Ozon');

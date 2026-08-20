@@ -25,7 +25,7 @@ import { DashSettingsModal } from './DashSettingsModal';
 import { formatCurrency, calcCostDebt, hasCostDebt } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonAlert } from '../lib/ozonAlerts';
-import { buildOzonCoverage, resolveOzonArticle, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult } from '../lib/ozonCoverage';
+import { buildOzonCoverage, resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 
 // Колонки таблицы остатков, которые можно скрывать. «Артикул» скрыть нельзя — это опора строки.
@@ -40,14 +40,6 @@ const DASH_TOGGLEABLE_COLS: { key: string; label: string }[] = [
 
 // По умолчанию скрыт учётный остаток: пользователю важнее свободный остаток за вычетом резерва.
 const DASH_DEFAULT_HIDDEN_COLS = ['quantity'];
-
-// Чтение числовой настройки Ozon с сервера. Не использовать `Number(value) || fallback` —
-// ноль является законным значением настройки, а `||` считает его ложью и подменяет умолчанием.
-const numSetting = (value: unknown, fallback: number): number => {
-  if (value === undefined || value === null || value === '') return fallback;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-};
 
 export const Dashboard: React.FC = React.memo(() => {
   const stock = useWarehouseStore((state) => state.stock);
@@ -162,22 +154,10 @@ export const Dashboard: React.FC = React.memo(() => {
     }
   });
 
-  const [ozonSettings, setOzonSettings] = useState<OzonCoverageSettings>({
-    speedWeeks: 4,
-    minStockDays: 7,
-    targetStockDays: 30,
-    factoryOrderDays: 60,
-    returnsToSalePct: 80,
-    excludedClusters: '',
-    priorityClusters: '',
-    deficitDays: 7,
-    trendWeeks: 13,
-    bestWeeks: 4,
-    minSalesForCorrection: 50,
-    maxSpeedGrowth: 5,
-    salesGrowthPct: 0,
-  });
-  const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
+  // Item 26 stage A2: настройки и справочник кластеров живут в хранилище — их приносит
+  // один составной вызов, и вкладка «Остатки Озон» использует те же данные, а не запрашивает свои.
+  const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
+  const clusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
 
   const [isAlertsCollapsed, setIsAlertsCollapsed] = useState(false);
 
@@ -194,47 +174,18 @@ export const Dashboard: React.FC = React.memo(() => {
 
   useEffect(() => {
     if (!isAdmin) return;
-    // Item 26 (2026-08-20): the Ozon block used to be delayed by 1200 ms. The delay arrived with
-    // the alerts feature and was never explained; measurement showed it simply postponed the
-    // LONGEST request on the page, so the whole start-up finished 1.2 s later than it had to.
-    // It now starts immediately, together with the rest.
-    {
-      // Item 26 stage A1 (2026-08-20): Ozon stocks, sales, factory orders, settings and cluster
-      // references now arrive in ONE composite call instead of five. Each round trip to Apps Script
-      // costs 2-4 s no matter how little it carries, so the old wave was as slow as its slowest
-      // member. getLastPurchasePrices stays separate on purpose: it still goes through the switch
-      // and takes the global lock, and folding it in would have changed that silently.
-      fetchLastPurchasePrices();
-      fetchOzonInitialData().then((res: any) => {
-        if (res?.settings) {
-          setOzonSettings({
-            // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-            speedWeeks: Math.max(1, numSetting(res.settings.speedWeeks, 4)),
-            minStockDays: numSetting(res.settings.minStockDays, 7),
-            targetStockDays: numSetting(res.settings.targetStockDays, 30),
-            maxClusterDays: numSetting(res.settings.maxClusterDays, 100),
-            factoryOrderDays: numSetting(res.settings.factoryOrderDays, 60),
-            returnsToSalePct: numSetting(res.settings.returnsToSalePct, 80),
-            excludedClusters: String(res.settings.excludedClusters || ''),
-            priorityClusters: String(res.settings.priorityClusters || ''),
-            deficitDays: numSetting(res.settings.deficitDays, 7),
-            // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-            trendWeeks: Math.max(1, numSetting(res.settings.trendWeeks, 13)),
-            // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-            bestWeeks: Math.max(1, numSetting(res.settings.bestWeeks, 4)),
-            minSalesForCorrection: numSetting(res.settings.minSalesForCorrection, 50),
-            maxSpeedGrowth: numSetting(res.settings.maxSpeedGrowth, 5),
-            salesGrowthPct: numSetting(res.settings.salesGrowthPct, 0),
-          });
-        }
-        if (Array.isArray(res?.clusters)) {
-          setClusterRefs(res.clusters.map((item: any) => ({
-            clusterId: String(item.clusterId || '').trim(),
-            clusterName: String(item.clusterName || '').trim(),
-          })).filter((item: any) => Boolean(item.clusterId)));
-        }
-      }).catch((err: any) => console.error('getOzonInitialData error:', err));
-    }
+    // Item 26 (2026-08-20): this block used to be delayed by 1200 ms. The delay arrived with the
+    // alerts feature and was never explained; measurement showed it simply postponed the LONGEST
+    // request on the page. It now starts immediately.
+    // Item 26 stage A1 (2026-08-20): Ozon stocks, sales, factory orders, settings and cluster
+    // references arrive in ONE composite call instead of five. Each round trip to Apps Script costs
+    // seconds no matter how little it carries, so the old wave was as slow as its slowest member.
+    // Stage A2: the call now unpacks everything straight into the store, so this screen and the
+    // «Остатки Озон» tab share one copy instead of fetching the same settings and clusters twice.
+    // getLastPurchasePrices stays separate on purpose: it goes through the switch and takes the
+    // global lock, and folding it in would have changed that silently.
+    fetchLastPurchasePrices();
+    fetchOzonInitialData();
   }, [isAdmin, fetchOzonInitialData, fetchLastPurchasePrices]);
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».

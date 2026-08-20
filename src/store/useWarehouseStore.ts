@@ -5,6 +5,7 @@ import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
 import { OzonSupplyRequestRow } from '../lib/ozonPending';
+import { OzonCoverageSettings, OzonClusterRef } from '../lib/ozonCoverage';
 import { toast } from 'sonner';
 
 // Пункт 40. Капитализацию здесь обнулять НЕЛЬЗЯ: у артикула с нулевым остатком она несёт
@@ -119,9 +120,18 @@ interface WarehouseState {
   runOzonSyncNow: () => Promise<void>;
   ozonStocks: OzonStockRow[];
   ozonStocksSyncIssues: { name: string; message: string }[];
-  /** Item 26 stage A1: one composite read replacing five separate start-up calls.
-   *  Resolves to the raw payload so the caller can apply the parts the store does not own. */
-  fetchOzonInitialData: () => Promise<{ settings?: any; clusters?: any[] } | null>;
+  /** Item 26 stage A1: one composite read replacing five separate start-up calls. */
+  fetchOzonInitialData: () => Promise<boolean>;
+  // Item 26 stage A2: Ozon settings and the cluster reference book used to live in the local state
+  // of BOTH the dashboard and the «Остатки Озон» tab, and each of them fetched its own copy — the
+  // same two reads twice per session. They live here now and are filled by the composite call.
+  ozonSettings: OzonCoverageSettings;
+  ozonSupplySettings: { maxBoxesPerCluster: number; dropOffWarehouseId: string; dropOffWarehouseName: string; dropOffWarehouseType: string };
+  ozonClusterRefs: OzonClusterRef[];
+  /** Сырые кластеры со служебным флагом «Уведомлён» — для сообщения о новых кластерах (пункт 29, этап D). */
+  ozonClustersRaw: any[];
+  /** Ответ по справочникам получен — успешно или с ошибкой. До этого расчёт покрытия не запускается. */
+  ozonRefsLoaded: boolean;
   fetchOzonStocks: () => Promise<void>;
   runOzonStocksSync: () => Promise<void>;
   ozonSales: OzonSalesRow[];
@@ -168,6 +178,25 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonSales: [],
   ozonSupplyRequests: [],
   factoryOrders: [],
+  ozonSettings: {
+    speedWeeks: 4,
+    minStockDays: 7,
+    targetStockDays: 30,
+    factoryOrderDays: 60,
+    returnsToSalePct: 80,
+    excludedClusters: '',
+    priorityClusters: '',
+    deficitDays: 7,
+    trendWeeks: 13,
+    bestWeeks: 4,
+    minSalesForCorrection: 50,
+    maxSpeedGrowth: 5,
+    salesGrowthPct: 0,
+  },
+  ozonSupplySettings: { maxBoxesPerCluster: 30, dropOffWarehouseId: '', dropOffWarehouseName: '', dropOffWarehouseType: '' },
+  ozonClusterRefs: [],
+  ozonClustersRaw: [],
+  ozonRefsLoaded: false,
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -1529,21 +1558,74 @@ export const useWarehouseStore = create<WarehouseState>()(
   // Ozon stocks, sales and factory orders are stored here; settings and cluster references are
   // owned by the components, so they are handed back to the caller instead.
   fetchOzonInitialData: async () => {
-    if (!get().sessionToken) return null;
+    if (!get().sessionToken) return false;
+    // Настройки приходят как строки из листа «ключ — значение»: пустая ячейка не должна
+    // превращаться в ноль, поэтому недостающее значение заменяется значением по умолчанию.
+    const num = (v: any, def: number): number => {
+      if (v === '' || v === null || v === undefined) return def;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : def;
+    };
     try {
       const result = await get().fetchGas('getOzonInitialData', { data: {} });
-      if (result.status === 'success' && result.data) {
-        const d = result.data;
-        if (Array.isArray(d.stocks)) set({ ozonStocks: d.stocks });
-        if (Array.isArray(d.sales)) set({ ozonSales: d.sales });
-        if (Array.isArray(d.factoryOrders)) set({ factoryOrders: d.factoryOrders });
-        return { settings: d.settings, clusters: Array.isArray(d.clusters) ? d.clusters : [] };
+      if (result.status !== 'success' || !result.data) {
+        console.error('getOzonInitialData failed:', result.message);
+        set({ ozonRefsLoaded: true });
+        return false;
       }
-      console.error('getOzonInitialData failed:', result.message);
-      return null;
+      const d = result.data;
+      if (Array.isArray(d.stocks)) set({ ozonStocks: d.stocks });
+      if (Array.isArray(d.sales)) set({ ozonSales: d.sales });
+      if (Array.isArray(d.factoryOrders)) set({ factoryOrders: d.factoryOrders });
+
+      if (d.settings) {
+        const s = d.settings;
+        set({
+          ozonSettings: {
+            // Счётчик недель, ноль бессмысленен — нижняя граница 1.
+            speedWeeks: Math.max(1, num(s.speedWeeks, 4)),
+            minStockDays: num(s.minStockDays, 7),
+            targetStockDays: num(s.targetStockDays, 30),
+            maxClusterDays: num(s.maxClusterDays, 100),
+            factoryOrderDays: num(s.factoryOrderDays, 60),
+            returnsToSalePct: num(s.returnsToSalePct, 80),
+            excludedClusters: String(s.excludedClusters || ''),
+            priorityClusters: String(s.priorityClusters || ''),
+            deficitDays: num(s.deficitDays, 7),
+            // Счётчик недель, ноль бессмысленен — нижняя граница 1.
+            trendWeeks: Math.max(1, num(s.trendWeeks, 13)),
+            // Счётчик недель, ноль бессмысленен — нижняя граница 1.
+            bestWeeks: Math.max(1, num(s.bestWeeks, 4)),
+            minSalesForCorrection: num(s.minSalesForCorrection, 50),
+            maxSpeedGrowth: num(s.maxSpeedGrowth, 5),
+            salesGrowthPct: num(s.salesGrowthPct, 0),
+          },
+          ozonSupplySettings: {
+            // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.
+            maxBoxesPerCluster: Math.max(1, num(s.maxBoxesPerCluster, 30)),
+            dropOffWarehouseId: String(s.dropOffWarehouseId || ''),
+            dropOffWarehouseName: String(s.dropOffWarehouseName || ''),
+            dropOffWarehouseType: String(s.dropOffWarehouseType || ''),
+          },
+        });
+      }
+
+      const clusters = Array.isArray(d.clusters) ? d.clusters : [];
+      set({
+        ozonClustersRaw: clusters,
+        ozonClusterRefs: clusters
+          .map((item: any) => ({
+            clusterId: String(item.clusterId || '').trim(),
+            clusterName: String(item.clusterName || '').trim(),
+          }))
+          .filter((item: any) => Boolean(item.clusterId)),
+        ozonRefsLoaded: true,
+      });
+      return true;
     } catch (e) {
       console.error('getOzonInitialData error:', e);
-      return null;
+      set({ ozonRefsLoaded: true });
+      return false;
     }
   },
 

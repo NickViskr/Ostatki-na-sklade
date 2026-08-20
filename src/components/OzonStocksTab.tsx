@@ -6,7 +6,7 @@ import { OzonStockRow, FactoryOrder } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
-import { buildOzonCoverage, OzonCoverageSettings, OzonClusterRef, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
+import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
 
@@ -34,14 +34,6 @@ const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
 ];
 
 const OZON_DEFAULT_HIDDEN_COLS = ['preparing', 'requested', 'excess', 'other'];
-
-// Чтение числовой настройки Ozon с сервера. Не использовать `Number(value) || fallback` —
-// ноль является законным значением настройки, а `||` считает его ложью и подменяет умолчанием.
-const numSetting = (value: unknown, fallback: number): number => {
-  if (value === undefined || value === null || value === '') return fallback;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-};
 
 const ColHint: React.FC<{ text: string }> = ({ text }) => (
   <span className="relative inline-flex group align-middle ml-1">
@@ -81,33 +73,18 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [showSettings, setShowSettings] = useState(false);
   const [expandedArticles, setExpandedArticles] = useState<Record<string, boolean>>({});
   const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
-  const [ozonSettings, setOzonSettings] = useState<OzonCoverageSettings>({
-    speedWeeks: 4,
-    minStockDays: 7,
-    targetStockDays: 30,
-    factoryOrderDays: 60,
-    returnsToSalePct: 80,
-    excludedClusters: '',
-    priorityClusters: '',
-    deficitDays: 7,
-    trendWeeks: 13,
-    bestWeeks: 4,
-    minSalesForCorrection: 50,
-    maxSpeedGrowth: 5,
-    salesGrowthPct: 0,
-  });
-  const [clusterRefs, setClusterRefs] = useState<OzonClusterRef[]>([]);
+  // Item 26 stage A2 (2026-08-20): настройки, справочник кластеров и признак их загрузки
+  // берутся из хранилища. Раньше эта вкладка запрашивала getOzonSettings и getOzonClusters
+  // заново, хотя главная страница уже получила ровно эти данные составным вызовом.
+  const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
+  const supplySettings = useWarehouseStore((state) => state.ozonSupplySettings);
+  const clusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
+  const clustersRaw = useWarehouseStore((state) => state.ozonClustersRaw);
+  const clusterRefsLoaded = useWarehouseStore((state) => state.ozonRefsLoaded);
   // Пункт 29, этап E: признак того, что ответ на запрос справочника
   // кластеров получен — успешно или с ошибкой, неважно. Пока ответа нет,
   // расчёт покрытия не запускается, иначе таблица рисуется без названий
   // кластеров и потом переписывается.
-  const [clusterRefsLoaded, setClusterRefsLoaded] = useState(false);
-  const [supplySettings, setSupplySettings] = useState({
-    maxBoxesPerCluster: 30,
-    dropOffWarehouseId: '',
-    dropOffWarehouseName: '',
-    dropOffWarehouseType: '',
-  });
   const [selectedSupply, setSelectedSupply] = useState<Record<string, boolean>>({});
   const [supplySummaryOpen, setSupplySummaryOpen] = useState(false);
 
@@ -173,67 +150,25 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     }
   }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchLastPurchasePrices, fetchExternalShipments, fetchOzonSupplyRequests]);
 
+  // Пункт 29, этап D: сообщение о новых кластерах Ozon.
+  // Item 26 stage A2: справочник больше не запрашивается здесь — он уже в хранилище,
+  // принесённый составным вызовом. Осталась только сама проверка флага «Уведомлён».
   useEffect(() => {
     if (!isAdmin) return;
-    fetchGas('getOzonSettings').then((res) => {
-      if (res?.status === 'success' && res.data) {
-        setOzonSettings({
-          // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-          speedWeeks: Math.max(1, numSetting(res.data.speedWeeks, 4)),
-          minStockDays: numSetting(res.data.minStockDays, 7),
-          targetStockDays: numSetting(res.data.targetStockDays, 30),
-          maxClusterDays: numSetting(res.data.maxClusterDays, 100),
-          factoryOrderDays: numSetting(res.data.factoryOrderDays, 60),
-          returnsToSalePct: numSetting(res.data.returnsToSalePct, 80),
-          excludedClusters: String(res.data.excludedClusters || ''),
-          priorityClusters: String(res.data.priorityClusters || ''),
-          deficitDays: numSetting(res.data.deficitDays, 7),
-          // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-          trendWeeks: Math.max(1, numSetting(res.data.trendWeeks, 13)),
-          // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-          bestWeeks: Math.max(1, numSetting(res.data.bestWeeks, 4)),
-          minSalesForCorrection: numSetting(res.data.minSalesForCorrection, 50),
-          maxSpeedGrowth: numSetting(res.data.maxSpeedGrowth, 5),
-          salesGrowthPct: numSetting(res.data.salesGrowthPct, 0),
-        });
-        setSupplySettings({
-          // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.
-          maxBoxesPerCluster: Math.max(1, numSetting(res.data.maxBoxesPerCluster, 30)),
-          dropOffWarehouseId: String(res.data.dropOffWarehouseId || ''),
-          dropOffWarehouseName: String(res.data.dropOffWarehouseName || ''),
-          dropOffWarehouseType: String(res.data.dropOffWarehouseType || ''),
-        });
-      }
-    }).catch((err) => console.error('getOzonSettings error:', err));
-    fetchGas('getOzonClusters').then((res) => {
-      if (res?.status === 'success' && Array.isArray(res.data)) {
-        setClusterRefs(res.data.map((item: any) => ({
-          clusterId: String(item.clusterId || '').trim(),
-          clusterName: String(item.clusterName || '').trim(),
-        })).filter((item: any) => Boolean(item.clusterId)));
-
-        // Пункт 29, этап D: проверка новых кластеров использует уже
-        // полученный ответ, второй запрос к Apps Script не делается.
-        if (!notifyCheckDone.current) {
-          notifyCheckDone.current = true;
-          const unnotified = res.data.filter((item: any) => item.notified === false);
-          if (unnotified.length > 0) {
-            const names = unnotified
-              .map((item: any) => {
-                const cid = String(item.clusterId || '').trim();
-                const cname = String(item.clusterName || '').trim();
-                return cname || `Кластер ${cid}`;
-              })
-              .join(', ');
-
-            toast.info(`Новые кластеры Ozon: ${names}`, { duration: 10000 });
-            fetchGas('markOzonClustersNotified').catch((err) => console.error('markOzonClustersNotified error:', err));
-          }
-        }
-      }
-    }).catch((err) => console.error('getOzonClusters error:', err))
-      .finally(() => setClusterRefsLoaded(true));
-  }, [isAdmin, fetchGas]);
+    if (!clusterRefsLoaded || notifyCheckDone.current) return;
+    notifyCheckDone.current = true;
+    const unnotified = clustersRaw.filter((item: any) => item.notified === false);
+    if (unnotified.length === 0) return;
+    const names = unnotified
+      .map((item: any) => {
+        const cid = String(item.clusterId || '').trim();
+        const cname = String(item.clusterName || '').trim();
+        return cname || `Кластер ${cid}`;
+      })
+      .join(', ');
+    toast.info(`Новые кластеры Ozon: ${names}`, { duration: 10000 });
+    fetchGas('markOzonClustersNotified').catch((err) => console.error('markOzonClustersNotified error:', err));
+  }, [isAdmin, clusterRefsLoaded, clustersRaw, fetchGas]);
 
   useEffect(() => {
     if (!showColsMenu) return;
