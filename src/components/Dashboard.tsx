@@ -23,7 +23,7 @@ import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { DashSettingsModal } from './DashSettingsModal';
 import { formatCurrency, calcCostDebt, hasCostDebt } from '../lib/utils';
-import { STATUS_FUNNEL_ORDER, getStatusDetails } from '../lib/ozonStatus';
+import { STATUS_FUNNEL_ORDER, getStatusDetails, isFunnelVisibleStatus } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonAlert } from '../lib/ozonAlerts';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
@@ -315,8 +315,11 @@ export const Dashboard: React.FC = React.memo(() => {
       return null;
     }
 
-    // Только актуальные поставки (внутренний статус new) — как на вкладке Ozon по умолчанию
-    const actualShipments = externalShipments.filter((s) => s.status === 'new');
+    // Только актуальные поставки (внутренний статус new) — как на вкладке Ozon по умолчанию.
+    // Item 44: dead and finished supplies are dropped as well, see isFunnelVisibleStatus.
+    const actualShipments = externalShipments.filter(
+      (s) => s.status === 'new' && isFunnelVisibleStatus(s.ozonStatus)
+    );
     if (actualShipments.length === 0) {
       return null;
     }
@@ -826,9 +829,7 @@ export const Dashboard: React.FC = React.memo(() => {
                   <div
                     key={card.status}
                     onClick={() => setActiveTab('ozon')}
-                    className={`bg-white p-4 rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-sm cursor-pointer transition-all flex flex-col gap-2 min-w-[150px] ${
-                      ['COMPLETED', 'CANCELLED'].includes(card.status) ? 'opacity-60' : ''
-                    }`}
+                    className="bg-white p-4 rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-sm cursor-pointer transition-all flex flex-col gap-2 min-w-[150px]"
                   >
                     <div className="flex items-center">
                       <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold tracking-wide truncate ${card.badgeClass}`}>
@@ -843,7 +844,7 @@ export const Dashboard: React.FC = React.memo(() => {
               </div>
               
               <p className="text-xs text-slate-400 font-medium">
-                {funnelData.totalShipments} поставок в {funnelData.totalOrders} заявках
+                {funnelData.totalShipments} активных поставок в {funnelData.totalOrders} заявках
                 {funnelData.lastUpdatedStr && ` · статусы обновлены ${funnelData.lastUpdatedStr}`}
               </p>
             </>

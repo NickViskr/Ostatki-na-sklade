@@ -104,9 +104,33 @@ interface UIState {
   askConfirmation: (title: string, message: React.ReactNode, onConfirm: () => void) => void;
 }
 
+// Item 54. The collapsed sidebar is a workspace preference, so it must survive a reload.
+// Only this single flag is persisted: the rest of the UI store holds transient state
+// (open modals, parsed upload rows) that must start clean on every visit.
+const SIDEBAR_COLLAPSED_KEY = 'sidebarCollapsed';
+
+const readSidebarCollapsed = (): boolean => {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+
+const writeSidebarCollapsed = (collapsed: boolean) => {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+  } catch {
+    // Private mode or a full quota: the sidebar still works, it just forgets the choice.
+  }
+};
+
 export const useUIStore = create<UIState>((set) => ({
-  isSidebarCollapsed: false,
-  setIsSidebarCollapsed: (isSidebarCollapsed) => set({ isSidebarCollapsed }),
+  isSidebarCollapsed: readSidebarCollapsed(),
+  setIsSidebarCollapsed: (isSidebarCollapsed) => {
+    writeSidebarCollapsed(isSidebarCollapsed);
+    set({ isSidebarCollapsed });
+  },
   activeTab: 'dashboard',
   setActiveTab: (activeTab) => set({ activeTab }),
 

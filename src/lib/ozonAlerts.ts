@@ -250,7 +250,16 @@ export function buildCoverageAlerts(
         (cls.recommendation.boxes > 0 || cls.unmetQty > 0)
       );
 
-      if (selectedClusters.length > 0) {
+      // Item 55. Пока на своём складе нет свободного остатка, звать на поставку не за что:
+      // recommendation.boxes считается из freeMyStock, поэтому boxes > 0 хотя бы по одному
+      // кластеру и означает «есть что отгрузить». Потребность при этом не теряется — тот же
+      // дефицит уходит в calcFactorySignal и поднимает алерт «Пора заказать на фабрике».
+      // Как только остаток появится, распределение по кластерам посчитается и алерт вернётся.
+      const hasShippableCluster = selectedClusters.some(
+        cls => cls.recommendation !== null && cls.recommendation.boxes > 0
+      );
+
+      if (selectedClusters.length > 0 && hasShippableCluster) {
         let totalQty = 0;
         let totalUnmet = 0;
 

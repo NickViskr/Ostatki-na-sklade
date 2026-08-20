@@ -39,6 +39,21 @@ export const STATUS_FUNNEL_ORDER = [
   'CANCELLED'
 ];
 
+// Item 44. Statuses hidden from the dashboard funnel. The funnel answers one question —
+// what is on its way right now — so a supply drops out once it is dead (CANCELLED),
+// fully accepted at every warehouse (COMPLETED) or still an unsent draft (DATA_FILLING).
+// Problem statuses (OVERDUE, REJECTED_AT_SUPPLY_WAREHOUSE, REPORT_REJECTED) stay: they are
+// unfinished and need action. A deny-list is used on purpose — a status Ozon adds later
+// shows up in the funnel instead of silently disappearing.
+export const FUNNEL_HIDDEN_STATUSES = [
+  'CANCELLED',
+  'COMPLETED',
+  'DATA_FILLING'
+];
+
+export const isFunnelVisibleStatus = (ozonStatus?: string): boolean =>
+  !FUNNEL_HIDDEN_STATUSES.includes(String(ozonStatus || 'DATA_FILLING').toUpperCase().trim());
+
 export const STOCK_DEPARTED_STATUSES = [
   'ACCEPTED_AT_SUPPLY_WAREHOUSE',
   'IN_TRANSIT',

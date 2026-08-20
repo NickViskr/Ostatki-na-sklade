@@ -126,7 +126,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   return (
     <aside className={`
       ${isSidebarCollapsed ? 'md:w-20' : 'md:w-72'} 
-      fixed bottom-0 left-0 right-0 w-full z-50 md:relative md:w-auto md:z-auto
+      fixed bottom-0 left-0 right-0 w-full z-50 md:relative md:z-auto
       bg-white border-t md:border-t-0 md:border-r border-slate-200 
       flex flex-row md:flex-col md:h-screen transition-all duration-300 md:sticky top-0
     `}>
