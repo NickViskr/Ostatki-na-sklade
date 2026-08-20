@@ -392,18 +392,11 @@ export const ConfirmModal: React.FC = () => {
     hasPrefilledRef.current = true;
   }, [parsedItems, skus, services, opType, boxesPerPalletGlobal]);
 
-  if (!parsedItems) return null;
-
-  // Приход с нулевой себестоимостью запрещён: количество выросло бы, а капитализация нет,
-  // из-за чего средняя себестоимость артикула обрушилась бы. Проверяется базовая цена,
-  // введённая пользователем; надбавка за услуги считается поверх неё и на проверку не влияет.
-  const zeroPriceIndexes =
-    opType === "Приход"
-      ? parsedItems
-          .map((item, idx) => (Number(item.price) > 0 ? -1 : idx))
-          .filter((idx) => idx !== -1)
-      : [];
-
+  // These hooks used to sit BELOW the early return «if (!parsedItems) return null».
+  // It never surfaced while the window mounts with data already in place, but the moment
+  // parsedItems went null on a live window React would see a different number of hooks
+  // between renders and the page would go blank until a reload. That is exactly how the
+  // Ozon supply window broke on 20.08.2026. See rule 11.11 in the technical brief.
   const [commitError, setCommitError] = useState<string | null>(null);
   const [isCheckingResult, setIsCheckingResult] = useState<boolean>(false);
   // Пункт 28, этап D. Через 20 секунд ожидания показываем, что операция ещё идёт.
@@ -417,6 +410,18 @@ export const ConfirmModal: React.FC = () => {
     const slowTimer = setTimeout(() => setIsSlowRunning(true), 20000);
     return () => clearTimeout(slowTimer);
   }, [isProcessing]);
+
+  if (!parsedItems) return null;
+
+  // Приход с нулевой себестоимостью запрещён: количество выросло бы, а капитализация нет,
+  // из-за чего средняя себестоимость артикула обрушилась бы. Проверяется базовая цена,
+  // введённая пользователем; надбавка за услуги считается поверх неё и на проверку не влияет.
+  const zeroPriceIndexes =
+    opType === "Приход"
+      ? parsedItems
+          .map((item, idx) => (Number(item.price) > 0 ? -1 : idx))
+          .filter((idx) => idx !== -1)
+      : [];
 
   const isConfirmDisabled =
     isProcessing ||

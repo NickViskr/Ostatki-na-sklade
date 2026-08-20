@@ -259,6 +259,36 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       exceptKey
     );
 
+  /* ---- Item 45. Adding a cluster or an article by hand ----------------------------
+   * These two live ABOVE the early return on purpose. Hooks must run in the same order on
+   * every render; when they sat below it, opening the window ran two useMemo calls that the
+   * closed render had not, React threw «Rendered more hooks than during the previous
+   * render» and the whole page went blank until a reload. See rule 11.11 in the brief.
+   */
+
+  /** Clusters offered in the picker: the whole reference list, current ones first. */
+  const clusterOptions = useMemo(() => {
+    const used = new Set(activeRows.map((r) => r.clusterId));
+    const refs = (ozonClusterRefs || []).filter((c) => c.clusterId);
+    return [...refs].sort((a, b) => {
+      const ua = used.has(a.clusterId) ? 0 : 1;
+      const ub = used.has(b.clusterId) ? 0 : 1;
+      if (ua !== ub) return ua - ub;
+      return a.clusterName.localeCompare(b.clusterName, 'ru');
+    });
+  }, [ozonClusterRefs, activeRows]);
+
+  /** Articles that can still be put into the chosen cluster: an Ozon SKU is required,
+   *  otherwise the line cannot be sent at all, and the pair must not already be in the
+   *  supply — rowKey is article|||clusterId and a duplicate would collide. */
+  const articleOptions = useMemo(() => {
+    if (!addForm.clusterId) return [];
+    const taken = new Set(allRows.filter((r) => r.clusterId === addForm.clusterId).map((r) => r.article));
+    return (stockOptions || [])
+      .filter((o) => skuMap[o.article] && !taken.has(o.article))
+      .sort((a, b) => a.article.localeCompare(b.article, 'ru'));
+  }, [addForm.clusterId, stockOptions, skuMap, allRows]);
+
   if (!isOpen) return null;
 
   const markDirty = () => {
@@ -293,31 +323,6 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     setRemovedRows(next);
     markDirty();
   };
-
-  /* ---- Item 45. Adding a cluster or an article by hand ---------------------------- */
-
-  /** Clusters offered in the picker: the whole reference list, current ones first. */
-  const clusterOptions = useMemo(() => {
-    const used = new Set(activeRows.map((r) => r.clusterId));
-    const refs = (ozonClusterRefs || []).filter((c) => c.clusterId);
-    return [...refs].sort((a, b) => {
-      const ua = used.has(a.clusterId) ? 0 : 1;
-      const ub = used.has(b.clusterId) ? 0 : 1;
-      if (ua !== ub) return ua - ub;
-      return a.clusterName.localeCompare(b.clusterName, 'ru');
-    });
-  }, [ozonClusterRefs, activeRows]);
-
-  /** Articles that can still be put into the chosen cluster: an Ozon SKU is required,
-   *  otherwise the line cannot be sent at all, and the pair must not already be in the
-   *  supply — rowKey is article|||clusterId and a duplicate would collide. */
-  const articleOptions = useMemo(() => {
-    if (!addForm.clusterId) return [];
-    const taken = new Set(allRows.filter((r) => r.clusterId === addForm.clusterId).map((r) => r.article));
-    return (stockOptions || [])
-      .filter((o) => skuMap[o.article] && !taken.has(o.article))
-      .sort((a, b) => a.article.localeCompare(b.article, 'ru'));
-  }, [addForm.clusterId, stockOptions, skuMap, allRows]);
 
   const addFormCap = addForm.article ? capForRow(addForm.article, '') : 0;
 
