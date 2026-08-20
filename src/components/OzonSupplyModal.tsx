@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { buildCargoPlan, buildBoxesPayload } from '../lib/ozonCargo';
-import { X, AlertTriangle, Send, Trash2, RefreshCw } from 'lucide-react';
+import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
@@ -294,6 +294,49 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       .sort((a, b) => a.article.localeCompare(b.article, 'ru'));
   }, [addForm.clusterId, stockOptions, skuMap, allRows]);
 
+  /* ---- Ozon's answer, folded into the composition -------------------------------
+   * Ozon replies per cluster with two lists of items: what will go into the supply and
+   * what will not. The window used to show that as a separate read-only block above the
+   * editable one, so the same supply was described twice. Here the answer is reduced to
+   * «per cluster, per article: accepted / rejected» and printed inside the row it belongs
+   * to. Items come back as offerId + Ozon SKU, so the article is restored the same way
+   * the rest of the screen does it.
+   */
+  const ozonByCluster = useMemo(() => {
+    const map: Record<string, { state: string; invalidReason: string; byArticle: Record<string, { accepted: number; rejected: number }> }> = {};
+    for (const c of ((verdict && verdict.clusters) || [])) {
+      const byArticle: Record<string, { accepted: number; rejected: number }> = {};
+      const put = (it: any, field: 'accepted' | 'rejected') => {
+        const article = resolveOzonArticle(skus, String((it && it.offerId) || ''), String((it && it.sku) || ''));
+        if (!article) return;
+        if (!byArticle[article]) byArticle[article] = { accepted: 0, rejected: 0 };
+        byArticle[article][field] += Number(it && it.quantity) || 0;
+      };
+      for (const it of (c.accepted || [])) put(it, 'accepted');
+      for (const it of (c.rejected || [])) put(it, 'rejected');
+      map[String(c.clusterId)] = {
+        state: String(c.state || ''),
+        invalidReason: String(c.invalidReason || ''),
+        byArticle
+      };
+    }
+    return map;
+  }, [verdict, skus]);
+
+  /** Строки заявки, сгруппированные по кластеру: кластер — заголовок, товары — внутри. */
+  const rowsByCluster = useMemo(() => {
+    const out: { clusterId: string; clusterName: string; rows: SupplyPlanRow[] }[] = [];
+    const idx: Record<string, number> = {};
+    for (const r of activeRows) {
+      if (idx[r.clusterId] === undefined) {
+        idx[r.clusterId] = out.length;
+        out.push({ clusterId: r.clusterId, clusterName: r.clusterName, rows: [] });
+      }
+      out[idx[r.clusterId]].rows.push(r);
+    }
+    return out;
+  }, [activeRows]);
+
   if (!isOpen) return null;
 
   const markDirty = () => {
@@ -371,6 +414,42 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     setAddForm({ clusterId: addForm.clusterId, article: '', qty: '' });
     markDirty();
   };
+
+  /** Сколько штук Ozon примет и сколько не примет по всей заявке. */
+  const ozonTotals = (() => {
+    let accepted = 0;
+    let rejected = 0;
+    for (const r of activeRows) {
+      const v = ozonByCluster[r.clusterId];
+      const a = v && v.byArticle[r.article] ? v.byArticle[r.article].accepted : 0;
+      accepted += a;
+      rejected += Math.max(0, getQty(r) - a);
+    }
+    return { accepted, rejected };
+  })();
+
+  /**
+   * «Скорректировать поставку»: выставить в каждой строке то количество, которое Ozon
+   * согласился принять. Пересчёт после этого не нужен — состав становится ровно таким,
+   * какой Ozon уже подтвердил, поэтому dirty снимается и заявку можно создавать.
+   * Кнопка живёт только при неизменённом составе: по строке, добавленной после расчёта,
+   * ответа Ozon просто нет.
+   */
+  const correctToOzon = () => {
+    if (!verdict) return;
+    const nextQty: Record<string, number> = { ...qtyEdit };
+    for (const r of activeRows) {
+      const v = ozonByCluster[r.clusterId];
+      nextQty[rowKey(r)] = v && v.byArticle[r.article] ? v.byArticle[r.article].accepted : 0;
+    }
+    setQtyEdit(nextQty);
+    setDirty(false);
+    toast.success('Количества выставлены по ответу Ozon');
+  };
+
+  /** Кластеры живого состава — те, где реально что-то остаётся отгружать. */
+  const liveClusterIds = () =>
+    Array.from(new Set(activeRows.filter((r) => getQty(r) > 0).map((r) => r.clusterId)));
 
   const restoreRows = () => {
     setRemovedRows({});
@@ -662,7 +741,14 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       return;
     }
     setSending(true);
-    const clusterIds = (verdict.clusters || []).map((c: any) => String(c.clusterId));
+    // Только кластеры, которые остались в составе: убранный кластер или обнулённая после
+    // коррекции строка не должны уезжать в Ozon.
+    const clusterIds = liveClusterIds().filter((id) => ozonByCluster[id]);
+    if (clusterIds.length === 0) {
+      toast.error('В заявке не осталось ни одной позиции');
+      setSending(false);
+      return;
+    }
     await sendOrder(draftId, clusterIds, verdict);
   };
 
@@ -714,135 +800,61 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
           ) : (
             <>
               {missingSku.length > 0 && (
-                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800">
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs font-semibold text-red-600">
                   Не удалось определить Ozon-SKU: {missingSku.join(', ')}. SKU берётся из зеркала «Остатки Ozon», запасной источник — колонка «ШК Ozon» в SKU Базе.
                 </div>
               )}
 
-              {verdict && dirty && (
-                <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs font-semibold text-indigo-900">
-                  Состав изменён после расчёта. Нажмите «Пересчитать в Ozon» — заявка при этом НЕ создаётся.
+              {verdict && (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
+                  {dirty
+                    ? 'Состав изменён после расчёта. Нажмите «Пересчитать в Ozon» — заявка при этом НЕ создаётся.'
+                    : 'Ozon ответил, что готов принять. Заявка ещё НЕ создана: можно поправить количества вручную, нажать «Скорректировать поставку» или создать заявку в этом составе.'}
                 </div>
               )}
 
-              {verdict && !dirty && (
-                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 flex gap-2">
-                  <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
-                  <div className="text-xs font-semibold text-amber-900">
-                    Ниже — ответ Ozon. Заявка ещё НЕ создана. Можно уменьшить количество или убрать кластер прямо здесь,
-                    тогда потребуется пересчёт. Либо создать заявку в подтверждённом составе.
+              <div className="flex items-end justify-between gap-3 pt-1">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Состав заявки</div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    Количество можно менять, лишнюю строку или кластер — убрать, а недостающие позиции добавить внизу. Остатки на складе это не меняет.
+                  </div>
+                </div>
+                {verdict && !dirty && (
+                  <button
+                    type="button"
+                    onClick={correctToOzon}
+                    title="Выставить в каждой строке то количество, которое Ozon согласился принять"
+                    className="shrink-0 px-3 py-2 rounded-xl border border-slate-300 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors"
+                  >
+                    Скорректировать поставку
+                  </button>
+                )}
+              </div>
+
+              {verdict && (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
+                  <div className="text-xs text-slate-500">Ozon примет из заявки</div>
+                  <div className="text-xs text-slate-600">
+                    <span className="font-bold text-slate-900">{ozonTotals.accepted} шт</span>
+                    {ozonTotals.rejected > 0 ? (
+                      <> · не примет <span className="font-bold text-red-600">{ozonTotals.rejected} шт</span></>
+                    ) : (
+                      <span className="text-slate-400"> · всё целиком</span>
+                    )}
                   </div>
                 </div>
               )}
 
-              {verdict && (
-                <div className="space-y-2">
-                  <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Ответ Ozon</div>
-                  {(verdict.clusters || []).map((c: any) => {
-                    const stillSelected = activeRows.some((r) => r.clusterId === String(c.clusterId));
-                    return (
-                      <div key={c.clusterId} className={`p-3 rounded-xl border ${stillSelected ? 'border-slate-200' : 'border-slate-100 opacity-50'}`}>
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="font-bold text-sm text-slate-800">
-                            {c.clusterName || c.clusterId}
-                            {!stillSelected && <span className="ml-2 text-[11px] font-semibold text-slate-400">убран из заявки</span>}
-                          </div>
-                          <div className={`text-[11px] font-bold ${c.state === 'FULL_AVAILABLE' ? 'text-emerald-600' : c.state === 'PARTIAL_AVAILABLE' ? 'text-amber-600' : 'text-red-600'}`}>
-                            {c.state === 'FULL_AVAILABLE'
-                              ? 'принято'
-                              : c.state === 'PARTIAL_AVAILABLE'
-                                ? 'принято частично'
-                                : c.state === 'NOT_AVAILABLE'
-                                  ? 'кластер не принимает'
-                                  : 'статус не определён'}
-                            {c.invalidReason === 'NOT_AVAILABLE_MATRIX' && ' · склад не принимает такие товары'}
-                            {c.invalidReason === 'NOT_AVAILABLE_RANK' && ' · склад недоступен по рейтингу'}
-                            {c.invalidReason === 'NOT_AVAILABLE_ROUTE' && ' · нет маршрута'}
-                            {c.invalidReason === 'PARTIAL_MATRIX_AVAILABLE' && ' · примет только часть товаров'}
-                            {String(c.invalidReason || '').indexOf('TIMESLOT') >= 0 && ' · нет свободных слотов'}
-                          </div>
-                        </div>
-                        {(c.accepted || []).length > 0 && (
-                          <div className="mt-2">
-                            <div className="text-[11px] font-bold uppercase text-slate-400">Войдёт в поставку</div>
-                            {c.accepted.map((it: any, i: number) => {
-                              const b = boxInfoForOzonItem(it);
-                              return (
-                                <div key={`a${i}`} className="text-[11px] text-slate-600 flex justify-between gap-2">
-                                  <span className="truncate">{it.offerId || it.sku}</span>
-                                  <span className="shrink-0 text-right">
-                                    <span className="font-semibold">{it.quantity} шт</span>
-                                    {b.perBox > 0 && (
-                                      <span className="text-slate-400"> · {b.totalBoxes} кор по {b.perBox} шт</span>
-                                    )}
-                                    {b.isPartial && (
-                                      <span className="text-amber-600 font-semibold"> · неполная: {b.remainder} шт</span>
-                                    )}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {(c.rejected || []).length > 0 && (
-                          <div className="mt-2">
-                            <div className="text-[11px] font-bold uppercase text-red-500">Не войдёт</div>
-                            {c.rejected.map((it: any, i: number) => {
-                              const b = boxInfoForOzonItem(it);
-                              return (
-                                <div key={`r${i}`} className="text-[11px] text-red-600 flex justify-between gap-2">
-                                  <span className="truncate">{it.offerId || it.sku}</span>
-                                  <span className="shrink-0 text-right">
-                                    <span className="font-semibold">{it.quantity} шт</span>
-                                    {b.perBox > 0 && (
-                                      <span className="text-red-400"> · {b.totalBoxes} кор по {b.perBox} шт</span>
-                                    )}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {stillSelected && (
-                          <button
-                            type="button"
-                            onClick={() => removeCluster(String(c.clusterId))}
-                            className="mt-2 text-[11px] font-bold text-red-600 hover:text-red-800"
-                          >
-                            Убрать этот кластер из заявки
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-
-                  {(verdict.rejectedItems || []).length > 0 && (
-                    <div className="p-3 rounded-xl bg-red-50 border border-red-200">
-                      <div className="text-[11px] font-bold uppercase text-red-600 mb-1">Причины отказа Ozon</div>
-                      {verdict.rejectedItems.map((r: any, i: number) => (
-                        <div key={i} className="text-[11px] text-red-700">
-                          кластер {r.clusterId}, SKU {r.sku}: {(r.reasons || []).join(', ')}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 pt-1">Состав заявки</div>
-              <div className="text-xs text-slate-500">
-                Количество можно менять, лишнюю строку или кластер — убрать, а недостающие позиции добавить внизу. Остатки на складе это не меняет.
-              </div>
-
               {noBoxNormRows.length > 0 && (
-                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
                   Не задано количество в коробке (поле «Штук в коробке» в SKU Базе): {noBoxNormRows.join(', ')}.
                   Заявку это не блокирует, но посчитать коробки не получится.
                 </div>
               )}
 
               {partialBoxRows.length > 0 && (
-                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
                   Неполные коробки: {partialBoxRows.map((r) => {
                     const b = boxInfo(r);
                     return `${r.article} / ${r.clusterName} — ${b.fullBoxes} полных и ${b.remainder} шт из ${b.perBox}`;
@@ -851,76 +863,139 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 </div>
               )}
 
-              <div className="flex flex-col gap-2">
-                {activeRows.map((r) => (
-                  <div key={rowKey(r)} className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/50">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-mono font-bold text-sm text-slate-800 truncate">{r.article}</div>
-                      <div className="text-[11px] text-slate-500 truncate">
-                        {r.clusterName}
-                        {skuMap[r.article] && <span className="ml-1.5 text-slate-400">SKU {skuMap[r.article]}</span>}
-                      </div>
-                      {r.limitedByMyStock && (
-                        <div className="text-[11px] text-amber-600 font-semibold">урезано остатком Моего склада</div>
-                      )}
-                      {/* Item 45. How much of this article is still free to ship, with the
-                          other lines of the same supply already taken into account. */}
-                      {hasFreeFigure(r.article) && (
-                        <div className="text-[11px] text-slate-400">
-                          доступно для отгрузки {capForRow(r.article, rowKey(r))} шт
-                          {addedRows.some((a) => rowKey(a) === rowKey(r)) && (
-                            <span className="ml-1.5 text-indigo-500 font-semibold">добавлено вручную</span>
+              {/* Один список: кластер — заголовок, товары — внутри, ответ Ozon — в самой строке.
+                  Прежде ответ Ozon жил отдельным блоком выше, и одна и та же заявка описывалась дважды. */}
+              <div className="flex flex-col gap-3">
+                {rowsByCluster.map((group) => {
+                  const v = ozonByCluster[group.clusterId];
+                  const stateText = !v
+                    ? ''
+                    : v.state === 'FULL_AVAILABLE'
+                      ? 'принимает полностью'
+                      : v.state === 'PARTIAL_AVAILABLE'
+                        ? 'принимает частично'
+                        : v.state === 'NOT_AVAILABLE'
+                          ? 'не принимает'
+                          : 'статус не определён';
+                  const reasonText = !v ? '' :
+                    v.invalidReason === 'NOT_AVAILABLE_MATRIX' ? ' · склад не принимает такие товары'
+                    : v.invalidReason === 'NOT_AVAILABLE_RANK' ? ' · склад недоступен по рейтингу'
+                    : v.invalidReason === 'NOT_AVAILABLE_ROUTE' ? ' · нет маршрута'
+                    : v.invalidReason === 'PARTIAL_MATRIX_AVAILABLE' ? ' · примет только часть товаров'
+                    : v.invalidReason.indexOf('TIMESLOT') >= 0 ? ' · нет свободных слотов'
+                    : '';
+                  return (
+                    <div key={group.clusterId} className="rounded-2xl border border-slate-200 overflow-hidden">
+                      <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-base font-bold text-slate-900 truncate">{group.clusterName}</div>
+                          {v && (
+                            <div className="text-[11px] text-slate-500 truncate">Ozon {stateText}{reasonText}</div>
                           )}
                         </div>
-                      )}
+                        <button
+                          type="button"
+                          onClick={() => removeCluster(group.clusterId)}
+                          title="Убрать весь кластер из заявки"
+                          className="shrink-0 text-[11px] font-bold text-slate-500 hover:text-red-600 transition-colors"
+                        >
+                          Убрать кластер
+                        </button>
+                      </div>
+
+                      <div className="divide-y divide-slate-100">
+                        {group.rows.map((r) => {
+                          const b = boxInfo(r);
+                          const seen = v && v.byArticle[r.article];
+                          const accepted = seen ? seen.accepted : null;
+                          const notAccepted = accepted === null ? 0 : Math.max(0, getQty(r) - accepted);
+                          return (
+                            <div key={rowKey(r)} className="flex items-center gap-3 px-4 py-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="font-mono font-bold text-sm text-slate-800 truncate">{r.article}</div>
+                                {r.limitedByMyStock && (
+                                  <div className="text-[11px] text-slate-500">урезано остатком Моего склада</div>
+                                )}
+                                {hasFreeFigure(r.article) && (
+                                  <div className="text-[11px] text-slate-400">
+                                    доступно для отгрузки {capForRow(r.article, rowKey(r))} шт
+                                    {addedRows.some((a) => rowKey(a) === rowKey(r)) && (
+                                      <span className="ml-1.5 text-slate-500 font-semibold">добавлено вручную</span>
+                                    )}
+                                  </div>
+                                )}
+                                {accepted !== null && (
+                                  <div className="text-[11px] mt-0.5">
+                                    <span className="text-slate-500">Ozon примет </span>
+                                    <span className="font-bold text-slate-900">{accepted} шт</span>
+                                    {notAccepted > 0 && (
+                                      <>
+                                        <span className="text-slate-500"> · не примет </span>
+                                        <span className="font-bold text-red-600">{notAccepted} шт</span>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="text-[11px] shrink-0 text-right text-slate-500">
+                                {b.perBox <= 0 ? (
+                                  <span>норма коробки<br />не задана</span>
+                                ) : (
+                                  <>
+                                    <div className="font-semibold">{b.totalBoxes} кор</div>
+                                    <div className="text-slate-400">по {b.perBox} шт</div>
+                                    {b.isPartial && <div>неполная: {b.remainder} шт</div>}
+                                  </>
+                                )}
+                              </div>
+
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                max={hasFreeFigure(r.article) ? capForRow(r.article, rowKey(r)) : undefined}
+                                value={getQty(r)}
+                                onChange={(e) => changeQty(r, e.target.value)}
+                                className="w-24 px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-slate-400 outline-none text-sm font-semibold text-slate-800 bg-white"
+                              />
+                              <span className="text-[11px] text-slate-400 shrink-0">шт</span>
+                              <button
+                                type="button"
+                                onClick={() => removeRow(r)}
+                                title="Убрать эту строку из заявки"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 transition-colors shrink-0"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div className="text-[11px] shrink-0 text-right">
-                      {(() => {
-                        const b = boxInfo(r);
-                        if (b.perBox <= 0) {
-                          return <span className="text-amber-600 font-semibold">норма коробки<br />не задана</span>;
-                        }
-                        return (
-                          <>
-                            <div className="text-slate-500 font-semibold">{b.totalBoxes} кор</div>
-                            <div className="text-slate-400">по {b.perBox} шт</div>
-                            {b.isPartial && (
-                              <div className="text-amber-600 font-semibold">неполная: {b.remainder} шт</div>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </div>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      max={hasFreeFigure(r.article) ? capForRow(r.article, rowKey(r)) : undefined}
-                      value={getQty(r)}
-                      onChange={(e) => changeQty(r, e.target.value)}
-                      className="w-24 px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-semibold text-slate-800 bg-white"
-                    />
-                    <span className="text-[11px] text-slate-400 shrink-0">шт</span>
-                    <button
-                      type="button"
-                      onClick={() => removeRow(r)}
-                      title="Убрать эту строку из заявки"
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors shrink-0"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
+              {verdict && (verdict.rejectedItems || []).length > 0 && (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">Причины отказа Ozon</div>
+                  {(verdict.rejectedItems || []).map((r: any, i: number) => (
+                    <div key={i} className="text-[11px] text-slate-600">
+                      кластер {r.clusterId}, SKU {r.sku}: {(r.reasons || []).join(', ')}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Item 45. Adding a cluster or an article that the recommendation did not propose. */}
-              <div className="p-3 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/40 flex flex-col gap-2">
-                <div className="text-[11px] font-bold uppercase tracking-wide text-indigo-500">Добавить позицию</div>
+              <div className="p-3 rounded-2xl border border-slate-200 bg-slate-50 flex flex-col gap-2">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Добавить позицию</div>
                 <div className="flex flex-wrap items-center gap-2">
                   <select
                     value={addForm.clusterId}
                     onChange={(e) => setAddForm({ clusterId: e.target.value, article: '', qty: '' })}
-                    className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-400"
                   >
                     <option value="">Кластер…</option>
                     {clusterOptions.map((c) => (
@@ -931,13 +1006,11 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                     value={addForm.article}
                     disabled={!addForm.clusterId}
                     onChange={(e) => setAddForm({ ...addForm, article: e.target.value, qty: '' })}
-                    className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-400"
+                    className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-400 disabled:bg-slate-100 disabled:text-slate-400"
                   >
                     <option value="">Товар…</option>
                     {articleOptions.map((o) => (
-                      <option key={o.article} value={o.article}>
-                        {o.article}{o.name ? ` — ${o.name}` : ''}
-                      </option>
+                      <option key={o.article} value={o.article}>{o.article}</option>
                     ))}
                   </select>
                   <input
@@ -949,13 +1022,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                     value={addForm.qty}
                     placeholder="шт"
                     onChange={(e) => setAddForm({ ...addForm, qty: e.target.value })}
-                    className="w-24 px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
+                    className="w-24 px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold outline-none focus:ring-2 focus:ring-slate-400 disabled:bg-slate-100"
                   />
                   <button
                     type="button"
                     onClick={addLine}
                     disabled={!addForm.article || !addForm.qty}
-                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-sm font-bold transition-colors"
+                    className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-slate-700 text-sm font-bold transition-colors"
                   >
                     Добавить
                   </button>
@@ -981,13 +1054,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 <button
                   type="button"
                   onClick={restoreRows}
-                  className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800"
+                  className="text-[11px] font-bold text-slate-500 hover:text-slate-800"
                 >
                   Вернуть убранные строки
                 </button>
               )}
 
-              <div className="text-xs font-bold text-slate-700">
+              <div className="p-3 rounded-2xl border border-slate-200 bg-slate-50 text-xs font-bold text-slate-700">
                 Итого: {totals.rows} строк, {totals.clusters} кластеров, {totals.qty} шт
               </div>
             </>
@@ -1008,9 +1081,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
               id="btn-ozon-supply-submit"
               onClick={handlePrimary}
               disabled={missingSku.length > 0 || activeRows.length === 0}
-              className={`px-5 py-2.5 rounded-xl disabled:opacity-50 text-white text-sm font-bold transition-colors flex items-center gap-2 ${
-                primaryIsSafe ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-red-600 hover:bg-red-700'
-              }`}
+              className="px-5 py-2.5 rounded-xl disabled:opacity-50 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold transition-colors flex items-center gap-2"
             >
               {primaryIsSafe ? <RefreshCw size={16} /> : <Send size={16} />}
               {primaryLabel}
