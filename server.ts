@@ -241,11 +241,11 @@ async function startServer() {
   // историю, SKU и комплекты они не затрагивают.
   const CACHE_INVALIDATION: Record<string, string[]> = {
     logout: [],
-    saveOzonSettings: ['getOzonSettings'],
-    saveOzonClusters: ['getOzonClusters'],
-    markOzonClustersNotified: ['getOzonClusters'],
-    saveOzonSales: ['getOzonSales'],
-    saveOzonStocks: ['getOzonStocks'],
+    saveOzonSettings: ['getOzonSettings', 'getOzonInitialData'],
+    saveOzonClusters: ['getOzonClusters', 'getOzonInitialData'],
+    markOzonClustersNotified: ['getOzonClusters', 'getOzonInitialData'],
+    saveOzonSales: ['getOzonSales', 'getOzonInitialData'],
+    saveOzonStocks: ['getOzonStocks', 'getOzonInitialData'],
     saveExternalShipments: ['getExternalShipments'],
     updateExternalShipmentStatus: ['getExternalShipments'],
     saveOzonSupplyRequest: ['getOzonSupplyRequests', 'getExternalShipments'],
@@ -256,7 +256,7 @@ async function startServer() {
     updateService: ['getServices'],
     deleteService: ['getServices'],
     addServiceRate: ['getServiceRates'],
-    saveFactoryOrder: ['getFactoryOrders']
+    saveFactoryOrder: ['getFactoryOrders', 'getOzonInitialData']
   };
 
   function invalidateCacheFor(writeAction: string): void {
@@ -284,7 +284,14 @@ async function startServer() {
     if (['getServices', 'getServiceRates', 'getUsers', 'getOzonSettings', 'getOzonClusters'].includes(action)) {
       return CACHE_TTL_REFERENCE_MS;
     }
-    if (['getOzonStocks', 'getOzonSales', 'getFactoryOrders'].includes(action)) {
+    // Item 26 stage A1: the composite read is cached like the Ozon data it carries.
+    // It also carries settings and clusters, which on their own live 10 minutes — the
+    // shorter of the two lifetimes is used deliberately, so nothing is served staler
+    // than it would have been when fetched separately. LEFT OUT OF THIS LIST BY MISTAKE
+    // when the action was introduced: getCacheTtlMs returns 0 for anything unknown, so the
+    // composite was not cached at all and start-up got SLOWER, not faster — five cached
+    // reads had been replaced by one uncached one.
+    if (['getOzonStocks', 'getOzonSales', 'getFactoryOrders', 'getOzonInitialData'].includes(action)) {
       return CACHE_TTL_OZON_MS;
     }
     if (['getInitialData', 'getTransactions', 'getSkus', 'getArchivedItems', 'getStock', 'getExternalShipments', 'getOzonSupplyRequests'].includes(action)) {
