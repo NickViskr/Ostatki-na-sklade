@@ -4,7 +4,7 @@ import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
-import { capForSupplyLine } from '../lib/ozonSupplyLines';
+import { acceptedForLine, capForSupplyLine, correctedQuantities, foldOzonVerdict } from '../lib/ozonSupplyLines';
 
 export interface SupplyPlanRow {
   article: string;
@@ -302,26 +302,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
    * to. Items come back as offerId + Ozon SKU, so the article is restored the same way
    * the rest of the screen does it.
    */
-  const ozonByCluster = useMemo(() => {
-    const map: Record<string, { state: string; invalidReason: string; byArticle: Record<string, { accepted: number; rejected: number }> }> = {};
-    for (const c of ((verdict && verdict.clusters) || [])) {
-      const byArticle: Record<string, { accepted: number; rejected: number }> = {};
-      const put = (it: any, field: 'accepted' | 'rejected') => {
-        const article = resolveOzonArticle(skus, String((it && it.offerId) || ''), String((it && it.sku) || ''));
-        if (!article) return;
-        if (!byArticle[article]) byArticle[article] = { accepted: 0, rejected: 0 };
-        byArticle[article][field] += Number(it && it.quantity) || 0;
-      };
-      for (const it of (c.accepted || [])) put(it, 'accepted');
-      for (const it of (c.rejected || [])) put(it, 'rejected');
-      map[String(c.clusterId)] = {
-        state: String(c.state || ''),
-        invalidReason: String(c.invalidReason || ''),
-        byArticle
-      };
-    }
-    return map;
-  }, [verdict, skus]);
+  const ozonByCluster = useMemo(
+    () => foldOzonVerdict(
+      (verdict && verdict.clusters) || [],
+      (offerId, sku) => resolveOzonArticle(skus, offerId, sku)
+    ),
+    [verdict, skus]
+  );
 
   /** Строки заявки, сгруппированные по кластеру: кластер — заголовок, товары — внутри. */
   const rowsByCluster = useMemo(() => {
@@ -420,10 +407,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     let accepted = 0;
     let rejected = 0;
     for (const r of activeRows) {
-      const v = ozonByCluster[r.clusterId];
-      const a = v && v.byArticle[r.article] ? v.byArticle[r.article].accepted : 0;
-      accepted += a;
-      rejected += Math.max(0, getQty(r) - a);
+      const one = acceptedForLine(ozonByCluster, { article: r.article, clusterId: r.clusterId, qty: getQty(r) });
+      accepted += one.accepted;
+      rejected += one.notAccepted;
     }
     return { accepted, rejected };
   })();
@@ -437,11 +423,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
    */
   const correctToOzon = () => {
     if (!verdict) return;
-    const nextQty: Record<string, number> = { ...qtyEdit };
-    for (const r of activeRows) {
-      const v = ozonByCluster[r.clusterId];
-      nextQty[rowKey(r)] = v && v.byArticle[r.article] ? v.byArticle[r.article].accepted : 0;
-    }
+    const nextQty: Record<string, number> = {
+      ...qtyEdit,
+      ...correctedQuantities(
+        ozonByCluster,
+        activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) }))
+      )
+    };
     setQtyEdit(nextQty);
     setDirty(false);
     toast.success('Количества выставлены по ответу Ozon');
@@ -906,9 +894,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                       <div className="divide-y divide-slate-100">
                         {group.rows.map((r) => {
                           const b = boxInfo(r);
-                          const seen = v && v.byArticle[r.article];
-                          const accepted = seen ? seen.accepted : null;
-                          const notAccepted = accepted === null ? 0 : Math.max(0, getQty(r) - accepted);
+                          const seen = v ? v.byArticle[r.article] : undefined;
+                          const one = acceptedForLine(ozonByCluster, { article: r.article, clusterId: r.clusterId, qty: getQty(r) });
+                          const accepted = v ? one.accepted : null;
+                          const notAccepted = seen || v ? one.notAccepted : 0;
                           return (
                             <div key={rowKey(r)} className="flex items-center gap-3 px-4 py-3">
                               <div className="min-w-0 flex-1">
