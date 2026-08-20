@@ -119,6 +119,9 @@ interface WarehouseState {
   runOzonSyncNow: () => Promise<void>;
   ozonStocks: OzonStockRow[];
   ozonStocksSyncIssues: { name: string; message: string }[];
+  /** Item 26 stage A1: one composite read replacing five separate start-up calls.
+   *  Resolves to the raw payload so the caller can apply the parts the store does not own. */
+  fetchOzonInitialData: () => Promise<{ settings?: any; clusters?: any[] } | null>;
   fetchOzonStocks: () => Promise<void>;
   runOzonStocksSync: () => Promise<void>;
   ozonSales: OzonSalesRow[];
@@ -1517,6 +1520,30 @@ export const useWarehouseStore = create<WarehouseState>()(
     } finally {
       set({ isProcessing: false });
       await get().fetchOzonSyncStatus();
+    }
+  },
+
+  // Item 26 stage A1 (2026-08-20). Start-up used to fire five separate Ozon reads in one
+  // wave; each round trip to Apps Script costs 2-4 s regardless of how little data it carries,
+  // so the wave was as slow as its slowest member. One call now brings all five payloads.
+  // Ozon stocks, sales and factory orders are stored here; settings and cluster references are
+  // owned by the components, so they are handed back to the caller instead.
+  fetchOzonInitialData: async () => {
+    if (!get().sessionToken) return null;
+    try {
+      const result = await get().fetchGas('getOzonInitialData', { data: {} });
+      if (result.status === 'success' && result.data) {
+        const d = result.data;
+        if (Array.isArray(d.stocks)) set({ ozonStocks: d.stocks });
+        if (Array.isArray(d.sales)) set({ ozonSales: d.sales });
+        if (Array.isArray(d.factoryOrders)) set({ factoryOrders: d.factoryOrders });
+        return { settings: d.settings, clusters: Array.isArray(d.clusters) ? d.clusters : [] };
+      }
+      console.error('getOzonInitialData failed:', result.message);
+      return null;
+    } catch (e) {
+      console.error('getOzonInitialData error:', e);
+      return null;
     }
   },
 

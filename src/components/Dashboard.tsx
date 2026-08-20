@@ -64,9 +64,9 @@ export const Dashboard: React.FC = React.memo(() => {
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
   const ozonSales = useWarehouseStore((state) => state.ozonSales);
   const factoryOrders = useWarehouseStore((state) => state.factoryOrders);
-  const fetchOzonStocks = useWarehouseStore((state) => state.fetchOzonStocks);
-  const fetchOzonSales = useWarehouseStore((state) => state.fetchOzonSales);
-  const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
+  // Item 26 stage A1: these three reads are now part of the composite start-up call.
+  // The store still exposes them individually — other screens refresh with them.
+  const fetchOzonInitialData = useWarehouseStore((state) => state.fetchOzonInitialData);
   const ozonSupplyRequests = useWarehouseStore((state) => state.ozonSupplyRequests);
   const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
@@ -195,44 +195,44 @@ export const Dashboard: React.FC = React.memo(() => {
   useEffect(() => {
     if (!isAdmin) return;
     const timer = setTimeout(() => {
-      fetchOzonStocks();
-      fetchOzonSales();
-      fetchFactoryOrders();
+      // Item 26 stage A1 (2026-08-20): Ozon stocks, sales, factory orders, settings and cluster
+      // references now arrive in ONE composite call instead of five. Each round trip to Apps Script
+      // costs 2-4 s no matter how little it carries, so the old wave was as slow as its slowest
+      // member. getLastPurchasePrices stays separate on purpose: it still goes through the switch
+      // and takes the global lock, and folding it in would have changed that silently.
       fetchLastPurchasePrices();
-      fetchGas('getOzonSettings').then((res: any) => {
-        if (res?.status === 'success' && res.data) {
+      fetchOzonInitialData().then((res: any) => {
+        if (res?.settings) {
           setOzonSettings({
             // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-            speedWeeks: Math.max(1, numSetting(res.data.speedWeeks, 4)),
-            minStockDays: numSetting(res.data.minStockDays, 7),
-            targetStockDays: numSetting(res.data.targetStockDays, 30),
-            maxClusterDays: numSetting(res.data.maxClusterDays, 100),
-            factoryOrderDays: numSetting(res.data.factoryOrderDays, 60),
-            returnsToSalePct: numSetting(res.data.returnsToSalePct, 80),
-            excludedClusters: String(res.data.excludedClusters || ''),
-            priorityClusters: String(res.data.priorityClusters || ''),
-            deficitDays: numSetting(res.data.deficitDays, 7),
+            speedWeeks: Math.max(1, numSetting(res.settings.speedWeeks, 4)),
+            minStockDays: numSetting(res.settings.minStockDays, 7),
+            targetStockDays: numSetting(res.settings.targetStockDays, 30),
+            maxClusterDays: numSetting(res.settings.maxClusterDays, 100),
+            factoryOrderDays: numSetting(res.settings.factoryOrderDays, 60),
+            returnsToSalePct: numSetting(res.settings.returnsToSalePct, 80),
+            excludedClusters: String(res.settings.excludedClusters || ''),
+            priorityClusters: String(res.settings.priorityClusters || ''),
+            deficitDays: numSetting(res.settings.deficitDays, 7),
             // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-            trendWeeks: Math.max(1, numSetting(res.data.trendWeeks, 13)),
+            trendWeeks: Math.max(1, numSetting(res.settings.trendWeeks, 13)),
             // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-            bestWeeks: Math.max(1, numSetting(res.data.bestWeeks, 4)),
-            minSalesForCorrection: numSetting(res.data.minSalesForCorrection, 50),
-            maxSpeedGrowth: numSetting(res.data.maxSpeedGrowth, 5),
-            salesGrowthPct: numSetting(res.data.salesGrowthPct, 0),
+            bestWeeks: Math.max(1, numSetting(res.settings.bestWeeks, 4)),
+            minSalesForCorrection: numSetting(res.settings.minSalesForCorrection, 50),
+            maxSpeedGrowth: numSetting(res.settings.maxSpeedGrowth, 5),
+            salesGrowthPct: numSetting(res.settings.salesGrowthPct, 0),
           });
         }
-      }).catch((err: any) => console.error('getOzonSettings error:', err));
-      fetchGas('getOzonClusters').then((res: any) => {
-        if (res?.status === 'success' && Array.isArray(res.data)) {
-          setClusterRefs(res.data.map((item: any) => ({
+        if (Array.isArray(res?.clusters)) {
+          setClusterRefs(res.clusters.map((item: any) => ({
             clusterId: String(item.clusterId || '').trim(),
             clusterName: String(item.clusterName || '').trim(),
           })).filter((item: any) => Boolean(item.clusterId)));
         }
-      }).catch((err: any) => console.error('getOzonClusters error:', err));
+      }).catch((err: any) => console.error('getOzonInitialData error:', err));
     }, 1200);
     return () => clearTimeout(timer);
-  }, [isAdmin, fetchOzonStocks, fetchOzonSales, fetchFactoryOrders, fetchLastPurchasePrices, fetchGas]);
+  }, [isAdmin, fetchOzonInitialData, fetchLastPurchasePrices]);
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
   // На главной кабинеты не разделяются — берутся все записи.

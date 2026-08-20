@@ -178,6 +178,26 @@ function doPost(e) {
     
     // Читающие Ozon-экшены обслуживаются без LockService: они только читают листы,
     // а захват общего замка приводил к таймаутам при параллельной загрузке вкладки «Остатки Озон».
+    //
+    // Item 26 stage A1 (2026-08-20): getOzonInitialData returns the same five reads in ONE call.
+    // It is served HERE, next to the single reads, and deliberately NOT from the switch below:
+    // that keeps lock behaviour and permissions byte-identical to calling the five separately —
+    // the session is already verified above, the global lock is not taken, and none of these five
+    // reads has an assertAdmin of its own. getOzonSyncStatus stays out: the sidebar polls it on its
+    // own schedule. getLastPurchasePrices stays out too: it still goes through the switch and takes
+    // the lock, and moving it here would silently change that.
+    if (action === 'getOzonInitialData') {
+      const ozonInitial = {
+        stocks: getOzonStocks(),
+        sales: getOzonSales(payload.data && payload.data.weeksLimit),
+        settings: getOzonSettings(),
+        clusters: getOzonClusters(),
+        factoryOrders: getFactoryOrders()
+      };
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: ozonInitial }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     if (action === 'getOzonStocks' || action === 'getOzonSales' || action === 'getOzonSyncStatus' || action === 'getOzonSettings' || action === 'getOzonClusters' || action === 'getFactoryOrders') {
       let readResult;
       if (action === 'getOzonStocks') readResult = getOzonStocks();
