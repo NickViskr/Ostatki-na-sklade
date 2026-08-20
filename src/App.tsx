@@ -48,6 +48,7 @@ export default function App() {
   const fetchStock = useWarehouseStore((state) => state.fetchStock);
   const fetchArchivedItems = useWarehouseStore((state) => state.fetchArchivedItems);
   const checkSession = useWarehouseStore((state) => state.checkSession);
+  const bootFetchStarted = useWarehouseStore((state) => state.bootFetchStarted);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const devMode = useWarehouseStore((state) => state.devMode);
 
@@ -66,14 +67,19 @@ export default function App() {
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
 
+  // Item 26 (2026-08-20): checkSession уже запустило fetchStock параллельно с проверкой сессии,
+  // не дожидаясь её ответа. Здесь оно повторяется только на том пути, где checkSession не работало —
+  // например сразу после ввода логина и пароля. Признак bootFetchStarted и отличает эти два случая.
   useEffect(() => {
     if (currentUser) {
-      fetchStock();
+      if (!bootFetchStarted) {
+        fetchStock();
+      }
       if (isAdmin) {
         fetchArchivedItems();
       }
     }
-  }, [fetchStock, fetchArchivedItems, currentUser, isAdmin]);
+  }, [fetchStock, fetchArchivedItems, currentUser, isAdmin, bootFetchStarted]);
 
   useEffect(() => {
     if ((activeTab === 'settings' || activeTab === 'users' || activeTab === 'deleted' || activeTab === 'ozon' || activeTab === 'ozonStocks') && !isAdmin) {

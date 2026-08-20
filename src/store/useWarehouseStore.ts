@@ -13,6 +13,20 @@ import { toast } from 'sonner';
 // Раньше это правило дублировало принудительное обнуление в Code.gs; там оно снято, и если
 // оставить его здесь, сервер будет хранить долг, а приложение — показывать ноль.
 // Средняя себестоимость при нулевом остатке действительно ноль: она не определена.
+// Item 26: два экрана и стартовая загрузка могут попросить составное чтение Ozon почти
+// одновременно. Пока запрос в полёте, все получают один и тот же промис — иначе к Apps Script
+// ушли бы два одинаковых запроса, и оба мимо кэша, потому что первый ещё не успел его наполнить.
+// Повторный вызов ПОСЛЕ завершения запускает новое чтение — этим пользуется сохранение настроек.
+let ozonInitialInFlight: Promise<boolean> | null = null;
+
+// Роль администратора определяется одинаково в нескольких местах приложения.
+const isAdminUser = (user: { role?: string; username?: string } | null | undefined): boolean => {
+  if (!user) return false;
+  const role = String(user.role || '').trim().toLowerCase();
+  const name = String(user.username || '').trim().toLowerCase();
+  return role === 'admin' || ['admin', 'админ', 'администратор'].includes(name);
+};
+
 const normalizeStock = (items: StockItem[]): StockItem[] =>
   items.map(item =>
     Number(item.quantity) <= 0
@@ -132,6 +146,8 @@ interface WarehouseState {
   ozonClustersRaw: any[];
   /** Ответ по справочникам получен — успешно или с ошибкой. До этого расчёт покрытия не запускается. */
   ozonRefsLoaded: boolean;
+  /** Item 26: стартовая загрузка данных уже запущена — чтобы не выстрелить её дважды. */
+  bootFetchStarted: boolean;
   fetchOzonStocks: () => Promise<void>;
   runOzonStocksSync: () => Promise<void>;
   ozonSales: OzonSalesRow[];
@@ -197,6 +213,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonClusterRefs: [],
   ozonClustersRaw: [],
   ozonRefsLoaded: false,
+  bootFetchStarted: false,
 
   getEffectiveAvailability: (article) => {
     const kits = get().kits;
@@ -936,6 +953,25 @@ export const useWarehouseStore = create<WarehouseState>()(
       if (!token) return;
       set({ sessionToken: token });
     }
+    // Item 26 (2026-08-20): раньше приложение ждало ответа verifySession (около 3 секунд) и только
+    // потом начинало грузить данные — каждая следующая волна запросов упиралась в предыдущую.
+    // Ждать незачем: токен уже лежит в браузере и в хранилище, и все читающие действия всё равно
+    // проверяют сессию на стороне Apps Script. Поэтому чтения стартуют СРАЗУ, параллельно с
+    // проверкой. Если сессия окажется недействительной, эти запросы просто вернут ошибку, их
+    // обработчики её только логируют, а токен всё равно будет стёрт ниже по этой же функции.
+    // Признак bootFetchStarted не даёт выстрелить теми же чтениями второй раз из эффекта в App.
+    if (!get().bootFetchStarted) {
+      set({ bootFetchStarted: true });
+      void get().fetchStock();
+      // Роль сохраняется между перезагрузками вместе с токеном, поэтому она известна ещё до
+      // ответа verifySession. Для администратора сразу запускается и составное чтение Ozon —
+      // это самый долгий запрос страницы, и раньше он ждал проверку сессии зря. Если роль
+      // в сохранённых данных окажется неверной, экран всё равно закажет чтение сам.
+      if (isAdminUser(get().currentUser)) {
+        void get().fetchOzonInitialData();
+      }
+    }
+
     try {
       const result = await get().fetchGas('verifySession');
       if (result.status === 'success') {
@@ -1559,6 +1595,8 @@ export const useWarehouseStore = create<WarehouseState>()(
   // owned by the components, so they are handed back to the caller instead.
   fetchOzonInitialData: async () => {
     if (!get().sessionToken) return false;
+    if (ozonInitialInFlight) return ozonInitialInFlight;
+    const run = async (): Promise<boolean> => {
     // Настройки приходят как строки из листа «ключ — значение»: пустая ячейка не должна
     // превращаться в ноль, поэтому недостающее значение заменяется значением по умолчанию.
     const num = (v: any, def: number): number => {
@@ -1627,6 +1665,9 @@ export const useWarehouseStore = create<WarehouseState>()(
       set({ ozonRefsLoaded: true });
       return false;
     }
+    };
+    ozonInitialInFlight = run().finally(() => { ozonInitialInFlight = null; });
+    return ozonInitialInFlight;
   },
 
   fetchOzonStocks: async () => {
