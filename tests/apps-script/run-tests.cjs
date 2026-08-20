@@ -799,6 +799,72 @@ function buildSkuRow(headers, obj) {
   check('П74: строки старше окна не отдаются', oldest.length === 0, `лишних строк: ${oldest.length}`);
 })();
 
+// ========== Item 26: sales sheet split into weekly and archive ==========
+// Weekly zone is 13 weeks; anything older is compacted into 28-day blocks. Before this change both
+// zones lived in one sheet, and getOzonSales read all of it on every start-up: 1805 of 3194 rows
+// were archive rows the date window always discards.
+(() => {
+  const H = freshHarness();
+  H.setNow('2026-01-05T09:00:00Z');           // понедельник 05.01.2026
+  H.setOzonSettings({ salesRetentionWeeks: 78 });
+
+  // Свежая неделя остаётся недельной; 2025-09-08 старше границы уплотнения и уходит в блок.
+  H.setOzonSalesSheet([
+    { week: '2025-12-29', offerId: 'ART', qty: 10, days: 7 },
+    { week: '2025-09-08', offerId: 'ART', qty: 5, days: 7 }
+  ]);
+  H.setOzonSalesArchiveSheet([]);
+  H.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
+
+  const weekly = H.dumpSalesSheet('Продажи Ozon');
+  const archive = H.dumpSalesSheet('Продажи Ozon Архив');
+
+  check('П75: недельные строки остались в основном листе',
+    weekly.length === 1 && weekly[0].week === '2025-12-29' && weekly[0].qty === 10,
+    `получено: ${JSON.stringify(weekly)}`);
+  check('П75: в основном листе НЕТ 28-дневных блоков — их и читал зря старт приложения',
+    weekly.every(r => r.days === 7), `получено: ${JSON.stringify(weekly.map(r => r.days))}`);
+  check('П75: уплотнённый блок ушёл в архивный лист',
+    archive.length === 1 && archive[0].days === 28 && archive[0].qty === 5,
+    `получено: ${JSON.stringify(archive)}`);
+
+  // Второй прогон: старый блок уже лежит в архивном листе и должен быть подхвачен, а не потерян.
+  const H2 = freshHarness();
+  H2.setNow('2026-01-05T09:00:00Z');
+  H2.setOzonSettings({ salesRetentionWeeks: 78 });
+  H2.setOzonSalesSheet([{ week: '2025-12-29', offerId: 'ART', qty: 10, days: 7 }]);
+  H2.setOzonSalesArchiveSheet([{ week: '2025-09-08', offerId: 'ART', qty: 100, days: 28 }]);
+  H2.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
+  const arch2 = H2.dumpSalesSheet('Продажи Ozon Архив');
+  check('П76: существующий архивный блок прочитан и сохранён, а не потерян',
+    arch2.length === 1 && arch2[0].qty === 100, `получено: ${JSON.stringify(arch2)}`);
+
+  // Третий прогон: строка из основного листа доливается в УЖЕ существующий блок того же периода.
+  const H3 = freshHarness();
+  H3.setNow('2026-01-05T09:00:00Z');
+  H3.setOzonSettings({ salesRetentionWeeks: 78 });
+  H3.setOzonSalesSheet([{ week: '2025-09-15', offerId: 'ART', qty: 7, days: 7 }]);
+  H3.setOzonSalesArchiveSheet([{ week: '2025-09-08', offerId: 'ART', qty: 100, days: 28 }]);
+  H3.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
+  const arch3 = H3.dumpSalesSheet('Продажи Ozon Архив');
+  check('П77: строка того же 28-дневного периода долилась в блок (100 + 7 = 107)',
+    arch3.length === 1 && arch3[0].qty === 107, `получено: ${JSON.stringify(arch3)}`);
+
+  // Четвёртый прогон: ретенция режет обе зоны.
+  const H4 = freshHarness();
+  H4.setNow('2026-01-05T09:00:00Z');
+  H4.setOzonSettings({ salesRetentionWeeks: 10 });   // 10 недель — отсечка 2025-10-27
+  H4.setOzonSalesSheet([{ week: '2025-12-29', offerId: 'ART', qty: 10, days: 7 }]);
+  H4.setOzonSalesArchiveSheet([{ week: '2024-05-06', offerId: 'ART', qty: 999, days: 28 }]);
+  H4.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
+  check('П78: ретенция вычистила устаревший блок из архивного листа',
+    H4.dumpSalesSheet('Продажи Ozon Архив').length === 0,
+    `получено: ${JSON.stringify(H4.dumpSalesSheet('Продажи Ozon Архив'))}`);
+  check('П78: свежая недельная строка ретенцией не тронута',
+    H4.dumpSalesSheet('Продажи Ozon').length === 1,
+    `получено: ${JSON.stringify(H4.dumpSalesSheet('Продажи Ozon'))}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

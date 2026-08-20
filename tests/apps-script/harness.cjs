@@ -296,5 +296,26 @@ module.exports = {
     return sheet;
   },
   getOzonSales: (...args) => context.getOzonSales(...args),
+
+  // ---------- Хелперы для saveOzonSales (item 26: split of the sales sheet) ----------
+  setOzonSalesArchiveSheet(rows) {
+    const headers = context.OZON_SALES_HEADERS;
+    const data = (rows || []).map(r => [r.week, r.cabinet || 'Mercurius', r.offerId, r.clusterName || 'Екатеринбург',
+      r.qty, r.updatedAt || '2026-01-05 12:00:00', r.days]);
+    const sheet = makeFakeSheet(headers, 'Продажи Ozon Архив');
+    if (data.length > 0) sheet.__setData([headers.slice(), ...data]);
+    sheetRegistry['Продажи Ozon Архив'] = sheet;
+    return sheet;
+  },
+  dumpSalesSheet(name) {
+    const sheet = sheetRegistry[name];
+    if (!sheet) return null;
+    const data = sheet.__dump();
+    const lastRow = sheet.getLastRow();
+    return data.slice(1, Math.max(lastRow, 1)).filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => ({ week: String(r[0]), cabinet: String(r[1]), offerId: String(r[2]),
+                   cluster: String(r[3]), qty: Number(r[4]), days: Number(r[6]) }));
+  },
+  saveOzonSales: (...args) => context.saveOzonSales(...args),
   vm
 };

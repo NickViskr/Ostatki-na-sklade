@@ -490,6 +490,13 @@ const OZON_STOCK_HISTORY_HEADERS = [
 ];
 
 const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 'Кластер', 'Количество', 'Обновлено', 'Дней'];
+// Item 26 (2026-08-20): the compacted 28-day blocks live in their OWN sheet.
+// Reason: getOzonSales reads its sheet whole on every start-up, and 57% of «Продажи Ozon»
+// was archive rows that the date window always discards — 1805 rows out of 3194 read for nothing.
+// The archive is NOT frozen history: saveOzonSales rebuilds it on every sync by compacting weekly
+// rows that age out of the 13-week weekly zone, so both sheets are read by the write path and
+// only the weekly one is read by the start-up path.
+const OZON_SALES_ARCHIVE_SHEET_NAME = 'Продажи Ozon Архив';
 const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
 const OZON_CLUSTERS_HEADERS = ['КластерID', 'Название', 'Добавлен', 'Уведомлён'];
 const FACTORY_ORDERS_HEADERS = ['ID', 'Артикул', 'Дата заказа', 'Количество', 'Ожидаемое прибытие', 'Комментарий', 'Кто', 'Статус', 'Дата получения'];
@@ -734,6 +741,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
   getOrCreateSheet(ss, 'История остатков Ozon', OZON_STOCK_HISTORY_HEADERS);
   getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
+  getOrCreateSheet(ss, OZON_SALES_ARCHIVE_SHEET_NAME, OZON_SALES_HEADERS);
   getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
   getOrCreateSheet(ss, 'Кластеры Ozon', OZON_CLUSTERS_HEADERS);
   getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
@@ -3688,6 +3696,13 @@ function getOzonStockHistorySheet() {
   return sheet;
 }
 
+function getOzonSalesArchiveSheet() {
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, OZON_SALES_ARCHIVE_SHEET_NAME, OZON_SALES_HEADERS);
+  ensureColumns(sheet, OZON_SALES_HEADERS);
+  return sheet;
+}
+
 function getOzonSalesSheet() {
   const ss = getSpreadsheet();
   const sheet = getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
@@ -4399,11 +4414,24 @@ function saveOzonSales(payload) {
   }
   const cutoffMs = Date.now() - retentionWeeks * 7 * 24 * 60 * 60 * 1000;
 
+  // Item 26 (2026-08-20): the compacted blocks now live in their own sheet, but the write path
+  // must still see them — every sync re-aggregates old rows into their 28-day block, so an
+  // archive row left unread would simply vanish. Rows are read from BOTH sheets here and split
+  // again at write time. Legacy layout migrates itself: on the first run after deployment the
+  // archive rows are still sitting in the main sheet, get read here like any other row, and are
+  // written back to the archive sheet. No manual data migration is needed.
+  const archiveSheet = getOzonSalesArchiveSheet();
+  const archiveLastRow = archiveSheet.getLastRow();
+  const archiveData = archiveLastRow > 1
+    ? archiveSheet.getRange(2, 1, archiveLastRow - 1, lastCol).getValues()
+    : [];
+
   const keptRows = [];
   let existingNonEmptyCount = 0;
 
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
+  const scanRows = data.slice(1).concat(archiveData);
+  for (let i = 0; i < scanRows.length; i++) {
+    const row = scanRows[i];
     if (row.join('').trim() === '') continue;
     existingNonEmptyCount++;
 
@@ -4517,14 +4545,22 @@ function saveOzonSales(payload) {
     compactedRows.push(row);
   });
 
-  // 4.4. Запись в лист
+  // 4.4. Запись в два листа: недельная зона в основной, 28-дневные блоки в архивный.
+  // Порядок важен только тем, что оба листа полностью перезаписываются: сначала чистим,
+  // потом пишем. Основной лист после этого содержит ТОЛЬКО недельные строки — ровно то,
+  // что читает getOzonSales при старте приложения.
   if (lastRow > 1) {
     sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
   }
+  if (archiveLastRow > 1) {
+    archiveSheet.getRange(2, 1, archiveLastRow - 1, lastCol).clearContent();
+  }
 
-  const combinedRows = passRows.concat(compactedRows);
-  if (combinedRows.length > 0) {
-    sheet.getRange(2, 1, combinedRows.length, headers.length).setValues(combinedRows);
+  if (passRows.length > 0) {
+    sheet.getRange(2, 1, passRows.length, headers.length).setValues(passRows);
+  }
+  if (compactedRows.length > 0) {
+    archiveSheet.getRange(2, 1, compactedRows.length, headers.length).setValues(compactedRows);
   }
 
   return {
@@ -4532,7 +4568,9 @@ function saveOzonSales(payload) {
     deletedRows: deletedRows,
     keptRows: keptRows.length,
     compactedRows: compactedRows.length,
-    totalRows: combinedRows.length
+    totalRows: passRows.length + compactedRows.length,
+    weeklyRows: passRows.length,
+    archiveRows: compactedRows.length
   };
 }
 
