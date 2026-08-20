@@ -3,7 +3,7 @@ import { buildCargoPlan, buildBoxesPayload } from '../lib/ozonCargo';
 import { X, AlertTriangle, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { resolveOzonArticle } from '../lib/ozonCoverage';
+import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
 import { capForSupplyLine } from '../lib/ozonSupplyLines';
 
 export interface SupplyPlanRow {
@@ -50,6 +50,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const ozonClusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
+  const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
 
   const [sending, setSending] = useState(false);
   const [qtyEdit, setQtyEdit] = useState<Record<string, number>>({});
@@ -266,26 +267,30 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
    * render» and the whole page went blank until a reload. See rule 11.11 in the brief.
    */
 
-  /** Clusters offered in the picker: the whole reference list, current ones first. */
+  /** Clusters offered in the picker: the reference list MINUS the ones banned for shipping
+   *  in the settings, current ones first. A banned cluster gets no recommendation either,
+   *  so offering it here would contradict the rest of the screen. */
   const clusterOptions = useMemo(() => {
+    const excluded = parseExcludedClusters(ozonSettings ? ozonSettings.excludedClusters : '');
     const used = new Set(activeRows.map((r) => r.clusterId));
-    const refs = (ozonClusterRefs || []).filter((c) => c.clusterId);
+    const refs = (ozonClusterRefs || []).filter((c) => c.clusterId && !excluded.has(c.clusterId));
     return [...refs].sort((a, b) => {
       const ua = used.has(a.clusterId) ? 0 : 1;
       const ub = used.has(b.clusterId) ? 0 : 1;
       if (ua !== ub) return ua - ub;
       return a.clusterName.localeCompare(b.clusterName, 'ru');
     });
-  }, [ozonClusterRefs, activeRows]);
+  }, [ozonClusterRefs, ozonSettings, activeRows]);
 
-  /** Articles that can still be put into the chosen cluster: an Ozon SKU is required,
+  /** Articles offered for the chosen cluster: something must be free to ship on «Мой склад»,
+   *  an Ozon SKU is required,
    *  otherwise the line cannot be sent at all, and the pair must not already be in the
    *  supply — rowKey is article|||clusterId and a duplicate would collide. */
   const articleOptions = useMemo(() => {
     if (!addForm.clusterId) return [];
     const taken = new Set(allRows.filter((r) => r.clusterId === addForm.clusterId).map((r) => r.article));
     return (stockOptions || [])
-      .filter((o) => skuMap[o.article] && !taken.has(o.article))
+      .filter((o) => o.freeMyStock > 0 && skuMap[o.article] && !taken.has(o.article))
       .sort((a, b) => a.article.localeCompare(b.article, 'ru'));
   }, [addForm.clusterId, stockOptions, skuMap, allRows]);
 
@@ -965,8 +970,8 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                   <div className="text-[11px] text-slate-400">
                     {addForm.clusterId
                       ? (articleOptions.length > 0
-                          ? 'Выберите товар. В списке только те, у кого есть SKU Ozon и кого ещё нет в этом кластере.'
-                          : 'В этот кластер добавить нечего: все подходящие товары уже в заявке.')
+                          ? 'Выберите товар. В списке только те SKU, у которых есть остатки на Своём складе.'
+                          : 'В этот кластер добавить нечего: свободных остатков на Своём складе по подходящим товарам нет.')
                       : 'Выберите кластер — можно любой, не только из рекомендаций.'}
                   </div>
                 )}

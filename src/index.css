@@ -85,8 +85,15 @@
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+/* NO «forwards» HERE ON PURPOSE. With it the final keyframe's transform: translateY(0)
+   stays applied for good, and an element with ANY transform becomes the containing block
+   for every position: fixed descendant. Every modal rendered inside a tab was then anchored
+   to the tab instead of the screen: measured 20.08.2026 on the supply window — the overlay
+   sat at top -2468px, the panel at -780px, so the screen dimmed and nothing was visible
+   until you scrolled. Without «forwards» the styles fall back to the base ones, which are
+   identical to the last keyframe, so nothing changes visually. See rule 11.12. */
 .tab-enter {
-  animation: fadeInUp 0.2s ease-out forwards;
+  animation: fadeInUp 0.2s ease-out;
 }
 
 @keyframes fadeScale {

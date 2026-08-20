@@ -85,3 +85,24 @@ describe('Правило 11.11: хуки не вызываются после р
     }
   });
 });
+
+/**
+ * Правило 11.12. Анимация появления вкладки не должна оставлять после себя transform.
+ * Элемент с любым transform становится «якорем» для position: fixed внутри него, и тогда
+ * модальные окна вкладки привязываются к вкладке, а не к экрану. 20.08.2026 из-за этого
+ * окно поставки оказалось на 780 пикселей выше экрана: фон темнел, а окна не было видно.
+ */
+describe('Правило 11.12: .tab-enter не оставляет transform после анимации', () => {
+  it('в .tab-enter нет forwards', () => {
+    const css = fs.readFileSync(path.join(process.cwd(), 'src', 'index.css'), 'utf-8');
+    const rule = css.slice(css.indexOf('.tab-enter'), css.indexOf('.tab-enter') + 200);
+    expect(rule).toContain('animation: fadeInUp');
+    expect(rule).not.toContain('forwards');
+  });
+
+  it('последний кадр fadeInUp действительно ставит transform — поэтому forwards и опасен', () => {
+    const css = fs.readFileSync(path.join(process.cwd(), 'src', 'index.css'), 'utf-8');
+    const frames = css.slice(css.indexOf('@keyframes fadeInUp'), css.indexOf('@keyframes fadeInUp') + 160);
+    expect(frames).toContain('transform');
+  });
+});
