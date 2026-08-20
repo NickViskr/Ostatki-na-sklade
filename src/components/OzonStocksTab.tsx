@@ -602,6 +602,18 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     };
   }, [coverageRows, selectedSupply, supplySettings]);
 
+  /** Item 45. Everything the supply window may offer for hand-adding: the article, its name
+   *  and how much of it is free to ship. Built from the whole coverage table, not from the
+   *  recommendations, so an article the recommendation never proposed can still be added. */
+  const supplyStockOptions = useMemo(
+    () => (coverageRows as any[]).map((row) => ({
+      article: row.article,
+      name: row.name || '',
+      freeMyStock: Number(row.freeMyStock) || 0
+    })),
+    [coverageRows]
+  );
+
   const recommendations = useMemo(() => {
     const supplies: any[] = [];
     const factories: any[] = [];
@@ -1730,6 +1742,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         isOpen={supplySummaryOpen && supplyPlan.rows.length > 0}
         onClose={() => setSupplySummaryOpen(false)}
         rows={supplyPlan.rows}
+        stockOptions={supplyStockOptions}
         cabinet={supplyPlan.cabinets.length === 1 ? supplyPlan.cabinets[0] : (cabinetFilter !== 'all' ? cabinetFilter : '')}
         dropOffWarehouseId={supplySettings.dropOffWarehouseId}
         dropOffWarehouseName={supplySettings.dropOffWarehouseName}

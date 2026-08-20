@@ -4,6 +4,7 @@ import { X, AlertTriangle, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { resolveOzonArticle } from '../lib/ozonCoverage';
+import { capForSupplyLine } from '../lib/ozonSupplyLines';
 
 export interface SupplyPlanRow {
   article: string;
@@ -15,10 +16,20 @@ export interface SupplyPlanRow {
   limitedByMyStock: boolean;
 }
 
+/** Item 45. One addable article: what it is called and how much of it is free to ship.
+ *  freeMyStock is stock on «Мой склад» MINUS the reserve held by supplies already created,
+ *  which is why it can be smaller than what the warehouse physically holds. */
+export interface SupplyStockOption {
+  article: string;
+  name: string;
+  freeMyStock: number;
+}
+
 interface OzonSupplyModalProps {
   isOpen: boolean;
   onClose: () => void;
   rows: SupplyPlanRow[];
+  stockOptions: SupplyStockOption[];
   cabinet: string;
   dropOffWarehouseId: string;
   dropOffWarehouseName: string;
@@ -30,7 +41,7 @@ const REQUEST_TIMEOUT_SEC = 60;
 const FINALIZE_TIMEOUT_SEC = 180; // достройка идёт по каждому кластеру, минуты не хватает
 
 export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
-  isOpen, onClose, rows, cabinet, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated
+  isOpen, onClose, rows, stockOptions, cabinet, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated
 }) => {
   const skus = useWarehouseStore((state) => state.skus);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
@@ -38,10 +49,16 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const devMode = useWarehouseStore((state) => state.devMode);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
+  const ozonClusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
 
   const [sending, setSending] = useState(false);
   const [qtyEdit, setQtyEdit] = useState<Record<string, number>>({});
   const [removedRows, setRemovedRows] = useState<Record<string, boolean>>({});
+  // Item 45. Lines the user added by hand. They live beside the recommended ones and go
+  // through exactly the same path afterwards — payload, availability check, itemsJSON —
+  // so the reserve on «Мой склад» is built for them the same way.
+  const [addedRows, setAddedRows] = useState<SupplyPlanRow[]>([]);
+  const [addForm, setAddForm] = useState<{ clusterId: string; article: string; qty: string }>({ clusterId: '', article: '', qty: '' });
   const [draftId, setDraftId] = useState('');
   const [verdict, setVerdict] = useState<any>(null);
   const [dirty, setDirty] = useState(false);
@@ -59,6 +76,8 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       setSending(false);
       setQtyEdit({});
       setRemovedRows({});
+      setAddedRows([]);
+      setAddForm({ clusterId: '', article: '', qty: '' });
       setDraftId('');
       setVerdict(null);
       setDirty(false);
@@ -91,9 +110,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     return v === undefined ? r.qty : v;
   };
 
+  /** Recommended lines plus the hand-added ones. Everything downstream reads activeRows,
+   *  so a hand-added line needs no special case anywhere else. */
+  const allRows = useMemo(() => [...rows, ...addedRows], [rows, addedRows]);
+
   const activeRows = useMemo(
-    () => rows.filter((r) => !removedRows[rowKey(r)]),
-    [rows, removedRows]
+    () => allRows.filter((r) => !removedRows[rowKey(r)]),
+    [allRows, removedRows]
   );
 
   /**
@@ -205,6 +228,37 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     return { qty, rows: activeRows.length, clusters: clusters.size };
   }, [activeRows, qtyEdit]);
 
+  /* ---- Item 45. Free stock on «Мой склад» ---------------------------------------
+   * The owner's rule: a line may not ask for more than is actually free to ship, and the
+   * screen must say how much that is. «Free» is stock minus the reserve already held by
+   * created supplies — the warehouse can hold more than the figure shown.
+   * One article can sit in several clusters of the same supply, so the ceiling for a line
+   * is the free stock LESS what the other lines of the same article already take.
+   */
+  const freeByArticle = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const o of stockOptions || []) map[o.article] = Math.max(0, Number(o.freeMyStock) || 0);
+    return map;
+  }, [stockOptions]);
+
+  const nameByArticle = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const o of stockOptions || []) map[o.article] = o.name || '';
+    return map;
+  }, [stockOptions]);
+
+  /** true when we simply have no stock figure for this article — then nothing is capped. */
+  const hasFreeFigure = (article: string) => Object.prototype.hasOwnProperty.call(freeByArticle, article);
+
+  /** Ceiling for one line, in pieces. The arithmetic lives in src/lib/ozonSupplyLines.ts. */
+  const capForRow = (article: string, exceptKey: string) =>
+    capForSupplyLine(
+      freeByArticle,
+      activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) })),
+      article,
+      exceptKey
+    );
+
   if (!isOpen) return null;
 
   const markDirty = () => {
@@ -212,7 +266,17 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   };
 
   const changeQty = (r: SupplyPlanRow, value: string) => {
-    setQtyEdit({ ...qtyEdit, [rowKey(r)]: value === '' ? 0 : parseInt(value, 10) });
+    const raw = value === '' ? 0 : parseInt(value, 10);
+    const asked = isNaN(raw) || raw < 0 ? 0 : raw;
+    // Item 45. Hard ceiling, owner's decision 20.08.2026: a line may not ask for more than
+    // is free to ship. The recommendation itself never exceeds it, so the clamp only ever
+    // catches a hand-made increase.
+    const cap = capForRow(r.article, rowKey(r));
+    const next = Math.min(asked, cap);
+    if (next < asked) {
+      toast.error(`${r.article}: свободно для отгрузки ${cap} шт, больше поставить нельзя`);
+    }
+    setQtyEdit({ ...qtyEdit, [rowKey(r)]: next });
     markDirty();
   };
 
@@ -223,10 +287,78 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   const removeCluster = (clusterId: string) => {
     const next = { ...removedRows };
-    for (const r of rows) {
+    for (const r of allRows) {
       if (r.clusterId === clusterId) next[rowKey(r)] = true;
     }
     setRemovedRows(next);
+    markDirty();
+  };
+
+  /* ---- Item 45. Adding a cluster or an article by hand ---------------------------- */
+
+  /** Clusters offered in the picker: the whole reference list, current ones first. */
+  const clusterOptions = useMemo(() => {
+    const used = new Set(activeRows.map((r) => r.clusterId));
+    const refs = (ozonClusterRefs || []).filter((c) => c.clusterId);
+    return [...refs].sort((a, b) => {
+      const ua = used.has(a.clusterId) ? 0 : 1;
+      const ub = used.has(b.clusterId) ? 0 : 1;
+      if (ua !== ub) return ua - ub;
+      return a.clusterName.localeCompare(b.clusterName, 'ru');
+    });
+  }, [ozonClusterRefs, activeRows]);
+
+  /** Articles that can still be put into the chosen cluster: an Ozon SKU is required,
+   *  otherwise the line cannot be sent at all, and the pair must not already be in the
+   *  supply — rowKey is article|||clusterId and a duplicate would collide. */
+  const articleOptions = useMemo(() => {
+    if (!addForm.clusterId) return [];
+    const taken = new Set(allRows.filter((r) => r.clusterId === addForm.clusterId).map((r) => r.article));
+    return (stockOptions || [])
+      .filter((o) => skuMap[o.article] && !taken.has(o.article))
+      .sort((a, b) => a.article.localeCompare(b.article, 'ru'));
+  }, [addForm.clusterId, stockOptions, skuMap, allRows]);
+
+  const addFormCap = addForm.article ? capForRow(addForm.article, '') : 0;
+
+  const addLine = () => {
+    const cluster = clusterOptions.find((c) => c.clusterId === addForm.clusterId);
+    if (!cluster) {
+      toast.error('Выберите кластер');
+      return;
+    }
+    if (!addForm.article) {
+      toast.error('Выберите товар');
+      return;
+    }
+    const asked = parseInt(addForm.qty, 10);
+    if (!(asked > 0)) {
+      toast.error('Укажите количество больше нуля');
+      return;
+    }
+    if (asked > addFormCap) {
+      toast.error(`${addForm.article}: свободно для отгрузки ${addFormCap} шт`);
+      return;
+    }
+    const key = `${addForm.article}|||${addForm.clusterId}`;
+    if (allRows.some((r) => rowKey(r) === key)) {
+      toast.error('Такой товар уже есть в этом кластере — измените количество в строке');
+      return;
+    }
+    const perBox = pcsPerBoxMap[addForm.article] || 0;
+    setAddedRows([
+      ...addedRows,
+      {
+        article: addForm.article,
+        name: nameByArticle[addForm.article] || '',
+        clusterId: cluster.clusterId,
+        clusterName: cluster.clusterName,
+        boxes: perBox > 0 ? Math.ceil(asked / perBox) : 0,
+        qty: asked,
+        limitedByMyStock: false
+      }
+    ]);
+    setAddForm({ clusterId: addForm.clusterId, article: '', qty: '' });
     markDirty();
   };
 
@@ -689,7 +821,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
               <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 pt-1">Состав заявки</div>
               <div className="text-xs text-slate-500">
-                Количество можно уменьшить, лишнюю строку или кластер — убрать. Остатки на складе это не меняет.
+                Количество можно менять, лишнюю строку или кластер — убрать, а недостающие позиции добавить внизу. Остатки на складе это не меняет.
               </div>
 
               {noBoxNormRows.length > 0 && (
@@ -721,6 +853,16 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                       {r.limitedByMyStock && (
                         <div className="text-[11px] text-amber-600 font-semibold">урезано остатком Моего склада</div>
                       )}
+                      {/* Item 45. How much of this article is still free to ship, with the
+                          other lines of the same supply already taken into account. */}
+                      {hasFreeFigure(r.article) && (
+                        <div className="text-[11px] text-slate-400">
+                          доступно для отгрузки {capForRow(r.article, rowKey(r))} шт
+                          {addedRows.some((a) => rowKey(a) === rowKey(r)) && (
+                            <span className="ml-1.5 text-indigo-500 font-semibold">добавлено вручную</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div className="text-[11px] shrink-0 text-right">
                       {(() => {
@@ -743,6 +885,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                       type="number"
                       min="0"
                       step="1"
+                      max={hasFreeFigure(r.article) ? capForRow(r.article, rowKey(r)) : undefined}
                       value={getQty(r)}
                       onChange={(e) => changeQty(r, e.target.value)}
                       className="w-24 px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-semibold text-slate-800 bg-white"
@@ -758,6 +901,70 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                     </button>
                   </div>
                 ))}
+              </div>
+
+              {/* Item 45. Adding a cluster or an article that the recommendation did not propose. */}
+              <div className="p-3 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/40 flex flex-col gap-2">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-indigo-500">Добавить позицию</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={addForm.clusterId}
+                    onChange={(e) => setAddForm({ clusterId: e.target.value, article: '', qty: '' })}
+                    className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">Кластер…</option>
+                    {clusterOptions.map((c) => (
+                      <option key={c.clusterId} value={c.clusterId}>{c.clusterName}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={addForm.article}
+                    disabled={!addForm.clusterId}
+                    onChange={(e) => setAddForm({ ...addForm, article: e.target.value, qty: '' })}
+                    className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-400"
+                  >
+                    <option value="">Товар…</option>
+                    {articleOptions.map((o) => (
+                      <option key={o.article} value={o.article}>
+                        {o.article}{o.name ? ` — ${o.name}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    max={addFormCap}
+                    disabled={!addForm.article}
+                    value={addForm.qty}
+                    placeholder="шт"
+                    onChange={(e) => setAddForm({ ...addForm, qty: e.target.value })}
+                    className="w-24 px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={addLine}
+                    disabled={!addForm.article || !addForm.qty}
+                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-sm font-bold transition-colors"
+                  >
+                    Добавить
+                  </button>
+                </div>
+                {addForm.article ? (
+                  <div className="text-[11px] text-slate-500">
+                    Доступно для отгрузки: <span className="font-bold text-slate-700">{addFormCap} шт</span>.
+                    {pcsPerBoxMap[addForm.article] > 0 && <> В коробке {pcsPerBoxMap[addForm.article]} шт.</>}
+                    {' '}На складе может лежать больше — часть уже зарезервирована под созданные заявки.
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-slate-400">
+                    {addForm.clusterId
+                      ? (articleOptions.length > 0
+                          ? 'Выберите товар. В списке только те, у кого есть SKU Ozon и кого ещё нет в этом кластере.'
+                          : 'В этот кластер добавить нечего: все подходящие товары уже в заявке.')
+                      : 'Выберите кластер — можно любой, не только из рекомендаций.'}
+                  </div>
+                )}
               </div>
 
               {Object.keys(removedRows).length > 0 && (
