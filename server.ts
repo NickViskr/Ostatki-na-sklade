@@ -304,7 +304,7 @@ async function startServer() {
     if (['getOzonStocks', 'getOzonSales', 'getFactoryOrders', 'getOzonInitialData'].includes(action)) {
       return CACHE_TTL_OZON_MS;
     }
-    if (['getInitialData', 'getTransactions', 'getSkus', 'getArchivedItems', 'getStock', 'getExternalShipments', 'getOzonSupplyRequests'].includes(action)) {
+    if (['getInitialData', 'getTransactions', 'getSkus', 'getArchivedItems', 'getStock', 'getExternalShipments', 'getOzonSupplyRequests', 'getLastPurchasePrices'].includes(action)) {
       return CACHE_TTL_OPERATIONAL_MS;
     }
     return 0;
@@ -349,7 +349,13 @@ async function startServer() {
     'verifySession', 'login', 'getGlobalSettings', 'getExternalShipments', 'getOzonSupplyRequests',
     'getOzonSettings', 'getOzonClusters', 'getOzonSyncStatus', 'getFactoryOrders', 'getGeminiKey', 'getOzonKeys',
     'getStock', 'getServiceRates', 'getOzonStocks', 'getOzonSales', 'checkSupplyAvailability',
-    'getOzonInitialData'
+    'getOzonInitialData',
+    // Item 26 (2026-08-20): getLastPurchasePrices was missing here from the day it was added.
+    // It is a pure read — it only calls getValues on the history sheet — but the dashboard fires
+    // it on EVERY load, so on every load the proxy treated it as a write and, finding no entry in
+    // CACHE_INVALIDATION, wiped the entire response cache. That is why the cache never helped at
+    // start-up, before or after the composite read was introduced.
+    'getLastPurchasePrices'
   ];
 
   // API Endpoint to proxy GAS requests
