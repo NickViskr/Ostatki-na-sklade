@@ -56,7 +56,7 @@ describe('Item 45. Потолок строки заявки = свободный
   });
 });
 
-import { acceptedForLine, correctedQuantities, foldOzonVerdict } from './ozonSupplyLines';
+import { acceptedForLine, applyOzonCorrection, foldOzonVerdict } from './ozonSupplyLines';
 
 // Ozon отвечает по кластерам и опознаёт товар по offerId и своему SKU.
 // В тестах артикул совпадает с offerId — так же, как это делает resolveOzonArticle на боевых данных.
@@ -140,37 +140,89 @@ describe('Сколько Ozon примет по строке', () => {
   });
 });
 
-describe('«Скорректировать поставку» выставляет принятые количества', () => {
+describe('«Скорректировать поставку» приводит состав к ответу Ozon', () => {
   const folded = foldOzonVerdict(verdictClusters, resolve);
 
-  it('каждая строка получает то, что Ozon согласился принять', () => {
-    const next = correctedQuantities(folded, [
+  it('строка, из которой Ozon берёт часть, получает принятое количество', () => {
+    const res = applyOzonCorrection(folded, [{ article: 'ART-A', clusterId: 'C1', qty: 40 }]);
+    expect(res.quantities).toEqual({ 'ART-A|||C1': 30 });
+    expect(res.removedKeys).toEqual([]);
+    expect(res.removedClusterIds).toEqual([]);
+  });
+
+  it('товар, который Ozon не берёт совсем, убирается из заявки, а не обнуляется', () => {
+    const res = applyOzonCorrection(folded, [
       { article: 'ART-A', clusterId: 'C1', qty: 40 },
+      { article: 'ART-B', clusterId: 'C1', qty: 10 }
+    ]);
+    expect(res.quantities).toEqual({ 'ART-A|||C1': 30 });
+    expect(res.removedKeys).toEqual(['ART-B|||C1']);
+    // Кластер остаётся: в нём ещё есть что везти.
+    expect(res.removedClusterIds).toEqual([]);
+  });
+
+  it('кластер, из которого Ozon не берёт ничего, убирается целиком', () => {
+    const res = applyOzonCorrection(folded, [
+      { article: 'ART-A', clusterId: 'C1', qty: 40 },
+      { article: 'ART-A', clusterId: 'C2', qty: 20 }
+    ]);
+    expect(res.quantities).toEqual({ 'ART-A|||C1': 30 });
+    expect(res.removedKeys).toEqual(['ART-A|||C2']);
+    expect(res.removedClusterIds).toEqual(['C2']);
+  });
+
+  it('кластер уходит, только когда потеряны ВСЕ его строки', () => {
+    const many = foldOzonVerdict([{
+      clusterId: 'C3', state: 'PARTIAL_AVAILABLE', invalidReason: '',
+      accepted: [{ offerId: 'ART-A', quantity: 5 }],
+      rejected: [{ offerId: 'ART-B', quantity: 5 }]
+    }], resolve);
+    const res = applyOzonCorrection(many, [
+      { article: 'ART-A', clusterId: 'C3', qty: 5 },
+      { article: 'ART-B', clusterId: 'C3', qty: 5 }
+    ]);
+    expect(res.removedKeys).toEqual(['ART-B|||C3']);
+    expect(res.removedClusterIds).toEqual([]);
+  });
+
+  it('Ozon не берёт ничего вообще: пустой состав и все кластеры убраны', () => {
+    const res = applyOzonCorrection(folded, [
       { article: 'ART-B', clusterId: 'C1', qty: 10 },
       { article: 'ART-A', clusterId: 'C2', qty: 20 }
     ]);
-    expect(next).toEqual({
-      'ART-A|||C1': 30,
-      'ART-B|||C1': 0,
-      'ART-A|||C2': 0
-    });
+    expect(res.quantities).toEqual({});
+    expect(res.removedKeys.length).toBe(2);
+    expect(res.removedClusterIds.sort()).toEqual(['C1', 'C2']);
+  });
+
+  it('кластера в ответе нет — строка убирается, а не остаётся молча', () => {
+    const res = applyOzonCorrection(folded, [{ article: 'ART-A', clusterId: 'C-НЕТ', qty: 5 }]);
+    expect(res.quantities).toEqual({});
+    expect(res.removedKeys).toEqual(['ART-A|||C-НЕТ']);
+    expect(res.removedClusterIds).toEqual(['C-НЕТ']);
   });
 
   it('повторная коррекция ничего не меняет', () => {
-    const lines = [{ article: 'ART-A', clusterId: 'C1', qty: 40 }];
-    const once = correctedQuantities(folded, lines);
-    const twice = correctedQuantities(folded, [{ article: 'ART-A', clusterId: 'C1', qty: once['ART-A|||C1'] }]);
-    expect(twice).toEqual(once);
+    const first = applyOzonCorrection(folded, [
+      { article: 'ART-A', clusterId: 'C1', qty: 40 },
+      { article: 'ART-B', clusterId: 'C1', qty: 10 }
+    ]);
+    // Убранные строки в состав больше не входят, поэтому второй проход идёт по оставшимся.
+    const second = applyOzonCorrection(folded, [{ article: 'ART-A', clusterId: 'C1', qty: first.quantities['ART-A|||C1'] }]);
+    expect(second.quantities).toEqual({ 'ART-A|||C1': 30 });
+    expect(second.removedKeys).toEqual([]);
   });
 
   it('после коррекции непринятого не остаётся', () => {
     const lines = [
       { article: 'ART-A', clusterId: 'C1', qty: 40 },
+      { article: 'ART-B', clusterId: 'C1', qty: 10 },
       { article: 'ART-A', clusterId: 'C2', qty: 20 }
     ];
-    const next = correctedQuantities(folded, lines);
+    const res = applyOzonCorrection(folded, lines);
     const left = lines
-      .map((l) => acceptedForLine(folded, { ...l, qty: next[`${l.article}|||${l.clusterId}`] }).notAccepted)
+      .filter((l) => res.removedKeys.indexOf(`${l.article}|||${l.clusterId}`) < 0)
+      .map((l) => acceptedForLine(folded, { ...l, qty: res.quantities[`${l.article}|||${l.clusterId}`] }).notAccepted)
       .reduce((a, b) => a + b, 0);
     expect(left).toBe(0);
   });

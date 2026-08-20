@@ -94,16 +94,48 @@ export const acceptedForLine = (
   return { accepted, notAccepted: Math.max(0, (Number(line.qty) || 0) - accepted) };
 };
 
+export interface OzonCorrection {
+  /** row key -> quantity Ozon agreed to take, for the lines that stay */
+  quantities: Record<string, number>;
+  /** row keys to drop from the supply: Ozon takes none of them */
+  removedKeys: string[];
+  /** clusters that lose every line and therefore leave the supply altogether */
+  removedClusterIds: string[];
+}
+
 /**
- * «Скорректировать поставку»: the quantity of every line becomes what Ozon agreed to take.
- * A line Ozon said nothing about — a cluster it refused outright, or an article it did not
- * list — drops to zero, which is exactly what «Ozon will not take this» means.
+ * «Скорректировать поставку»: every line that survives gets the quantity Ozon agreed to
+ * take, and every line Ozon takes nothing of LEAVES the supply — a zero line is not a
+ * supply line, it is a line that should not be there. When a cluster loses all of its
+ * lines it leaves too: shipping nothing to a warehouse is not a shipment.
+ *
+ * A line in a cluster Ozon never answered about counts as fully refused, not as silently
+ * accepted — the safe direction when the answer is missing.
  */
-export const correctedQuantities = (
+export const applyOzonCorrection = (
   folded: Record<string, OzonClusterVerdict>,
   lines: Array<SupplyLine & { qty: number }>
-): Record<string, number> => {
-  const out: Record<string, number> = {};
-  for (const line of lines) out[supplyLineKey(line)] = acceptedForLine(folded, line).accepted;
-  return out;
+): OzonCorrection => {
+  const quantities: Record<string, number> = {};
+  const removedKeys: string[] = [];
+  const keptByCluster: Record<string, number> = {};
+  const seenClusters: string[] = [];
+
+  for (const line of lines) {
+    if (seenClusters.indexOf(line.clusterId) < 0) seenClusters.push(line.clusterId);
+    const key = supplyLineKey(line);
+    const accepted = acceptedForLine(folded, line).accepted;
+    if (accepted > 0) {
+      quantities[key] = accepted;
+      keptByCluster[line.clusterId] = (keptByCluster[line.clusterId] || 0) + 1;
+    } else {
+      removedKeys.push(key);
+    }
+  }
+
+  return {
+    quantities,
+    removedKeys,
+    removedClusterIds: seenClusters.filter((id) => !keptByCluster[id])
+  };
 };

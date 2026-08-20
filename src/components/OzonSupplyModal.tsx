@@ -4,7 +4,7 @@ import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
-import { acceptedForLine, capForSupplyLine, correctedQuantities, foldOzonVerdict } from '../lib/ozonSupplyLines';
+import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict } from '../lib/ozonSupplyLines';
 
 export interface SupplyPlanRow {
   article: string;
@@ -415,24 +415,36 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   })();
 
   /**
-   * «Скорректировать поставку»: выставить в каждой строке то количество, которое Ozon
-   * согласился принять. Пересчёт после этого не нужен — состав становится ровно таким,
-   * какой Ozon уже подтвердил, поэтому dirty снимается и заявку можно создавать.
-   * Кнопка живёт только при неизменённом составе: по строке, добавленной после расчёта,
-   * ответа Ozon просто нет.
+   * «Скорректировать поставку»: строки, которые Ozon берёт, получают принятое количество,
+   * а те, из которых он не берёт ничего, УХОДЯТ из заявки — строка с нулём это не позиция
+   * поставки, а позиция, которой там быть не должно. Кластер, потерявший все свои строки,
+   * уходит следом: везти на склад нечего.
+   * Пересчёт после этого не нужен — состав становится ровно тем, который Ozon подтвердил,
+   * поэтому dirty снимается. Кнопка живёт только при неизменённом составе: по строке,
+   * добавленной после расчёта, ответа Ozon просто нет.
    */
   const correctToOzon = () => {
     if (!verdict) return;
-    const nextQty: Record<string, number> = {
-      ...qtyEdit,
-      ...correctedQuantities(
-        ozonByCluster,
-        activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) }))
-      )
-    };
-    setQtyEdit(nextQty);
+    const result = applyOzonCorrection(
+      ozonByCluster,
+      activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) }))
+    );
+    const nextRemoved = { ...removedRows };
+    for (const key of result.removedKeys) nextRemoved[key] = true;
+    setQtyEdit({ ...qtyEdit, ...result.quantities });
+    setRemovedRows(nextRemoved);
     setDirty(false);
-    toast.success('Количества выставлены по ответу Ozon');
+
+    if (Object.keys(result.quantities).length === 0) {
+      toast.error('Ozon не принимает ни одной позиции — заявку создать не из чего');
+      return;
+    }
+    const parts: string[] = [];
+    if (result.removedKeys.length > 0) parts.push(`убрано позиций: ${result.removedKeys.length}`);
+    if (result.removedClusterIds.length > 0) parts.push(`кластеров: ${result.removedClusterIds.length}`);
+    toast.success(parts.length > 0
+      ? `Состав приведён к ответу Ozon (${parts.join(', ')})`
+      : 'Количества выставлены по ответу Ozon');
   };
 
   /** Кластеры живого состава — те, где реально что-то остаётся отгружать. */
