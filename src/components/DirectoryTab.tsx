@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { resolveServiceRateAt } from '../lib/serviceRates';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Book, Plus, Edit2, Trash2, Check, X, ShieldAlert, ArrowUp, ArrowDown, Clock } from 'lucide-react';
@@ -162,13 +163,6 @@ export const DirectoryTab: React.FC = React.memo(() => {
     const success = await handleUpdateService(editingId, form.name.trim(), cost, true);
     if (success) resetForm();
   };
-
-  // Item 43. Today in yyyy-MM-dd — the same shape ДействуетС is stored in, so plain string
-  // comparison decides which tariff has already started. Built from the local calendar, not
-  // from toISOString(): in Moscow the UTC date is still yesterday until 03:00, and a tariff
-  // starting today would not show up for the first three hours of the working day.
-  const now = new Date();
-  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
   const activeServices = React.useMemo(() => {
     let active = services.filter(s => s.isActive);
@@ -438,15 +432,13 @@ export const DirectoryTab: React.FC = React.memo(() => {
                   .filter(r => String(r.serviceId) === String(service.id))
                   .sort((a, b) => b.validFrom.localeCompare(a.validFrom));
 
-                // Item 43. The column used to print service.cost — the price entered when the
-                // service was created — while invoices were already billed at the dated rate.
-                // rates is sorted newest first, so the first row that has already started is
-                // the one in force today. Rows with an empty ДействуетС are skipped, exactly
-                // as the backend does in getServiceCostAt; the base price is the fallback.
-                // The value is derived from serviceRates rather than from the backend field
-                // service.currentCost because adding a tariff refreshes only serviceRates —
-                // currentCost would stay stale until the next full reload.
-                const activeRate = rates.find(r => r.validFrom && r.validFrom <= todayStr);
+                // Item 43. Колонка печатала service.cost — цену, с которой услугу завели,
+                // хотя акты уже считались по датированному тарифу. Действующий тариф
+                // определяется тем же кодом, что и при расчёте отгрузки. Значение берётся
+                // из serviceRates, а НЕ из серверного поля service.currentCost: добавление
+                // тарифа обновляет только список тарифов, и currentCost остался бы старым
+                // до полной перезагрузки страницы.
+                const activeRate = resolveServiceRateAt(serviceRates, service.id);
                 const effectiveCost = activeRate ? activeRate.cost : service.cost;
 
                 return (
@@ -459,7 +451,7 @@ export const DirectoryTab: React.FC = React.memo(() => {
                         {formatCurrency(effectiveCost)} ₽
                         {activeRate && (
                           <div className="text-[10px] font-sans font-normal text-slate-400 mt-0.5">
-                            тариф с {activeRate.validFrom} · базовая {formatCurrency(service.cost)} ₽
+                            действует с {activeRate.validFrom}
                           </div>
                         )}
                       </td>

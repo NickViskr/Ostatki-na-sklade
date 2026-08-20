@@ -11,6 +11,7 @@ import {
   Layers,
   Zap,
 } from "lucide-react";
+import { resolveServiceCostAt } from '../lib/serviceRates';
 import { useWarehouseStore } from "../store/useWarehouseStore";
 import { useUIStore } from "../store/useUIStore";
 import { formatCurrency, newOperationId } from "../lib/utils";
@@ -98,18 +99,10 @@ export const ConfirmModal: React.FC = () => {
   );
   const boxesPerPalletGlobal = useSettingsStore((state) => state.boxesPerPalletGlobal);
 
-  const getServiceCostAt = (serviceId: string, dateStr?: string) => {
-    const targetDate = dateStr || new Date().toISOString().split('T')[0];
-    const rates = serviceRates.filter(
-      (r) => String(r.serviceId) === String(serviceId) && r.validFrom <= targetDate
-    );
-    if (rates.length > 0) {
-      rates.sort((a, b) => b.validFrom.localeCompare(a.validFrom));
-      return rates[0].cost;
-    }
-    const s = services.find((srv) => String(srv.id) === String(serviceId));
-    return s ? s.cost : 0;
-  };
+  // Item 43. Дата отсечки: расценка берётся та, что действовала на дату поставки, а не
+  // сегодняшняя. Логика вынесена в src/lib/serviceRates.ts и общая со справочником.
+  const getServiceCostAt = (serviceId: string, dateStr?: string) =>
+    resolveServiceCostAt(serviceRates, services, serviceId, dateStr);
 
   const activeServices = useMemo(() => {
     let active = services.filter((s) => s.isActive);

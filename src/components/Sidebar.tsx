@@ -156,8 +156,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               key={item.id}
               onClick={() => handleTabClick(item.id)}
               title={isSidebarCollapsed ? item.label : undefined}
-              className={`flex-shrink-0 md:w-full flex items-center justify-center md:justify-start gap-0 md:gap-3 p-2 md:py-3 rounded-xl transition-all relative flex-col md:flex-row ${
-                isSidebarCollapsed ? 'md:justify-center md:px-0' : 'md:px-4'
+              className={`flex-shrink-0 md:w-full flex items-center justify-center gap-0 md:gap-3 p-2 md:py-3 rounded-xl transition-all relative flex-col md:flex-row ${
+                isSidebarCollapsed ? 'md:justify-center md:px-0' : 'md:justify-start md:px-4'
               } ${
                 activeTab === item.id 
                   ? 'text-indigo-700 font-medium' 
@@ -167,7 +167,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               }`}
             >
               <item.icon size={20} className={`shrink-0 ${activeTab === item.id && 'text-indigo-600 md:text-indigo-700'} mb-1 md:mb-0`} />
-              <span className={`text-[10px] md:text-base whitespace-nowrap ${isSidebarCollapsed ? 'hidden md:hidden' : 'md:inline'} ${activeTab !== item.id && 'hidden md:inline'}`}>{item.label}</span>
+              {/* Каждая утилита упоминается РОВНО один раз. Прежде свёрнутое меню собирало
+                  «hidden md:hidden» и «hidden md:inline» сразу: Tailwind ставит md:inline
+                  в таблице стилей позже md:hidden, поэтому подпись оставалась видимой и
+                  вылезала за пределы узкой панели. Мобильная видимость (подпись только у
+                  активной вкладки) и настольная (подпись скрыта в свёрнутом меню) теперь
+                  задаются разными классами и не спорят друг с другом. */}
+              <span className={`text-[10px] md:text-base whitespace-nowrap ${activeTab === item.id ? '' : 'hidden'} ${isSidebarCollapsed ? 'md:hidden' : 'md:inline'}`}>{item.label}</span>
               {item.id === 'deleted' && archivedItems.length > 0 && (
                 <div className={`absolute bg-red-500 border-2 border-white rounded-full z-10 md:hidden right-1 top-1 w-2.5 h-2.5`} />
               )}

@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import ReactDOM from 'react-dom';
+import { parseStoredServiceEntries } from '../lib/serviceRates';
 import { useWarehouseStore } from "../store/useWarehouseStore";
 import { useUIStore } from "../store/useUIStore";
 import {
@@ -467,33 +468,10 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     if (bracketMatch) {
       const servicesTag = bracketMatch[2].split('|').map((s: string) => s.trim()).find((tag: string) => tag.startsWith('Услуги:'));
       if (servicesTag) {
-        const re = /([^(]+)\((\d+(?:\.\d+)?)₽\)/g;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(servicesTag)) !== null) {
-          // Strip "Услуги:" prefix (first item) and leading "," separator (subsequent items)
-          let rawName = m[1].trim().replace(/^Услуги:\s*/, '').replace(/^,\s*/, '').trim();
-          const totalCost = parseFloat(m[2]);
-
-          // Detect "ServiceName x{qty}" format stored by ConfirmModal
-          const qtyMatch = rawName.match(/^(.*?)\s+x(\d+)\s*$/i);
-          let name: string;
-          let storedQty: number;
-          if (qtyMatch) {
-            name = qtyMatch[1].trim();
-            storedQty = parseInt(qtyMatch[2], 10) || 1;
-          } else {
-            name = rawName;
-            storedQty = 1;
-          }
-
-          // Look up unit cost from services store by clean name
-          const storeService = services.find(s => s.name === name);
-          const unitCost = storeService?.cost && storeService.cost > 0
-            ? storeService.cost
-            : (storedQty > 0 ? totalCost / storedQty : totalCost);
-          const quantity = unitCost > 0 ? Math.max(1, Math.round(totalCost / unitCost)) : storedQty;
-          servicesList.push({ name, unitCost, quantity });
-        }
+        // Item 43. Разбор общий с остальным приложением, см. src/lib/serviceRates.ts.
+        // Расценка старой отгрузки берётся из неё самой: она посчитана по тарифу на дату
+        // поставки, и смена тарифа задним числом её менять не должна.
+        servicesList.push(...parseStoredServiceEntries(servicesTag, services));
       }
     }
     setServiceEditData({ packagingCost, packagingDist, otherCost, otherDist, servicesList, destinationName });
