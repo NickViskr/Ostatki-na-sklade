@@ -48,7 +48,6 @@ export default function App() {
   const fetchStock = useWarehouseStore((state) => state.fetchStock);
   const fetchArchivedItems = useWarehouseStore((state) => state.fetchArchivedItems);
   const checkSession = useWarehouseStore((state) => state.checkSession);
-  const bootFetchStarted = useWarehouseStore((state) => state.bootFetchStarted);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const devMode = useWarehouseStore((state) => state.devMode);
 
@@ -69,17 +68,23 @@ export default function App() {
 
   // Item 26 (2026-08-20): checkSession уже запустило fetchStock параллельно с проверкой сессии,
   // не дожидаясь её ответа. Здесь оно повторяется только на том пути, где checkSession не работало —
-  // например сразу после ввода логина и пароля. Признак bootFetchStarted и отличает эти два случая.
+  // например сразу после ввода логина и пароля.
+  //
+  // Признак читается ИМПЕРАТИВНО из хранилища, а не через подписку. Подписка здесь давала ровно
+  // тот дубль, ради устранения которого всё и затевалось: значение попадает в замыкание на той
+  // отрисовке, которая произошла ДО запуска checkSession, то есть эффект видел «ещё не запущено»
+  // и слал второй getInitialData. По той же причине признак не входит в список зависимостей —
+  // иначе его изменение перезапускало бы эффект и второй раз запрашивало архив.
   useEffect(() => {
     if (currentUser) {
-      if (!bootFetchStarted) {
+      if (!useWarehouseStore.getState().bootFetchStarted) {
         fetchStock();
       }
       if (isAdmin) {
         fetchArchivedItems();
       }
     }
-  }, [fetchStock, fetchArchivedItems, currentUser, isAdmin, bootFetchStarted]);
+  }, [fetchStock, fetchArchivedItems, currentUser, isAdmin]);
 
   useEffect(() => {
     if ((activeTab === 'settings' || activeTab === 'users' || activeTab === 'deleted' || activeTab === 'ozon' || activeTab === 'ozonStocks') && !isAdmin) {
