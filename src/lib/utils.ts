@@ -116,3 +116,18 @@ export function hasCostDebt(
 
   return capitalization > quantity * lastPurchasePrice * COST_DEBT_ALERT_FACTOR;
 }
+
+/**
+ * A date for the user's eyes: ДД.ММ.ГГГГ. See rule 11.9 in the technical brief.
+ * The database stores dates as yyyy-MM-dd, which is right for sorting and comparing but
+ * must never reach the screen. Parsing goes through parseAppDate, so already-flipped and
+ * full ISO strings are understood too. An unparseable value is returned untouched, so an
+ * empty cell does not turn into «NaN.NaN.NaN».
+ */
+export const formatDateRu = (raw?: string | null): string => {
+  const d = parseAppDate(raw);
+  if (!d) return raw ? String(raw) : '';
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  return `${dd}.${mm}.${d.getFullYear()}`;
+};

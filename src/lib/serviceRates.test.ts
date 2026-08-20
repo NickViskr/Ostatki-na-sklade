@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseStoredServiceEntries, resolveServiceCostAt, resolveServiceRateAt, todayLocalDateString } from './serviceRates';
 import type { ServiceItem, ServiceRate } from '../types';
+import { formatDateRu } from './utils';
 
 const services: ServiceItem[] = [
   { id: 'S1', name: 'Упаковка в пакет', cost: 10, isActive: true },
@@ -109,5 +110,29 @@ describe('Item 43. Старая отгрузка остаётся по стар�
       const sum = parsed.reduce((s, e) => s + e.unitCost * e.quantity, 0);
       expect(sum).toBeCloseTo(total, 2);
     }
+  });
+});
+
+describe('Даты на экране показываются как ДД.ММ.ГГГГ', () => {
+  it('дата из базы переворачивается', () => {
+    expect(formatDateRu('2026-07-06')).toBe('06.07.2026');
+    expect(formatDateRu('2026-12-31')).toBe('31.12.2026');
+  });
+
+  it('однозначные день и месяц дополняются нулём', () => {
+    expect(formatDateRu('2026-01-02')).toBe('02.01.2026');
+  });
+
+  it('уже перевёрнутая дата остаётся перевёрнутой', () => {
+    expect(formatDateRu('06.07.2026')).toBe('06.07.2026');
+  });
+
+  it('пустое значение не превращается в мусор', () => {
+    expect(formatDateRu('')).toBe('');
+    expect(formatDateRu(undefined)).toBe('');
+  });
+
+  it('неразбираемая строка возвращается как есть', () => {
+    expect(formatDateRu('нет даты')).toBe('нет даты');
   });
 });

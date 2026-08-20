@@ -3,7 +3,7 @@ import { resolveServiceRateAt } from '../lib/serviceRates';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Book, Plus, Edit2, Trash2, Check, X, ShieldAlert, ArrowUp, ArrowDown, Clock } from 'lucide-react';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, formatDateRu } from '../lib/utils';
 import { toast } from 'sonner';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -432,12 +432,12 @@ export const DirectoryTab: React.FC = React.memo(() => {
                   .filter(r => String(r.serviceId) === String(service.id))
                   .sort((a, b) => b.validFrom.localeCompare(a.validFrom));
 
-                // Item 43. Колонка печатала service.cost — цену, с которой услугу завели,
-                // хотя акты уже считались по датированному тарифу. Действующий тариф
-                // определяется тем же кодом, что и при расчёте отгрузки. Значение берётся
-                // из serviceRates, а НЕ из серверного поля service.currentCost: добавление
-                // тарифа обновляет только список тарифов, и currentCost остался бы старым
-                // до полной перезагрузки страницы.
+                // Item 43. The column printed service.cost — the price the service was
+                // created with — while invoices were already billed at the dated tariff. The
+                // rate in force is resolved by the same code the shipment calculation uses.
+                // It is derived from serviceRates and NOT from the backend field
+                // service.currentCost: adding a tariff refreshes only the rate list, so
+                // currentCost would stay stale until a full page reload.
                 const activeRate = resolveServiceRateAt(serviceRates, service.id);
                 const effectiveCost = activeRate ? activeRate.cost : service.cost;
 
@@ -451,7 +451,7 @@ export const DirectoryTab: React.FC = React.memo(() => {
                         {formatCurrency(effectiveCost)} ₽
                         {activeRate && (
                           <div className="text-[10px] font-sans font-normal text-slate-400 mt-0.5">
-                            действует с {activeRate.validFrom}
+                            действует с {formatDateRu(activeRate.validFrom)}
                           </div>
                         )}
                       </td>
@@ -534,7 +534,7 @@ export const DirectoryTab: React.FC = React.memo(() => {
                                   {rates.map((rate, rIdx) => (
                                     <div key={rIdx} className="flex justify-between items-center px-4 py-2.5 text-sm hover:bg-white transition-colors">
                                       <span className="font-mono font-medium text-slate-700">{formatCurrency(rate.cost)} ₽</span>
-                                      <span className="text-xs text-slate-500 bg-white px-2 py-1 rounded-md border border-slate-100 font-medium">{rate.validFrom}</span>
+                                      <span className="text-xs text-slate-500 bg-white px-2 py-1 rounded-md border border-slate-100 font-medium">{formatDateRu(rate.validFrom)}</span>
                                     </div>
                                   ))}
                                 </div>

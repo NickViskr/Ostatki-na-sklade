@@ -468,9 +468,9 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     if (bracketMatch) {
       const servicesTag = bracketMatch[2].split('|').map((s: string) => s.trim()).find((tag: string) => tag.startsWith('Услуги:'));
       if (servicesTag) {
-        // Item 43. Разбор общий с остальным приложением, см. src/lib/serviceRates.ts.
-        // Расценка старой отгрузки берётся из неё самой: она посчитана по тарифу на дату
-        // поставки, и смена тарифа задним числом её менять не должна.
+        // Item 43. Parsing is shared with the rest of the app, see src/lib/serviceRates.ts.
+        // A past shipment's rate is read from the shipment itself: it was billed at the
+        // tariff in force on the delivery date, and a later tariff must not change it.
         servicesList.push(...parseStoredServiceEntries(servicesTag, services));
       }
     }

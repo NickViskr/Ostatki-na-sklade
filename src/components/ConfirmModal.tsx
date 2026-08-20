@@ -99,8 +99,8 @@ export const ConfirmModal: React.FC = () => {
   );
   const boxesPerPalletGlobal = useSettingsStore((state) => state.boxesPerPalletGlobal);
 
-  // Item 43. Дата отсечки: расценка берётся та, что действовала на дату поставки, а не
-  // сегодняшняя. Логика вынесена в src/lib/serviceRates.ts и общая со справочником.
+  // Item 43. Cut-off date: the rate used is the one in force on the delivery date, not
+  // today's. The logic lives in src/lib/serviceRates.ts and is shared with the directory.
   const getServiceCostAt = (serviceId: string, dateStr?: string) =>
     resolveServiceCostAt(serviceRates, services, serviceId, dateStr);
 

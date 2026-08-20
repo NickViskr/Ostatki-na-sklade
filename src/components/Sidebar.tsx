@@ -167,12 +167,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               }`}
             >
               <item.icon size={20} className={`shrink-0 ${activeTab === item.id && 'text-indigo-600 md:text-indigo-700'} mb-1 md:mb-0`} />
-              {/* Каждая утилита упоминается РОВНО один раз. Прежде свёрнутое меню собирало
-                  «hidden md:hidden» и «hidden md:inline» сразу: Tailwind ставит md:inline
-                  в таблице стилей позже md:hidden, поэтому подпись оставалась видимой и
-                  вылезала за пределы узкой панели. Мобильная видимость (подпись только у
-                  активной вкладки) и настольная (подпись скрыта в свёрнутом меню) теперь
-                  задаются разными классами и не спорят друг с другом. */}
+              {/* Every utility is named EXACTLY once — see rule 11.10 in the technical brief.
+                  The collapsed menu used to emit «hidden md:hidden» and «hidden md:inline» at
+                  the same time, and Tailwind places md:inline after md:hidden in the
+                  stylesheet, so the label stayed visible and spilled out of the narrow panel.
+                  Mobile visibility (label only on the active tab) and desktop visibility
+                  (label hidden while collapsed) are now separate classes that cannot fight. */}
               <span className={`text-[10px] md:text-base whitespace-nowrap ${activeTab === item.id ? '' : 'hidden'} ${isSidebarCollapsed ? 'md:hidden' : 'md:inline'}`}>{item.label}</span>
               {item.id === 'deleted' && archivedItems.length > 0 && (
                 <div className={`absolute bg-red-500 border-2 border-white rounded-full z-10 md:hidden right-1 top-1 w-2.5 h-2.5`} />
