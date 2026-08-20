@@ -328,11 +328,18 @@ async function startServer() {
     }
   }
 
+  // This list does three separate jobs, so a read missing from it misbehaves three ways:
+  // an action not listed here is treated as a WRITE, which (1) invalidates the response cache —
+  // and, when the action is absent from CACHE_INVALIDATION too, wipes the cache ENTIRELY,
+  // (2) is never retried automatically after a transport failure, and (3) goes down the write path.
+  // Item 26 stage A1: getOzonInitialData was missing here at first, so every cache miss on it
+  // wiped the whole cache and made every other read on the same page load miss as well.
   const READ_ONLY_ACTIONS = [
     'getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems',
     'verifySession', 'login', 'getGlobalSettings', 'getExternalShipments', 'getOzonSupplyRequests',
     'getOzonSettings', 'getOzonClusters', 'getOzonSyncStatus', 'getFactoryOrders', 'getGeminiKey', 'getOzonKeys',
-    'getStock', 'getServiceRates', 'getOzonStocks', 'getOzonSales', 'checkSupplyAvailability'
+    'getStock', 'getServiceRates', 'getOzonStocks', 'getOzonSales', 'checkSupplyAvailability',
+    'getOzonInitialData'
   ];
 
   // API Endpoint to proxy GAS requests
