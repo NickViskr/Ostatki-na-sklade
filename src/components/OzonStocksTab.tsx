@@ -373,6 +373,22 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return map;
   }, [factoryOrdersByArticle]);
 
+  /* ---- «Распределить весь остаток» ------------------------------------------------
+   * Кластер попадает в распределение, только если у товара есть скорость продаж именно в
+   * нём, а скорость считается за окно «Полных недель для скорости продаж» (обычно 4).
+   * У товара, который кончился на Ozon, продажи прекратились везде, где остаток обнулился,
+   * поэтому такие кластеры выпадают: спроса нет, потому что не было товара.
+   * Кнопка пересчитывает распределение ЭТОГО товара по окну тренда (обычно 13 недель) —
+   * тогда кластеры, продававшие до дефицита, возвращаются со своей долей.
+   * Расчёт по широкому окну ленивый: пока ни один товар не переключён, он не запускается.
+   */
+  const [wideArticles, setWideArticles] = useState<Record<string, boolean>>({});
+  const anyWide = Object.keys(wideArticles).some((a) => wideArticles[a]);
+
+  const toggleWideArticle = (article: string) => {
+    setWideArticles((prev) => ({ ...prev, [article]: !prev[article] }));
+  };
+
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (filteredOzonStocks.length === 0) return null;
     // Пункт 29, этап E: ждём ответ по справочнику кластеров.
@@ -402,6 +418,38 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
     return result;
   }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies, factoryOnOrder]);
+
+  /** Окно тренда из настроек: сколько недель берём, когда распределяем весь остаток. */
+  const wideWeeks = Number(ozonSettings.trendWeeks) > 0 ? Math.floor(Number(ozonSettings.trendWeeks)) : 13;
+
+  /**
+   * Тот же расчёт покрытия, но скорость продаж считается за окно тренда. Считается только
+   * тогда, когда хотя бы один товар переключён кнопкой: расчёт тяжёлый, а нужен он редко.
+   * Из результата берутся ТОЛЬКО кластеры переключённых товаров — всё остальное на экране
+   * по-прежнему живёт по обычному окну скорости.
+   */
+  const wideCoverage = useMemo<OzonCoverageResult | null>(() => {
+    if (!anyWide) return null;
+    if (filteredOzonStocks.length === 0 || !clusterRefsLoaded) return null;
+    const myStockAvailability: Record<string, number> = {};
+    for (const sku of skus) {
+      myStockAvailability[sku.sku] = getEffectiveAvailability(sku.sku);
+    }
+    const perfStart = performance.now();
+    const result = buildOzonCoverage({
+      stocks: filteredOzonStocks,
+      sales: filteredOzonSales,
+      skus,
+      clusters: clusterRefs,
+      settings: { ...ozonSettings, speedWeeks: wideWeeks },
+      myStockAvailability,
+      pending: pendingSupplies,
+      factoryOnOrder,
+      kits,
+    });
+    console.log(`OZONPERF wideCoverage total=${Math.round(performance.now() - perfStart)}ms weeks=${wideWeeks}`);
+    return result;
+  }, [anyWide, wideWeeks, filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];
@@ -620,7 +668,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     let orderedCount = 0;
     let clusterDeficitCount = 0;
     for (const row of coverageRows as any[]) {
-      const clusters = row.clusters.filter((c: any) => c.recommendation && (c.recommendation.boxes > 0 || c.needQty > 0));
+      // «Распределить весь остаток»: у переключённого товара кластеры берутся из расчёта по
+      // окну тренда. Обогащение (needBoxes/needQty) повторяет то, что делает coverageRows,
+      // потому что панель рисует обе выдачи одним и тем же кодом.
+      const wideArticle = wideArticles[row.article] && wideCoverage
+        ? wideCoverage.articles.find((a) => a.article === row.article)
+        : undefined;
+      const box = row.pcsPerBox > 0 ? row.pcsPerBox : 1;
+      const sourceClusters = wideArticle
+        ? wideArticle.clusters.map((cls) => {
+            const needBoxes = cls.recommendation ? Math.ceil(cls.recommendation.neededQty / box) : 0;
+            return { ...cls, needBoxes, needQty: needBoxes * box };
+          })
+        : row.clusters;
+      const clusters = sourceClusters.filter((c: any) => c.recommendation && (c.recommendation.boxes > 0 || c.needQty > 0));
       if (clusters.length > 0) {
         let minCoverage = Number.POSITIVE_INFINITY;
         for (const c of clusters) {
@@ -635,6 +696,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           pendingTotal: row.pendingTotal,
           minCoverage,
           clusters,
+          wide: Boolean(wideArticle),
+          // Сколько свободного остатка расчёт НЕ разложил: чтобы «весь остаток» не оказалось
+          // обещанием, которого расчёт не выполнил.
+          leftover: Math.max(0, (Number(row.freeMyStock) || 0) - clusters.reduce(
+            (sum: number, c: any) => sum + (c.recommendation ? c.recommendation.qty : 0), 0
+          )),
         });
       }
       // Пункт 35. В список попадает то, что реально надо дозаказать.
@@ -648,7 +715,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     supplies.sort((a, b) => a.minCoverage - b.minCoverage);
     factories.sort((a, b) => a.factory.daysLeft - b.factory.daysLeft);
     return { supplies, factories, orderedCount, clusterDeficitCount };
-  }, [coverageRows, activeFactoryOrders, factoryOnOrder]);
+  }, [coverageRows, activeFactoryOrders, factoryOnOrder, wideArticles, wideCoverage]);
 
   if (!isAdmin) return null;
 
@@ -858,6 +925,29 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 </span>
                               </div>
                               {s.name && <div className="text-[11px] text-slate-500 truncate" title={s.name}>{s.name}</div>}
+
+                              <div className="mt-1.5 flex items-center justify-between gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleWideArticle(s.article)}
+                                  title={s.wide
+                                    ? `Вернуться к обычному расчёту: окно скорости ${ozonSettings.speedWeeks} нед.`
+                                    : `Пересчитать распределение по окну тренда — ${wideWeeks} нед. Кластеры, продававшие до того, как товар кончился, вернутся в распределение.`}
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors ${
+                                    s.wide
+                                      ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                                      : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'
+                                  }`}
+                                >
+                                  {s.wide ? `по окну тренда, ${wideWeeks} нед.` : 'Распределить весь остаток'}
+                                </button>
+                                {s.wide && s.leftover > 0 && (
+                                  <span className="text-[10px] text-slate-400 shrink-0" title="Расчёт разложил не весь свободный остаток: потребности кластеров за окно тренда на него не хватило">
+                                    не разложено {fmtInt(s.leftover)} шт
+                                  </span>
+                                )}
+                              </div>
+
                               <div className="mt-2 flex flex-col gap-1">
                                 {s.clusters.map((c: any) => (
                                   <div key={c.clusterId} className="flex items-center justify-between gap-2 text-[11px]">

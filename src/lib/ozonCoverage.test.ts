@@ -900,3 +900,91 @@ describe('buildSalesSpeed: только недельные строки и ре�
     expect(res.articles[0].factory).toBeNull();
   });
 });
+
+/* ---- «Распределить весь остаток»: окно скорости решает, какие кластеры участвуют ---- */
+
+// Среда 10.01.2024. Последняя полная неделя — 2024-01-01.
+// Окно 4 недели: с 2023-12-11. Окно 13 недель: с 2023-10-09.
+const WIDE_NOW = new Date('2024-01-10T10:00:00Z');
+
+/** Товар кончился на Ozon: остатков нет ни в одном кластере, продажи прекратились. */
+function wideInput(overrides: Partial<OzonCoverageInput> = {}): OzonCoverageInput {
+  return {
+    stocks: [
+      // Нулевые остатки, но кластеры в данных присутствуют.
+      { cabinet: 'test', sku: '', offerId: 'MISKA', name: 'MISKA', warehouseName: 'W1', clusterName: 'Москва', clusterId: 'C1', available: 0, preparing: 0, requested: 0, transit: 0, excess: 0, returns: 0, other: 0 } as OzonStockRow,
+      { cabinet: 'test', sku: '', offerId: 'MISKA', name: 'MISKA', warehouseName: 'W2', clusterName: 'Казань', clusterId: 'C2', available: 0, preparing: 0, requested: 0, transit: 0, excess: 0, returns: 0, other: 0 } as OzonStockRow,
+    ],
+    sales: [
+      // Москва продавала в последние 4 недели.
+      ...['2023-12-11', '2023-12-18', '2023-12-25', '2024-01-01'].map((week) => ({
+        week, cabinet: 'test', offerId: 'MISKA', clusterName: 'Москва', qty: 7, updatedAt: '', days: 7
+      })),
+      // Казань продавала ТОЛЬКО раньше: товар там кончился первым.
+      ...['2023-10-09', '2023-10-16', '2023-10-23', '2023-10-30'].map((week) => ({
+        week, cabinet: 'test', offerId: 'MISKA', clusterName: 'Казань', qty: 7, updatedAt: '', days: 7
+      })),
+    ],
+    skus: [makeSku({ sku: 'MISKA', pcsPerBox: 1 })],
+    clusters: [
+      { clusterId: 'C1', clusterName: 'Москва' },
+      { clusterId: 'C2', clusterName: 'Казань' },
+    ],
+    settings: makeSettings({ speedWeeks: 4, minStockDays: 7, targetStockDays: 20 }),
+    myStockAvailability: { MISKA: 500 },
+    now: WIDE_NOW,
+    ...overrides
+  };
+}
+
+const clusterRec = (res: any, clusterId: string) => {
+  const art = res.articles.find((a: any) => a.article === 'MISKA')!;
+  return art.clusters.find((c: any) => c.clusterId === clusterId);
+};
+
+describe('Окно скорости решает, попадёт ли кластер в распределение', () => {
+  it('обычное окно 4 недели: кластер без свежих продаж рекомендации НЕ получает', () => {
+    const res = buildOzonCoverage(wideInput());
+    expect(clusterRec(res, 'C1')!.recommendation).not.toBeNull();
+    expect(clusterRec(res, 'C1')!.recommendation!.qty).toBeGreaterThan(0);
+    // Казань продавала 13 недель назад — в окно 4 недели не попала.
+    expect(clusterRec(res, 'C2')!.recommendation).toBeNull();
+  });
+
+  it('окно тренда 13 недель: кластер возвращается в распределение', () => {
+    const res = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 13, minStockDays: 7, targetStockDays: 20 }) }));
+    expect(clusterRec(res, 'C1')!.recommendation!.qty).toBeGreaterThan(0);
+    expect(clusterRec(res, 'C2')!.recommendation).not.toBeNull();
+    expect(clusterRec(res, 'C2')!.recommendation!.qty).toBeGreaterThan(0);
+  });
+
+  it('ВАЖНО: общий объём НЕ растёт — те же продажи делятся между большим числом кластеров', () => {
+    // Знаменатель скорости — недели, реально присутствующие в данных, а не длина окна.
+    // Поэтому скорость по товару в обоих случаях 1 шт/день, а вот по кластеру она делится.
+    // Узкое окно: Москва 1.0 шт/д -> 20 шт, Казань 0 -> ничего. Итого 20.
+    // Широкое окно: обе по 0.5 шт/д -> по 10 шт. Итого те же 20, но на два кластера.
+    const narrow = buildOzonCoverage(wideInput());
+    const wide = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 13, minStockDays: 7, targetStockDays: 20 }) }));
+    const total = (res: any) => res.articles
+      .find((a: any) => a.article === 'MISKA')!.clusters
+      .reduce((s: number, c: any) => s + (c.recommendation ? c.recommendation.qty : 0), 0);
+    const withRec = (res: any) => res.articles
+      .find((a: any) => a.article === 'MISKA')!.clusters
+      .filter((c: any) => c.recommendation && c.recommendation.qty > 0).length;
+
+    expect(withRec(narrow)).toBe(1);
+    expect(withRec(wide)).toBe(2);
+    expect(total(narrow)).toBe(20);
+    expect(total(wide)).toBe(20);
+    expect(clusterRec(narrow, 'C1')!.recommendation!.qty).toBe(20);
+    expect(clusterRec(wide, 'C1')!.recommendation!.qty).toBe(10);
+    expect(clusterRec(wide, 'C2')!.recommendation!.qty).toBe(10);
+  });
+
+  it('широкое окно растягивает те же продажи: скорость по кластеру падает', () => {
+    const narrow = buildOzonCoverage(wideInput());
+    const wide = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 13, minStockDays: 7, targetStockDays: 20 }) }));
+    // Москва: те же 28 шт, но поделённые на 91 день вместо 28.
+    expect(clusterRec(wide, 'C1')!.perDay).toBeLessThan(clusterRec(narrow, 'C1')!.perDay);
+  });
+});
