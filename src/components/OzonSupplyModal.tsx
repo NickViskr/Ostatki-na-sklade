@@ -662,11 +662,14 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   };
 
   /**
-   * Расчёт черновика.
-   * autoCreate = true только при первом нажатии: если Ozon принял всё полностью,
-   * заявка создаётся сразу. После любой правки состава пересчёт заявку не создаёт.
+   * Расчёт черновика. Заявку НЕ создаёт никогда.
+   * Прежде первое нажатие создавало заявку сразу, если Ozon принимал состав целиком, —
+   * человек не видел ни кластеров, ни возможности что-то добавить, заявка просто уезжала.
+   * Теперь путь один и тот же при любом ответе Ozon: расчёт → показ состава с ответом →
+   * отдельное нажатие «Создать заявку в этом составе». Создание заявки необратимо, и
+   * последнее слово всегда за человеком.
    */
-  const runDraft = async (autoCreate: boolean) => {
+  const runDraft = async () => {
     if (!dropOffWarehouseId || !dropOffWarehouseType) {
       toast.error('Не выбрана точка отгрузки — укажите её в настройках Ozon');
       return;
@@ -712,19 +715,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     const hasRejected = Array.isArray(data.rejectedItems) && data.rejectedItems.length > 0;
     const hasBadCluster = (data.clusters || []).some((c: any) => c.state !== 'FULL_AVAILABLE');
     const hasRestricted = (data.clusters || []).some((c: any) => (c.rejected || []).length > 0);
-    const clusterIds = (data.clusters || []).map((c: any) => String(c.clusterId));
 
-    if (!autoCreate || hasRejected || hasBadCluster || hasRestricted) {
-      setSending(false);
-      if (hasRejected || hasBadCluster || hasRestricted) {
-        toast.error('Ozon принял заявку не полностью — проверьте состав');
-      } else {
-        toast.success('Ozon подтвердил состав полностью');
-      }
-      return;
+    setSending(false);
+    if (hasRejected || hasBadCluster || hasRestricted) {
+      toast.error('Ozon принял заявку не полностью — проверьте состав');
+    } else {
+      toast.success('Ozon готов принять весь состав. Проверьте и нажмите «Создать заявку в этом составе»');
     }
-
-    await sendOrder(String(data.draftId || ''), clusterIds, data);
   };
 
   const handlePrimary = async () => {
@@ -733,11 +730,11 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       return;
     }
     if (!verdict) {
-      await runDraft(true);
+      await runDraft();
       return;
     }
     if (dirty) {
-      await runDraft(false);
+      await runDraft();
       return;
     }
     setSending(true);
@@ -752,7 +749,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     await sendOrder(draftId, clusterIds, verdict);
   };
 
-  const primaryLabel = !verdict ? 'Оформить заявку в Ozon' : dirty ? 'Пересчитать в Ozon' : 'Создать заявку в этом составе';
+  // Первое нажатие только СЧИТАЕТ черновик — надпись обязана это говорить, иначе человек
+  // думает, что уже оформил заявку. Создаёт её только «Создать заявку в этом составе».
+  const primaryLabel = !verdict ? 'Проверить в Ozon' : dirty ? 'Пересчитать в Ozon' : 'Создать заявку в этом составе';
   const primaryIsSafe = Boolean(verdict) && dirty;
 
   return (
@@ -809,7 +808,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
                   {dirty
                     ? 'Состав изменён после расчёта. Нажмите «Пересчитать в Ozon» — заявка при этом НЕ создаётся.'
-                    : 'Ozon ответил, что готов принять. Заявка ещё НЕ создана: можно поправить количества вручную, нажать «Скорректировать поставку» или создать заявку в этом составе.'}
+                    : 'Ozon ответил. Заявка ещё НЕ создана — ниже видно, что он примет. Можно поправить количества, добавить кластер или товар, нажать «Скорректировать поставку». Заявка уйдёт в Ozon только по кнопке «Создать заявку в этом составе».'}
                 </div>
               )}
 
