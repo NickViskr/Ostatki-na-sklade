@@ -7,6 +7,9 @@ type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'sku
 interface UIState {
   isSidebarCollapsed: boolean;
   setIsSidebarCollapsed: (collapsed: boolean) => void;
+  /** Артикулы, распределение которых считается по окну тренда, а не по окну скорости. */
+  ozonWideArticles: Record<string, boolean>;
+  toggleOzonWideArticle: (article: string) => void;
   activeTab: TabType;
   setActiveTab: (tab: TabType) => void;
   
@@ -125,8 +128,45 @@ const writeSidebarCollapsed = (collapsed: boolean) => {
   }
 };
 
+// Выбор «Распределить весь остаток» живёт здесь, а не в самой вкладке: вкладка
+// размонтируется при переходе на другую (см. App.tsx), и её состояние пропадает. Владелец
+// оформил заявку, вернулся — а рекомендации по товару исчезли целиком, потому что расчёт
+// молча вернулся к обычному окну скорости. Выбор переживает и уход со вкладки, и
+// перезагрузку страницы; в кнопке всегда видно, какое окно сейчас применено.
+const OZON_WIDE_KEY = 'ozonWideArticles';
+
+const readOzonWide = (): Record<string, boolean> => {
+  try {
+    const raw = localStorage.getItem(OZON_WIDE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, boolean> = {};
+    for (const key of Object.keys(parsed)) if (parsed[key]) out[key] = true;
+    return out;
+  } catch {
+    return {};
+  }
+};
+
+const writeOzonWide = (value: Record<string, boolean>) => {
+  try {
+    localStorage.setItem(OZON_WIDE_KEY, JSON.stringify(value));
+  } catch {
+    // Приватный режим или переполненное хранилище: выбор просто не переживёт перезагрузку.
+  }
+};
+
 export const useUIStore = create<UIState>((set) => ({
   isSidebarCollapsed: readSidebarCollapsed(),
+  ozonWideArticles: readOzonWide(),
+  toggleOzonWideArticle: (article) => set((state) => {
+    const next = { ...state.ozonWideArticles };
+    if (next[article]) delete next[article];
+    else next[article] = true;
+    writeOzonWide(next);
+    return { ozonWideArticles: next };
+  }),
   setIsSidebarCollapsed: (isSidebarCollapsed) => {
     writeSidebarCollapsed(isSidebarCollapsed);
     set({ isSidebarCollapsed });

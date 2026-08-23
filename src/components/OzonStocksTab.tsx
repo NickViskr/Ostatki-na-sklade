@@ -2,6 +2,7 @@ import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronRight, Columns3, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
+import { useUIStore } from '../store/useUIStore';
 import { OzonStockRow, FactoryOrder } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
@@ -382,12 +383,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
    * тогда кластеры, продававшие до дефицита, возвращаются со своей долей.
    * Расчёт по широкому окну ленивый: пока ни один товар не переключён, он не запускается.
    */
-  const [wideArticles, setWideArticles] = useState<Record<string, boolean>>({});
+  const wideArticles = useUIStore((state) => state.ozonWideArticles);
+  const toggleWideArticle = useUIStore((state) => state.toggleOzonWideArticle);
   const anyWide = Object.keys(wideArticles).some((a) => wideArticles[a]);
-
-  const toggleWideArticle = (article: string) => {
-    setWideArticles((prev) => ({ ...prev, [article]: !prev[article] }));
-  };
 
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     if (filteredOzonStocks.length === 0) return null;
