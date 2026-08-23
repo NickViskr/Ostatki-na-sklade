@@ -606,49 +606,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     };
   }, [coverageRows, componentRows, factoryModalArticle]);
 
-  const supplyPlan = useMemo(() => {
-    const rows: any[] = [];
-    const boxesByCluster: Record<string, { clusterId: string; clusterName: string; boxes: number }> = {};
-    const cabinets = new Set<string>();
-
-    for (const row of coverageRows as any[]) {
-      for (const c of row.clusters) {
-        if (!c.recommendation || c.recommendation.boxes <= 0) continue;
-        if (!selectedSupply[supplyKey(row.article, c.clusterId)]) continue;
-
-        rows.push({
-          article: row.article,
-          name: row.name,
-          clusterId: String(c.clusterId),
-          clusterName: String(c.clusterName || ''),
-          boxes: c.recommendation.boxes,
-          qty: c.recommendation.qty,
-          limitedByMyStock: c.recommendation.limitedByMyStock === true,
-        });
-
-        (row.cabinets || []).forEach((cab: string) => { if (cab) cabinets.add(cab); });
-
-        const cid = String(c.clusterId);
-        if (!boxesByCluster[cid]) {
-          boxesByCluster[cid] = { clusterId: cid, clusterName: String(c.clusterName || ''), boxes: 0 };
-        }
-        boxesByCluster[cid].boxes += c.recommendation.boxes;
-      }
-    }
-
-    const limit = Number(supplySettings.maxBoxesPerCluster) || 30;
-    const overLimit = Object.values(boxesByCluster).filter((c) => c.boxes > limit);
-
-    return {
-      rows,
-      clusters: Object.values(boxesByCluster),
-      cabinets: Array.from(cabinets),
-      totalBoxes: rows.reduce((s, r) => s + r.boxes, 0),
-      totalQty: rows.reduce((s, r) => s + r.qty, 0),
-      overLimit,
-      limit,
-    };
-  }, [coverageRows, selectedSupply, supplySettings]);
 
   /** Item 45. Everything the supply window may offer for hand-adding: the article, its name
    *  and how much of it is free to ship. Built from the whole coverage table, not from the
@@ -716,6 +673,58 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     factories.sort((a, b) => a.factory.daysLeft - b.factory.daysLeft);
     return { supplies, factories, orderedCount, clusterDeficitCount };
   }, [coverageRows, activeFactoryOrders, factoryOnOrder, wideArticles, wideCoverage]);
+
+  const supplyPlan = useMemo(() => {
+    const rows: any[] = [];
+    const boxesByCluster: Record<string, { clusterId: string; clusterName: string; boxes: number }> = {};
+    const cabinets = new Set<string>();
+
+    // Заявка собирается ИЗ ТОГО ЖЕ СПИСКА, в котором пользователь ставил галочки.
+    // Раньше здесь перебирался coverageRows — обычный расчёт, — а галочки ставились в
+    // «Рекомендациях», где у товара, переключённого кнопкой «Распределить весь остаток»,
+    // кластеры приходят из расчёта по окну тренда. Кластер, которого в обычном расчёте нет,
+    // до окна не доезжал: отметил восемь, в окне оказалось четыре.
+    const cabinetsByArticle: Record<string, string[]> = {};
+    for (const row of coverageRows as any[]) cabinetsByArticle[row.article] = row.cabinets || [];
+
+    for (const row of recommendations.supplies as any[]) {
+      for (const c of row.clusters) {
+        if (!c.recommendation || c.recommendation.boxes <= 0) continue;
+        if (!selectedSupply[supplyKey(row.article, c.clusterId)]) continue;
+
+        rows.push({
+          article: row.article,
+          name: row.name,
+          clusterId: String(c.clusterId),
+          clusterName: String(c.clusterName || ''),
+          boxes: c.recommendation.boxes,
+          qty: c.recommendation.qty,
+          limitedByMyStock: c.recommendation.limitedByMyStock === true,
+        });
+
+        (cabinetsByArticle[row.article] || []).forEach((cab: string) => { if (cab) cabinets.add(cab); });
+
+        const cid = String(c.clusterId);
+        if (!boxesByCluster[cid]) {
+          boxesByCluster[cid] = { clusterId: cid, clusterName: String(c.clusterName || ''), boxes: 0 };
+        }
+        boxesByCluster[cid].boxes += c.recommendation.boxes;
+      }
+    }
+
+    const limit = Number(supplySettings.maxBoxesPerCluster) || 30;
+    const overLimit = Object.values(boxesByCluster).filter((c) => c.boxes > limit);
+
+    return {
+      rows,
+      clusters: Object.values(boxesByCluster),
+      cabinets: Array.from(cabinets),
+      totalBoxes: rows.reduce((s, r) => s + r.boxes, 0),
+      totalQty: rows.reduce((s, r) => s + r.qty, 0),
+      overLimit,
+      limit,
+    };
+  }, [recommendations, coverageRows, selectedSupply, supplySettings]);
 
   if (!isAdmin) return null;
 
