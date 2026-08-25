@@ -1105,6 +1105,70 @@ function dumpTransRows(sheet) {
     headers.filter(x => x === 'Двойник').length === 1, `шапка: ${JSON.stringify(headers)}`);
 })();
 
+// ============ 25.08.2026: both shapes of «Упаковка» and «Прочее» must be read ============
+// Reported by the owner: packaging entered «for the whole batch» never reached the cost of
+// the goods. Its pattern demanded the «= N ₽» tail that only the per-piece shape has.
+// «Прочее» carried the mirror image of the same defect.
+
+(function test88() {
+  const h = freshHarness();
+  const P = (dest) => h.parseAdditionalCostsFromDestination(dest);
+
+  check('Упаковка «на всю партию» больше не теряется',
+    P('Ozon [Упаковка: 500₽]') === 500, `получено: ${P('Ozon [Упаковка: 500₽]')}`);
+  check('Упаковка «на единицу» читается как прежде — берётся итог, а не цена штуки',
+    P('Ozon [Упаковка: 196 шт. x 5₽ = 980₽]') === 980,
+    `получено: ${P('Ozon [Упаковка: 196 шт. x 5₽ = 980₽]')}`);
+
+  check('Прочее «на единицу» больше не теряется',
+    P('Ozon [Прочее: 196 шт. x 55₽ = 10780₽]') === 10780,
+    `получено: ${P('Ozon [Прочее: 196 шт. x 55₽ = 10780₽]')}`);
+  check('Прочее «на всю партию» читается как прежде',
+    P('Ozon [Прочее: 55₽]') === 55, `получено: ${P('Ozon [Прочее: 55₽]')}`);
+
+  check('Обе части и услуги складываются вместе',
+    P('Ozon [Упаковка: 500₽ | Прочее: 10 шт. x 7₽ = 70₽ | Услуги: Паллета x2 (600₽), Короб x1 (40₽)]') === 1210,
+    `получено: ${P('Ozon [Упаковка: 500₽ | Прочее: 10 шт. x 7₽ = 70₽ | Услуги: Паллета x2 (600₽), Короб x1 (40₽)]')}`);
+
+  check('Нет доп. расходов — ноль, а не выдумка',
+    P('Ozon (Mercurius)') === 0 && P('') === 0, `получено: ${P('Ozon (Mercurius)')}`);
+})();
+
+(function test89() {
+  // The exact destinations of the owner's production write-offs of 25.08.2026: their numbers
+  // must not move, because those expenses are already in the books.
+  const h = freshHarness();
+  const P = (dest) => h.parseAdditionalCostsFromDestination(dest);
+
+  const merc = 'Ozon (Mercurius) [Упаковка: 196 шт. x 5₽ = 980₽ | Услуги: Доставка по городу 1 короб x1 (159₽), Доставка  1 пал + сборка x3 (5097₽)]';
+  check('Боевая операция Mercurius по-прежнему даёт 6236',
+    P(merc) === 6236, `получено: ${P(merc)}`);
+
+  const batch = 'Ozon (MaxiStore) [Упаковка: 294 шт. x 5₽ = 1470₽ | Услуги: Доставка  1 пал + сборка x1 (1699₽)] [Общая поставка: заявки № 124792864-1, № 124792158-1; доля этой заявки 84 из 294 шт., 905.43 руб. из 3169.00 руб.]';
+  check('Боевая партия по-прежнему даёт 3169, а пометка про общую поставку денег не добавляет',
+    P(batch) === 3169, `получено: ${P(batch)}`);
+
+  const wb = 'Wildberries FBS [Упаковка: 1 шт. x 5₽ = 5₽ | Прочее: 55₽]';
+  check('Боевое списание Wildberries по-прежнему даёт 60',
+    P(wb) === 60, `получено: ${P(wb)}`);
+})();
+
+(function test90() {
+  // End to end: the cost of the goods must actually carry the whole-batch packaging now.
+  const h = freshHarness();
+  const ts = h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-P', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.commitTransaction(
+    [{ article: 'ART-P', quantity: 10, price: 100 }],
+    'Расход', 'Ozon (Shop) [Упаковка: 500₽]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const rows = dumpTransRows(ts);
+  check('Упаковка «на всю партию» дошла до себестоимости (1000 + 500)',
+    rows.length === 1 && rows[0].total === 1500, `получено: ${JSON.stringify(rows)}`);
+  check('И на единицу товара она тоже разнеслась (100 + 50)',
+    rows.length === 1 && rows[0].price === 150, `получено: ${rows.length && rows[0].price}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

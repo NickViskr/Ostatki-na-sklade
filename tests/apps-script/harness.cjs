@@ -293,6 +293,7 @@ module.exports = {
   },
   commitTransaction: (...args) => context.commitTransaction(...args),
   ensureColumns: (...args) => context.ensureColumns(...args),
+  parseAdditionalCostsFromDestination: (...args) => context.parseAdditionalCostsFromDestination(...args),
   makeSheet: (headers, name) => {
     const sheet = makeFakeSheet(headers, name);
     sheetRegistry[name] = sheet;

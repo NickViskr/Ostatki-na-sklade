@@ -864,13 +864,35 @@ const TRANS_HEADERS = [
   'Цена', 'Себестоимость списания', 'Сумма', 'Объект', 'Дата поставки', 'Пользователь'
 ];
 
+/**
+ * The total of one «Упаковка»/«Прочее» part of the destination text.
+ *
+ * The screen writes each of them in one of two shapes, depending on whether the cost was
+ * entered per piece or for the batch as a whole:
+ *
+ *   Упаковка: 196 шт. x 5₽ = 980₽     Прочее: 196 шт. x 55₽ = 10780₽
+ *   Упаковка: 500₽                    Прочее: 55₽
+ *
+ * 25.08.2026: each label used to be read by a pattern that fitted ONE of its two shapes.
+ * «Упаковка» demanded the «= N ₽» tail, so the whole-batch shape was silently skipped and the
+ * packaging the owner had paid for never reached the cost of the goods. «Прочее» had the
+ * mirror image of the defect: its pattern wanted the amount right after the label, so the
+ * per-piece shape was the one that went missing.
+ *
+ * Both shapes end with the total, so the LAST amount of the part is the one to take — the
+ * earlier «x 5₽» is the price of a single piece, not a cost of its own.
+ */
+function parseLabelledAmount(destination, label) {
+  var part = destination.match(new RegExp(label + ':([^|\\]]*)'));
+  if (!part) return 0;
+  var re = /([\d.,]+)\s*₽/g, m, last = 0;
+  while ((m = re.exec(part[1])) !== null) last = parseNumber(m[1]);
+  return last;
+}
+
 function parseAdditionalCostsFromDestination(destination) {
   if (!destination) return 0;
-  var total = 0;
-  var pack = destination.match(/Упаковка:[^|\]]*=\s*([\d.,]+)\s*₽/);
-  if (pack) total += parseNumber(pack[1]);
-  var other = destination.match(/Прочее:\s*([\d.,]+)\s*₽/);
-  if (other) total += parseNumber(other[1]);
+  var total = parseLabelledAmount(destination, 'Упаковка') + parseLabelledAmount(destination, 'Прочее');
   var servBlock = destination.match(/Услуги:([^\]]*)/);
   if (servBlock) {
     var re = /\(([\d.,]+)\s*₽\)/g, m;
