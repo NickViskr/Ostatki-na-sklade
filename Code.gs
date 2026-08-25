@@ -765,6 +765,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
   getOrCreateSheet(ss, 'Кластеры Ozon', OZON_CLUSTERS_HEADERS);
   getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  getOrCreateSheet(ss, 'Себестоимость Озон', OZON_COST_HEADERS);
   return true;
 }
 
