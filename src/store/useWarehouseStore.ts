@@ -6,6 +6,7 @@ import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
 import { OzonSupplyRequestRow } from '../lib/ozonPending';
 import { OzonCoverageSettings, OzonClusterRef } from '../lib/ozonCoverage';
+import { BatchWriteOffGroup } from '../lib/ozonBatchWriteOff';
 import { toast } from 'sonner';
 
 // Пункт 40. Капитализацию здесь обнулять НЕЛЬЗЯ: у артикула с нулевым остатком она несёт
@@ -18,6 +19,21 @@ import { toast } from 'sonner';
 // ушли бы два одинаковых запроса, и оба мимо кэша, потому что первый ещё не успел его наполнить.
 // Повторный вызов ПОСЛЕ завершения запускает новое чтение — этим пользуется сохранение настроек.
 let ozonInitialInFlight: Promise<boolean> | null = null;
+
+/**
+ * Item 56, stage 3. Extras a single commit needs when it is one order of a batch write-off.
+ * Empty for every ordinary operation, which keeps behaving exactly as before.
+ */
+export interface CommitOptions {
+  /** Postings of THIS order; without it the shared pending list is used. */
+  postingIds?: string[];
+  /** This order's share of the additional costs, in roubles. */
+  additionalCosts?: number;
+  /** One summary toast for the whole batch instead of one per order. */
+  silent?: boolean;
+  /** The supplies are reloaded once after the loop, not after every order. */
+  skipShipmentsRefresh?: boolean;
+}
 
 // Роль администратора определяется одинаково в нескольких местах приложения.
 const isAdminUser = (user: { role?: string; username?: string } | null | undefined): boolean => {
@@ -95,7 +111,7 @@ interface WarehouseState {
   handleUpdateService: (id: string, name: string, cost: number, isActive: boolean) => Promise<boolean>;
   handleDeleteService: (id: string) => Promise<boolean>;
   handleAddServiceRate: (serviceId: string, cost: number, validFrom: string) => Promise<boolean>;
-  commitTransaction: (items: ParsedItem[], type: string, destination: string, deliveryDate?: string, opId?: string) => Promise<boolean>;
+  commitTransaction: (items: ParsedItem[], type: string, destination: string, deliveryDate?: string, opId?: string, options?: CommitOptions) => Promise<boolean>;
   handleDeleteTransaction: (id: string) => Promise<boolean>;
   handleDeleteMultipleTransactions: (ids: string[]) => Promise<boolean>;
   handleUpdateTransaction: (id: string, data: Transaction) => Promise<boolean>;
@@ -124,6 +140,9 @@ interface WarehouseState {
   fetchExternalShipments: () => Promise<void>;
   pendingOzonPostingIds: string[];
   setPendingOzonPostingIds: (ids: string[]) => void;
+  /** Item 56. Orders of a batch write-off; null for an ordinary single-order operation. */
+  pendingOzonBatch: BatchWriteOffGroup[] | null;
+  setPendingOzonBatch: (groups: BatchWriteOffGroup[] | null) => void;
   getEffectiveAvailability: (article: string) => number;
   getEffectiveAvgCost: (article: string) => number;
   devMode: boolean;
@@ -187,6 +206,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   hasMoreTransactions: false,
   externalShipments: [],
   pendingOzonPostingIds: [],
+  pendingOzonBatch: null,
   devMode: typeof localStorage !== 'undefined' && localStorage.getItem('devMode') === 'true',
   ozonSyncStatus: null,
   ozonStocks: [],
@@ -261,6 +281,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   setPendingOzonPostingIds: (pendingOzonPostingIds) => set({ pendingOzonPostingIds }),
+  setPendingOzonBatch: (pendingOzonBatch) => set({ pendingOzonBatch }),
   setHasMoreTransactions: (hasMoreTransactions) => set({ hasMoreTransactions }),
   
   setGasError: (gasError) => set({ gasError }),
@@ -590,10 +611,12 @@ export const useWarehouseStore = create<WarehouseState>()(
     }
   },
 
-  commitTransaction: async (items, type, destination, deliveryDate = '', opId = '') => {
+  commitTransaction: async (items, type, destination, deliveryDate = '', opId = '', options) => {
     // Пункт 28, этап C: список поставок Ozon фиксируется в начале операции
     // и уходит на сервер вместе с расходом, а не отдельными запросами после него.
-    const postingIds = get().pendingOzonPostingIds;
+    // Item 56, stage 3. A batch write-off commits one expense per Ozon order, so the postings
+    // and the money cannot come from the shared store field — each call states its own.
+    const postingIds = options?.postingIds ?? get().pendingOzonPostingIds;
     const { notificationEmail } = useSettingsStore.getState();
 
     // Пункт 33, этап A: приход на виртуальный комплект запрещён.
@@ -664,7 +687,10 @@ export const useWarehouseStore = create<WarehouseState>()(
         type, 
         destination,
         deliveryDate,
-        notificationEmail 
+        notificationEmail,
+        // Item 56, stage 3: stated as a number so the server does not read the batch total
+        // out of the destination text and charge it to this order in full.
+        ...(options?.additionalCosts === undefined ? {} : { additionalCosts: options.additionalCosts })
       });
       
       if (result.status === 'success') {
@@ -684,10 +710,12 @@ export const useWarehouseStore = create<WarehouseState>()(
           };
         });
         
-        if (payloadData.idempotentHit) {
-          toast.success('Эта операция уже была записана ранее — повтор не создан');
-        } else {
-          toast.success('Операция успешно записана в Google Таблицу!');
+        if (!options?.silent) {
+          if (payloadData.idempotentHit) {
+            toast.success('Эта операция уже была записана ранее — повтор не создан');
+          } else {
+            toast.success('Операция успешно записана в Google Таблицу!');
+          }
         }
         
         // Пункт 28, этап C: привязку поставок выполнил сервер внутри той же операции.
@@ -704,7 +732,8 @@ export const useWarehouseStore = create<WarehouseState>()(
             );
           }
           set({ pendingOzonPostingIds: [] });
-          await get().fetchExternalShipments();
+          // A batch refreshes the supplies once after the whole loop, not after every order.
+          if (!options?.skipShipmentsRefresh) await get().fetchExternalShipments();
         }
         
         // No background fetches needed anymore since we returned all affected data!

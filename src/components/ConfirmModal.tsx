@@ -15,6 +15,7 @@ import { resolveServiceCostAt } from '../lib/serviceRates';
 import { useWarehouseStore } from "../store/useWarehouseStore";
 import { useUIStore } from "../store/useUIStore";
 import { formatCurrency, newOperationId } from "../lib/utils";
+import { batchDestinationNote, buildBatchWriteOffPlan } from "../lib/ozonBatchWriteOff";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { toast } from "sonner";
 
@@ -28,6 +29,7 @@ export const ConfirmModal: React.FC = () => {
   useEffect(() => {
     return () => {
       useWarehouseStore.getState().setPendingOzonPostingIds([]);
+      useWarehouseStore.getState().setPendingOzonBatch(null);
     };
   }, []);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
@@ -38,6 +40,10 @@ export const ConfirmModal: React.FC = () => {
     (state) => state.handleProcessInvoice,
   );
   const currentUser = useWarehouseStore((state) => state.currentUser);
+  // Item 56. Orders of a batch write-off. One order behaves exactly as before; several
+  // orders are written as several expenses sharing one set of additional costs.
+  const pendingOzonBatch = useWarehouseStore((state) => state.pendingOzonBatch);
+  const isMultiOrderBatch = !!pendingOzonBatch && pendingOzonBatch.length > 1;
   const isAdmin =
     currentUser?.role?.toLowerCase() === "admin" ||
     ["admin", "админ", "администратор"].includes(
@@ -221,30 +227,17 @@ export const ConfirmModal: React.FC = () => {
       0,
     );
 
-    const totalBaseValue = parsedItems.reduce(
-      (sum, item) => sum + item.quantity * item.price,
-      0,
-    );
-
     const totalQuantity = parsedItems.reduce(
       (acc, item) => acc + item.quantity,
       0,
     );
 
-    // Вспомогательная функция для расчета доли услуги на единицу товара
-    const getServicesExtraPerUnit = (item: (typeof parsedItems)[0]) => {
-      if (totalServicesCost === 0) return 0;
-      if (totalBaseValue === 0) {
-        if (totalQuantity === 0) return 0;
-        const shareRatio = item.quantity / totalQuantity;
-        const extraCostForLine = totalServicesCost * shareRatio;
-        return item.quantity > 0 ? extraCostForLine / item.quantity : 0;
-      }
-      const itemBaseValue = item.quantity * item.price;
-      const shareRatio = itemBaseValue / totalBaseValue;
-      const extraCostForLine = totalServicesCost * shareRatio;
-      return item.quantity > 0 ? extraCostForLine / item.quantity : 0;
-    };
+    // Item 56 (owner's decision, 25.08.2026): additional costs are divided BY PIECE COUNT,
+    // never by line value. That is what the server does when it spreads them over an expense,
+    // and a preview that divided them differently disagreed with the books whenever the
+    // articles of one operation had different costs.
+    const servicesExtraPerUnit =
+      totalServicesCost === 0 || totalQuantity === 0 ? 0 : totalServicesCost / totalQuantity;
 
     if (opType === "Приход") {
       if (totalServicesCost === 0) return parsedItems;
@@ -252,7 +245,7 @@ export const ConfirmModal: React.FC = () => {
       return parsedItems.map((item) => {
         return {
           ...item,
-          price: item.price + getServicesExtraPerUnit(item),
+          price: item.price + servicesExtraPerUnit,
         };
       });
     }
@@ -279,8 +272,7 @@ export const ConfirmModal: React.FC = () => {
             ? other / totalQuantity
             : 0;
 
-      const extraPerUnit =
-        packPerUnit + otherPerUnit + getServicesExtraPerUnit(item);
+      const extraPerUnit = packPerUnit + otherPerUnit + servicesExtraPerUnit;
 
       return {
         ...item,
@@ -527,6 +519,66 @@ export const ConfirmModal: React.FC = () => {
     // Запись пошла: с этого момента остатки в сторе могут обновиться раньше,
     // чем закроется окно — проверку замораживаем, чтобы не мигала ложная ошибка
     setIsCommitting(true);
+
+    // Item 56. Several Ozon orders shipped as one batch are written as several expenses —
+    // the owner wants one History record per order — while the additional costs were paid
+    // once for the whole batch. Each order therefore states its own share of them as a
+    // number, so the server does not read the batch total out of the destination text and
+    // charge it to every order in full.
+    //
+    // A batch of one order deliberately does NOT take this path: it stays on the plain
+    // commit below, byte for byte the behaviour that has been in production all along.
+    if (isMultiOrderBatch && pendingOzonBatch) {
+      const plan = buildBatchWriteOffPlan(pendingOzonBatch, extraCostsTotal);
+      const written: string[] = [];
+
+      for (let i = 0; i < plan.groups.length; i++) {
+        const group = plan.groups[i];
+        const groupDestination = `${finalDestination} ${batchDestinationNote(
+          plan.groups.map((g) => g.label),
+          group.quantity,
+          plan.totalQuantity,
+          group.extrasShare,
+          plan.extrasTotal,
+        )}`;
+
+        // Every order needs its own idempotency key: with a shared one the second order
+        // would be answered from the first order's already-written result.
+        const ok = await commitTransaction(
+          group.items as any,
+          opType,
+          groupDestination,
+          deliveryDate,
+          `${opIdRef.current}-${i + 1}`,
+          {
+            postingIds: group.postingIds,
+            additionalCosts: group.extrasShare,
+            silent: true,
+            skipShipmentsRefresh: true,
+          },
+        );
+
+        if (!ok) {
+          setIsCommitting(false);
+          setCommitError(
+            written.length === 0
+              ? "Ответ не получен, операция могла быть записана"
+              : `Записаны заявки ${written.join(", ")}. На заявке № ${group.label} запись прервалась — оставшиеся заявки НЕ записаны.`,
+          );
+          await useWarehouseStore.getState().fetchExternalShipments();
+          return;
+        }
+        written.push(`№ ${group.label}`);
+      }
+
+      await useWarehouseStore.getState().fetchExternalShipments();
+      toast.success(`Записано расходов: ${plan.groups.length} — заявки ${written.join(", ")}`);
+      setShowConfirmModal(false);
+      setParsedItems(null);
+      useUIStore.getState().setRawText("");
+      return;
+    }
+
     const success = await commitTransaction(
       opType === "Расход" ? parsedItems : finalItems,
       opType,
@@ -582,6 +634,36 @@ export const ConfirmModal: React.FC = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto p-8 space-y-8">
+          {/* Item 56. Несколько заявок Ozon, которые подрядчик вёз одной поставкой. */}
+          {isMultiOrderBatch && pendingOzonBatch && (
+            <div className="bg-sky-50 border border-sky-200 rounded-3xl p-5 space-y-3">
+              <div className="flex items-center gap-2 font-bold text-sky-900">
+                <Layers size={18} />
+                Списание по нескольким заявкам: {pendingOzonBatch.length}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {pendingOzonBatch.map((group) => {
+                  const pieces = group.items.reduce((sum, it) => sum + it.quantity, 0);
+                  return (
+                    <span
+                      key={group.groupId}
+                      className="text-xs font-semibold px-3 py-1.5 bg-white text-sky-800 rounded-full border border-sky-200"
+                    >
+                      № {group.label} — {pieces} шт.
+                    </span>
+                  );
+                })}
+              </div>
+              <p className="text-sm text-sky-800">
+                Состав заявок сложен в один список: упаковка, прочие расходы и услуги вводятся
+                один раз на всю партию и делятся по количеству штук. В «Историю» попадёт
+                отдельная запись на каждую заявку, себестоимость единицы во всех одинаковая.
+              </p>
+              <p className="text-xs text-sky-700 font-semibold">
+                Состав правке не подлежит: строки сложены из разных заявок.
+              </p>
+            </div>
+          )}
           <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
             <table className="w-full text-left border-collapse">
               <thead>
@@ -632,10 +714,12 @@ export const ConfirmModal: React.FC = () => {
                       <input
                         type="text"
                         value={item.article}
+                        readOnly={isMultiOrderBatch}
+                        title={isMultiOrderBatch ? 'Состав нескольких заявок правке не подлежит: строка сложена из разных заявок' : undefined}
                         onChange={(e) =>
                           updateParsedItem(idx, { article: e.target.value })
                         }
-                        className="w-full bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                        className={`w-full bg-transparent border-b border-transparent outline-none transition-colors ${isMultiOrderBatch ? 'cursor-not-allowed text-slate-500' : 'hover:border-indigo-200 focus:border-indigo-500'}`}
                       />
                     </td>
                     <td className="px-6 py-4 text-right font-bold">
@@ -644,13 +728,15 @@ export const ConfirmModal: React.FC = () => {
                           type="number"
                           min="1"
                           value={item.quantity === 0 ? "" : item.quantity}
+                          readOnly={isMultiOrderBatch}
+                          title={isMultiOrderBatch ? 'Состав нескольких заявок правке не подлежит: строка сложена из разных заявок' : undefined}
                           onChange={(e) => {
                             const val = Number(e.target.value) || 0;
                             updateParsedItem(idx, {
                               quantity: val < 0 ? 0 : val,
                             });
                           }}
-                          className="w-24 text-right bg-transparent border-b border-transparent hover:border-indigo-200 focus:border-indigo-500 outline-none transition-colors"
+                          className={`w-24 text-right bg-transparent border-b border-transparent outline-none transition-colors ${isMultiOrderBatch ? 'cursor-not-allowed text-slate-500' : 'hover:border-indigo-200 focus:border-indigo-500'}`}
                         />
                         {opType === "Расход" && (() => {
                           const skuData = skus.find((s) => s.sku === item.article);

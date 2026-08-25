@@ -84,6 +84,14 @@ export const countPieces = (items: BatchWriteOffItem[]): number =>
   items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
 
 /**
+ * Pieces that will actually be written off. An item whose article could not be recognised is
+ * shown on the screen but skipped by the server, so counting it here would spread the costs
+ * over pieces that never carry them and quietly overcharge every other order of the batch.
+ */
+export const countShippablePieces = (items: BatchWriteOffItem[]): number =>
+  countPieces(items.filter((item) => item.status === 'ok'));
+
+/**
  * Cuts a sum of money into shares proportional to piece counts.
  *
  * Works in kopecks and hands the rounding leftovers to the largest remainders, so the shares
@@ -133,9 +141,9 @@ export const buildBatchWriteOffPlan = (
   extrasTotal: number
 ): BatchWriteOffPlan => {
   const mergedItems = mergeBatchItems(groups);
-  const totalQuantity = countPieces(mergedItems);
+  const totalQuantity = countShippablePieces(mergedItems);
   const perGroupItems = groups.map((group) => mergeBatchItems([group]));
-  const quantities = perGroupItems.map(countPieces);
+  const quantities = perGroupItems.map(countShippablePieces);
   const shares = splitByQuantity(extrasTotal, quantities);
 
   return {
@@ -150,4 +158,25 @@ export const buildBatchWriteOffPlan = (
       extrasShare: shares[index],
     })),
   };
+};
+
+/**
+ * The note added to the destination of every expense of a batch, so a reader of the History
+ * sees why this one carries only a part of the services listed next to it.
+ *
+ * The text is deliberately written with «руб.» and never with «₽». The server still has a
+ * fallback that reads additional costs out of the destination text by regex, and every one of
+ * those regexes ends in «₽»: a rouble sign anywhere in this note would be silently added to
+ * the costs of the order. The unit test pins that down.
+ */
+export const batchDestinationNote = (
+  labels: string[],
+  groupQuantity: number,
+  totalQuantity: number,
+  share: number,
+  total: number
+): string => {
+  const orders = labels.map((l) => `№ ${l}`).join(', ');
+  return `[Общая поставка: заявки ${orders}; доля этой заявки ${groupQuantity} из ${totalQuantity} шт., `
+    + `${(Number(share) || 0).toFixed(2)} руб. из ${(Number(total) || 0).toFixed(2)} руб.]`;
 };

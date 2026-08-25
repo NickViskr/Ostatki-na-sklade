@@ -13,7 +13,7 @@ import {
 import { STATUS_DICT, getStatusDetails, getStatusLabel, isAcceptanceStage } from '../lib/ozonStatus';
 import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
-import { buildOzonGroups, useProcessOzonGroup, OzonGroup } from '../lib/ozonGroups';
+import { buildOzonGroups, useProcessOzonGroup, useProcessOzonGroups, OzonGroup } from '../lib/ozonGroups';
 import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
 import { detectPeresort } from '../lib/ozonPeresort';
 import { formatCurrency } from '../lib/utils';
@@ -1186,6 +1186,8 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [expandedPostings, setExpandedPostings] = useState<Set<string>>(new Set());
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
   const [showProcessed, setShowProcessed] = useState(false);
+  // Item 56: заявки, отмеченные галочками для списания одной партией
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set());
   const [selectedAcceptanceShipment, setSelectedAcceptanceShipment] = useState<ExternalShipment | null>(null);
   const [selectedPeresortShipment, setSelectedPeresortShipment] = useState<ExternalShipment | null>(null);
 
@@ -1221,6 +1223,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   };
 
   const handleProcessOzonGroup = useProcessOzonGroup();
+  const handleProcessOzonGroups = useProcessOzonGroups();
 
   // Пункт 31. Виртуальную заявку создал сам Ozon: товар уже находится на его складе,
   // наш склад в операции не участвует. Кнопка «Ок» только убирает заявку из актуальных —
@@ -1373,6 +1376,50 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     return filteredGroups.filter(g => !isFullyCancelled(g) && g.items.some((i: any) => isActionableItem(i)));
   }, [filteredGroups, showProcessed]);
 
+  // Item 56. Несколько заявок Ozon подрядчик пакует и везёт как одну поставку, поэтому
+  // списывать их надо за один проход, с общим списком артикулов и общими доп. расходами.
+  // Отмечать можно только заявки, готовые к списанию, и только внутри ОДНОГО магазина:
+  // магазин входит в назначение расхода, и при смешивании привязка к нему теряется.
+  const isBatchSelectable = useCallback(
+    (g: OzonGroup) => !g.isVirtual && g.needsExpense && g.items.some((i: any) => isActionableItem(i)),
+    []
+  );
+
+  const selectedGroups = useMemo(
+    () => displayedGroups.filter(g => selectedGroupIds.has(g.id) && isBatchSelectable(g)),
+    [displayedGroups, selectedGroupIds, isBatchSelectable]
+  );
+
+  // Магазин первой отмеченной заявки закрывает выбор для всех остальных магазинов
+  const batchCabinet = selectedGroups.length > 0 ? String(selectedGroups[0].cabinet || '').trim() : null;
+
+  const toggleGroupSelection = useCallback((group: OzonGroup) => {
+    setSelectedGroupIds(prev => {
+      const next = new Set(prev);
+      if (next.has(group.id)) next.delete(group.id);
+      else next.add(group.id);
+      return next;
+    });
+  }, []);
+
+  // Заявки, исчезнувшие из списка после записи, не должны оставаться отмеченными
+  useEffect(() => {
+    setSelectedGroupIds(prev => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(displayedGroups.filter(isBatchSelectable).map(g => g.id));
+      const next = new Set(Array.from(prev).filter(id => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [displayedGroups, isBatchSelectable]);
+
+  const selectedPostingCount = useMemo(
+    () => selectedGroups.reduce(
+      (sum, g) => sum + g.items.filter((i: any) => isActionableItem(i)).length,
+      0
+    ),
+    [selectedGroups]
+  );
+
   const getStatusSummary = (group: ExternalShipment[]) => {
     const statusCounts: Record<string, number> = {};
     group.forEach(s => {
@@ -1452,6 +1499,37 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
         </label>
       )}
 
+      {/* Item 56: панель списания нескольких заявок за один проход */}
+      {!isLoading && selectedGroups.length > 0 && (
+        <div className="bg-sky-50 border border-sky-200 rounded-3xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="font-bold text-sky-900">
+              Выбрано заявок: {selectedGroups.length} · поставок: {selectedPostingCount}
+            </div>
+            <div className="text-sm text-sky-800">
+              {selectedGroups.map(g => `№ ${g.label}`).join(', ')}
+            </div>
+            <div className="text-xs text-sky-700">
+              Спишутся одной партией: упаковка, прочие расходы и услуги вводятся один раз и делятся по количеству штук.
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSelectedGroupIds(new Set())}
+              className="bg-white border border-sky-300 text-sky-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-sky-100 transition-all cursor-pointer whitespace-nowrap"
+            >
+              Снять выделение
+            </button>
+            <button
+              onClick={() => handleProcessOzonGroups(selectedGroups)}
+              className="bg-sky-500 text-white px-5 py-2 rounded-xl font-bold text-sm hover:bg-sky-600 transition-all shadow-md shadow-sky-100 cursor-pointer whitespace-nowrap"
+            >
+              Оформить списание ({selectedGroups.length})
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Loading state */}
       {isLoading ? (
         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
@@ -1480,6 +1558,25 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                 >
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
+                      {isBatchSelectable(group) && (() => {
+                        const otherCabinet =
+                          batchCabinet !== null &&
+                          String(group.cabinet || '').trim() !== batchCabinet &&
+                          !selectedGroupIds.has(group.id);
+                        return (
+                          <input
+                            type="checkbox"
+                            checked={selectedGroupIds.has(group.id)}
+                            disabled={otherCabinet}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={() => toggleGroupSelection(group)}
+                            title={otherCabinet
+                              ? `В одном списании могут быть только заявки магазина «${batchCabinet}»`
+                              : 'Списать вместе с другими отмеченными заявками'}
+                            className="w-5 h-5 rounded accent-sky-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                          />
+                        );
+                      })()}
                       <h3 className="font-bold text-slate-900 text-lg">Заявка № {group.label}</h3>
                       {group.cabinet && (
                         <span className="text-xs font-semibold px-2.5 py-1 bg-sky-50 text-sky-700 rounded-full">

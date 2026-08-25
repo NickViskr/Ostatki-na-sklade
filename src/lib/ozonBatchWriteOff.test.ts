@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  batchDestinationNote,
   BatchWriteOffGroup,
   buildBatchWriteOffPlan,
   countPieces,
+  countShippablePieces,
   extrasPerUnit,
   mergeBatchItems,
   splitByQuantity,
@@ -197,5 +199,65 @@ describe('Costs per piece, never per line value', () => {
   it('items with no cost at all still carry their share', () => {
     const plan = buildBatchWriteOffPlan([group('A', [item('FREE', 4, 0)])], 40);
     expect(plan.extrasPerUnit).toBe(10);
+  });
+});
+
+describe('The note left in the History for an order of a batch', () => {
+  const note = () => batchDestinationNote(['A-1', 'B-2'], 10, 30, 200, 600);
+
+  it('names every order of the batch and this order\'s share', () => {
+    expect(note()).toBe(
+      '[Общая поставка: заявки № A-1, № B-2; доля этой заявки 10 из 30 шт., 200.00 руб. из 600.00 руб.]'
+    );
+  });
+
+  // The server still falls back to reading costs out of the destination text. These are its
+  // own regexes: if the note ever matched one, the order would be charged twice.
+  it('carries no rouble sign the server could mistake for a cost', () => {
+    const text = `Ozon (Shop) [Упаковка: 30 шт. x 5₽ = 150₽ | Услуги: Паллета x2 (600₽)] ${note()}`;
+    const services = text.match(/Услуги:([^\]]*)/);
+    const found: number[] = [];
+    if (services) {
+      const re = /\(([\d.,]+)\s*₽\)/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(services[1])) !== null) found.push(Number(m[1]));
+    }
+    expect(found).toEqual([600]);
+    expect(note()).not.toContain('₽');
+  });
+
+  it('the note never matches the packaging or «other» patterns either', () => {
+    expect(/Упаковка:[^|\]]*=\s*([\d.,]+)\s*₽/.test(note())).toBe(false);
+    expect(/Прочее:\s*([\d.,]+)\s*₽/.test(note())).toBe(false);
+  });
+});
+
+describe('Only the pieces that are really written off carry the costs', () => {
+  it('an unrecognised article is not counted', () => {
+    const items = [item('OK-1', 10, 100), item('MYSTERY', 5, 0, 'unknown')];
+    expect(countPieces(items)).toBe(15);
+    expect(countShippablePieces(items)).toBe(10);
+  });
+
+  it('the share of an order is not inflated by its unrecognised rows', () => {
+    // The server skips the unknown row, so 600 roubles are spread over 20 pieces, not 25.
+    const plan = buildBatchWriteOffPlan(
+      [
+        group('A', [item('OK-1', 10, 100), item('MYSTERY', 5, 0, 'unknown')]),
+        group('B', [item('OK-2', 10, 100)]),
+      ],
+      600
+    );
+    expect(plan.totalQuantity).toBe(20);
+    expect(plan.extrasPerUnit).toBe(30);
+    expect(plan.groups.map((g) => g.extrasShare)).toEqual([300, 300]);
+  });
+
+  it('an order made only of unrecognised rows carries nothing', () => {
+    const plan = buildBatchWriteOffPlan(
+      [group('A', [item('OK-1', 10, 100)]), group('B', [item('MYSTERY', 5, 0, 'unknown')])],
+      500
+    );
+    expect(plan.groups.map((g) => g.extrasShare)).toEqual([500, 0]);
   });
 });

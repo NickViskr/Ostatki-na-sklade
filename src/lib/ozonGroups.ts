@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { ExternalShipment, SKUItem, Transaction } from '../types';
 import { MatchResult, matchOzonGroup } from './ozonMatch';
 import { isStockDeparted } from './ozonStatus';
+import { BatchWriteOffGroup, BatchWriteOffItem, mergeBatchItems } from './ozonBatchWriteOff';
 
 export interface OzonGroup {
   id: string;
@@ -75,110 +76,155 @@ export function buildOzonGroups(
   });
 }
 
-export function useProcessOzonGroup(): (group: OzonGroup) => void {
+/**
+ * Item 45. Ozon names an item by barcode and offerId; this turns the items of one order
+ * into rows of our own accounting, with the cost we would write them off at.
+ * Equal articles are summed — one article can sit in several postings of the same order.
+ */
+const mapPostingItems = (
+  postings: ExternalShipment[],
+  skus: SKUItem[]
+): { items: BatchWriteOffItem[]; error: string | null } => {
+  const rawItems: any[] = [];
+  for (const posting of postings) {
+    try {
+      const list = JSON.parse(posting.itemsJSON);
+      if (Array.isArray(list)) rawItems.push(...list);
+    } catch (e) {
+      return { items: [], error: `Ошибка разбора позиций поставки №${posting.postingId}` };
+    }
+  }
+
+  const mapped: BatchWriteOffItem[] = rawItems.map((item: any) => {
+    const barcode = String(item.barcode || '').trim();
+    const offerId = String(item.offerId || '').trim();
+    const quantity = Number(item.quantity) || 0;
+
+    let matchedSku = skus.find(skuItem => {
+      if (barcode && skuItem.ozonBarcode) {
+        return skuItem.ozonBarcode.trim() === barcode;
+      }
+      return false;
+    });
+
+    if (!matchedSku && offerId) {
+      matchedSku = skus.find(skuItem => skuItem.sku.toLowerCase() === offerId.toLowerCase());
+    }
+
+    if (matchedSku) {
+      // Себестоимость через хелпер стора: виртуальный комплект = сумма компонентов,
+      // обычный товар = средняя со склада; справочная цена SKU — запасной вариант
+      const effectiveCost = useWarehouseStore.getState().getEffectiveAvgCost(matchedSku.sku);
+      const unitCost = effectiveCost > 0 ? effectiveCost : (matchedSku.price || 0);
+      return {
+        article: matchedSku.sku,
+        quantity,
+        price: unitCost,
+        status: 'ok' as const
+      };
+    }
+    return {
+      article: offerId || barcode || 'НЕИЗВЕСТНО',
+      quantity,
+      price: 0,
+      status: 'unknown' as const,
+      errorMsg: 'SKU не найден по штрихкоду или артикулу Ozon'
+    };
+  });
+
+  return {
+    items: mergeBatchItems([{ groupId: '', label: '', postingIds: [], items: mapped }]),
+    error: null
+  };
+};
+
+/**
+ * Item 56. Writes off one or several Ozon orders in a single pass.
+ *
+ * The contractor packs and hauls several orders as one physical supply, so the additional
+ * costs are paid once and must be spread over the combined article list. The screen therefore
+ * shows the orders merged, while the commit stays one expense per order — see
+ * src/lib/ozonBatchWriteOff.ts for why the two do not contradict each other.
+ *
+ * A single order goes through exactly the same path with a batch of one, so there is no
+ * second code path to keep in step.
+ */
+export function useProcessOzonGroups(): (groups: OzonGroup[]) => void {
   const skus = useWarehouseStore((state) => state.skus);
   const stock = useWarehouseStore((state) => state.stock);
   const setPendingOzonPostingIds = useWarehouseStore((state) => state.setPendingOzonPostingIds);
+  const setPendingOzonBatch = useWarehouseStore((state) => state.setPendingOzonBatch);
   const setOpType = useUIStore((state) => state.setOpType);
   const setUploadDestination = useUIStore((state) => state.setUploadDestination);
   const askConfirmation = useUIStore((state) => state.askConfirmation);
 
-  const handleProcessOzonGroup = useCallback((group: OzonGroup) => {
+  return useCallback((groups: OzonGroup[]) => {
+    if (!groups || groups.length === 0) {
+      toast.error('Не выбрано ни одной заявки');
+      return;
+    }
     // Пункт 31. Предохранитель: по виртуальной заявке списание не проводится никогда
-    if (group.isVirtual) {
+    if (groups.some(g => g.isVirtual)) {
       toast.error('Заявку создал сам Ozon — списание со склада по ней не проводится');
       return;
     }
-    const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
-      p => p.status === 'new' && isStockDeparted(p.ozonStatus)
-    );
-    if (newPostings.length === 0) {
-      toast.error('Заявка ещё не отгружена на Ozon — оформление станет доступно после приёмки на точке отгрузки');
+    // Магазин входит в назначение расхода, поэтому в одном списании он должен быть один
+    const cabinets = Array.from(new Set(groups.map(g => String(g.cabinet || '').trim())));
+    if (cabinets.length > 1) {
+      toast.error('В одном списании могут участвовать только заявки одного магазина');
       return;
     }
 
-    const rawItems: any[] = [];
-    for (const posting of newPostings) {
-      try {
-        const list = JSON.parse(posting.itemsJSON);
-        if (Array.isArray(list)) rawItems.push(...list);
-      } catch (e) {
-        toast.error(`Ошибка разбора позиций поставки №${posting.postingId}`);
+    const batch: BatchWriteOffGroup[] = [];
+    for (const group of groups) {
+      const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
+        p => p.status === 'new' && isStockDeparted(p.ozonStatus)
+      );
+      if (newPostings.length === 0) {
+        toast.error(`Заявка № ${group.label} ещё не отгружена на Ozon — оформление станет доступно после приёмки на точке отгрузки`);
         return;
       }
-    }
-
-    if (rawItems.length === 0) {
-      toast.error('Поставки заявки не содержат позиций');
-      return;
-    }
-
-    const mapped = rawItems.map((item: any) => {
-      const barcode = String(item.barcode || '').trim();
-      const offerId = String(item.offerId || '').trim();
-      const quantity = Number(item.quantity) || 0;
-
-      let matchedSku = skus.find(skuItem => {
-        if (barcode && skuItem.ozonBarcode) {
-          return skuItem.ozonBarcode.trim() === barcode;
-        }
-        return false;
+      const { items, error } = mapPostingItems(newPostings, skus);
+      if (error) {
+        toast.error(error);
+        return;
+      }
+      if (items.length === 0) {
+        toast.error(`Поставки заявки № ${group.label} не содержат позиций`);
+        return;
+      }
+      batch.push({
+        groupId: group.id,
+        label: group.label,
+        postingIds: newPostings.map(p => p.postingId),
+        items
       });
-
-      if (!matchedSku && offerId) {
-        matchedSku = skus.find(skuItem => skuItem.sku.toLowerCase() === offerId.toLowerCase());
-      }
-
-      if (matchedSku) {
-        // Себестоимость через хелпер стора: виртуальный комплект = сумма компонентов,
-        // обычный товар = средняя со склада; справочная цена SKU — запасной вариант
-        const effectiveCost = useWarehouseStore.getState().getEffectiveAvgCost(matchedSku.sku);
-        const unitCost = effectiveCost > 0 ? effectiveCost : (matchedSku.price || 0);
-        return {
-          article: matchedSku.sku,
-          quantity,
-          price: unitCost,
-          status: 'ok' as const
-        };
-      } else {
-        return {
-          article: offerId || barcode || 'НЕИЗВЕСТНО',
-          quantity,
-          price: 0,
-          status: 'unknown' as const,
-          errorMsg: 'SKU не найден по штрихкоду или артикулу Ozon'
-        };
-      }
-    });
-
-    // Одинаковые артикулы из разных поставок заявки суммируются в одну строку
-    const aggregated = new Map<string, any>();
-    for (const item of mapped) {
-      const key = `${item.article}|${item.status}`;
-      const existing = aggregated.get(key);
-      if (existing) {
-        existing.quantity += item.quantity;
-      } else {
-        aggregated.set(key, { ...item });
-      }
     }
-    const mappedItems = Array.from(aggregated.values());
+
+    const mergedItems = mergeBatchItems(batch);
+    const postingCount = batch.reduce((sum, g) => sum + g.postingIds.length, 0);
 
     const proceedToModal = () => {
-      setPendingOzonPostingIds(newPostings.map(p => p.postingId));
+      setPendingOzonBatch(batch);
+      setPendingOzonPostingIds(batch.reduce<string[]>((all, g) => all.concat(g.postingIds), []));
 
       setOpType('Расход');
       // Заявка знает свой магазин — подставляем в назначение автоматически
-      const cabName = String(group.cabinet || '').trim();
+      const cabName = cabinets[0] || '';
       setUploadDestination(cabName ? `Ozon (${cabName})` : 'Ozon');
-      useUIStore.getState().setParsedItems(mappedItems);
+      useUIStore.getState().setParsedItems(mergedItems as any);
       useUIStore.getState().setShowConfirmModal(true);
-      toast.success(`Заявка № ${group.label}: подготовлено поставок — ${newPostings.length}`);
+      toast.success(
+        batch.length === 1
+          ? `Заявка № ${batch[0].label}: подготовлено поставок — ${postingCount}`
+          : `Выбрано заявок: ${batch.length}, поставок — ${postingCount}`
+      );
     };
 
-    // Проверка наличия сразу при оформлении (комплекты — через доступность по компонентам)
+    // Проверка наличия сразу при оформлении (комплекты — через доступность по компонентам).
+    // Считается по ОБЩЕМУ списку: списание уедет одной партией, и товара должно хватить на всё сразу.
     const requiredByArticle: Record<string, number> = {};
-    for (const it of mappedItems) {
+    for (const it of mergedItems) {
       if (it.status === 'ok') {
         requiredByArticle[it.article] = (requiredByArticle[it.article] || 0) + it.quantity;
       }
@@ -218,7 +264,11 @@ export function useProcessOzonGroup(): (group: OzonGroup) => void {
     }
 
     proceedToModal();
-  }, [skus, stock, setPendingOzonPostingIds, setOpType, setUploadDestination, askConfirmation]);
+  }, [skus, stock, setPendingOzonPostingIds, setPendingOzonBatch, setOpType, setUploadDestination, askConfirmation]);
+}
 
-  return handleProcessOzonGroup;
+/** Одна заявка — та же дорога, что и партия, только из одного элемента. */
+export function useProcessOzonGroup(): (group: OzonGroup) => void {
+  const processGroups = useProcessOzonGroups();
+  return useCallback((group: OzonGroup) => processGroups([group]), [processGroups]);
 }
