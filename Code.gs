@@ -790,20 +790,53 @@ function getStock() {
 
 // ─── Вспомогательные функции ──────────────────────────────────────────────────
 
-function ensureColumns(sheet, requiredHeaders) {
+function readHeaderRow(sheet) {
   const lastCol = sheet.getLastColumn();
-  let existingHeaders = [];
-  if (lastCol > 0) {
-    existingHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0]
-      .map(h => String(h).trim());
+  if (lastCol <= 0) return [];
+  return sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+}
+
+/**
+ * Adds the columns a sheet is missing.
+ *
+ * 25.08.2026: the «ДопРасходы» column ended up in the History sheet TWICE. The app fires
+ * several requests as it loads; two of them read the header row before either had written,
+ * each concluded the column was missing, and each appended it. Reading the headers and
+ * appending to them therefore has to happen inside one lock.
+ *
+ * The lock is taken ONLY when something is actually missing. The ordinary call — every
+ * column already in place, which is every call after the first — still costs a single read
+ * and never waits, so the sheets this runs on before almost every operation are not slowed.
+ *
+ * The new column index comes from the header row we just read rather than from
+ * getLastColumn(), which can still report the pre-write width inside one execution.
+ */
+function ensureColumns(sheet, requiredHeaders) {
+  let existingHeaders = readHeaderRow(sheet);
+  const missing = requiredHeaders.filter(function(h) { return existingHeaders.indexOf(h) === -1; });
+  if (missing.length === 0) return;
+
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    // Another execution is adding these very columns and will finish the job.
+    return;
   }
-  requiredHeaders.forEach(function(header) {
-    if (!existingHeaders.includes(header)) {
-      const newCol = sheet.getLastColumn() + 1;
-      sheet.getRange(1, newCol).setValue(header);
-      existingHeaders.push(header);
-    }
-  });
+  try {
+    existingHeaders = readHeaderRow(sheet);
+    requiredHeaders.forEach(function(header) {
+      if (existingHeaders.indexOf(header) === -1) {
+        sheet.getRange(1, existingHeaders.length + 1).setValue(header);
+        existingHeaders.push(header);
+      }
+    });
+    SpreadsheetApp.flush();
+    // The header cache of the transactions sheet must not survive a widened header row.
+    _transHeadersCache = null;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function getOrCreateSheet(ss, sheetName, headers) {

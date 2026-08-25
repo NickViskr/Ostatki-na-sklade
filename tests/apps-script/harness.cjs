@@ -142,6 +142,10 @@ let uuidCounter = 0;
 // как есть ради обратной совместимости с уже существующими 42 проверками.
 const sheetRegistry = {};
 
+// How many times a script lock was requested — ensureColumns must ask for one only when
+// it actually has a column to add.
+let lockRequests = 0;
+
 // ---------- Сборка контекста vm ----------
 const sandbox = {
   console,
@@ -156,6 +160,15 @@ const sandbox = {
     log: (msg) => { logs.push(String(msg)); }
   },
   Date: FakeDate,
+  // ensureColumns takes a script lock before widening a header row (25.08.2026: the
+  // «ДопРасходы» column had been created twice by two concurrent requests). The stand runs
+  // one execution at a time, so the lock always succeeds and never blocks.
+  LockService: {
+    getScriptLock: () => {
+      lockRequests += 1;
+      return { waitLock: () => true, releaseLock: () => {} };
+    }
+  },
   SpreadsheetApp: {
     getActiveSpreadsheet: () => ({
       getSheetByName: (name) => (name === 'SKU' ? skuSheet : (sheetRegistry[name] || null)),
@@ -279,6 +292,14 @@ module.exports = {
     return sheet;
   },
   commitTransaction: (...args) => context.commitTransaction(...args),
+  ensureColumns: (...args) => context.ensureColumns(...args),
+  makeSheet: (headers, name) => {
+    const sheet = makeFakeSheet(headers, name);
+    sheetRegistry[name] = sheet;
+    return sheet;
+  },
+  headerRowOf: (sheet) => sheet.__dump()[0].map(h => String(h).trim()),
+  lockRequests: () => lockRequests,
   // Item 56, stage 2: needed to prove the additional costs survive a round trip through the sheet.
   getTransactions: (...args) => context.getTransactions(...args),
 

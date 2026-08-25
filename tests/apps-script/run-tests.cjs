@@ -1014,6 +1014,97 @@ function dumpTransRows(sheet) {
     rows2.length === 1 && rows2[0].additionalCosts === null, `получено: ${rows2.length && JSON.stringify(rows2[0].additionalCosts)}`);
 })();
 
+// ================= 25.08.2026: a column must never be created twice =================
+// Found in production: the History sheet ended up with TWO «ДопРасходы» columns. The app
+// fires several requests as it loads; two of them read the header row before either had
+// written, and both appended. Values in the twin columns matched, so no money was lost —
+// but the sheet must not grow twins.
+
+(function test84() {
+  const h = freshHarness();
+  const sheet = h.makeSheet(['A', 'B'], 'Проба');
+
+  h.ensureColumns(sheet, ['A', 'B', 'НоваяКолонка']);
+  check('ensureColumns: the missing column is added once',
+    JSON.stringify(h.headerRowOf(sheet)) === JSON.stringify(['A', 'B', 'НоваяКолонка']),
+    `получено: ${JSON.stringify(h.headerRowOf(sheet))}`);
+
+  // Every later call sees it in place — this is the loop that produced the twin.
+  h.ensureColumns(sheet, ['A', 'B', 'НоваяКолонка']);
+  h.ensureColumns(sheet, ['A', 'B', 'НоваяКолонка']);
+  const headers = h.headerRowOf(sheet);
+  check('ensureColumns: repeated calls do not add a twin',
+    headers.filter(x => x === 'НоваяКолонка').length === 1,
+    `получено: ${JSON.stringify(headers)}`);
+})();
+
+(function test85() {
+  const h = freshHarness();
+  const sheet = h.makeSheet(['A', 'B'], 'Проба');
+
+  const before = h.lockRequests();
+  h.ensureColumns(sheet, ['A', 'B']);
+  check('ensureColumns: nothing missing — no lock is taken and nothing is written',
+    h.lockRequests() === before && JSON.stringify(h.headerRowOf(sheet)) === JSON.stringify(['A', 'B']),
+    `запросов замка: ${h.lockRequests() - before}`);
+
+  h.ensureColumns(sheet, ['A', 'B', 'C']);
+  check('ensureColumns: a column to add — the write happens under a lock',
+    h.lockRequests() === before + 1,
+    `запросов замка: ${h.lockRequests() - before}`);
+})();
+
+(function test86() {
+  const h = freshHarness();
+  // Several columns missing at once are added in one locked pass, in the order requested.
+  const sheet = h.makeSheet(['A'], 'Проба');
+  const before = h.lockRequests();
+  h.ensureColumns(sheet, ['A', 'B', 'C', 'D']);
+  check('ensureColumns: several missing columns take the lock once',
+    h.lockRequests() === before + 1, `запросов замка: ${h.lockRequests() - before}`);
+  check('ensureColumns: all of them are added, in order',
+    JSON.stringify(h.headerRowOf(sheet)) === JSON.stringify(['A', 'B', 'C', 'D']),
+    `получено: ${JSON.stringify(h.headerRowOf(sheet))}`);
+})();
+
+(function test87() {
+  // The real defect was a race, and a single-threaded stand cannot reproduce one by running
+  // code twice. So the race is staged inside the sheet: the FIRST read of the header row
+  // reports the column missing, every read after it reports the column present — exactly what
+  // a competing execution that appended while we waited for the lock would look like.
+  // The fix must re-read the headers INSIDE the lock and then leave the sheet alone.
+  const h = freshHarness();
+  let headers = ['A', 'B'];
+  let reads = 0;
+  const writes = [];
+  const racingSheet = {
+    getLastColumn() { return headers.length; },
+    getRange(row, col, numRows, numCols) {
+      if (numCols !== undefined) {
+        return {
+          getValues() {
+            reads += 1;
+            const snapshot = headers.slice();
+            // A competing execution appends the column right after our first look.
+            if (reads === 1) headers = headers.concat(['Двойник']);
+            return [snapshot];
+          }
+        };
+      }
+      return { setValue(value) { writes.push([col, value]); headers[col - 1] = value; } };
+    }
+  };
+
+  h.ensureColumns(racingSheet, ['A', 'B', 'Двойник']);
+
+  check('Гонка: заголовки перечитаны под замком (чтений больше одного)',
+    reads >= 2, `чтений: ${reads}`);
+  check('Гонка: колонку уже добавил другой запрос — второй раз не пишем',
+    writes.length === 0, `записей: ${JSON.stringify(writes)}`);
+  check('Гонка: двойника в шапке не появилось',
+    headers.filter(x => x === 'Двойник').length === 1, `шапка: ${JSON.stringify(headers)}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
