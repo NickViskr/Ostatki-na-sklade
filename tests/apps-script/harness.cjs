@@ -199,6 +199,7 @@ const exportLine = `
 ;this.OZON_STOCK_HISTORY_HEADERS = OZON_STOCK_HISTORY_HEADERS;
 this.OZON_STOCKS_HEADERS = OZON_STOCKS_HEADERS;
 this.OZON_SALES_HEADERS = OZON_SALES_HEADERS;
+this.OZON_COST_HEADERS = OZON_COST_HEADERS;
 `;
 vm.runInContext(src + exportLine, context, { filename: 'Code.gs' });
 
@@ -294,6 +295,19 @@ module.exports = {
   commitTransaction: (...args) => context.commitTransaction(...args),
   ensureColumns: (...args) => context.ensureColumns(...args),
   parseAdditionalCostsFromDestination: (...args) => context.parseAdditionalCostsFromDestination(...args),
+
+  // ---------- Item 47, stage 1: журнал себестоимости на Озоне ----------
+  OZON_COST_HEADERS: context.OZON_COST_HEADERS,
+  setOzonCostSheet(rows) {
+    const headers = context.OZON_COST_HEADERS;
+    const sheet = makeFakeSheet(headers, 'Себестоимость Озон');
+    if (rows && rows.length > 0) sheet.__setData([headers.slice(), ...rows]);
+    sheetRegistry['Себестоимость Озон'] = sheet;
+    return sheet;
+  },
+  getOzonCostJournal: (...args) => context.getOzonCostJournal(...args),
+  getOzonCostState: (...args) => context.getOzonCostState(...args),
+  isOzonCostCounted: (...args) => context.isOzonCostCounted(...args),
   makeSheet: (headers, name) => {
     const sheet = makeFakeSheet(headers, name);
     sheetRegistry[name] = sheet;

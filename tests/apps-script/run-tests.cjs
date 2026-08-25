@@ -1169,6 +1169,88 @@ function dumpTransRows(sheet) {
     rows.length === 1 && rows[0].price === 150, `получено: ${rows.length && rows[0].price}`);
 })();
 
+// ============ Item 47, stage 1: журнал себестоимости товаров на Озоне ============
+// Текущая себестоимость артикула — это ПОСЛЕДНЯЯ его строка в журнале. Ключ операции в
+// строке отвечает на вопрос владельца «по какой поставке уже посчитано, а по какой нет».
+
+// [Дата, Кабинет, Артикул, SKU, ОстатокДо, СебестДо, Отгружено, СебестОтгрузки, СебестПосле, OpID, Выгружено, Источник]
+const costRow = (date, cab, art, after, opId, extra = {}) => [
+  date, cab, art, extra.sku || '', extra.stockBefore ?? '', extra.costBefore ?? '',
+  extra.shipped ?? '', extra.shippedCost ?? '', after, opId, extra.exported || '', extra.source || '',
+];
+
+(function test91() {
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-A', 200.00, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '111' }),
+    costRow('2026-08-06', 'MaxiStore', 'ART-A', 210.50, 'op-1', { sku: '111', stockBefore: 100, costBefore: 200, shipped: 50, shippedCost: 231.5 }),
+    costRow('2026-08-01', 'Mercurius', 'ART-B', 500.00, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '222' }),
+  ]);
+
+  const journal = h.getOzonCostJournal();
+  check('Item 47: журнал читается целиком и в порядке записи',
+    journal.length === 3 && journal[0].article === 'ART-A' && journal[2].article === 'ART-B',
+    `получено строк: ${journal.length}`);
+  check('Item 47: числа разобраны как числа, а не как текст',
+    journal[1].shipped === 50 && journal[1].shippedCost === 231.5 && journal[1].costAfter === 210.5,
+    `получено: ${JSON.stringify(journal[1])}`);
+
+  const state = h.getOzonCostState();
+  check('Item 47: текущая себестоимость — последняя строка артикула, а не первая',
+    state['MaxiStore|ART-A'].cost === 210.5, `получено: ${state['MaxiStore|ART-A'] && state['MaxiStore|ART-A'].cost}`);
+  check('Item 47: артикул без отгрузок остаётся на своей начальной точке',
+    state['Mercurius|ART-B'].cost === 500, `получено: ${state['Mercurius|ART-B'] && state['Mercurius|ART-B'].cost}`);
+  check('Item 47: один и тот же артикул в разных магазинах — разные строки состояния',
+    Object.keys(state).length === 2, `получено: ${Object.keys(state).join(', ')}`);
+})();
+
+(function test92() {
+  // Один артикул в двух магазинах не должен слипаться: себестоимость у них своя.
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-X', 100.00, 'НАЧАЛЬНАЯ ТОЧКА'),
+    costRow('2026-08-01', 'Mercurius', 'ART-X', 900.00, 'НАЧАЛЬНАЯ ТОЧКА'),
+  ]);
+  const state = h.getOzonCostState();
+  check('Item 47: одинаковый артикул в разных магазинах не смешивается',
+    state['MaxiStore|ART-X'].cost === 100 && state['Mercurius|ART-X'].cost === 900,
+    `получено: ${JSON.stringify(state)}`);
+})();
+
+(function test93() {
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-06', 'MaxiStore', 'ART-A', 210.50, 'op-1'),
+    costRow('2026-08-06', 'MaxiStore', 'ART-B', 300.00, 'op-1'),
+  ]);
+  const j = h.getOzonCostJournal();
+  check('Item 47: поставка, уже посчитанная по этому артикулу, распознаётся',
+    h.isOzonCostCounted(j, 'op-1', 'MaxiStore', 'ART-A') === true, '');
+  check('Item 47: та же операция по ДРУГОМУ артикулу того же магазина тоже посчитана',
+    h.isOzonCostCounted(j, 'op-1', 'MaxiStore', 'ART-B') === true, '');
+  check('Item 47: артикул, которого в этой операции не было, не считается посчитанным',
+    h.isOzonCostCounted(j, 'op-1', 'MaxiStore', 'ART-C') === false, '');
+  check('Item 47: тот же ключ, но другой магазин — не посчитано',
+    h.isOzonCostCounted(j, 'op-1', 'Mercurius', 'ART-A') === false, '');
+  check('Item 47: новая операция не считается посчитанной',
+    h.isOzonCostCounted(j, 'op-2', 'MaxiStore', 'ART-A') === false, '');
+  check('Item 47: пустой ключ никогда не считается посчитанным — иначе одна кривая строка застопорит всё',
+    h.isOzonCostCounted(j, '', 'MaxiStore', 'ART-A') === false, '');
+})();
+
+(function test94() {
+  const h = freshHarness();
+  h.setOzonCostSheet([]);
+  check('Item 47: пустой журнал — пустое состояние, а не падение',
+    h.getOzonCostJournal().length === 0 && Object.keys(h.getOzonCostState()).length === 0, '');
+  check('Item 47: в пустом журнале ничего не посчитано',
+    h.isOzonCostCounted([], 'op-1', 'MaxiStore', 'ART-A') === false, '');
+  const created = h.getOzonCostJournal.length !== undefined;
+  check('Item 47: лист создаётся сам, если его ещё нет',
+    JSON.stringify(h.OZON_COST_HEADERS) === JSON.stringify(['Дата','Кабинет','Артикул','SKU','Остаток до','Себестоимость до','Отгружено','Себестоимость отгрузки','Себестоимость после','OpID','Выгружено в КАН','Источник']),
+    `шапка: ${JSON.stringify(h.OZON_COST_HEADERS)}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

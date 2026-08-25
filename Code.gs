@@ -500,6 +500,26 @@ const OZON_SALES_ARCHIVE_SHEET_NAME = 'Продажи Ozon Архив';
 const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
 const OZON_CLUSTERS_HEADERS = ['КластерID', 'Название', 'Добавлен', 'Уведомлён'];
 const FACTORY_ORDERS_HEADERS = ['ID', 'Артикул', 'Дата заказа', 'Количество', 'Ожидаемое прибытие', 'Комментарий', 'Кто', 'Статус', 'Дата получения'];
+
+/**
+ * Item 47, stage 1. The cost of the goods sitting on Ozon, kept as a journal.
+ *
+ * KAN needs the cost of what lies ON OZON, while the app knows the cost of what it SHIPPED.
+ * The two are bridged by a moving average: every shipment blends its own cost into whatever
+ * was already there. The owner's decision of 25.08.2026 is to recompute at every shipment
+ * rather than once a month — a supply arriving on the 30th then affects the cost from the
+ * 30th, instead of retroactively reweighting the whole month.
+ *
+ * A JOURNAL, not a state table, on purpose. The current cost of an article is simply its last
+ * row, so nothing has to be kept in step. It also answers the owner's requirement that the app
+ * know which supply has already been counted: the operation key is written into the row, and a
+ * key already present is never counted again.
+ */
+const OZON_COST_HEADERS = [
+  'Дата', 'Кабинет', 'Артикул', 'SKU',
+  'Остаток до', 'Себестоимость до', 'Отгружено', 'Себестоимость отгрузки', 'Себестоимость после',
+  'OpID', 'Выгружено в КАН', 'Источник'
+];
 const OZON_SUPPLY_REQUESTS_HEADERS = ['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус'];
 const OZON_SETTINGS_DEFAULTS = [
   { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
@@ -3735,6 +3755,87 @@ function saveSupplyDocsToDrive(data) {
     missingLabels: missingLabels,
     problems: problems
   };
+}
+
+function getOzonCostSheet(ss) {
+  return getOrCreateSheet(ss, 'Себестоимость Озон', OZON_COST_HEADERS);
+}
+
+/** Every row of the journal, oldest first — the order they were written in. */
+function getOzonCostJournal() {
+  const ss = getSpreadsheet();
+  const sheet = getOzonCostSheet(ss);
+  ensureColumns(sheet, OZON_COST_HEADERS);
+  const values = sheet.getDataRange().getValues();
+  if (values.length <= 1) return [];
+  const headers = values[0].map(function(h) { return String(h).trim(); });
+  const idx = {};
+  OZON_COST_HEADERS.forEach(function(h) { idx[h] = headers.indexOf(h); });
+  const rows = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (row.join('').trim() === '') continue;
+    let dateStr = '';
+    const rawDate = row[idx['Дата']];
+    if (rawDate instanceof Date) {
+      try { dateStr = Utilities.formatDate(rawDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'); }
+      catch (e) { dateStr = String(rawDate); }
+    } else {
+      dateStr = String(rawDate || '');
+    }
+    rows.push({
+      date: dateStr,
+      cabinet: String(row[idx['Кабинет']] || '').trim(),
+      article: String(row[idx['Артикул']] || '').trim(),
+      sku: String(row[idx['SKU']] || '').trim(),
+      stockBefore: parseNumber(row[idx['Остаток до']]),
+      costBefore: parseNumber(row[idx['Себестоимость до']]),
+      shipped: parseNumber(row[idx['Отгружено']]),
+      shippedCost: parseNumber(row[idx['Себестоимость отгрузки']]),
+      costAfter: parseNumber(row[idx['Себестоимость после']]),
+      opId: String(row[idx['OpID']] || '').trim(),
+      exported: String(row[idx['Выгружено в КАН']] || '').trim(),
+      source: String(row[idx['Источник']] || '').trim()
+    });
+  }
+  return rows;
+}
+
+/**
+ * The cost in force right now, per cabinet and article: the LAST row wins.
+ * Rows are read in sheet order, so a later row simply overwrites an earlier one.
+ */
+function getOzonCostState() {
+  const state = {};
+  getOzonCostJournal().forEach(function(r) {
+    if (!r.cabinet || !r.article) return;
+    state[r.cabinet + '|' + r.article] = {
+      cabinet: r.cabinet,
+      article: r.article,
+      sku: r.sku,
+      cost: r.costAfter,
+      date: r.date,
+      opId: r.opId,
+      exported: r.exported
+    };
+  });
+  return state;
+}
+
+/**
+ * Item 47: the guard the owner asked for — a supply whose operation is already in the journal
+ * must never be counted into the cost a second time.
+ */
+function isOzonCostCounted(journal, opId, cabinet, article) {
+  const key = String(opId || '').trim();
+  if (!key) return false;
+  for (let i = 0; i < journal.length; i++) {
+    const r = journal[i];
+    if (r.opId === key && r.cabinet === String(cabinet).trim() && r.article === String(article).trim()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function getOzonSupplyRequests() {
