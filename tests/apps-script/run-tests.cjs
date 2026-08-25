@@ -865,6 +865,155 @@ function buildSkuRow(headers, obj) {
     `получено: ${JSON.stringify(H4.dumpSalesSheet('Продажи Ozon'))}`);
 })();
 
+// ================= Item 56, stage 2: additional costs stated as a number, not dug out of the text =================
+// Several Ozon orders shipped as one batch are written as several expenses, and the destination
+// text of each one names the cost of the WHOLE batch. Parsing that text would charge the batch
+// in full to every order, so the caller may now state the sum for this operation as a number.
+
+// Reads the main (non-component) rows of the transactions sheet as plain objects.
+function dumpTransRows(sheet) {
+  const data = sheet.__dump();
+  const headers = data[0].map(x => String(x).trim());
+  const lastRow = sheet.getLastRow();
+  const col = (row, name) => row[headers.indexOf(name)];
+  return data.slice(1, Math.max(lastRow, 1))
+    .filter(r => r.some(v => String(v).trim() !== ''))
+    .filter(r => headers.indexOf('isComponent') === -1 || col(r, 'isComponent') !== true)
+    .map(r => ({
+      article: String(col(r, 'Артикул')),
+      quantity: Number(col(r, 'Количество')),
+      price: Number(col(r, 'Цена')),
+      total: Number(col(r, 'Сумма')),
+      additional: headers.indexOf('ДопРасходы') === -1 ? '' : col(r, 'ДопРасходы')
+    }));
+}
+
+(function test79() {
+  const h = freshHarness();
+  const ts = h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+
+  // No number passed: the old parsing of the destination text must still work, untouched.
+  h.commitTransaction(
+    [{ article: 'ART-A', quantity: 10, price: 100 }],
+    'Расход', 'Ozon (Shop) [Услуги: Паллета x1 (500₽)]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const rows = dumpTransRows(ts);
+  check('Item 56: without a number the destination text is still parsed (1000 + 500 = 1500)',
+    rows.length === 1 && rows[0].total === 1500, `получено: ${JSON.stringify(rows)}`);
+  check('Item 56: unit cost carries the parsed costs (150)',
+    rows.length === 1 && rows[0].price === 150, `получено: ${rows.length && rows[0].price}`);
+  check('Item 56: the resolved sum is stored in its own column (500)',
+    rows.length === 1 && Number(rows[0].additional) === 500, `получено: ${rows.length && rows[0].additional}`);
+})();
+
+(function test80() {
+  const h = freshHarness();
+  const ts = h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-B', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+
+  // The same text, but the caller states this order's own share: the number must win.
+  h.commitTransaction(
+    [{ article: 'ART-B', quantity: 10, price: 100 }],
+    'Расход', 'Ozon (Shop) [Услуги: Паллета x1 (500₽)]', '', 'tester', '2026-01-05T09:00:00Z', '', 300
+  );
+  const rows = dumpTransRows(ts);
+  check('Item 56: the stated number wins over the text (1000 + 300 = 1300)',
+    rows.length === 1 && rows[0].total === 1300, `получено: ${JSON.stringify(rows)}`);
+  check('Item 56: the stated number is what gets stored (300)',
+    rows.length === 1 && Number(rows[0].additional) === 300, `получено: ${rows.length && rows[0].additional}`);
+})();
+
+(function test81() {
+  const h = freshHarness();
+  const ts = h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-C', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+
+  // Zero is a statement, not a missing value: an order that carries none of the costs.
+  h.commitTransaction(
+    [{ article: 'ART-C', quantity: 10, price: 100 }],
+    'Расход', 'Ozon (Shop) [Услуги: Паллета x1 (500₽)]', '', 'tester', '2026-01-05T09:00:00Z', '', 0
+  );
+  const rows = dumpTransRows(ts);
+  check('Item 56: a stated zero suppresses the text (1000, not 1500)',
+    rows.length === 1 && rows[0].total === 1000, `получено: ${JSON.stringify(rows)}`);
+  check('Item 56: nothing is stored when the operation carries no costs',
+    rows.length === 1 && String(rows[0].additional).trim() === '', `получено: "${rows.length && rows[0].additional}"`);
+})();
+
+(function test82() {
+  // The whole point of the change: two orders written separately must land exactly where
+  // one combined expense would have landed.
+  const combined = freshHarness();
+  const combinedSheet = combined.ensureTransSheet();
+  combined.setStockSheet([
+    { article: 'ART-A', quantity: 10, avgCost: 100, capitalization: 1000 },
+    { article: 'ART-B', quantity: 20, avgCost: 50, capitalization: 1000 }
+  ]);
+  combined.commitTransaction(
+    [{ article: 'ART-A', quantity: 10, price: 100 }, { article: 'ART-B', quantity: 20, price: 50 }],
+    'Расход', 'Ozon (Shop) [Услуги: Паллета x2 (600₽)]', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const one = dumpTransRows(combinedSheet);
+
+  const split = freshHarness();
+  const splitSheet = split.ensureTransSheet();
+  split.setStockSheet([
+    { article: 'ART-A', quantity: 10, avgCost: 100, capitalization: 1000 },
+    { article: 'ART-B', quantity: 20, avgCost: 50, capitalization: 1000 }
+  ]);
+  // 600 roubles over 30 pieces: 10 pieces carry 200, 20 pieces carry 400.
+  split.commitTransaction(
+    [{ article: 'ART-A', quantity: 10, price: 100 }],
+    'Расход', 'Ozon (Shop) [Услуги: Паллета x2 (600₽)]', '', 'tester', '2026-01-05T09:00:00Z', '', 200
+  );
+  split.commitTransaction(
+    [{ article: 'ART-B', quantity: 20, price: 50 }],
+    'Расход', 'Ozon (Shop) [Услуги: Паллета x2 (600₽)]', '', 'tester', '2026-01-05T09:00:00Z', '', 400
+  );
+  const two = dumpTransRows(splitSheet);
+
+  const byArticle = (rows, article) => rows.find(r => r.article === article) || {};
+  check('Item 56: split expenses put the same cost on the first order as one combined expense',
+    byArticle(one, 'ART-A').total === byArticle(two, 'ART-A').total && byArticle(two, 'ART-A').total === 1200,
+    `объединённое: ${byArticle(one, 'ART-A').total}, раздельное: ${byArticle(two, 'ART-A').total}`);
+  check('Item 56: and the same on the second order',
+    byArticle(one, 'ART-B').total === byArticle(two, 'ART-B').total && byArticle(two, 'ART-B').total === 1400,
+    `объединённое: ${byArticle(one, 'ART-B').total}, раздельное: ${byArticle(two, 'ART-B').total}`);
+  check('Item 56: unit cost is the same in both orders of the batch (base + 20 per piece)',
+    byArticle(two, 'ART-A').price === 120 && byArticle(two, 'ART-B').price === 70,
+    `получено: ${byArticle(two, 'ART-A').price} и ${byArticle(two, 'ART-B').price}`);
+  check('Item 56: writing the batch in full to every order would have cost 600 more — it does not',
+    (byArticle(two, 'ART-A').total + byArticle(two, 'ART-B').total) === 2600,
+    `получено: ${byArticle(two, 'ART-A').total + byArticle(two, 'ART-B').total}`);
+})();
+
+(function test83() {
+  // The stored number is what the re-run paths (an edit in History, a пересорт re-commit)
+  // read back instead of the destination text, so it has to survive the round trip.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-D', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.commitTransaction(
+    [{ article: 'ART-D', quantity: 10, price: 100 }],
+    'Расход', 'Ozon (Shop) [Услуги: Паллета x1 (500₽)]', '', 'tester', '2026-01-05T09:00:00Z', '', 250
+  );
+  const rows = h.getTransactions().rows.filter(r => r.isComponent !== true);
+  check('Item 56: the stated sum is read back from the sheet as a number (250)',
+    rows.length === 1 && rows[0].additionalCosts === 250, `получено: ${rows.length && rows[0].additionalCosts}`);
+
+  const h2 = freshHarness();
+  h2.ensureTransSheet();
+  h2.setStockSheet([{ article: 'ART-E', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h2.commitTransaction(
+    [{ article: 'ART-E', quantity: 10, price: 100 }],
+    'Расход', 'Ozon (Shop)', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const rows2 = h2.getTransactions().rows.filter(r => r.isComponent !== true);
+  check('Item 56: an expense with no costs reads back as «not stated», not as zero',
+    rows2.length === 1 && rows2[0].additionalCosts === null, `получено: ${rows2.length && JSON.stringify(rows2[0].additionalCosts)}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

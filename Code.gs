@@ -341,7 +341,7 @@ function doPost(e) {
         result = deleteSku(payload.sku, currentUser.username);
         break;
       case 'commit':
-        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId);
+        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId, payload.additionalCosts);
         // Пункт 28, этап C: привязка поставок Ozon выполняется здесь же, внутри замка.
         // Ошибка привязки не отменяет уже записанный расход — она возвращается клиенту как предупреждение.
         if (result && payload.postingIds && payload.postingIds.length > 0) {
@@ -899,6 +899,9 @@ function parseTransactionRow(row, headers) {
     destination:  String(getCol(['Объект'], 8) || ''),
     deliveryDate: deliveryStr,
     user:         String(getCol(['Пользователь'], 10) || ''),
+    additionalCosts: (headers && headers.indexOf('ДопРасходы') !== -1 && String(row[headers.indexOf('ДопРасходы')]).trim() !== '')
+                     ? parseNumber(row[headers.indexOf('ДопРасходы')])
+                     : null,
     groupId:      String(headers && headers.indexOf('groupId') !== -1 ? row[headers.indexOf('groupId')] : ''),
     isComponent:  headers && headers.indexOf('isComponent') !== -1 ? Boolean(row[headers.indexOf('isComponent')]) : false
   };
@@ -939,7 +942,8 @@ function buildTransactionRow(obj) {
     'Дата поставки': obj.deliveryDate,
     'Пользователь': obj.user,
     'groupId': obj.groupId || '',
-    'isComponent': obj.isComponent || false
+    'isComponent': obj.isComponent || false,
+    'ДопРасходы': obj.additionalCosts
   };
   
   for (let i = 0; i < _transHeadersCache.length; i++) {
@@ -961,7 +965,7 @@ function getTransactionSheet(ss) {
     finalSheet = sheet1 || sheet2;
   }
   if (finalSheet) {
-    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID']);
+    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID', 'ДопРасходы']);
   }
   return finalSheet;
 }
@@ -1503,8 +1507,27 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
 }
 
 function updateTransaction(id, data, username) {
+  // Item 56, stage 2. The additional costs of an operation now live in their own column.
+  // An edit deletes the row and writes it again, so the number has to be read BEFORE the
+  // delete: for a batch write-off the destination text names the cost of the whole batch,
+  // and re-parsing it would charge that whole cost to this one order.
+  let storedAdditional = null;
+  try {
+    const priorRows = getTransactions().rows;
+    for (let i = 0; i < priorRows.length; i++) {
+      if (String(priorRows[i].id) === String(id)) {
+        storedAdditional = priorRows[i].additionalCosts;
+        break;
+      }
+    }
+  } catch (e) {
+    storedAdditional = null;
+  }
+  const editedAdditional = (data.additionalCosts !== null && data.additionalCosts !== undefined
+    && String(data.additionalCosts).trim() !== '') ? data.additionalCosts : storedAdditional;
+
   deleteTransaction(id, username, true);
-  const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '');
+  const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional);
   return {
     stock: getStock(),
     newTransactions: getTransactions().rows,
@@ -1557,8 +1580,19 @@ function findTransactionsByOpId(transSheet, opIdStr) {
   return found;
 }
 
-function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId) {
+function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts) {
   const items = Array.isArray(data) ? data : [data];
+
+  // Item 56, stage 2. Additional costs of the operation, stated as a number by the caller.
+  // Until now they were dug out of the destination text by regex, which cannot serve a batch
+  // write-off: several orders shipped together are written as several expenses, and the text
+  // of each one names the cost of the whole batch. Parsing it would charge the batch in full
+  // to every order. When the number is absent the old text parsing still applies, so every
+  // expense written before this change, and every one written by an older client, is unaffected.
+  const hasExplicitAdditional = explicitAdditionalCosts !== null
+    && explicitAdditionalCosts !== undefined
+    && String(explicitAdditionalCosts).trim() !== '';
+  const explicitAdditional = hasExplicitAdditional ? roundToTwo(parseNumber(explicitAdditionalCosts)) : 0;
   const dateStr = originalDate || new Date().toISOString();
   const ss = getSpreadsheet();
   const transSheet = getTransactionSheet(ss);
@@ -1791,7 +1825,9 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       }
     }
     
-    const shipmentAdditional = (type === 'Расход') ? parseAdditionalCostsFromDestination(destination) : 0;
+    const shipmentAdditional = (type !== 'Расход')
+      ? 0
+      : (hasExplicitAdditional ? explicitAdditional : parseAdditionalCostsFromDestination(destination));
     const additionalCosts = (shipmentAdditional > 0 && shipmentTotalQty > 0) ? roundToTwo(shipmentAdditional * qty / shipmentTotalQty) : 0;
     const mainTotal = (type === 'Расход')
       ? (kitGroupId ? roundToTwo(writeOffCost + componentsTotal + additionalCosts) : roundToTwo(total + additionalCosts))
@@ -1813,7 +1849,8 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       deliveryDate: deliveryDate,
       user: username,
       groupId: kitGroupId || '',
-      isComponent: false
+      isComponent: false,
+      additionalCosts: (type === 'Расход' && shipmentAdditional > 0) ? shipmentAdditional : undefined
     });
     
     rowsToAppend.push(mainRow);
@@ -5672,7 +5709,9 @@ function commitShipmentPeresort(postingId, username) {
   for (var j = 0; j < mainTxRows.length; j++) {
     deleteTransaction(String(mainTxRows[j].id), username, true);
   }
-  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate);
+  // Item 56, stage 2: the additional costs come from the stored column of the original
+  // expense, so a batch write-off is not re-charged the cost of the whole batch.
+  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts);
 
   // Шаг 10. Собери newTxIds: из commitResult.newTransactions возьми элементы с isComponent !== true, их String(id). const linkInfo = JSON.stringify(newTxIds).
   var newTxIds = commitResult.newTransactions

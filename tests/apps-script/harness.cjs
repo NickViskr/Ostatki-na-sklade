@@ -279,6 +279,8 @@ module.exports = {
     return sheet;
   },
   commitTransaction: (...args) => context.commitTransaction(...args),
+  // Item 56, stage 2: needed to prove the additional costs survive a round trip through the sheet.
+  getTransactions: (...args) => context.getTransactions(...args),
 
   // ---------- Хелперы для getOzonSales (пункт 22, этап I: окно недель) ----------
   OZON_SALES_HEADERS: context.OZON_SALES_HEADERS,
