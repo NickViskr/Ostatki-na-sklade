@@ -1488,6 +1488,12 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
   
   const type = transData[2];
   const article = String(transData[3]);
+
+  // Окно 30 дней. Проверяем ВСЕГДА, и при правке тоже: дата тут берётся прямо из листа, а в
+  // updateTransaction — из разобранной строки, которую могло и не найтись. Глагол в сообщении
+  // подставляется по делу, чтобы правка не отчитывалась про удаление.
+  const dIdx = headers.indexOf('Дата') !== -1 ? headers.indexOf('Дата') : 1;
+  assertReceiptWithinEditWindow(type, transData[dIdx], isUpdate ? 'править' : 'удалять');
   const qty = Number(transData[4]);
   const price = Number(transData[5]);
   const writeOffCost = Number(transData[6]);
@@ -1619,6 +1625,21 @@ function daysSinceTransactionDate(dateStr) {
   return Math.floor(diff / 86400000);
 }
 
+/**
+ * Пункт 47, этап 4. Окно правки прихода сторожит и правку, и УДАЛЕНИЕ. Без второго правило
+ * обходится в два хода: старый приход удаляют и заводят заново с другой ценой. Владелец
+ * попросил закрыть эту дырку 26.08.2026.
+ */
+function assertReceiptWithinEditWindow(type, dateStr, verb) {
+  if (String(type) !== 'Приход') return;
+  const age = daysSinceTransactionDate(dateStr);
+  if (age > RECEIPT_EDIT_WINDOW_DAYS) {
+    throw new Error('Приход старше ' + RECEIPT_EDIT_WINDOW_DAYS + ' дней ' + verb + ' нельзя: этому приходу '
+      + age + ' дн. Себестоимость поступившего товара меняется не позднее '
+      + RECEIPT_EDIT_WINDOW_DAYS + ' дней с даты поступления на склад.');
+  }
+}
+
 function updateTransaction(id, data, username) {
   // Item 56, stage 2. The additional costs of an operation now live in their own column.
   // An edit deletes the row and writes it again, so the number has to be read BEFORE the
@@ -1642,12 +1663,7 @@ function updateTransaction(id, data, username) {
   // Подэтап 3: окно правки прихода. Дата берётся из СОХРАНЁННОЙ строки, а не из присланной:
   // иначе правило обходится подстановкой свежей даты в том же запросе, которым его нарушают.
   if (storedRow && String(storedRow.type) === 'Приход') {
-    const age = daysSinceTransactionDate(storedRow.date);
-    if (age > RECEIPT_EDIT_WINDOW_DAYS) {
-      throw new Error('Приход старше ' + RECEIPT_EDIT_WINDOW_DAYS + ' дней править нельзя: этому приходу '
-        + age + ' дн. Себестоимость поступившего товара меняется не позднее '
-        + RECEIPT_EDIT_WINDOW_DAYS + ' дней с даты поступления на склад.');
-    }
+    assertReceiptWithinEditWindow(storedRow.type, storedRow.date, 'править');
   }
   const editedAdditional = (data.additionalCosts !== null && data.additionalCosts !== undefined
     && String(data.additionalCosts).trim() !== '') ? data.additionalCosts : storedAdditional;
@@ -2762,8 +2778,12 @@ function restoreTransaction(payload) {
         
         if (type === 'Приход') {
           newQty += qty;
-          newCap += total;
-          newAvgCost = newQty > 0 ? newCap / newQty : 0;
+          newCap = roundToTwo(newCap + total);
+          // roundToTwo обязателен. До 26.08.2026 здесь делили без округления, и восстановленная
+          // операция оставляла в листе среднюю вида 5,889198396793588 — тогда как проведение
+          // пишет округлённую. Одно и то же событие давало разную среднюю в зависимости от
+          // того, проводили его или восстанавливали.
+          newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
         } else if (type === 'Расход') {
           newQty -= qty;
           if (newQty < 0) {
@@ -2776,9 +2796,9 @@ function restoreTransaction(payload) {
             // Пункт 40, этап A: списание с меткой «себестоимость обнулена» при проведении
             // снимало капитализацию, поэтому при восстановлении она снимается снова.
           } else {
-            newCap -= writeOffCost;
+            newCap = roundToTwo(newCap - writeOffCost);
           }
-          newAvgCost = newQty > 0 ? newCap / newQty : 0;
+          newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
           newSales += qty;
         }
         
@@ -2790,7 +2810,7 @@ function restoreTransaction(payload) {
     if (!stockFound) {
        let newQty = 0; let newAvgCost = 0; let newCap = 0; let newSales = 0;
        if (type === 'Приход') {
-           newQty = qty; newCap = total; newAvgCost = qty > 0 ? total / qty : 0;
+           newQty = qty; newCap = roundToTwo(total); newAvgCost = qty > 0 ? roundToTwo(total / qty) : 0;
        } else {
            newQty = -qty; newCap = -writeOffCost; newSales = qty;
        }
@@ -2878,6 +2898,10 @@ function deleteMultipleTransactions(ids, deletedBy) {
       rowsToDelete.push(i);
       
       const type = transDataAll[i][2];
+      // Окно 30 дней. Проверяем ДО единой записи: массовое удаление пишет всё разом в конце,
+      // поэтому отказ здесь оставляет базу нетронутой.
+      const dateIdxBulk = headers.indexOf('Дата') !== -1 ? headers.indexOf('Дата') : 1;
+      assertReceiptWithinEditWindow(type, transDataAll[i][dateIdxBulk], 'удалять');
       const article = String(transDataAll[i][3]);
       const qty = Number(transDataAll[i][4]);
       const price = Number(transDataAll[i][5]);

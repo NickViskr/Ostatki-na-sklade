@@ -137,6 +137,7 @@ function makeFakeSheet(headers, name) {
     // сервисные методы стенда (не часть Apps Script API)
     __dump() { return data.map(r => r.slice()); },
     __setData(d) { data = d.map(r => r.slice()); },
+    getSheetId: () => 1,
     __getSetValuesCallCount() { return setValuesCallCount; },
     __resetSetValuesCallCount() { setValuesCallCount = 0; }
   };
@@ -179,6 +180,9 @@ const sandbox = {
   },
   SpreadsheetApp: {
     getActiveSpreadsheet: () => ({
+      // deleteMultipleTransactions спрашивает идентификатор ещё до сканирования строк:
+      // без заглушки массовое удаление вообще не проверить.
+      getId: () => 'fake-spreadsheet-id',
       getSheetByName: (name) => (name === 'SKU' ? skuSheet : (sheetRegistry[name] || null)),
       getSheets: () => {
         const all = [];
@@ -403,6 +407,8 @@ module.exports = {
 
   // ---------- Item 47, stage 3: выгрузка в КАН ----------
   // ---------- Item 47, stage 4, substage 4: проигрывание истории артикула ----------
+  restoreTransaction: (...args) => context.restoreTransaction(...args),
+  deleteMultipleTransactions: (...args) => context.deleteMultipleTransactions(...args),
   applyReplayCorrections: (...args) => context.applyReplayCorrections(...args),
   reissueOzonCostRows: (...args) => context.reissueOzonCostRows(...args),
   replayArticle: (...args) => context.replayArticle(...args),

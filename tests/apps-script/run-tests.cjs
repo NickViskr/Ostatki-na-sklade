@@ -2087,8 +2087,9 @@ const editAtDay = (nowIso, qty) => {
     at30.message === '' && at30.price === 400, `сообщение: ${at30.message}, цена: ${at30.price}`);
 
   const at31 = editAtDay('2026-09-01T09:00:00Z');
-  check('Подэтап 3: 31 день — отказ',
-    at31.message.indexOf('старше 30 дней') !== -1, `получено: ${at31.message || 'без ошибки'}`);
+  check('Подэтап 3: 31 день — отказ, и отказ именно на ПРАВКЕ, а не на удалении',
+    at31.message.indexOf('старше 30 дней править нельзя') !== -1,
+    `получено: ${at31.message || 'без ошибки'}`);
   check('Подэтап 3: и цена после отказа осталась прежней — 300',
     at31.price === 300, `получено: ${at31.price}`);
   check('Подэтап 3: сообщение называет возраст прихода, а не одно только правило',
@@ -2319,6 +2320,113 @@ function checkFidelity(name, h, article) {
   try { h.replayArticle('ART', FROM); } catch (e) { message = String(e.message || e); }
   check('Верность: нечитаемая дата останавливает пересчёт с понятным сообщением',
     message.indexOf('нечитаемая дата') !== -1, `получено: ${message || 'без ошибки'}`);
+})();
+
+// ====== Окно 30 дней на УДАЛЕНИЕ и округление при восстановлении ======
+
+(function test160() {
+  // Дырка, которую закрыли: старый приход удаляли и заводили заново с другой ценой,
+  // и правило «не позднее 30 дней» обходилось в два хода.
+  const { h, id } = withReceipt(300, 100);
+  h.setNow('2026-09-10T09:00:00Z');
+  let message = '';
+  try { h.deleteTransaction(id, 'tester'); } catch (e) { message = String(e.message || e); }
+  check('Удаление прихода старше 30 дней отклонено',
+    message.indexOf('старше 30 дней удалять нельзя') !== -1, `получено: ${message || 'без ошибки'}`);
+  check('Сообщение об удалении называет возраст прихода',
+    /этому приходу 40 дн\./.test(message), `получено: ${message}`);
+  check('И приход остался на месте, склад цел',
+    h.getTransactions().rows.length === 1 && h.stockOf('ART').quantity === 100,
+    `строк: ${h.getTransactions().rows.length}, остаток: ${h.stockOf('ART').quantity}`);
+  h.setNow('2026-01-05T09:00:00Z');
+})();
+
+(function test161() {
+  // Внутри окна удаление работает как работало.
+  const { h, id } = withReceipt(300, 100);
+  h.setNow('2026-08-20T09:00:00Z');
+  let message = '';
+  try { h.deleteTransaction(id, 'tester'); } catch (e) { message = String(e.message || e); }
+  check('Удаление прихода внутри окна проходит',
+    message === '' && h.stockOf('ART').quantity === 0,
+    `сообщение: ${message}, остаток: ${h.stockOf('ART').quantity}`);
+  h.setNow('2026-01-05T09:00:00Z');
+})();
+
+(function test162() {
+  // Массовое удаление — вторая дверь к той же дырке, и она тоже закрыта.
+  const { h, id } = withReceipt(300, 100);
+  h.setNow('2026-09-10T09:00:00Z');
+  let message = '';
+  try { h.deleteMultipleTransactions([id], 'tester'); } catch (e) { message = String(e.message || e); }
+  check('Массовое удаление старого прихода тоже отклонено',
+    message.indexOf('старше 30 дней удалять нельзя') !== -1, `получено: ${message || 'без ошибки'}`);
+  check('И база после отказа не тронута: приход на месте, остаток 100',
+    h.getTransactions().rows.length === 1 && h.stockOf('ART').quantity === 100,
+    `строк: ${h.getTransactions().rows.length}, остаток: ${h.stockOf('ART').quantity}`);
+  h.setNow('2026-01-05T09:00:00Z');
+})();
+
+(function test163() {
+  // Окно про ПРИХОД. Старый расход удаляется как удалялся.
+  const { h } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 10, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-02T09:00:00Z', 'op-old');
+  const outId = h.getTransactions().rows.find(t => t.type === 'Расход').id;
+  h.setNow('2026-10-01T09:00:00Z');
+  let message = '';
+  try { h.deleteTransaction(outId, 'tester'); } catch (e) { message = String(e.message || e); }
+  check('Окно 30 дней на удаление РАСХОДА не распространяется',
+    message.indexOf('удалять нельзя') === -1, `получено: ${message}`);
+  h.setNow('2026-01-05T09:00:00Z');
+})();
+
+(function test164() {
+  // Восстановление операции обязано писать среднюю ОКРУГЛЁННОЙ — как её пишет проведение.
+  // До 26.08.2026 тут делили без округления, и в боевой базе осели значения вида
+  // 5,889198396793588, из-за которых пересчёт себестоимости отказывался работать.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 3, price: 100 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'r1');
+  h.commitTransaction([{ article: 'ART', quantity: 7, price: 33.33 }], 'Приход', 'Склад', '', 'tester', '2026-08-02T09:00:00Z', 'r2');
+  const afterCommit = h.stockOf('ART');
+  check('Проведение записало среднюю округлённой — 53,33 от 533,31 на 10 шт',
+    afterCommit.avgCost === 53.33 && afterCommit.capitalization === 533.31,
+    `средняя: ${afterCommit.avgCost}, кап: ${afterCommit.capitalization}`);
+
+  const second = h.getTransactions().rows.find(t => String(t.date).indexOf('2026-08-02') === 0);
+  h.deleteTransaction(second.id, 'tester');
+  h.restoreTransaction({
+    id: second.id, date: second.date, type: 'Приход', article: 'ART',
+    quantity: 7, price: 33.33, writeOffCost: 0, total: 233.31,
+    destination: 'Склад', deliveryDate: '', user: 'tester'
+  });
+
+  const afterRestore = h.stockOf('ART');
+  check('Восстановление записало ТУ ЖЕ округлённую среднюю, а не 53,331',
+    afterRestore.avgCost === 53.33,
+    `получено: ${afterRestore.avgCost}`);
+  check('И капитализация вернулась ровно та же — 533,31 на 10 шт',
+    afterRestore.capitalization === 533.31 && afterRestore.quantity === 10,
+    `кап: ${afterRestore.capitalization}, шт: ${afterRestore.quantity}`);
+  check('Проведение и восстановление дают одинаковый склад — в этом и был дефект',
+    JSON.stringify(afterRestore) === JSON.stringify(afterCommit),
+    `проведение ${JSON.stringify(afterCommit)}, восстановление ${JSON.stringify(afterRestore)}`);
+})();
+
+(function test165() {
+  // И после восстановления сверка проигрывания сходится: неокруглённая средняя её ломала.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 3, price: 100 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 's1');
+  h.commitTransaction([{ article: 'ART', quantity: 7, price: 33.33 }], 'Приход', 'Склад', '', 'tester', '2026-08-02T09:00:00Z', 's2');
+  const second = h.getTransactions().rows.find(t => String(t.date).indexOf('2026-08-02') === 0);
+  h.deleteTransaction(second.id, 'tester');
+  h.restoreTransaction({
+    id: second.id, date: second.date, type: 'Приход', article: 'ART',
+    quantity: 7, price: 33.33, writeOffCost: 0, total: 233.31,
+    destination: 'Склад', deliveryDate: '', user: 'tester'
+  });
+  h.commitTransaction([{ article: 'ART', quantity: 4, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-03T09:00:00Z', 's3');
+  checkFidelity('история, прошедшая через удаление и восстановление', h);
 })();
 
 // ================= Итог =================
