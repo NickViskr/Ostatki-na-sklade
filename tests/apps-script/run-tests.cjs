@@ -1417,7 +1417,9 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], [['ART-A', 10, 'OZN-A'], ['ART-B', 10, 'OZN-B']]);
   h.setExternalShipmentsSheet([
     { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'IN_TRANSIT', items: [{ offerId: 'ART-A', quantity: 40 }] },
-    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', items: [{ offerId: 'ART-A', quantity: 25 }] },
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', items: [{ offerId: 'ART-A', quantity: 25 }] },
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', items: [{ offerId: 'ART-A', quantity: 111 }] },
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'REPORTS_CONFIRMATION_AWAITING', items: [{ offerId: 'ART-A', quantity: 222 }] },
     { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'COMPLETED', items: [{ offerId: 'ART-A', quantity: 1000 }] },
     { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'CANCELLED', items: [{ offerId: 'ART-A', quantity: 500 }] },
     { cabinet: 'MaxiStore', status: 'new', ozonStatus: 'IN_TRANSIT', items: [{ offerId: 'ART-A', quantity: 300 }] },
@@ -1429,6 +1431,8 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     flight['ART-A'] === 65, `получено: ${JSON.stringify(flight)}`);
   check('Item 47: завершённая поставка в «в пути» не идёт — её товар уже в «Доступно»',
     flight['ART-A'] !== 1065, `получено: ${flight['ART-A']}`);
+  check('Item 47: доехавшая до склада хранения — тоже не в пути, Озон уже поставил её на остаток',
+    flight['ART-A'] === 65, `получено: ${flight['ART-A']} (ожидалось 65, без 111 и 222)`);
   check('Item 47: НЕ списанная поставка в основание не идёт — её себестоимость ещё не подмешана',
     flight['ART-A'] === 65, `получено: ${flight['ART-A']}`);
   check('Item 47: артикул опознан по штрихкоду Ozon, когда offerId чужой',

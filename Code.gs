@@ -3889,8 +3889,30 @@ function getOzonAcceptedStockForCost(cabinet, article) {
   return total;
 }
 
-/** Ozon has finished with a supply: its goods are on stock, or they are never coming. */
-const OZON_SUPPLY_SETTLED_STATUSES = ['COMPLETED', 'CANCELLED'];
+/**
+ * Supplies whose goods must NOT be counted as «in flight» any more.
+ *
+ * 26.08.2026, выведено сверкой с боевыми данными. Сначала сюда входили только COMPLETED и
+ * CANCELLED — и получилось задвоение: поставка, доехавшая до склада хранения, уже лежит в
+ * «Доступно», а мы продолжали считать её в пути. По «Полке выдвижной 27 см» это давало +78
+ * штук к основанию, по «Набору полок» +36, по «Органайзеру 2 пол PureWhite» +8.
+ *
+ * Граница проходит по прибытию на склад хранения: с этого момента товар у Озона на остатке,
+ * даже если бумаги ещё не закрыты. Ровно этот набор статусов приложение уже называет этапом
+ * приёмки (ACCEPTANCE_STAGE_STATUSES в src/lib/ozonStatus.ts) — держим одно понятие на две
+ * стороны. CANCELLED добавлен отдельно: такой товар не приедет никогда.
+ *
+ * После правки расхождение с озоновскими колонками «В пути» + «В заявках» стало ±6 штук
+ * вместо +78, и остаток объясняется тем, что снимок остатков и статусы поставок снимаются
+ * не в одну и ту же секунду.
+ */
+const OZON_SUPPLY_SETTLED_STATUSES = [
+  'ACCEPTANCE_AT_STORAGE_WAREHOUSE',
+  'REPORTS_CONFIRMATION_AWAITING',
+  'REPORT_REJECTED',
+  'COMPLETED',
+  'CANCELLED'
+];
 
 /** offerId/штрихкод позиции Ozon -> наш артикул. */
 function buildOzonArticleResolver() {
