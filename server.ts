@@ -1559,6 +1559,15 @@ async function startServer() {
         return res.status(400).json({ status: "error", message: "Для поиска точки отгрузки нужно минимум 4 символа" });
       }
 
+      // Пункт 58. Тот же метод Ozon отдаёт два разных списка складов: кросс-докинговые точки
+      // отгрузки и склады прямой поставки, куда продавец везёт груз сам. Без параметра
+      // поведение прежнее — кросс-докинг, чтобы старые вызовы не изменились.
+      const supplyType = String(req.body?.supplyType || 'CROSSDOCK').trim().toUpperCase();
+      if (supplyType !== 'CROSSDOCK' && supplyType !== 'DIRECT') {
+        return res.status(400).json({ status: "error", message: "Неизвестный тип поставки: " + supplyType });
+      }
+      const filterBySupplyType = supplyType === 'DIRECT' ? "CREATE_TYPE_DIRECT" : "CREATE_TYPE_CROSSDOCK";
+
       const keys = await fetchOzonKeys();
       if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
         return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
@@ -1567,7 +1576,7 @@ async function startServer() {
 
       const data: any = await fetchOzonApi("/v1/warehouse/fbo/list",
         { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
-        { filter_by_supply_type: ["CREATE_TYPE_CROSSDOCK"], search });
+        { filter_by_supply_type: [filterBySupplyType], search });
 
       const found = Array.isArray(data?.search) ? data.search : [];
       const warehouses = found.map((w: any) => ({

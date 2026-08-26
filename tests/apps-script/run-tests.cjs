@@ -2501,6 +2501,67 @@ function checkFidelity(name, h, article) {
     'получено: ' + h.errorMessage(new Error('Приход старше 30 дней удалять нельзя: этому приходу 50 дн.')));
 })();
 
+// ================= Пункт 58: настройка «кластеры прямой поставки» =================
+(function () {
+  const h = freshHarness();
+  const norm = (v) => h.normalizeDirectClustersSetting(v);
+  const throws = (v) => {
+    try { norm(v); return null; } catch (e) { return String(e && e.message || e); }
+  };
+
+  check('Пустая настройка — пустая строка, а не ошибка',
+    norm('') === '' && norm('   ') === '' && norm(null) === '' && norm(undefined) === '',
+    `получено: "${norm('')}" / "${norm(null)}"`);
+
+  const one = norm('[{"clusterId":"4066","clusterName":"Екатеринбург","warehouseId":"15431806189000","warehouseName":"ЕКАТЕРИНБУРГ_РФЦ_НОВЫЙ"}]');
+  const oneParsed = JSON.parse(one);
+  check('Один кластер сохраняется целиком',
+    oneParsed.length === 1 && oneParsed[0].clusterId === '4066' && oneParsed[0].warehouseName === 'ЕКАТЕРИНБУРГ_РФЦ_НОВЫЙ',
+    `получено: ${one}`);
+
+  const numeric = JSON.parse(norm('[{"clusterId":4066,"warehouseId":15431806189000}]'));
+  check('Числовые идентификаторы приводятся к строкам',
+    numeric[0].clusterId === '4066' && numeric[0].warehouseId === '15431806189000',
+    `получено: ${JSON.stringify(numeric[0])}`);
+
+  const noWh = JSON.parse(norm('[{"clusterId":"4066","clusterName":"Екатеринбург"}]'));
+  check('Кластер без склада принимается: склад выбирается вторым шагом',
+    noWh[0].warehouseId === '' && noWh[0].warehouseName === '',
+    `получено: ${JSON.stringify(noWh[0])}`);
+
+  check('Пустой список сводится к пустой строке',
+    norm('[]') === '', `получено: "${norm('[]')}"`);
+
+  check('Нечитаемый JSON отвергается',
+    (throws('{не json') || '').indexOf('нечитаемое') !== -1, `получено: ${throws('{не json')}`);
+
+  check('Не список отвергается',
+    (throws('{"clusterId":"4066"}') || '').indexOf('список') !== -1, `получено: ${throws('{"clusterId":"4066"}')}`);
+
+  check('Кластер без номера отвергается, а не пропускается молча',
+    (throws('[{"clusterName":"Екатеринбург"}]') || '').indexOf('КластерID') !== -1,
+    `получено: ${throws('[{"clusterName":"Екатеринбург"}]')}`);
+
+  check('Нечисловой КластерID отвергается',
+    (throws('[{"clusterId":"ЕКБ"}]') || '').indexOf('КластерID') !== -1, `получено: ${throws('[{"clusterId":"ЕКБ"}]')}`);
+
+  check('Нечисловой ID склада отвергается',
+    (throws('[{"clusterId":"4066","warehouseId":"КОЛЬЦОВО"}]') || '').indexOf('склада') !== -1,
+    `получено: ${throws('[{"clusterId":"4066","warehouseId":"КОЛЬЦОВО"}]')}`);
+
+  check('Один кластер дважды отвергается',
+    (throws('[{"clusterId":"4066"},{"clusterId":"4066"}]') || '').indexOf('дважды') !== -1,
+    `получено: ${throws('[{"clusterId":"4066"},{"clusterId":"4066"}]')}`);
+
+  check('Мусор вместо кластера отвергается',
+    (throws('[null]') || '').indexOf('не является кластером') !== -1, `получено: ${throws('[null]')}`);
+
+  const two = JSON.parse(norm('[{"clusterId":"4066","clusterName":"Екатеринбург"},{"clusterId":"4051","clusterName":"Казань"}]'));
+  check('Несколько прямых кластеров сохраняются в порядке ввода',
+    two.length === 2 && two[0].clusterId === '4066' && two[1].clusterId === '4051',
+    `получено: ${JSON.stringify(two)}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

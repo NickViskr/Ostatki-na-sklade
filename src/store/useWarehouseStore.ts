@@ -160,7 +160,7 @@ interface WarehouseState {
   // of BOTH the dashboard and the «Остатки Озон» tab, and each of them fetched its own copy — the
   // same two reads twice per session. They live here now and are filled by the composite call.
   ozonSettings: OzonCoverageSettings;
-  ozonSupplySettings: { maxBoxesPerCluster: number; dropOffWarehouseId: string; dropOffWarehouseName: string; dropOffWarehouseType: string };
+  ozonSupplySettings: { maxBoxesPerCluster: number; dropOffWarehouseId: string; dropOffWarehouseName: string; dropOffWarehouseType: string; directClusters: string };
   ozonClusterRefs: OzonClusterRef[];
   /** Сырые кластеры со служебным флагом «Уведомлён» — для сообщения о новых кластерах (пункт 29, этап D). */
   ozonClustersRaw: any[];
@@ -232,7 +232,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     maxSpeedGrowth: 5,
     salesGrowthPct: 0,
   },
-  ozonSupplySettings: { maxBoxesPerCluster: 30, dropOffWarehouseId: '', dropOffWarehouseName: '', dropOffWarehouseType: '' },
+  ozonSupplySettings: { maxBoxesPerCluster: 30, dropOffWarehouseId: '', dropOffWarehouseName: '', dropOffWarehouseType: '', directClusters: '' },
   ozonClusterRefs: [],
   ozonClustersRaw: [],
   ozonRefsLoaded: false,
@@ -1689,6 +1689,8 @@ export const useWarehouseStore = create<WarehouseState>()(
             dropOffWarehouseId: String(s.dropOffWarehouseId || ''),
             dropOffWarehouseName: String(s.dropOffWarehouseName || ''),
             dropOffWarehouseType: String(s.dropOffWarehouseType || ''),
+            // Пункт 58. Кластеры прямой поставки хранятся строкой JSON; разбирает их parseDirectClusters.
+            directClusters: String(s.directClusters || ''),
           },
         });
       }

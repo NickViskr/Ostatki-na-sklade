@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { X, HelpCircle, Search, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
+import { parseDirectClusters, type DirectClusterRule } from '../lib/ozonDirectSupply';
 
 interface OzonSettingsModalProps {
   isOpen: boolean;
@@ -28,6 +29,8 @@ interface OzonSettingsData {
   dropOffWarehouseId: string;
   dropOffWarehouseName: string;
   dropOffWarehouseType: string;
+  /** Пункт 58. Кластеры прямой поставки, JSON-строка — как она лежит в листе настроек. */
+  directClusters: string;
 }
 
 // Чтение числовой настройки Ozon с сервера. Не использовать `Number(value) || fallback` —
@@ -63,6 +66,13 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   const [dropOffResults, setDropOffResults] = useState<{ warehouseId: string; name: string; address: string; warehouseType: string }[]>([]);
   const [dropOffSearching, setDropOffSearching] = useState(false);
 
+  // Пункт 58. Поиск склада прямой поставки идёт для ОДНОГО кластера за раз:
+  // список складов у каждого кластера свой, и общий на всех сбивал бы с толку.
+  const [directEditing, setDirectEditing] = useState<string>('');
+  const [directQuery, setDirectQuery] = useState('');
+  const [directResults, setDirectResults] = useState<{ warehouseId: string; name: string; address: string; warehouseType: string }[]>([]);
+  const [directSearching, setDirectSearching] = useState(false);
+
   const [directory, setDirectory] = useState<{ clusterId: string; clusterName: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -86,6 +96,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     dropOffWarehouseId: '',
     dropOffWarehouseName: '',
     dropOffWarehouseType: '',
+    directClusters: '',
   });
 
   const handleDropOffSearch = async () => {
@@ -118,6 +129,73 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
       toast.error('Ошибка сети при поиске точки отгрузки: ' + (e?.message || ''));
     } finally {
       setDropOffSearching(false);
+    }
+  };
+
+  /** Пункт 58. Правила прямой поставки в разобранном виде — настройка хранится строкой. */
+  const directRules = useMemo(() => parseDirectClusters(form.directClusters), [form.directClusters]);
+
+  const saveDirectRules = (rules: DirectClusterRule[]) => {
+    setForm({ ...form, directClusters: rules.length === 0 ? '' : JSON.stringify(rules) });
+  };
+
+  const handleAddDirectCluster = (clusterId: string) => {
+    const id = String(clusterId || '').trim();
+    if (!id || directRules.some((r) => r.clusterId === id)) return;
+    const cluster = clusters.find((c) => c.clusterId === id);
+    saveDirectRules([
+      ...directRules,
+      { clusterId: id, clusterName: cluster?.clusterName || `Кластер ${id}`, warehouseId: '', warehouseName: '' }
+    ]);
+    setDirectEditing(id);
+    setDirectQuery('');
+    setDirectResults([]);
+  };
+
+  const handleRemoveDirectCluster = (clusterId: string) => {
+    saveDirectRules(directRules.filter((r) => r.clusterId !== clusterId));
+    if (directEditing === clusterId) {
+      setDirectEditing('');
+      setDirectResults([]);
+    }
+  };
+
+  const handleDirectWarehousePick = (clusterId: string, warehouseId: string, warehouseName: string) => {
+    saveDirectRules(directRules.map((r) => (r.clusterId === clusterId ? { ...r, warehouseId, warehouseName } : r)));
+  };
+
+  /** Ищет склады, на которые Ozon разрешает привезти груз самостоятельно. */
+  const handleDirectSearch = async (clusterId: string) => {
+    const query = directQuery.trim();
+    if (query.length < 4) {
+      toast.error('Введите минимум 4 символа названия склада');
+      return;
+    }
+    setDirectSearching(true);
+    try {
+      const role = currentUser?.role?.toLowerCase() || '';
+      const isAdminRole = role === 'admin' || role === 'администратор';
+      const sendDevMode = devMode && isAdminRole;
+
+      const res = await fetch('/api/ozon/dropoff/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionToken, search: query, supplyType: 'DIRECT', ...(sendDevMode ? { devMode: true } : {}) })
+      });
+      const result = await res.json();
+      if (result.status === 'success' && Array.isArray(result.data?.warehouses)) {
+        setDirectEditing(clusterId);
+        setDirectResults(result.data.warehouses);
+        if (result.data.warehouses.length === 0) {
+          toast.error('Ozon не нашёл складов прямой поставки по этому названию');
+        }
+      } else {
+        toast.error(result.message || 'Ошибка поиска склада прямой поставки');
+      }
+    } catch (e: any) {
+      toast.error('Ошибка сети при поиске склада: ' + (e?.message || ''));
+    } finally {
+      setDirectSearching(false);
     }
   };
 
@@ -254,6 +332,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               dropOffWarehouseId: String(res.data.dropOffWarehouseId || ''),
               dropOffWarehouseName: String(res.data.dropOffWarehouseName || ''),
               dropOffWarehouseType: String(res.data.dropOffWarehouseType || ''),
+              directClusters: String(res.data.directClusters || ''),
             });
           } else if (res?.status === 'error') {
             toast.error(res.message || 'Ошибка загрузки настроек Ozon');
@@ -299,6 +378,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         dropOffWarehouseId: form.dropOffWarehouseId,
         dropOffWarehouseName: form.dropOffWarehouseName,
         dropOffWarehouseType: form.dropOffWarehouseType,
+        directClusters: form.directClusters,
       };
 
       const res = await fetchGas('saveOzonSettings', { data: payload });
@@ -653,6 +733,121 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                       );
                     })}
                   </div>
+                )}
+              </div>
+
+              {/* Пункт 58. Прямая поставка: кластеры, на которые груз везётся своими силами
+                  и сдаётся не на точку отгрузки, а прямо на склад размещения Ozon. */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Прямая поставка — везу сам
+                  <FieldHint text="Кластеры, куда вы доставляете груз самостоятельно, минуя точку отгрузки. Такая заявка едет ОДНА: другие кластеры к ней не добавляются, потому что Ozon не принимает смешанные заявки. Для каждого кластера выберите склад, на который вы физически привозите коробки." />
+                </label>
+
+                {directRules.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic mb-2">
+                    Прямых кластеров нет — все заявки идут через точку отгрузки
+                  </p>
+                ) : (
+                  <div className="space-y-2 mb-2">
+                    {directRules.map((rule) => (
+                      <div key={rule.clusterId} className="p-3 rounded-xl border border-slate-200 bg-slate-50/50">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-bold text-slate-800 truncate">
+                            {rule.clusterName || `Кластер ${rule.clusterId}`}
+                            <span className="ml-1.5 text-xs font-semibold text-slate-400">ID {rule.clusterId}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveDirectCluster(rule.clusterId)}
+                            className="shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-red-600 hover:bg-red-50 transition-colors"
+                          >
+                            Убрать
+                          </button>
+                        </div>
+
+                        {rule.warehouseId ? (
+                          <div className="mt-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-200">
+                            <div className="text-sm font-bold text-emerald-900 break-words">{rule.warehouseName || 'Без названия'}</div>
+                            <div className="text-xs text-emerald-700 mt-0.5">ID {rule.warehouseId}</div>
+                          </div>
+                        ) : (
+                          <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                            Склад не выбран — заявку на этот кластер оформить не получится
+                          </div>
+                        )}
+
+                        <div className="flex gap-2 mt-2">
+                          <input
+                            type="text"
+                            value={directEditing === rule.clusterId ? directQuery : ''}
+                            placeholder="Название склада, минимум 4 символа"
+                            onFocus={() => { if (directEditing !== rule.clusterId) { setDirectEditing(rule.clusterId); setDirectQuery(''); setDirectResults([]); } }}
+                            onChange={(e) => { setDirectEditing(rule.clusterId); setDirectQuery(e.target.value); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleDirectSearch(rule.clusterId); } }}
+                            className="flex-1 px-3 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleDirectSearch(rule.clusterId)}
+                            disabled={directSearching}
+                            className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 text-sm font-bold"
+                          >
+                            <Search size={15} />
+                            {directSearching && directEditing === rule.clusterId ? 'Ищу…' : 'Найти'}
+                          </button>
+                        </div>
+
+                        {directEditing === rule.clusterId && directResults.length > 0 && (
+                          <div className="mt-2 space-y-1.5 max-h-52 overflow-y-auto">
+                            {directResults.map((w) => {
+                              const isActive = w.warehouseId === rule.warehouseId;
+                              return (
+                                <button
+                                  key={w.warehouseId}
+                                  type="button"
+                                  onClick={() => handleDirectWarehousePick(rule.clusterId, w.warehouseId, w.name)}
+                                  className={`w-full text-left p-2.5 rounded-lg border transition-colors ${
+                                    isActive ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-slate-200 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <div className="flex items-start gap-2">
+                                    {isActive && <Check size={14} className="text-indigo-600 mt-0.5 shrink-0" />}
+                                    <div className="min-w-0">
+                                      <div className="text-sm font-bold text-slate-800 break-words">{w.name}</div>
+                                      <div className="text-xs text-slate-500 mt-0.5">{w.warehouseType}</div>
+                                      <div className="text-xs text-slate-400 mt-0.5 break-words">{w.address}</div>
+                                    </div>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {clusters.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">
+                    Кластеры появятся после первой загрузки остатков Ozon
+                  </p>
+                ) : (
+                  <select
+                    value=""
+                    onChange={(e) => handleAddDirectCluster(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                  >
+                    <option value="">Добавить кластер прямой поставки…</option>
+                    {clusters
+                      .filter((c) => !directRules.some((r) => r.clusterId === c.clusterId))
+                      .map((c) => (
+                        <option key={c.clusterId} value={c.clusterId}>
+                          {c.clusterName}
+                        </option>
+                      ))}
+                  </select>
                 )}
               </div>
 

@@ -544,10 +544,11 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'dropOffWarehouseId',   value: '', desc: 'ID точки отгрузки Ozon (drop-off), число' },
   { key: 'dropOffWarehouseName', value: '', desc: 'Название точки отгрузки Ozon' },
   { key: 'dropOffWarehouseType', value: '', desc: 'Тип точки отгрузки: SORTING_CENTER, CROSS_DOCK, FULL_FILLMENT, DELIVERY_POINT, ORDERS_RECEIVING_POINT' },
+  { key: 'directClusters',       value: '', desc: 'Кластеры прямой поставки (везём сами), JSON: [{"clusterId","clusterName","warehouseId","warehouseName"}]' },
   { key: 'supplyDocsFolderId',    value: '1hTJPqJrkV7qC4YuUi2qm_-_9y9iDjnFe', desc: 'ID родительской папки Google Диска для документов заявок на поставку' },
   { key: 'supplyDocsLabelsFolder', value: 'ШК озон для автоматизации', desc: 'Имя папки-библиотеки с этикетками ШК товаров внутри родительской папки, файлы называются Артикул.pdf' }
 ];
-const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType', 'supplyDocsFolderId', 'supplyDocsLabelsFolder'];
+const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType', 'directClusters', 'supplyDocsFolderId', 'supplyDocsLabelsFolder'];
 const OZON_DROPOFF_TYPES = ['SORTING_CENTER', 'CROSS_DOCK', 'FULL_FILLMENT', 'DELIVERY_POINT', 'ORDERS_RECEIVING_POINT'];
 const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
 const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
@@ -4789,6 +4790,59 @@ function getOzonSettings() {
   return result;
 }
 
+/**
+ * Пункт 58. Разбор настройки «directClusters» — кластеры прямой поставки.
+ * Формат: JSON-массив [{clusterId, clusterName, warehouseId, warehouseName}].
+ * Возвращает НОРМАЛИЗОВАННУЮ строку для записи в лист; на негодных данных бросает ошибку,
+ * потому что молча выброшенный кластер означал бы заявку, уехавшую не тем способом.
+ * Вынесена из saveOzonSettings отдельной функцией, чтобы её можно было проверить без листа.
+ */
+function normalizeDirectClustersSetting(raw) {
+  const text = String(raw == null ? '' : raw).trim();
+  if (!text) return '';
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error('Настройка "directClusters": ожидался список кластеров прямой поставки, получено нечитаемое значение');
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('Настройка "directClusters": ожидался список кластеров прямой поставки');
+  }
+
+  const out = [];
+  const seen = {};
+  for (let i = 0; i < parsed.length; i++) {
+    const item = parsed[i];
+    if (!item || typeof item !== 'object') {
+      throw new Error('Настройка "directClusters": элемент ' + (i + 1) + ' не является кластером');
+    }
+    const clusterId = String(item.clusterId == null ? '' : item.clusterId).trim();
+    if (!/^\d+$/.test(clusterId)) {
+      throw new Error('Настройка "directClusters": КластерID должен быть числом, получено "' + clusterId + '"');
+    }
+    if (seen[clusterId]) {
+      throw new Error('Настройка "directClusters": кластер ' + clusterId + ' указан дважды');
+    }
+    seen[clusterId] = true;
+
+    const warehouseId = String(item.warehouseId == null ? '' : item.warehouseId).trim();
+    if (warehouseId && !/^\d+$/.test(warehouseId)) {
+      throw new Error('Настройка "directClusters": ID склада должен быть числом, получено "' + warehouseId + '"');
+    }
+
+    out.push({
+      clusterId: clusterId,
+      clusterName: String(item.clusterName == null ? '' : item.clusterName).trim(),
+      warehouseId: warehouseId,
+      warehouseName: String(item.warehouseName == null ? '' : item.warehouseName).trim()
+    });
+  }
+
+  return out.length === 0 ? '' : JSON.stringify(out);
+}
+
 function saveOzonSettings(data) {
   if (!data || typeof data !== 'object') {
     throw new Error('Некорректные данные для сохранения настроек Ozon');
@@ -4809,6 +4863,10 @@ function saveOzonSettings(data) {
         throw new Error('Настройка "dropOffWarehouseId" должна быть числом или пустой строкой');
       }
       keysToSave[k] = idVal;
+      continue;
+    }
+    if (k === 'directClusters') {
+      keysToSave[k] = normalizeDirectClustersSetting(rawVal);
       continue;
     }
     if (k === 'dropOffWarehouseName') {

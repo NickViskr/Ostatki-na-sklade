@@ -408,6 +408,8 @@ module.exports = {
   // ---------- Item 47, stage 3: выгрузка в КАН ----------
   // ---------- Item 47, stage 4, substage 4: проигрывание истории артикула ----------
   errorMessage: (...args) => context.errorMessage(...args),
+  // Пункт 58: разбор настройки «кластеры прямой поставки». Функция чистая и листа не трогает.
+  normalizeDirectClustersSetting: (...args) => context.normalizeDirectClustersSetting(...args),
   restoreTransaction: (...args) => context.restoreTransaction(...args),
   deleteMultipleTransactions: (...args) => context.deleteMultipleTransactions(...args),
   applyReplayCorrections: (...args) => context.applyReplayCorrections(...args),
