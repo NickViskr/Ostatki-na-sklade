@@ -1251,6 +1251,251 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     `шапка: ${JSON.stringify(h.OZON_COST_HEADERS)}`);
 })();
 
+// ============ Item 47, этап 2: пересчёт себестоимости на Озоне при отгрузке ============
+// Себестоимость товара НА ОЗОНЕ = скользящая средняя: каждая поставка подмешивает свою
+// стоимость к тому, что там уже лежало. Основание — остаток МИНУС эта самая поставка:
+// списание становится доступным только после того, как Озон принял товар, значит в остатке
+// он уже сидит, и не вычесть его — значит смешать поставку саму с собой.
+
+(function test95() {
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '111' }),
+  ]);
+  // 400 на Озоне — в них уже входят 100 только что отгруженных
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 350, transit: 40, returns: 10 }]);
+
+  const res = h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }],
+    'Ozon (MaxiStore) [Упаковка: 100₽]', '2026-08-26T09:00:00Z', 'op-1', 'tester'
+  );
+  const rows = h.dumpOzonCost();
+  const last = rows[rows.length - 1];
+  check('Item 47: строка дописана в журнал', res.written === 1 && rows.length === 2, `получено: ${JSON.stringify(res)}`);
+  check('Item 47: основание — остаток минус эта поставка (400 - 100 = 300)',
+    last['Остаток до'] === 300, `получено: ${last['Остаток до']}`);
+  check('Item 47: средняя пересчитана верно ((300×500 + 100×600) / 400 = 525)',
+    last['Себестоимость после'] === 525, `получено: ${last['Себестоимость после']}`);
+  check('Item 47: в строке записаны и прежняя себестоимость, и себестоимость отгрузки',
+    last['Себестоимость до'] === 500 && last['Себестоимость отгрузки'] === 600 && last['Отгружено'] === 100,
+    `получено: ${JSON.stringify(last)}`);
+  check('Item 47: ключ операции и дата отгрузки попали в строку',
+    last['OpID'] === 'op-1' && last['Дата'] === '2026-08-26', `получено: ${last['OpID']} / ${last['Дата']}`);
+  check('Item 47: SKU подхвачен из прежней строки артикула',
+    last['SKU'] === '111', `получено: ${last['SKU']}`);
+})();
+
+(function test96() {
+  // Требование владельца: приложение обязано знать, по какой поставке уже посчитано.
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 400 }]);
+  const items = [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }];
+  const dest = 'Ozon (MaxiStore)';
+
+  h.appendOzonCostForShipment(items, dest, '2026-08-26T09:00:00Z', 'op-1', 'tester');
+  const afterFirst = h.dumpOzonCost().length;
+  const second = h.appendOzonCostForShipment(items, dest, '2026-08-26T09:00:00Z', 'op-1', 'tester');
+
+  check('Item 47: та же поставка второй раз НЕ считается',
+    second.written === 0 && second.skipped === 1 && h.dumpOzonCost().length === afterFirst,
+    `получено: ${JSON.stringify(second)}, строк ${h.dumpOzonCost().length}`);
+  const rows = h.dumpOzonCost();
+  check('Item 47: себестоимость от повтора не сдвинулась',
+    rows[rows.length - 1]['Себестоимость после'] === 525, `получено: ${rows[rows.length - 1]['Себестоимость после']}`);
+})();
+
+(function test97() {
+  // Одна операция везёт несколько артикулов — у каждого своя строка и свой пересчёт.
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'Mercurius', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА'),
+    costRow('2026-08-01', 'Mercurius', 'ART-B', 1000.00, 'НАЧАЛЬНАЯ ТОЧКА'),
+  ]);
+  h.setOzonStocksSheet([
+    { cabinet: 'Mercurius', article: 'ART-A', available: 400 },
+    { cabinet: 'Mercurius', article: 'ART-B', available: 50 },
+  ]);
+  const res = h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' },
+     { article: 'ART-B', quantity: 10, price: 1200, status: 'ok' }],
+    'Ozon (Mercurius)', '2026-08-26T09:00:00Z', 'op-multi', 'tester'
+  );
+  const rows = h.dumpOzonCost().filter(r => r['OpID'] === 'op-multi');
+  check('Item 47: операция на два артикула дала две строки, второй не «съеден» защитой',
+    res.written === 2 && rows.length === 2, `получено: ${JSON.stringify(res)}`);
+  const a = rows.find(r => r['Артикул'] === 'ART-A'), b = rows.find(r => r['Артикул'] === 'ART-B');
+  check('Item 47: каждый артикул пересчитан по своему остатку',
+    a['Себестоимость после'] === 525 && b['Себестоимость после'] === 1040,
+    `получено: ART-A ${a['Себестоимость после']}, ART-B ${b['Себестоимость после']}`);
+})();
+
+(function test98() {
+  // Партия из двух заявок: один артикул приходит двумя строками одной операции.
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 400 }]);
+  const res = h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 60, price: 600, status: 'ok' },
+     { article: 'ART-A', quantity: 40, price: 600, status: 'ok' }],
+    'Ozon (MaxiStore)', '2026-08-26T09:00:00Z', 'op-1', 'tester'
+  );
+  const rows = h.dumpOzonCost();
+  const last = rows[rows.length - 1];
+  check('Item 47: две строки одного артикула сложились в одну запись, а не потерялись',
+    res.written === 1 && last['Отгружено'] === 100, `получено: ${JSON.stringify(res)}, отгружено ${last['Отгружено']}`);
+  check('Item 47: и дали ту же среднюю, что одна строка на 100 шт',
+    last['Себестоимость после'] === 525, `получено: ${last['Себестоимость после']}`);
+})();
+
+(function test99() {
+  const h = freshHarness();
+  h.setOzonCostSheet([]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'НОВЫЙ', available: 0 }]);
+  h.appendOzonCostForShipment(
+    [{ article: 'НОВЫЙ', quantity: 50, price: 777.5, status: 'ok' }],
+    'Ozon (MaxiStore)', '2026-08-26T09:00:00Z', 'op-new', 'tester'
+  );
+  const last = h.dumpOzonCost().slice(-1)[0];
+  check('Item 47: у артикула без прежней себестоимости берётся себестоимость отгрузки',
+    last['Себестоимость после'] === 777.5, `получено: ${last['Себестоимость после']}`);
+  check('Item 47: и это честно помечено в источнике строки',
+    String(last['Источник']).indexOf('прежней себестоимости нет') !== -1, `получено: ${last['Источник']}`);
+})();
+
+(function test100() {
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 400 }]);
+
+  const notOzon = h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 10, price: 600, status: 'ok' }],
+    'Wildberries FBS [Упаковка: 5₽]', '2026-08-26T09:00:00Z', 'op-wb', 'tester');
+  check('Item 47: списание не на Ozon журнал не трогает',
+    notOzon.written === 0 && h.dumpOzonCost().length === 1, `получено: ${JSON.stringify(notOzon)}`);
+
+  check('Item 47: магазин вынимается из назначения',
+    h.ozonCabinetFromDestination('Ozon (MaxiStore) [Упаковка: 1₽]') === 'MaxiStore' &&
+    h.ozonCabinetFromDestination('Склад') === '', '');
+
+  const zeroQty = h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 0, price: 600, status: 'ok' }],
+    'Ozon (MaxiStore)', '2026-08-26T09:00:00Z', 'op-zero', 'tester');
+  check('Item 47: строка с нулевым количеством не создаёт записи',
+    zeroQty.written === 0, `получено: ${JSON.stringify(zeroQty)}`);
+
+  const bad = h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 10, price: 600, status: 'unknown' }],
+    'Ozon (MaxiStore)', '2026-08-26T09:00:00Z', 'op-bad', 'tester');
+  check('Item 47: нераспознанная позиция в пересчёт не идёт — её и сервер не проводит',
+    bad.written === 0, `получено: ${JSON.stringify(bad)}`);
+})();
+
+(function test101() {
+  // Остаток считается по трём колонкам и по всем складам сразу.
+  const h = freshHarness();
+  h.setOzonStocksSheet([
+    { cabinet: 'MaxiStore', article: 'ART-A', warehouse: 'W1', available: 100, transit: 10, returns: 1, preparing: 7, requested: 9, excess: 3, other: 5 },
+    { cabinet: 'MaxiStore', article: 'ART-A', warehouse: 'W2', available: 50, transit: 5, returns: 2 },
+    { cabinet: 'Mercurius', article: 'ART-A', warehouse: 'W1', available: 999 },
+    { cabinet: 'MaxiStore', article: 'ART-B', warehouse: 'W1', available: 777 },
+  ]);
+  check('Item 47: остаток = Доступно + В пути + Возвраты по всем складам (168), прочие колонки не в счёт',
+    h.getOzonStockForCost('MaxiStore', 'ART-A') === 168, `получено: ${h.getOzonStockForCost('MaxiStore', 'ART-A')}`);
+  check('Item 47: чужой магазин в остаток не попадает',
+    h.getOzonStockForCost('Mercurius', 'ART-A') === 999, `получено: ${h.getOzonStockForCost('Mercurius', 'ART-A')}`);
+  check('Item 47: артикула нет на Озоне — ноль, а не падение',
+    h.getOzonStockForCost('MaxiStore', 'НЕТ-ТАКОГО') === 0, '');
+})();
+
+(function test102() {
+  // Сквозная проверка: настоящее списание через commitTransaction должно само дописать
+  // строку в журнал себестоимости — без отдельного вызова откуда-либо ещё.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-E2E', quantity: 200, avgCost: 300, capitalization: 60000 }]);
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-E2E', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-E2E', available: 400 }]);
+
+  h.commitTransaction(
+    [{ article: 'ART-E2E', quantity: 100, price: 300 }],
+    'Расход', 'Ozon (MaxiStore) [Упаковка: 100 шт. x 300₽ = 30000₽]', '', 'tester',
+    '2026-08-26T09:00:00Z', 'op-e2e'
+  );
+
+  const rows = h.dumpOzonCost();
+  const last = rows[rows.length - 1];
+  check('Item 47: обычное списание на Ozon само дописало строку в журнал',
+    rows.length === 2 && last['OpID'] === 'op-e2e', `строк: ${rows.length}, ключ: ${last && last['OpID']}`);
+  check('Item 47: в журнал попала себестоимость С УЧЁТОМ разнесённых расходов (300 + 300 = 600)',
+    last['Себестоимость отгрузки'] === 600, `получено: ${last['Себестоимость отгрузки']}`);
+  check('Item 47: и средняя посчитана от неё ((300×500 + 100×600) / 400 = 525)',
+    last['Себестоимость после'] === 525, `получено: ${last['Себестоимость после']}`);
+
+  // Повтор той же операции: сервер отдаёт прежний результат по ключу идемпотентности,
+  // и журнал тоже не должен вырасти.
+  h.commitTransaction(
+    [{ article: 'ART-E2E', quantity: 100, price: 300 }],
+    'Расход', 'Ozon (MaxiStore) [Упаковка: 100 шт. x 300₽ = 30000₽]', '', 'tester',
+    '2026-08-26T09:00:00Z', 'op-e2e'
+  );
+  check('Item 47: повтор операции журнал не удлинил',
+    h.dumpOzonCost().length === 2, `строк: ${h.dumpOzonCost().length}`);
+})();
+
+(function test103() {
+  // Списание на свой склад или на другую площадку журнала не касается.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-W', quantity: 50, avgCost: 100, capitalization: 5000 }]);
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-W', 100.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-W', available: 400 }]);
+  h.commitTransaction([{ article: 'ART-W', quantity: 10, price: 100 }],
+    'Расход', 'Склад [Списание - Брак]', '', 'tester', '2026-08-26T09:00:00Z', 'op-scrap');
+  check('Item 47: списание брака на складе журнал себестоимости Озона не трогает',
+    h.dumpOzonCost().length === 1, `строк: ${h.dumpOzonCost().length}`);
+
+  h.commitTransaction([{ article: 'ART-W', quantity: 5, price: 100 }],
+    'Приход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-26T09:00:00Z', 'op-income');
+  check('Item 47: приход журнал тоже не трогает — себестоимость на Озоне двигает только отгрузка',
+    h.dumpOzonCost().length === 1, `строк: ${h.dumpOzonCost().length}`);
+})();
+
+(function test104() {
+  // Требование владельца: себестоимость виртуального комплекта = комплектующие + услуги
+  // подрядчиков по упаковке и доставке. В журнал должна попасть строка КОМПЛЕКТА с полной
+  // себестоимостью, а не строки комплектующих.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setKitSheet([
+    { kitSku: 'КОМПЛЕКТ', componentSku: 'МИСКА', quantity: 1, kitType: 'virtual' },
+    { kitSku: 'КОМПЛЕКТ', componentSku: 'ПАКЕТ', quantity: 1, kitType: 'virtual' },
+  ]);
+  h.setStockSheet([
+    { article: 'МИСКА', quantity: 500, avgCost: 190, capitalization: 95000 },
+    { article: 'ПАКЕТ', quantity: 500, avgCost: 10, capitalization: 5000 },
+  ]);
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'КОМПЛЕКТ', 200.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'КОМПЛЕКТ', available: 200 }]);
+
+  // 100 комплектов: 190 + 10 = 200 за комплектующие, плюс услуги 5000 на 100 шт = 50 на штуку.
+  h.commitTransaction(
+    [{ article: 'КОМПЛЕКТ', quantity: 100, price: 0 }],
+    'Расход', 'Ozon (MaxiStore) [Услуги: Паллета x1 (5000₽)]', '', 'tester',
+    '2026-08-26T09:00:00Z', 'op-kit'
+  );
+
+  const rows = h.dumpOzonCost();
+  const kitRows = rows.filter(r => r['OpID'] === 'op-kit');
+  check('Item 47: у комплекта одна строка в журнале, комплектующие в журнал не попали',
+    kitRows.length === 1 && kitRows[0]['Артикул'] === 'КОМПЛЕКТ',
+    `получено: ${JSON.stringify(kitRows.map(r => r['Артикул']))}`);
+  check('Item 47: себестоимость комплекта = комплектующие + услуги (190 + 10 + 50 = 250)',
+    kitRows[0]['Себестоимость отгрузки'] === 250, `получено: ${kitRows[0]['Себестоимость отгрузки']}`);
+  check('Item 47: средняя на Озоне пересчитана от полной себестоимости ((100×200 + 100×250) / 200 = 225)',
+    kitRows[0]['Себестоимость после'] === 225, `получено: ${kitRows[0]['Себестоимость после']}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

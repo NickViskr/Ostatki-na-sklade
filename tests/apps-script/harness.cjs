@@ -308,6 +308,42 @@ module.exports = {
   getOzonCostJournal: (...args) => context.getOzonCostJournal(...args),
   getOzonCostState: (...args) => context.getOzonCostState(...args),
   isOzonCostCounted: (...args) => context.isOzonCostCounted(...args),
+  // rows — массив {cabinet, article, available, transit, returns, warehouse?}
+  setOzonStocksSheet(rows) {
+    const headers = context.OZON_STOCKS_HEADERS;
+    const idx = (n) => headers.indexOf(n);
+    const data = (rows || []).map(r => {
+      const line = new Array(headers.length).fill('');
+      line[idx('Кабинет')] = r.cabinet;
+      line[idx('Артикул')] = r.article;
+      line[idx('SKU')] = r.sku || '';
+      line[idx('Склад')] = r.warehouse || 'W1';
+      line[idx('Доступно')] = r.available || 0;
+      line[idx('Готовим к продаже')] = r.preparing || 0;
+      line[idx('В заявках')] = r.requested || 0;
+      line[idx('В пути')] = r.transit || 0;
+      line[idx('Излишки')] = r.excess || 0;
+      line[idx('Возвраты')] = r.returns || 0;
+      line[idx('Прочее')] = r.other || 0;
+      return line;
+    });
+    const sheet = makeFakeSheet(headers, 'Остатки Ozon');
+    if (data.length > 0) sheet.__setData([headers.slice(), ...data]);
+    sheetRegistry['Остатки Ozon'] = sheet;
+    return sheet;
+  },
+  getOzonStockForCost: (...args) => context.getOzonStockForCost(...args),
+  ozonCabinetFromDestination: (...args) => context.ozonCabinetFromDestination(...args),
+  appendOzonCostForShipment: (...args) => context.appendOzonCostForShipment(...args),
+  dumpOzonCost() {
+    const sheet = sheetRegistry['Себестоимость Озон'];
+    if (!sheet) return [];
+    const headers = context.OZON_COST_HEADERS;
+    const data = sheet.__dump();
+    const last = sheet.getLastRow();
+    return data.slice(1, Math.max(last, 1)).filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => { const o = {}; headers.forEach((h, k) => o[h] = r[k]); return o; });
+  },
   makeSheet: (headers, name) => {
     const sheet = makeFakeSheet(headers, name);
     sheetRegistry[name] = sheet;

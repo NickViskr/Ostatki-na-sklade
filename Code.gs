@@ -1963,6 +1963,26 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     SpreadsheetApp.flush();
   }
 
+  // Item 47, stage 2: a shipment to Ozon moves the cost of the goods lying there.
+  // Never at the price of the expense itself — that is the operation the user asked for.
+  if (type === 'Расход') {
+    try {
+      // ВАЖНО: берём УЖЕ ПРОВЕДЁННЫЕ строки, а не позиции клиента. Клиент присылает базовые
+      // цены, а долю упаковки и услуг сервер добавляет сам чуть выше (mainPrice). На Ozon
+      // товар уезжает с полной себестоимостью, и именно она должна попасть в журнал —
+      // иначе в КАН уйдёт цена без расходов, ради учёта которых всё и затевалось.
+      // Строки комплектующих исключены: у комплекта своя строка, и в ней они уже сидят.
+      const shippedRows = newTransactions
+        .filter(function(t) { return t.isComponent !== true; })
+        .map(function(t) {
+          return { article: t.article, quantity: t.quantity, price: t.price, status: 'ok' };
+        });
+      appendOzonCostForShipment(shippedRows, destination, dateStr, opIdStr, username);
+    } catch (costErr) {
+      Logger.log('Себестоимость Озон не обновлена: ' + costErr);
+    }
+  }
+
   return {
     stock: getStock(),
     newTransactions: newTransactions,
@@ -3837,6 +3857,119 @@ function isOzonCostCounted(journal, opId, cabinet, article) {
     }
   }
   return false;
+}
+
+/**
+ * Item 47, stage 2. What already lies on Ozon for this cabinet and article, by the owner's
+ * definition: «Доступно» + «В пути» + «Возвраты», summed over every warehouse.
+ */
+function getOzonStockForCost(cabinet, article) {
+  const ss = getSpreadsheet();
+  const sheet = getSheetByNameRobust(ss, 'Остатки Ozon');
+  if (!sheet) return 0;
+  const values = sheet.getDataRange().getValues();
+  if (values.length <= 1) return 0;
+  const headers = values[0].map(function(h) { return String(h).trim(); });
+  const ci = headers.indexOf('Кабинет'), ai = headers.indexOf('Артикул');
+  const parts = ['Доступно', 'В пути', 'Возвраты'].map(function(n) { return headers.indexOf(n); });
+  if (ci === -1 || ai === -1) return 0;
+  const cab = String(cabinet).trim(), art = String(article).trim();
+  let total = 0;
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (String(row[ci]).trim() !== cab || String(row[ai]).trim() !== art) continue;
+    parts.forEach(function(idx) { if (idx !== -1) total += parseNumber(row[idx]); });
+  }
+  return total;
+}
+
+/** «Ozon (Магазин) [расходы]» -> «Магазин». Пустая строка, если это не отгрузка на Ozon. */
+function ozonCabinetFromDestination(destination) {
+  const m = String(destination || '').match(/Ozon\s*\(([^)]+)\)/);
+  return m ? m[1].trim() : '';
+}
+
+/**
+ * Item 47, stage 2. Blends a shipment into the cost of the goods already on Ozon and writes
+ * the result as a new row of the journal.
+ *
+ * The base is the stock MINUS this very shipment. A write-off only becomes available once Ozon
+ * has accepted the goods at the drop-off point, so by this moment they are already inside the
+ * stock figures — leaving them in would blend the shipment into itself. The base actually used
+ * is written into the row, so a wrong reading is visible instead of silently distorting money.
+ *
+ * A supply already in the journal is never counted again: the guard is the triple of operation
+ * key, cabinet and article, because one operation ships several articles at once.
+ *
+ * Failures here must never break the write-off itself — the expense is the operation the user
+ * asked for, the cost journal is bookkeeping on top of it. The caller wraps this in try/catch.
+ */
+function appendOzonCostForShipment(items, destination, dateStr, opId, username) {
+  const cabinet = ozonCabinetFromDestination(destination);
+  if (!cabinet) return { written: 0, skipped: 0 };
+
+  const ss = getSpreadsheet();
+  const sheet = getOzonCostSheet(ss);
+  ensureColumns(sheet, OZON_COST_HEADERS);
+  const journal = getOzonCostJournal();
+  const state = getOzonCostState();
+
+  let day = String(dateStr || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    day = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+
+  // Одинаковые артикулы одной операции складываются: иначе вторая строка того же артикула
+  // сочла бы себя уже посчитанной и потерялась.
+  const byArticle = {};
+  items.forEach(function(item) {
+    if (!item || !item.article) return;
+    if (item.status && item.status !== 'ok') return;
+    const qty = Number(item.quantity) || 0;
+    const price = Number(item.price) || 0;
+    if (qty <= 0) return;
+    const key = String(item.article).trim();
+    if (!byArticle[key]) byArticle[key] = { qty: 0, value: 0 };
+    byArticle[key].qty += qty;
+    byArticle[key].value += qty * price;
+  });
+
+  const rows = [];
+  let skipped = 0;
+  Object.keys(byArticle).forEach(function(article) {
+    if (isOzonCostCounted(journal, opId, cabinet, article)) { skipped += 1; return; }
+    const shipped = byArticle[article].qty;
+    const shippedCost = roundToTwo(byArticle[article].value / shipped);
+    const prior = state[cabinet + '|' + article];
+    const stockNow = getOzonStockForCost(cabinet, article);
+    const base = Math.max(0, stockNow - shipped);
+
+    let costAfter, source;
+    if (!prior) {
+      // Прежней себестоимости нет: смешивать не с чем, берём себестоимость самой отгрузки.
+      costAfter = shippedCost;
+      source = 'первая отгрузка, прежней себестоимости нет';
+    } else if (base + shipped <= 0) {
+      costAfter = shippedCost;
+      source = 'отгрузка';
+    } else {
+      costAfter = roundToTwo((base * prior.cost + shipped * shippedCost) / (base + shipped));
+      source = 'отгрузка';
+    }
+
+    rows.push([
+      day, cabinet, article, (prior && prior.sku) || '',
+      base, prior ? prior.cost : '', shipped, shippedCost, costAfter,
+      String(opId || ''), '', source
+    ]);
+  });
+
+  if (rows.length > 0) {
+    const startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, rows.length, OZON_COST_HEADERS.length).setValues(rows);
+    SpreadsheetApp.flush();
+  }
+  return { written: rows.length, skipped: skipped };
 }
 
 function getOzonSupplyRequests() {
