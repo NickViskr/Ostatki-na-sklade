@@ -126,6 +126,14 @@ function makeFakeSheet(headers, name) {
         }
       };
     },
+    // Удаление строки. Пункт 47, этап 4: без него стенд не мог пройти ни правку операции,
+    // ни удаление — а правка это и есть «удалить и провести заново». Нумерация как в Apps
+    // Script: 1-based, строка 1 — заголовки.
+    deleteRow(rowNumber) {
+      const idx = Number(rowNumber) - 1;
+      if (idx <= 0 || idx >= data.length) return;
+      data.splice(idx, 1);
+    },
     // сервисные методы стенда (не часть Apps Script API)
     __dump() { return data.map(r => r.slice()); },
     __setData(d) { data = d.map(r => r.slice()); },
@@ -357,6 +365,42 @@ module.exports = {
   },
   ozonCabinetFromDestination: (...args) => context.ozonCabinetFromDestination(...args),
   appendOzonCostForShipment: (...args) => context.appendOzonCostForShipment(...args),
+  // ---------- Пункт 47, этап 4: правка и удаление операций ----------
+  // Лист «Удаленное» обязан существовать заранее: archiveItem, не найдя его, зовёт
+  // setupDatabase, а та красит заголовки — оформления в стенде нет и никогда не будет.
+  ensureArchiveSheet() {
+    if (!sheetRegistry['Удаленное']) {
+      sheetRegistry['Удаленное'] = makeFakeSheet(
+        ['ArchiveID', 'Type', 'DeletedAt', 'DataJSON', 'DeletedBy'], 'Удаленное');
+    }
+    return sheetRegistry['Удаленное'];
+  },
+  dumpArchive() {
+    const sheet = sheetRegistry['Удаленное'];
+    if (!sheet) return [];
+    return sheet.__dump().slice(1)
+      .filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => ({ archiveId: r[0], type: r[1], deletedAt: r[2], data: JSON.parse(r[3] || '{}'), deletedBy: r[4] }));
+  },
+  // Лист «Транзакции» как есть, В ПОРЯДКЕ СТРОК: getTransactions отдаёт разобранные и
+  // отсортированные данные, а для этапа 4 важен именно физический порядок в листе.
+  dumpTransSheet() {
+    const sheet = sheetRegistry['Транзакции'];
+    if (!sheet) return [];
+    const data = sheet.__dump();
+    const headers = data[0].map(h => String(h).trim());
+    return data.slice(1)
+      .filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => { const o = {}; headers.forEach((h, i) => o[h] = r[i]); return o; });
+  },
+  updateTransaction: (...args) => context.updateTransaction(...args),
+  deleteTransaction: (...args) => context.deleteTransaction(...args),
+  getStock: (...args) => context.getStock(...args),
+  stockOf(article) {
+    const found = context.getStock().filter(s => String(s.article) === String(article));
+    return found.length > 0 ? found[0] : null;
+  },
+
   // ---------- Item 47, stage 3: выгрузка в КАН ----------
   getOzonCostExport: (...args) => context.getOzonCostExport(...args),
   markOzonCostExported: (...args) => context.markOzonCostExported(...args),

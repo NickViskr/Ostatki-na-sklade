@@ -1706,6 +1706,161 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     `отмечено: ${res.marked}`);
 })();
 
+// ====== Пункт 47, этап 4, подготовка: правка и удаление операций на стенде ======
+// Стенд впервые умеет удалять строки и вести лист «Удаленное». До 26.08.2026 вся эта
+// область не проверялась вовсе — правка операции это «удалить и провести заново», а
+// поддельные листы не умели ни того, ни другого.
+
+// Готовый склад с одним приходом: возвращает стенд и идентификатор строки прихода.
+function withReceipt(price, qty, opts) {
+  opts = opts || {};
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setStockSheet([{ article: 'ART', quantity: 0, avgCost: 0, capitalization: 0 }]);
+  h.setOzonCostSheet(opts.costRows || []);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART', available: opts.ozonAvailable || 500, sku: '999' }]);
+  h.commitTransaction([{ article: 'ART', quantity: qty, price: price }],
+    'Приход', 'Склад', '', 'tester', opts.date || '2026-08-01T09:00:00Z', 'op-in');
+  const id = h.getTransactions().rows.find(t => t.type === 'Приход').id;
+  return { h, id };
+}
+
+const editReceipt = (h, id, price, qty, date) => h.updateTransaction(id, {
+  article: 'ART', quantity: qty, price: price, type: 'Приход',
+  destination: 'Склад', date: date || '2026-08-01T09:00:00Z'
+}, 'tester');
+
+(function test120() {
+  // Цена вверх, ничего не отгружено: количество на месте, деньги пересчитаны.
+  const { h, id } = withReceipt(300, 100);
+  editReceipt(h, id, 400, 100);
+  const st = h.stockOf('ART');
+  check('Правка прихода: количество не изменилось',
+    st.quantity === 100, `получено: ${st.quantity}`);
+  check('Правка прихода: капитализация стала 100 x 400 = 40000',
+    st.capitalization === 40000, `получено: ${st.capitalization}`);
+  check('Правка прихода: средняя себестоимость стала 400',
+    st.avgCost === 400, `получено: ${st.avgCost}`);
+  check('Правка прихода: строк в Истории по-прежнему одна, а не две',
+    h.getTransactions().rows.length === 1, `получено: ${h.getTransactions().rows.length}`);
+  check('Правка прихода: прежняя версия ушла в «Удаленное»',
+    h.dumpArchive().length === 1 && h.dumpArchive()[0].data.type === 'UpdatedVersion',
+    `получено: ${JSON.stringify(h.dumpArchive().map(a => a.data.type))}`);
+  check('Правка прихода: в архиве лежит СТАРАЯ цена, а не новая',
+    h.dumpArchive()[0].data.price === 300, `получено: ${h.dumpArchive()[0].data.price}`);
+})();
+
+(function test121() {
+  // Цена вниз — то же самое в обратную сторону.
+  const { h, id } = withReceipt(400, 100);
+  editReceipt(h, id, 250, 100);
+  const st = h.stockOf('ART');
+  check('Правка прихода вниз: капитализация 25000, средняя 250',
+    st.capitalization === 25000 && st.avgCost === 250,
+    `получено: кап=${st.capitalization}, средняя=${st.avgCost}`);
+})();
+
+(function test122() {
+  // Правка количества, а не цены: тоже разрешена, пока ничего не отгружено.
+  const { h, id } = withReceipt(300, 100);
+  editReceipt(h, id, 300, 120);
+  const st = h.stockOf('ART');
+  check('Правка количества прихода: 120 шт и капитализация 36000',
+    st.quantity === 120 && st.capitalization === 36000,
+    `получено: ${st.quantity} шт, кап=${st.capitalization}`);
+})();
+
+(function test123() {
+  // Две партии по разным ценам, правим ПЕРВУЮ: средняя обязана пересчитаться по обеим.
+  const { h, id } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 600 }],
+    'Приход', 'Склад', '', 'tester', '2026-08-05T09:00:00Z', 'op-in2');
+  const before = h.stockOf('ART');
+  check('Две партии: до правки средняя (100x300 + 50x600) / 150 = 400',
+    before.avgCost === 400 && before.capitalization === 60000,
+    `получено: средняя=${before.avgCost}, кап=${before.capitalization}`);
+
+  editReceipt(h, id, 360, 100);
+  const st = h.stockOf('ART');
+  check('Две партии: после правки первой средняя (100x360 + 50x600) / 150 = 440',
+    st.avgCost === 440 && st.capitalization === 66000,
+    `получено: средняя=${st.avgCost}, кап=${st.capitalization}`);
+  check('Две партии: количество не поехало — 150 шт',
+    st.quantity === 150, `получено: ${st.quantity}`);
+})();
+
+(function test124() {
+  // ЛОВУШКА ДЛЯ ЭТАПА 4: правка не переписывает строку на месте, а дописывает её В КОНЕЦ.
+  // Значит порядок строк в листе перестаёт совпадать с порядком дат, и проигрывание
+  // истории обязано сортировать по ДАТЕ, а не по номеру строки.
+  const { h, id } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 600 }],
+    'Приход', 'Склад', '', 'tester', '2026-08-05T09:00:00Z', 'op-in2');
+  editReceipt(h, id, 360, 100, '2026-08-01T09:00:00Z');
+
+  const sheetOrder = h.dumpTransSheet().map(r => String(r['Дата']).slice(0, 10));
+  check('Правка ставит строку в КОНЕЦ листа: даты в листе идут не по порядку',
+    sheetOrder.length === 2 && sheetOrder[0] === '2026-08-05' && sheetOrder[1] === '2026-08-01',
+    `порядок дат в листе: ${sheetOrder.join(', ')}`);
+  check('Но сама дата операции сохранена, а не подменена днём правки',
+    sheetOrder.indexOf('2026-08-01') !== -1, `получено: ${sheetOrder.join(', ')}`);
+})();
+
+(function test125() {
+  // Удаление прихода, из которого ничего не ушло: склад возвращается в ноль.
+  const { h, id } = withReceipt(300, 100);
+  h.deleteTransaction(id, 'tester');
+  const st = h.stockOf('ART');
+  check('Удаление прихода: остаток и капитализация обнулились',
+    st.quantity === 0 && st.capitalization === 0 && st.avgCost === 0,
+    `получено: ${st.quantity} шт, кап=${st.capitalization}, средняя=${st.avgCost}`);
+  check('Удаление прихода: строка из Истории убрана',
+    h.getTransactions().rows.length === 0, `получено: ${h.getTransactions().rows.length}`);
+})();
+
+(function test126() {
+  // Защита от отрицательного остатка при НАСТОЯЩЕМ удалении прихода обязана остаться:
+  // товара на складе меньше, чем в приходе, потому что часть уже уехала.
+  const { h, id } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-10T09:00:00Z', 'op-ship');
+  let message = '';
+  try { h.deleteTransaction(id, 'tester'); } catch (e) { message = String(e.message || e); }
+  check('Удаление отгруженного прихода отклонено — защита от отрицательного остатка',
+    message.indexOf('отрицательному остатку') !== -1, `получено: ${message || 'без ошибки'}`);
+  check('И склад после отказа не тронут: 50 шт на месте',
+    h.stockOf('ART').quantity === 50, `получено: ${h.stockOf('ART').quantity}`);
+})();
+
+(function test127() {
+  // ДЕФЕКТ, КОТОРЫЙ ИСПРАВИТ ЭТАП 2. Правка ЦЕНЫ количества не меняет, и запрещать её
+  // не за что — но правка сделана как «удалить и провести заново», и отказ прилетает
+  // с промежуточного состояния, которого пользователь не просил.
+  const { h, id } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-10T09:00:00Z', 'op-ship');
+  let message = '';
+  try { editReceipt(h, id, 400, 100); } catch (e) { message = String(e.message || e); }
+  check('ДЕФЕКТ (этап 2 исправит): правка цены отгруженного прихода отклоняется',
+    message.indexOf('отрицательному остатку') !== -1, `получено: ${message || 'без ошибки'}`);
+  check('ДЕФЕКТ: и цена осталась прежней — 300',
+    h.getTransactions().rows.find(t => t.type === 'Приход').price === 300,
+    `получено: ${h.getTransactions().rows.find(t => t.type === 'Приход').price}`);
+  check('ДЕФЕКТ: журнал себестоимости Озона правкой не тронут (этап 4 изменит)',
+    h.dumpOzonCost().length === 1 && h.dumpOzonCost()[0]['Себестоимость отгрузки'] === 300,
+    `получено: ${JSON.stringify(h.dumpOzonCost().map(r => r['Себестоимость отгрузки']))}`);
+})();
+
+(function test128() {
+  // Правка прихода, по которому отгрузок НЕ было, журнал Озона тоже не трогает —
+  // и трогать нечего: на Озон ничего не уезжало.
+  const { h, id } = withReceipt(300, 100);
+  editReceipt(h, id, 400, 100);
+  check('Правка прихода без отгрузок: журнал себестоимости Озона пуст',
+    h.dumpOzonCost().length === 0, `получено строк: ${h.dumpOzonCost().length}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
