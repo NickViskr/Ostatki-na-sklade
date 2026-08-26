@@ -1,9 +1,13 @@
 /**
  * Item 47, stage 3: the CSV KAN expects from the «Себестоимость КАН» button.
  *
- * The shape is copied from a live KAN export the owner supplied
- * (`products_import_2026-08-25.csv`): «;» as the separator, string fields in double quotes,
- * numbers unquoted with four decimals and a dot, and the seven columns below in this order.
+ * The shape is copied byte for byte from a live KAN export the owner supplied
+ * (`products_import_2026-08-25.csv`, 167 rows): a UTF-8 BOM, CRLF line endings, «;» as the
+ * separator, string fields in double quotes, numbers unquoted with four decimals and a dot,
+ * and the seven columns below in this order.
+ *
+ * THE SKU IS A NUMBER, NOT A STRING — `2889355693`, unquoted, even though its header is
+ * quoted like every other. Guessed wrong once on 26.08.2026 and corrected against the sample.
  *
  * The owner's rules, settled 26.08.2026:
  *  - EVERY change goes to KAN, one row per shipment, not just the latest cost per article.
@@ -35,6 +39,9 @@ const KAN_STATUS_MAIN = 'MAIN';
 const quote = (value: unknown): string =>
   `"${String(value ?? '').replace(/"/g, '""')}"`;
 
+/** KAN's own files start with a BOM; the header must match theirs from the first byte. */
+const BOM = '\uFEFF';
+
 const number4 = (value: unknown): string => {
   const n = Number(value);
   return (Number.isFinite(n) ? n : 0).toFixed(4);
@@ -58,7 +65,8 @@ export const buildKanCostCsv = (rows: KanCostRow[]): string => {
   (rows || []).forEach((row) => {
     lines.push([
       quote(normaliseKanDate(row.date)),
-      quote(row.sku),
+      // Unquoted: KAN writes the SKU as a bare number.
+      String(row.sku ?? '').trim(),
       quote(row.article),
       number4(row.cost),
       number4(0),
@@ -66,7 +74,7 @@ export const buildKanCostCsv = (rows: KanCostRow[]): string => {
       quote(KAN_STATUS_MAIN)
     ].join(';'));
   });
-  return lines.join('\n');
+  return BOM + lines.join('\r\n');
 };
 
 /** File name for the download: the day the file was made, so several files never collide. */
