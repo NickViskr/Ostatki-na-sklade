@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import * as XLSX from "xlsx";
+import { chooseDirectWarehouse, directWarehouseMessage, readDraftWarehouses } from "./src/lib/ozonDirectDraft";
 
 dotenv.config();
 
@@ -1627,8 +1628,20 @@ async function startServer() {
       const dropOffType = String(req.body?.dropOffWarehouseType || '').trim().toUpperCase();
       const clustersIn = Array.isArray(req.body?.clusters) ? req.body.clusters : [];
 
-      if (!dropOffId || !dropOffType) {
+      // Пункт 58, этап 4. Прямая поставка идёт другим методом Ozon: продавец везёт груз сам,
+      // поэтому точки отгрузки у неё нет вовсе, зато нужен склад размещения.
+      const supplyType = String(req.body?.supplyType || 'CROSSDOCK').trim().toUpperCase();
+      if (supplyType !== 'CROSSDOCK' && supplyType !== 'DIRECT') {
+        return res.status(400).json({ status: "error", message: "Неизвестный тип поставки: " + supplyType });
+      }
+      const storageWarehouseId = String(req.body?.storageWarehouseId || '').trim();
+      const storageWarehouseName = String(req.body?.storageWarehouseName || '').trim();
+
+      if (supplyType === 'CROSSDOCK' && (!dropOffId || !dropOffType)) {
         return res.status(400).json({ status: "error", message: "Не указана точка отгрузки — заполните её в настройках Ozon" });
+      }
+      if (supplyType === 'DIRECT' && !storageWarehouseId) {
+        return res.status(400).json({ status: "error", message: "Не указан склад прямой поставки — выберите его в настройках Ozon" });
       }
       if (clustersIn.length === 0) {
         return res.status(400).json({ status: "error", message: "Не передан ни один кластер" });
@@ -1658,17 +1671,33 @@ async function startServer() {
         return res.status(400).json({ status: "error", message: "Состав поставки пуст: проверьте, что у артикулов заполнен ШК Ozon" });
       }
 
-      // deletion_sku_mode обязателен де-факто, без него Ozon отвечает 400
-      const createData: any = await fetchOzonApi("/v1/draft/multi-cluster/create",
-        { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
-        {
-          clusters_info: clustersInfo,
-          delivery_info: {
-            type: "DROPOFF",
-            drop_off_warehouse: { warehouse_id: Number(dropOffId), warehouse_type: dropOffType }
-          },
-          deletion_sku_mode: "PARTIAL"
+      // Прямая поставка едет ОДНИМ кластером: cluster_info в /v1/draft/direct/create — объект,
+      // а не массив, и смешанного черновика в Ozon не существует.
+      if (supplyType === 'DIRECT' && clustersInfo.length !== 1) {
+        return res.status(400).json({
+          status: "error",
+          message: "Прямой поставкой едет один кластер за заявку, а передано: " + clustersInfo.length
         });
+      }
+
+      // deletion_sku_mode обязателен де-факто, без него Ozon отвечает 400
+      const createData: any = supplyType === 'DIRECT'
+        ? await fetchOzonApi("/v1/draft/direct/create",
+            { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
+            {
+              cluster_info: clustersInfo[0],
+              deletion_sku_mode: "PARTIAL"
+            })
+        : await fetchOzonApi("/v1/draft/multi-cluster/create",
+            { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
+            {
+              clusters_info: clustersInfo,
+              delivery_info: {
+                type: "DROPOFF",
+                drop_off_warehouse: { warehouse_id: Number(dropOffId), warehouse_type: dropOffType }
+              },
+              deletion_sku_mode: "PARTIAL"
+            });
 
       const draftId = createData?.draft_id;
       if (!draftId) {
@@ -1714,6 +1743,10 @@ async function startServer() {
 
       const clustersOut: any[] = [];
       const rawClusters = Array.isArray(info?.clusters) ? info.clusters : [];
+      // Пункт 58, этап 4. У прямой поставки склад размещения выбирает продавец, поэтому
+      // ответ несёт итог выбора: подошёл ли склад из настроек и чем его заменить.
+      let directWarehouseOut: any = null;
+
       for (const cl of rawClusters) {
         const warehouses = Array.isArray(cl?.warehouses) ? cl.warehouses : [];
 
@@ -1733,6 +1766,26 @@ async function startServer() {
         }
         if (!mainWh && warehouses.length > 0) mainWh = warehouses[0];
 
+        // У прямой поставки состав берётся из бандла ВЫБРАННОГО склада, а не первого
+        // попавшегося: бандл свой у каждого склада, и чужой описал бы другую поставку.
+        let directChoice: any = null;
+        if (supplyType === 'DIRECT') {
+          directChoice = chooseDirectWarehouse(readDraftWarehouses(warehouses), storageWarehouseId);
+          if (directChoice.chosen) {
+            bundleId = directChoice.chosen.bundleId;
+            restrictedBundleId = directChoice.chosen.restrictedBundleId;
+            mainWh = warehouses.find((w: any) => String(w?.storage_warehouse?.warehouse_id ?? '') === directChoice.chosen.warehouseId) || mainWh;
+          }
+          directWarehouseOut = {
+            requestedId: storageWarehouseId,
+            requestedName: storageWarehouseName,
+            chosen: directChoice.chosen,
+            problem: directChoice.problem,
+            alternatives: directChoice.alternatives,
+            message: directWarehouseMessage(directChoice, storageWarehouseName)
+          };
+        }
+
         const accepted = await loadBundleItems(bundleId, cab);
         const rejected = await loadBundleItems(restrictedBundleId, cab);
 
@@ -1751,7 +1804,7 @@ async function startServer() {
 
       return res.json({
         status: "success",
-        data: { draftId: String(draftId), clusters: clustersOut, rejectedItems }
+        data: { draftId: String(draftId), clusters: clustersOut, rejectedItems, supplyType, directWarehouse: directWarehouseOut }
       });
 
     } catch (error: any) {
