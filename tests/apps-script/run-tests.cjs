@@ -2429,6 +2429,55 @@ function checkFidelity(name, h, article) {
   checkFidelity('история, прошедшая через удаление и восстановление', h);
 })();
 
+(function test166() {
+  // ДЕФЕКТ, НАЙДЕННЫЙ ПРОГОНОМ НА БОЕВОЙ БАЗЕ 26.08.2026: правка одного товара дописывала
+  // строки в журнал по ЧУЖИМ товарам. У их цепочек на Озоне есть собственный копеечный
+  // дрейф, и пересчёт объявлял его расхождением. На стенде этого случая не было — там
+  // журнал всегда идеально сходился сам с собой.
+  const { h, id } = withShippedReceipt();
+  // Чужой товар со СВОИМ дрейфом: 500 после отгрузки по 600 от базы 100 по 400 дало бы
+  // не 566.67, а записано 560 — расхождение, которое нас не касается.
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-ЧУЖОЙ', 400, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '111' }),
+    costRow('2026-08-05', 'MaxiStore', 'ART-ЧУЖОЙ', 560, 'op-alien',
+      { sku: '111', stockBefore: 100, costBefore: 400, shipped: 50, shippedCost: 600 }),
+  ]);
+  h.commitTransaction([{ article: 'ART', quantity: 10, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-11T09:00:00Z', 'op-mine');
+  const alienBefore = h.dumpOzonCost().filter(r => r['Артикул'] === 'ART-ЧУЖОЙ').length;
+
+  editReceipt(h, id, 400, 100);
+
+  const j = h.dumpOzonCost();
+  const alienAfter = j.filter(r => r['Артикул'] === 'ART-ЧУЖОЙ').length;
+  check('Правка товара не трогает журнал ЧУЖИХ товаров',
+    alienAfter === alienBefore, `было ${alienBefore}, стало ${alienAfter}`);
+  const mine = j.filter(r => String(r['Источник']).indexOf('пересчёт') !== -1);
+  check('Дописаны строки только по правленому товару',
+    mine.length > 0 && mine.every(r => r['Артикул'] === 'ART'),
+    `получено: ${JSON.stringify(mine.map(r => r['Артикул']))}`);
+})();
+
+(function test167() {
+  // И внутри СВОЕГО товара цепочка не пересчитывается до первой сдвинувшейся отгрузки:
+  // всё, что было раньше, правка не затрагивает.
+  const { h, id } = withReceipt(300, 100, { date: '2026-08-10T09:00:00Z' });
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART', 250, 'op-ранняя',
+      { sku: '999', stockBefore: 100, costBefore: 200, shipped: 40, shippedCost: 999 }),
+  ]);
+  h.commitTransaction([{ article: 'ART', quantity: 20, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-12T09:00:00Z', 'op-поздняя');
+  editReceipt(h, id, 400, 100, '2026-08-10T09:00:00Z');
+  const reissued = h.dumpOzonCost().filter(r => String(r['Источник']).indexOf('пересчёт') !== -1);
+  check('Отгрузка ДО правленого прихода в пересчёт не попала',
+    reissued.every(r => String(r['Дата']).slice(0, 10) !== '2026-08-01'),
+    `получено даты: ${JSON.stringify(reissued.map(r => String(r['Дата']).slice(0, 10)))}`);
+  check('А отгрузка после — попала',
+    reissued.some(r => String(r['Дата']).slice(0, 10) === '2026-08-12'),
+    `получено даты: ${JSON.stringify(reissued.map(r => String(r['Дата']).slice(0, 10)))}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

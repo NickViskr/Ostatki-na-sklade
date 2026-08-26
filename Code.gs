@@ -2008,15 +2008,26 @@ function reissueOzonCostRows(changedShipments, username) {
   });
 
   const rowsToAppend = [];
+  const stampOf = function(r) { return r.cabinet + '|' + r.article + '|' + String(r.date).slice(0, 10); };
+
   Object.keys(groups).forEach(function(key) {
     const rows = groups[key];
     let prior = null;
-    let chainChanged = false;
+    let started = false;
     rows.forEach(function(r) {
-      const stamp = r.cabinet + '|' + r.article + '|' + String(r.date).slice(0, 10);
-      const replacement = newCostByKey.hasOwnProperty(stamp) ? newCostByKey[stamp] : null;
       // «НАЧАЛЬНАЯ ТОЧКА» и любая строка без отгрузки задают точку отсчёта и не пересчитываются.
       if (!r.shipped) { prior = r.costAfter; return; }
+      const replacement = newCostByKey.hasOwnProperty(stampOf(r)) ? newCostByKey[stampOf(r)] : null;
+      // ГЛАВНОЕ ПРАВИЛО ЭТОЙ ФУНКЦИИ. Пока не встретилась сдвинувшаяся отгрузка, цепочку не
+      // пересчитываем вовсе: там всё как было, и любое расхождение — чужое, не наше дело.
+      // Оно же оставляет в покое ЦЕЛИКОМ те пары «магазин + товар», которых правка не
+      // касалась: у них ни одна отгрузка не сдвинулась, значит started так и не включится.
+      // Без этого правила правка одного товара дописывала строки по чужим — у их цепочек на
+      // Озоне есть собственный копеечный дрейф, и пересчёт объявлял его расхождением.
+      // Найдено 26.08.2026 прогоном на боевой базе: на стенде такого случая не было, там
+      // журнал всегда идеально сходился сам с собой.
+      if (!started && replacement === null) { prior = r.costAfter; return; }
+      started = true;
       const shippedCost = (replacement !== null) ? replacement : r.shippedCost;
       const base = Number(r.stockBefore) || 0;
       let costAfter;
@@ -2026,7 +2037,6 @@ function reissueOzonCostRows(changedShipments, username) {
         costAfter = roundToTwo((base * prior + r.shipped * shippedCost) / (base + r.shipped));
       }
       if (replacement !== null || Math.abs(costAfter - r.costAfter) > 0.005) {
-        chainChanged = true;
         rowsToAppend.push([
           r.date, r.cabinet, r.article, r.sku,
           base, prior === null ? '' : prior, r.shipped, roundToTwo(shippedCost), costAfter,
@@ -2035,7 +2045,6 @@ function reissueOzonCostRows(changedShipments, username) {
       }
       prior = costAfter;
     });
-    if (!chainChanged) return;
   });
 
   if (rowsToAppend.length === 0) return { appended: 0 };
