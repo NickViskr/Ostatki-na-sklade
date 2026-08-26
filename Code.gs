@@ -1446,7 +1446,16 @@ function deleteSku(sku, deletedBy) {
   return getSkus();
 }
 
-function deleteTransaction(id, deletedBy, isUpdate = false) {
+/**
+ * Пункт 47, этап 4, подэтап 2. `replacementQty` — количество, которое ТУТ ЖЕ вернётся на склад
+ * взамен удаляемого прихода. Правка операции сделана как «удалить и провести заново», поэтому
+ * без этого числа защита от отрицательного остатка судит по промежуточному состоянию, которого
+ * пользователь не просил: правка ЦЕНЫ количества не меняет вовсе, а отказ прилетал.
+ * Защиту НЕ снимаем — мутация 26.08.2026 показала, что без неё склад уходит в минус, а правка
+ * рапортует об успехе. Меняется только то, ЧТО она проверяет: не промежуточный остаток, а
+ * итоговый. При обычном удалении `replacementQty` не передаётся и поведение прежнее.
+ */
+function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = null) {
   const ss = getSpreadsheet();
   const transSheet = getTransactionSheet(ss);
   
@@ -1525,9 +1534,15 @@ function deleteTransaction(id, deletedBy, isUpdate = false) {
         let newCap = Number(stockData[i][3]);
         
         if (type === 'Приход') {
+          const available = newQty;
           newQty -= qty;
-          if (newQty < 0) {
-            throw new Error(`Удаление этого прихода приведёт к отрицательному остатку товара "${article}". Доступно: ${newQty + qty}, нужно удалить: ${qty}. Сначала отмените расходы, ссылающиеся на этот товар.`);
+          const backQty = (replacementQty === null || replacementQty === undefined)
+            ? 0 : Number(replacementQty) || 0;
+          if (newQty + backQty < 0) {
+            if (isUpdate) {
+              throw new Error(`Правка приведёт к отрицательному остатку товара "${article}". На складе ${available} шт., в приходе было ${qty} шт., в правке ${backQty} шт. Уменьшить приход можно не более чем до ${qty - available} шт. — остальное уже отгружено.`);
+            }
+            throw new Error(`Удаление этого прихода приведёт к отрицательному остатку товара "${article}". Доступно: ${available}, нужно удалить: ${qty}. Сначала отмените расходы, ссылающиеся на этот товар.`);
           }
           newCap = roundToTwo(newCap - total);
           newAvgCost = newQty > 0 ? roundToTwo(newCap / newQty) : 0;
@@ -1604,7 +1619,10 @@ function updateTransaction(id, data, username) {
   const editedAdditional = (data.additionalCosts !== null && data.additionalCosts !== undefined
     && String(data.additionalCosts).trim() !== '') ? data.additionalCosts : storedAdditional;
 
-  deleteTransaction(id, username, true);
+  // Количество из правки едет в удаление: приход вернётся на склад сразу же, и защита от
+  // отрицательного остатка обязана судить по итогу, а не по середине операции.
+  const replacementQty = String(data.type) === 'Приход' ? (Number(data.quantity) || 0) : null;
+  deleteTransaction(id, username, true, replacementQty);
   const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional);
   return {
     stock: getStock(),

@@ -1833,23 +1833,91 @@ const editReceipt = (h, id, price, qty, date) => h.updateTransaction(id, {
     h.stockOf('ART').quantity === 50, `получено: ${h.stockOf('ART').quantity}`);
 })();
 
-(function test127() {
-  // ДЕФЕКТ, КОТОРЫЙ ИСПРАВИТ ЭТАП 2. Правка ЦЕНЫ количества не меняет, и запрещать её
-  // не за что — но правка сделана как «удалить и провести заново», и отказ прилетает
-  // с промежуточного состояния, которого пользователь не просил.
-  const { h, id } = withReceipt(300, 100);
-  h.commitTransaction([{ article: 'ART', quantity: 50, price: 300 }],
+// Приход 100 x 300, из него 50 шт уехали на Озон по 300. На складе 50 шт на 15000 руб.
+function withShippedReceipt() {
+  const made = withReceipt(300, 100);
+  made.h.commitTransaction([{ article: 'ART', quantity: 50, price: 300 }],
     'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-10T09:00:00Z', 'op-ship');
+  return made;
+}
+
+(function test127() {
+  // ЭТАП 2 ИСПРАВИЛ. Правка цены количества не меняет, запрещать её не за что.
+  const { h, id } = withShippedReceipt();
+  const before = h.stockOf('ART');
+  check('До правки: на складе 50 шт на 15000 руб по 300',
+    before.quantity === 50 && before.capitalization === 15000 && before.avgCost === 300,
+    `получено: ${before.quantity} шт, кап=${before.capitalization}, средняя=${before.avgCost}`);
+
   let message = '';
   try { editReceipt(h, id, 400, 100); } catch (e) { message = String(e.message || e); }
-  check('ДЕФЕКТ (этап 2 исправит): правка цены отгруженного прихода отклоняется',
-    message.indexOf('отрицательному остатку') !== -1, `получено: ${message || 'без ошибки'}`);
-  check('ДЕФЕКТ: и цена осталась прежней — 300',
-    h.getTransactions().rows.find(t => t.type === 'Приход').price === 300,
+  check('Правка цены отгруженного прихода ПРОХОДИТ, а не отклоняется',
+    message === '', `получено: ${message}`);
+  check('И новая цена записана — 400',
+    h.getTransactions().rows.find(t => t.type === 'Приход').price === 400,
     `получено: ${h.getTransactions().rows.find(t => t.type === 'Приход').price}`);
-  check('ДЕФЕКТ: журнал себестоимости Озона правкой не тронут (этап 4 изменит)',
+  check('Количество на складе не поехало — по-прежнему 50 шт',
+    h.stockOf('ART').quantity === 50, `получено: ${h.stockOf('ART').quantity}`);
+
+  // ВАЖНО ДЛЯ ПОДЭТАПА 4. Вся разница 100 x (400 - 300) = 10000 руб легла на ОСТАВШИЕСЯ
+  // 50 шт: 15000 + 10000 = 25000, то есть 500 руб/шт. Это действующее правило «долга
+  // себестоимости», а не ошибка — но владелец просил другого: отгруженные 50 шт должны
+  // стоить по 400. Подэтап 4 переносит 5000 руб с остатка на отгрузку.
+  const after = h.stockOf('ART');
+  check('Пока вся разница ложится на остаток: 25000 руб на 50 шт, средняя 500',
+    after.capitalization === 25000 && after.avgCost === 500,
+    `получено: кап=${after.capitalization}, средняя=${after.avgCost}`);
+  check('Журнал себестоимости Озона правкой ещё не тронут — это подэтап 4',
     h.dumpOzonCost().length === 1 && h.dumpOzonCost()[0]['Себестоимость отгрузки'] === 300,
     `получено: ${JSON.stringify(h.dumpOzonCost().map(r => r['Себестоимость отгрузки']))}`);
+})();
+
+(function test127b() {
+  // Количество ВВЕРХ: приход был 100, стал 120 — на складе становится 70.
+  const { h, id } = withShippedReceipt();
+  let message = '';
+  try { editReceipt(h, id, 300, 120); } catch (e) { message = String(e.message || e); }
+  check('Правка количества вверх по отгруженному приходу проходит',
+    message === '', `получено: ${message}`);
+  check('И на складе становится 70 шт на 21000 руб',
+    h.stockOf('ART').quantity === 70 && h.stockOf('ART').capitalization === 21000,
+    `получено: ${h.stockOf('ART').quantity} шт, кап=${h.stockOf('ART').capitalization}`);
+})();
+
+(function test127c() {
+  // Количество ВНИЗ до границы: 50 шт уже уехали, значит приход можно ужать ровно до 50.
+  const { h, id } = withShippedReceipt();
+  let message = '';
+  try { editReceipt(h, id, 300, 50); } catch (e) { message = String(e.message || e); }
+  check('Приход можно ужать ровно до отгруженного количества — 50 шт',
+    message === '', `получено: ${message}`);
+  check('И склад обнуляется, а не уходит в минус',
+    h.stockOf('ART').quantity === 0, `получено: ${h.stockOf('ART').quantity}`);
+})();
+
+(function test127d() {
+  // Количество ВНИЗ за границу: 49 шт меньше, чем уже уехало. Отказ обязателен.
+  const { h, id } = withShippedReceipt();
+  let message = '';
+  try { editReceipt(h, id, 300, 49); } catch (e) { message = String(e.message || e); }
+  check('Ужать приход ниже отгруженного нельзя — отказ',
+    message.indexOf('отрицательному остатку') !== -1, `получено: ${message || 'без ошибки'}`);
+  check('Сообщение говорит о ПРАВКЕ и подсказывает предел, а не зовёт удалять расходы',
+    message.indexOf('Правка') === 0 && message.indexOf('не более чем до 50') !== -1,
+    `получено: ${message}`);
+  check('И склад после отказа цел: 50 шт по 300',
+    h.stockOf('ART').quantity === 50 && h.stockOf('ART').avgCost === 300,
+    `получено: ${h.stockOf('ART').quantity} шт, средняя=${h.stockOf('ART').avgCost}`);
+})();
+
+(function test127e() {
+  // Приход, из которого не ушло НИЧЕГО, по-прежнему ужимается до нуля и удаляется.
+  const { h, id } = withReceipt(300, 100);
+  let message = '';
+  try { editReceipt(h, id, 300, 0); } catch (e) { message = String(e.message || e); }
+  check('Приход без отгрузок можно ужать до нуля',
+    message === '' && h.stockOf('ART').quantity === 0,
+    `сообщение: ${message}, остаток: ${h.stockOf('ART').quantity}`);
 })();
 
 (function test128() {
