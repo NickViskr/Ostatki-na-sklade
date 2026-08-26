@@ -1491,6 +1491,21 @@ async function startServer() {
   // ── Этап H: оформление заявки на поставку ────────────────────────────────────
 
   /** Выбор кабинета по имени; без имени — первый в списке. */
+  /**
+   * Пункт 59. Кабинет для операций С ЗАЯВКОЙ. В отличие от pickCabinet, пустое или
+   * неизвестное имя НЕ подменяется первым кабинетом: заявка на поставку принадлежит
+   * одному магазину, ключи у кабинетов разные, и молчаливая подмена отправляла бы
+   * заявку от чужого юрлица. Возвращает null — вызывающий отвечает ошибкой.
+   */
+  function requireCabinet(keys: OzonKeysBundle, name?: string): OzonCabinetKeys | null {
+    const wanted = String(name || '').trim().toLowerCase();
+    if (!wanted) return null;
+    return keys.cabinets.find(c => String(c.name || '').trim().toLowerCase() === wanted) || null;
+  }
+
+  const CABINET_REQUIRED_MESSAGE =
+    'Не указан магазин: заявка на поставку принадлежит одному кабинету, и подставлять первый попавшийся нельзя';
+
   function pickCabinet(keys: OzonKeysBundle, name?: string): OzonCabinetKeys {
     const wanted = String(name || '').trim().toLowerCase();
     if (wanted) {
@@ -1626,7 +1641,10 @@ async function startServer() {
       if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
         return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
       }
-      const cab = pickCabinet(keys, req.body?.cabinet);
+      const cab = requireCabinet(keys, req.body?.cabinet);
+      if (!cab) {
+        return res.status(400).json({ status: "error", stage: "no_cabinet", message: CABINET_REQUIRED_MESSAGE });
+      }
 
       const clustersInfo = clustersIn.map((c: any) => ({
         macrolocal_cluster_id: Number(c?.clusterId),
@@ -1805,7 +1823,10 @@ async function startServer() {
       if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
         return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
       }
-      const cab = pickCabinet(keys, req.body?.cabinet);
+      const cab = requireCabinet(keys, req.body?.cabinet);
+      if (!cab) {
+        return res.status(400).json({ status: "error", stage: "no_cabinet", message: CABINET_REQUIRED_MESSAGE });
+      }
 
       // Для MULTI_CLUSTER передаются все кластеры расчёта; storage_warehouse_id только для DIRECT
       await fetchOzonApi("/v2/draft/supply/create",
@@ -2018,7 +2039,10 @@ async function startServer() {
       if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
         return res.status(400).json({ status: "error", stage: "no_keys", message: "Ключи Ozon не настроены" });
       }
-      const cab = pickCabinet(keys, req.body?.cabinet);
+      const cab = requireCabinet(keys, req.body?.cabinet);
+      if (!cab) {
+        return res.status(400).json({ status: "error", stage: "no_cabinet", message: CABINET_REQUIRED_MESSAGE });
+      }
 
       const warnings: string[] = [];
       const files: any[] = [];

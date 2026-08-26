@@ -4,6 +4,7 @@ import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
+import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
 import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict } from '../lib/ozonSupplyLines';
 
@@ -24,6 +25,8 @@ export interface SupplyStockOption {
   article: string;
   name: string;
   freeMyStock: number;
+  /** Пункт 59. Магазины, в которых продаётся товар. Пустой список — магазин неизвестен. */
+  cabinets?: string[];
 }
 
 interface OzonSupplyModalProps {
@@ -314,8 +317,11 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     const taken = new Set(allRows.filter((r) => r.clusterId === addForm.clusterId).map((r) => r.article));
     return (stockOptions || [])
       .filter((o) => o.freeMyStock > 0 && skuMap[o.article] && !taken.has(o.article))
+      // Пункт 59. Заявка принадлежит одному магазину, поэтому товары чужого кабинета
+      // в список не попадают вовсе: добавленный сюда артикул уехал бы по чужим ключам.
+      .filter((o) => isCabinetCompatible([[cabinet]], o.cabinets || []))
       .sort((a, b) => a.article.localeCompare(b.article, 'ru'));
-  }, [addForm.clusterId, stockOptions, skuMap, allRows]);
+  }, [addForm.clusterId, stockOptions, skuMap, allRows, cabinet]);
 
   /* ---- Ozon's answer, folded into the composition -------------------------------
    * Ozon replies per cluster with two lists of items: what will go into the supply and
@@ -698,6 +704,12 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
    * последнее слово всегда за человеком.
    */
   const runDraft = async () => {
+    // Пункт 59. Пустой магазин прокси молча превращал в первый кабинет из настроек,
+    // и заявка уезжала по чужим ключам. Лучше остановиться здесь.
+    if (!cabinet) {
+      toast.error('Магазин заявки не определён: соберите заявку из товаров одного магазина или выберите магазин фильтром вкладки');
+      return;
+    }
     if (!dropOffWarehouseId || !dropOffWarehouseType) {
       toast.error('Не выбрана точка отгрузки — укажите её в настройках Ozon');
       return;

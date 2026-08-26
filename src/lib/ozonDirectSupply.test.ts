@@ -207,7 +207,8 @@ describe('подключение правила к экранам', () => {
   const modal = read('src/components/OzonSupplyModal.tsx');
 
   it('«Рекомендации»: галочка гаснет по правилу', () => {
-    expect(stocks).toContain("disabled={!isClusterSelectable(directRules, selectedClusterIds, String(c.clusterId))}");
+    // Выражение стало многострочным: к правилу кластеров добавилось правило магазина (пункт 59).
+    expect(stocks).toContain('!isClusterSelectable(directRules, selectedClusterIds, String(c.clusterId))');
   });
 
   it('«Рекомендации»: причина показывается подсказкой', () => {

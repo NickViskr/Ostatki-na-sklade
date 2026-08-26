@@ -8,6 +8,7 @@ import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
 import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
+import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
@@ -625,11 +626,31 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   /** Item 45. Everything the supply window may offer for hand-adding: the article, its name
    *  and how much of it is free to ship. Built from the whole coverage table, not from the
    *  recommendations, so an article the recommendation never proposed can still be added. */
+  // Пункт 59. Заявка принадлежит ОДНОМУ магазину: ключи API у кабинетов разные, и SKU
+  // одного магазина в другом не существуют. Магазин задаёт первая галочка.
+  const cabinetsByArticleMap = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    for (const row of coverageRows as any[]) map[row.article] = row.cabinets || [];
+    return map;
+  }, [coverageRows]);
+
+  const selectedCabinetSets = useMemo(() => {
+    const sets: string[][] = [];
+    Object.keys(selectedSupply).forEach((key) => {
+      if (!selectedSupply[key]) return;
+      const article = key.split('|||')[0] || '';
+      if (article) sets.push(cabinetsByArticleMap[article] || []);
+    });
+    return sets;
+  }, [selectedSupply, cabinetsByArticleMap]);
+
   const supplyStockOptions = useMemo(
     () => (coverageRows as any[]).map((row) => ({
       article: row.article,
       name: row.name || '',
-      freeMyStock: Number(row.freeMyStock) || 0
+      freeMyStock: Number(row.freeMyStock) || 0,
+      // Пункт 59: без магазина список «Добавить позицию» предлагал артикулы чужого кабинета.
+      cabinets: (row.cabinets || []) as string[]
     })),
     [coverageRows]
   );
@@ -992,10 +1013,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                           type="checkbox"
                                           checked={Boolean(selectedSupply[supplyKey(s.article, c.clusterId)])}
                                           onChange={() => toggleSupplyRow(s.article, c.clusterId)}
-                                          disabled={!isClusterSelectable(directRules, selectedClusterIds, String(c.clusterId))}
+                                          disabled={
+                                            !isClusterSelectable(directRules, selectedClusterIds, String(c.clusterId)) ||
+                                            !isCabinetCompatible(selectedCabinetSets, cabinetsByArticleMap[s.article] || [])
+                                          }
                                           className="shrink-0 w-3.5 h-3.5 accent-indigo-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                                           title={
                                             disabledReason(directRules, selectedClusterIds, String(c.clusterId)) ||
+                                            cabinetDisabledReason(selectedCabinetSets, cabinetsByArticleMap[s.article] || []) ||
                                             'Включить в заявку на поставку'
                                           }
                                         />
@@ -1872,7 +1897,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         onClose={() => setSupplySummaryOpen(false)}
         rows={supplyPlan.rows}
         stockOptions={supplyStockOptions}
-        cabinet={supplyPlan.cabinets.length === 1 ? supplyPlan.cabinets[0] : (cabinetFilter !== 'all' ? cabinetFilter : '')}
+        cabinet={resolveSupplyCabinet(selectedCabinetSets) || (cabinetFilter !== 'all' ? cabinetFilter : '')}
         dropOffWarehouseId={supplySettings.dropOffWarehouseId}
         dropOffWarehouseName={supplySettings.dropOffWarehouseName}
         dropOffWarehouseType={supplySettings.dropOffWarehouseType}
