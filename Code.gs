@@ -4091,15 +4091,20 @@ function appendOzonCostForShipment(items, destination, dateStr, opId, username) 
  * rule of 26.08.2026 is that EVERY recomputation goes to KAN, one row per shipment, so
  * nothing is collapsed to the latest value per article here.
  *
+ * THE BUTTON MUST ALWAYS PRODUCE A FILE (owner, 26.08.2026). When there are no new
+ * shipments there is nothing to recompute, so the answer is the LAST COMPUTED DATA
+ * instead: the rows of the previous export, identified by their export stamp — one press
+ * writes one stamp, so the largest stamp is exactly the last press. Such an answer is
+ * flagged `repeat`, and the caller must NOT stamp those rows again: the stamp records when
+ * a row FIRST reached KAN, and rewriting it would destroy the very grouping used here.
+ *
  * No alert for articles without a cost: the owner cancelled that on 26.08.2026 — those
  * are articles that stopped selling long ago.
  */
 function getOzonCostExport() {
   const journal = getOzonCostJournal();
-  const pending = [];
-  journal.forEach(function(r) {
-    if (r.exported) return;
-    pending.push({
+  const asRow = function(r) {
+    return {
       row: r.row,
       date: r.date,
       cabinet: r.cabinet,
@@ -4108,9 +4113,36 @@ function getOzonCostExport() {
       cost: r.costAfter,
       opId: r.opId,
       source: r.source
-    });
+    };
+  };
+
+  const pending = [];
+  journal.forEach(function(r) {
+    if (r.exported) return;
+    pending.push(asRow(r));
   });
-  return { rows: pending, pending: pending.length, total: journal.length };
+  if (pending.length > 0) {
+    return { rows: pending, pending: pending.length, total: journal.length, repeat: false, lastExportedAt: '' };
+  }
+
+  // Ничего нового: отдаём последний посчитанный набор. Метка вида «ГГГГ-ММ-ДД ЧЧ:ММ:СС имя»,
+  // сравниваем только время — имя пользователя за ним на порядок не влияет.
+  let lastStamp = '';
+  journal.forEach(function(r) {
+    const at = String(r.exported || '').slice(0, 19);
+    if (at && at > lastStamp) lastStamp = at;
+  });
+  const repeatRows = [];
+  journal.forEach(function(r) {
+    if (String(r.exported || '').slice(0, 19) === lastStamp && lastStamp) repeatRows.push(asRow(r));
+  });
+  return {
+    rows: repeatRows,
+    pending: 0,
+    total: journal.length,
+    repeat: true,
+    lastExportedAt: lastStamp
+  };
 }
 
 /**

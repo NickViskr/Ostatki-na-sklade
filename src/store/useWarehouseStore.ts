@@ -1870,6 +1870,11 @@ export const useWarehouseStore = create<WarehouseState>()(
   // Пункт 47, этап 3. Порядок шагов важен: сначала собрать и отдать файл, и только потом
   // проставить отметку. Сорвётся сборка — строки останутся невыгруженными, и следующее
   // нажатие заберёт их снова. Обратный порядок потерял бы изменение себестоимости навсегда.
+  //
+  // Файл отдаётся ВСЕГДА (решение владельца 26.08.2026). Есть новые отгрузки — в файле новая
+  // себестоимость по ним; новых нет — в файле последние расчётные данные, и тогда отметка НЕ
+  // переставляется: она помнит, когда строка попала в КАН впервые, и по ней же собирается
+  // этот повтор.
   exportKanCost: async () => {
     set({ isProcessing: true });
     try {
@@ -1879,10 +1884,7 @@ export const useWarehouseStore = create<WarehouseState>()(
         return;
       }
       const pending: any[] = result.data?.rows || [];
-      if (pending.length === 0) {
-        toast.info('Новых изменений себестоимости нет — выгружать нечего');
-        return;
-      }
+      const isRepeat = result.data?.repeat === true;
 
       const rows: KanCostRow[] = pending.map((r) => ({
         date: String(r.date || ''),
@@ -1902,6 +1904,15 @@ export const useWarehouseStore = create<WarehouseState>()(
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+
+      if (rows.length === 0) {
+        toast.info('В журнале себестоимости пока нет ни одной строки — в файле только заголовок');
+        return;
+      }
+      if (isRepeat) {
+        toast.info(`Новых отгрузок с прошлой выгрузки не было. В файле последние расчётные данные: строк ${rows.length}`);
+        return;
+      }
 
       const mark = await get().fetchGas('markOzonCostExported', {
         data: {

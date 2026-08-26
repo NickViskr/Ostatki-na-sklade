@@ -1577,10 +1577,17 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     rows.every(r => String(r['Выгружено в КАН']).indexOf('tester') !== -1),
     `получено: ${JSON.stringify(rows.map(r => r['Выгружено в КАН']))}`);
 
+  // Владелец 26.08.2026: файл должен отдаваться ВСЕГДА. Новых отгрузок нет — значит нечего
+  // пересчитывать, и в файл идут последние расчётные данные, то есть строки прошлой выгрузки.
   const second = h.getOzonCostExport();
-  check('Item 47: повторное нажатие без новых отгрузок отдаёт пустой список, а не те же строки',
-    second.pending === 0 && second.rows.length === 0,
-    `получено строк: ${second.pending}`);
+  check('Item 47: повторное нажатие отдаёт последние расчётные данные, а не пустоту',
+    second.repeat === true && second.rows.length === 2,
+    `повтор: ${second.repeat}, строк: ${second.rows.length}`);
+  check('Item 47: новых строк при этом ноль — сообщение будет честным',
+    second.pending === 0, `получено: ${second.pending}`);
+  check('Item 47: повтор несёт время прошлой выгрузки',
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(second.lastExportedAt),
+    `получено: ${second.lastExportedAt}`);
   check('Item 47: и общее число строк журнала при этом не изменилось',
     second.total === 2, `получено: ${second.total}`);
 })();
@@ -1607,9 +1614,25 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   check('Item 47: после новой отгрузки в выгрузку идёт ровно одна новая строка',
     after.pending === 1 && after.rows[0].opId === 'op-new',
     `получено: ${JSON.stringify(after.rows.map(r => r.opId))}`);
+  check('Item 47: и это не повтор, а новый расчёт',
+    after.repeat === false, `получено: ${after.repeat}`);
   check('Item 47: уже выгруженная строка второй раз не выгружается',
     after.rows.every(r => r.opId !== 'НАЧАЛЬНАЯ ТОЧКА'),
     `получено: ${JSON.stringify(after.rows.map(r => r.opId))}`);
+
+  // Отмечаем новую строку и жмём ещё раз: повтор обязан взять ТОЛЬКО последнюю выгрузку,
+  // а не всё, что когда-либо уходило в КАН. Часы стенда стоят, поэтому вторую выгрузку
+  // сдвигаем во времени руками — иначе обе отметки получат одну метку и проверка ничего
+  // не проверит.
+  h.setNow('2026-01-06T09:00:00Z');
+  h.markOzonCostExported({ rows: after.rows.map(r => ({
+    row: r.row, opId: r.opId, cabinet: r.cabinet, article: r.article
+  })) }, 'tester');
+  const repeat = h.getOzonCostExport();
+  check('Item 47: повтор берёт только последнюю выгрузку, а не весь журнал',
+    repeat.repeat === true && repeat.rows.length === 1 && repeat.rows[0].opId === 'op-new',
+    `строк: ${repeat.rows.length}, ключи: ${JSON.stringify(repeat.rows.map(r => r.opId))}`);
+  h.setNow('2026-01-05T09:00:00Z');
 })();
 
 (function test113() {
@@ -1662,6 +1685,15 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   }] }, 'tester');
   check('Item 47: и отмечается она так же, как любая другая',
     marked.marked === 1, `отмечено: ${marked.marked}`);
+})();
+
+(function test115a() {
+  // Журнал пуст: отдавать нечего, но и падать нельзя — фронтенд отдаст файл с одним заголовком.
+  const h = freshHarness();
+  h.setOzonCostSheet([]);
+  const res = h.getOzonCostExport();
+  check('Item 47: пустой журнал — ноль строк и никакого падения',
+    res.rows.length === 0 && res.total === 0, `получено: ${JSON.stringify(res)}`);
 })();
 
 (function test115() {

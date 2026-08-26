@@ -139,11 +139,20 @@ describe('порядок шагов при выгрузке', () => {
     expect(clicked).toBeLessThan(marked);
   });
 
-  it('пустой список выходит раньше сборки файла — пустой файл не скачивается', () => {
-    const empty = body.indexOf('pending.length === 0');
-    const blob = body.indexOf('new Blob(');
-    expect(empty).toBeGreaterThan(-1);
-    expect(empty).toBeLessThan(blob);
+  it('файл отдаётся до любого раннего выхода — кнопка всегда скачивает файл', () => {
+    const clicked = body.indexOf('link.click()');
+    const emptyExit = body.indexOf('rows.length === 0');
+    const repeatExit = body.indexOf('if (isRepeat)');
+    expect(emptyExit).toBeGreaterThan(-1);
+    expect(repeatExit).toBeGreaterThan(-1);
+    expect(clicked).toBeLessThan(emptyExit);
+    expect(clicked).toBeLessThan(repeatExit);
+  });
+
+  it('на повторной выгрузке отметка не переставляется', () => {
+    const repeatExit = body.indexOf('if (isRepeat)');
+    const marked = body.indexOf("'markOzonCostExported'");
+    expect(repeatExit).toBeLessThan(marked);
   });
 });
 
