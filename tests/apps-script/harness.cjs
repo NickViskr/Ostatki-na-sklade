@@ -402,6 +402,7 @@ module.exports = {
   },
 
   // ---------- Item 47, stage 3: выгрузка в КАН ----------
+  daysSinceTransactionDate: (...args) => context.daysSinceTransactionDate(...args),
   getOzonCostExport: (...args) => context.getOzonCostExport(...args),
   markOzonCostExported: (...args) => context.markOzonCostExported(...args),
   dumpOzonCost() {

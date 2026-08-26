@@ -1599,22 +1599,55 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
   return { stock: getStock(), transactions: getTransactions().rows };
 }
 
+/**
+ * Пункт 47, этап 4, подэтап 3. Владелец 26.08.2026: «пользователь может сделать такие
+ * изменения себестоимость поступившего товара не позднее 30 дней с даты поступления товара
+ * на его склад». Правило заодно ограничивает глубину пересчёта в подэтапе 4: чем дальше
+ * назад правка, тем больше отгрузок надо переигрывать.
+ */
+const RECEIPT_EDIT_WINDOW_DAYS = 30;
+
+/** Сколько ПОЛНЫХ суток прошло с даты операции. Пустая или нечитаемая дата — ноль, то есть
+ *  правку не запрещаем: отказывать из-за собственного непонимания даты неправильно. */
+function daysSinceTransactionDate(dateStr) {
+  const raw = String(dateStr || '').trim();
+  if (!raw) return 0;
+  const then = new Date(raw);
+  if (isNaN(then.getTime())) return 0;
+  const diff = new Date().getTime() - then.getTime();
+  if (diff <= 0) return 0;
+  return Math.floor(diff / 86400000);
+}
+
 function updateTransaction(id, data, username) {
   // Item 56, stage 2. The additional costs of an operation now live in their own column.
   // An edit deletes the row and writes it again, so the number has to be read BEFORE the
   // delete: for a batch write-off the destination text names the cost of the whole batch,
   // and re-parsing it would charge that whole cost to this one order.
   let storedAdditional = null;
+  let storedRow = null;
   try {
     const priorRows = getTransactions().rows;
     for (let i = 0; i < priorRows.length; i++) {
       if (String(priorRows[i].id) === String(id)) {
+        storedRow = priorRows[i];
         storedAdditional = priorRows[i].additionalCosts;
         break;
       }
     }
   } catch (e) {
     storedAdditional = null;
+  }
+
+  // Подэтап 3: окно правки прихода. Дата берётся из СОХРАНЁННОЙ строки, а не из присланной:
+  // иначе правило обходится подстановкой свежей даты в том же запросе, которым его нарушают.
+  if (storedRow && String(storedRow.type) === 'Приход') {
+    const age = daysSinceTransactionDate(storedRow.date);
+    if (age > RECEIPT_EDIT_WINDOW_DAYS) {
+      throw new Error('Приход старше ' + RECEIPT_EDIT_WINDOW_DAYS + ' дней править нельзя: этому приходу '
+        + age + ' дн. Себестоимость поступившего товара меняется не позднее '
+        + RECEIPT_EDIT_WINDOW_DAYS + ' дней с даты поступления на склад.');
+    }
   }
   const editedAdditional = (data.additionalCosts !== null && data.additionalCosts !== undefined
     && String(data.additionalCosts).trim() !== '') ? data.additionalCosts : storedAdditional;

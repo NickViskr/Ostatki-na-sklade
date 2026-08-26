@@ -131,3 +131,24 @@ export const formatDateRu = (raw?: string | null): string => {
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   return `${dd}.${mm}.${d.getFullYear()}`;
 };
+
+/**
+ * Пункт 47, этап 4, подэтап 3. Себестоимость поступившего товара правится не позднее
+ * 30 дней с даты поступления на склад — правило владельца от 26.08.2026. Число обязано
+ * совпадать с RECEIPT_EDIT_WINDOW_DAYS в Code.gs: сервер решает, экран лишь не обманывает.
+ */
+export const RECEIPT_EDIT_WINDOW_DAYS = 30;
+
+/**
+ * Сколько ПОЛНЫХ суток прошло с даты операции. Дата в будущем и нечитаемая дата дают ноль,
+ * то есть правку не запрещают: отказывать из-за собственного непонимания даты неправильно.
+ * Повторяет арифметику daysSinceTransactionDate в Code.gs — расхождение означало бы, что
+ * кнопка обещает одно, а сервер делает другое.
+ */
+export const daysSinceReceipt = (raw?: string | null, now: Date = new Date()): number => {
+  const then = parseAppDate(raw);
+  if (!then) return 0;
+  const diff = now.getTime() - then.getTime();
+  if (diff <= 0) return 0;
+  return Math.floor(diff / 86400000);
+};

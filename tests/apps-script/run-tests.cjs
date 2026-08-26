@@ -1929,6 +1929,93 @@ function withShippedReceipt() {
     h.dumpOzonCost().length === 0, `получено строк: ${h.dumpOzonCost().length}`);
 })();
 
+// ====== Пункт 47, этап 4, подэтап 3: окно правки прихода в 30 дней ======
+
+// Приход датирован 01.08.2026 09:00 UTC. Двигаем «сегодня» и смотрим, пускает ли правка.
+const editAtDay = (nowIso, qty) => {
+  const { h, id } = withReceipt(300, 100);
+  h.setNow(nowIso);
+  let message = '';
+  try { editReceipt(h, id, 400, qty === undefined ? 100 : qty); }
+  catch (e) { message = String(e.message || e); }
+  const price = h.getTransactions().rows.find(t => t.type === 'Приход').price;
+  h.setNow('2026-01-05T09:00:00Z');
+  return { message, price, h };
+};
+
+(function test130() {
+  const at29 = editAtDay('2026-08-30T09:00:00Z');
+  check('Подэтап 3: приходу 29 дней — правка проходит',
+    at29.message === '' && at29.price === 400, `сообщение: ${at29.message}, цена: ${at29.price}`);
+
+  const at30 = editAtDay('2026-08-31T09:00:00Z');
+  check('Подэтап 3: ровно 30 дней — правка проходит, граница включена',
+    at30.message === '' && at30.price === 400, `сообщение: ${at30.message}, цена: ${at30.price}`);
+
+  const at31 = editAtDay('2026-09-01T09:00:00Z');
+  check('Подэтап 3: 31 день — отказ',
+    at31.message.indexOf('старше 30 дней') !== -1, `получено: ${at31.message || 'без ошибки'}`);
+  check('Подэтап 3: и цена после отказа осталась прежней — 300',
+    at31.price === 300, `получено: ${at31.price}`);
+  check('Подэтап 3: сообщение называет возраст прихода, а не одно только правило',
+    /этому приходу 31 дн\./.test(at31.message), `получено: ${at31.message}`);
+})();
+
+(function test131() {
+  // Сутки считаются полными: за минуту до конца тридцать первых суток это ещё 30 дней.
+  const almost = editAtDay('2026-09-01T08:59:00Z');
+  check('Подэтап 3: 30 дней 23 ч 59 мин — ещё можно',
+    almost.message === '' && almost.price === 400,
+    `сообщение: ${almost.message}, цена: ${almost.price}`);
+})();
+
+(function test132() {
+  // Обход подстановкой свежей даты в той же правке: дата берётся из СОХРАНЁННОЙ строки.
+  const { h, id } = withReceipt(300, 100);
+  h.setNow('2026-09-10T09:00:00Z');
+  let message = '';
+  try {
+    h.updateTransaction(id, { article: 'ART', quantity: 100, price: 400, type: 'Приход',
+      destination: 'Склад', date: '2026-09-10T09:00:00Z' }, 'tester');
+  } catch (e) { message = String(e.message || e); }
+  check('Подэтап 3: свежая дата в самой правке правило не обходит',
+    message.indexOf('старше 30 дней') !== -1, `получено: ${message || 'без ошибки'}`);
+  check('Подэтап 3: склад после отказа цел — 100 шт по 300',
+    h.stockOf('ART').quantity === 100 && h.stockOf('ART').avgCost === 300,
+    `получено: ${h.stockOf('ART').quantity} шт, средняя=${h.stockOf('ART').avgCost}`);
+  h.setNow('2026-01-05T09:00:00Z');
+})();
+
+(function test133() {
+  // Правило про ПРИХОД. Старый расход правится как правился — трогать его не просили.
+  const { h } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 10, price: 300 }],
+    'Расход', 'Склад [Списание - Брак]', '', 'tester', '2026-08-02T09:00:00Z', 'op-out');
+  const outId = h.getTransactions().rows.find(t => t.type === 'Расход').id;
+  h.setNow('2026-10-01T09:00:00Z');
+  let message = '';
+  try {
+    h.updateTransaction(outId, { article: 'ART', quantity: 5, type: 'Расход',
+      destination: 'Склад [Списание - Брак]', date: '2026-08-02T09:00:00Z' }, 'tester');
+  } catch (e) { message = String(e.message || e); }
+  check('Подэтап 3: окно 30 дней на расходы НЕ распространяется',
+    message.indexOf('старше 30 дней') === -1, `получено: ${message}`);
+  h.setNow('2026-01-05T09:00:00Z');
+})();
+
+(function test134() {
+  // Дата в будущем и нечитаемая дата не должны запрещать правку: отказывать из-за
+  // собственного непонимания даты неправильно.
+  const future = editAtDay('2026-07-01T09:00:00Z');
+  check('Подэтап 3: приход из будущего правку не блокирует',
+    future.message === '' && future.price === 400, `сообщение: ${future.message}`);
+
+  const h = freshHarness();
+  check('Подэтап 3: пустая дата — ноль дней, а не отказ',
+    h.daysSinceTransactionDate('') === 0 && h.daysSinceTransactionDate('не дата') === 0,
+    `получено: ${h.daysSinceTransactionDate('')}, ${h.daysSinceTransactionDate('не дата')}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

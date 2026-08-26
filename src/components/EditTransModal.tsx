@@ -8,6 +8,7 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 
 import { toast } from 'sonner';
+import { daysSinceReceipt, RECEIPT_EDIT_WINDOW_DAYS } from '../lib/utils';
 
 export const EditTransModal: React.FC = () => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
@@ -19,7 +20,16 @@ export const EditTransModal: React.FC = () => {
 
   if (!editingTrans) return null;
 
+  // Подэтап 3. Окно правки прихода. Решает сервер, экран лишь не обманывает: без этого
+  // кнопка обещала бы сохранение, а ответом прилетал бы отказ.
+  const receiptAgeDays = editingTrans.type === 'Приход' ? daysSinceReceipt(editingTrans.date) : 0;
+  const isReceiptLocked = receiptAgeDays > RECEIPT_EDIT_WINDOW_DAYS;
+
   const handleSave = async () => {
+    if (isReceiptLocked) {
+      toast.error(`Приход старше ${RECEIPT_EDIT_WINDOW_DAYS} дней править нельзя: этому приходу ${receiptAgeDays} дн.`);
+      return;
+    }
     if (Number(editingTrans.quantity) < 0) {
       toast.error('Количество не может быть отрицательным');
       return;
@@ -57,6 +67,14 @@ export const EditTransModal: React.FC = () => {
         </div>
 
         <div className="p-8 space-y-6">
+          {isReceiptLocked && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-6 py-4 text-sm text-amber-800">
+              <span className="font-bold">Править этот приход уже нельзя.</span> Ему {receiptAgeDays} дн.,
+              а себестоимость поступившего товара меняется не позднее {RECEIPT_EDIT_WINDOW_DAYS} дней
+              с даты поступления на склад.
+            </div>
+          )}
+
           <div className="space-y-2">
             <label className="text-sm font-bold text-slate-500 uppercase">Количество</label>
             <input 
@@ -128,7 +146,7 @@ export const EditTransModal: React.FC = () => {
           </button>
           <button 
             onClick={handleSave}
-            disabled={isProcessing}
+            disabled={isProcessing || isReceiptLocked}
             className="flex-1 bg-slate-900 text-white py-4 rounded-2xl font-bold hover:bg-slate-800 disabled:opacity-50 transition-all shadow-xl flex items-center justify-center gap-2"
           >
             {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <Save size={20} />}
