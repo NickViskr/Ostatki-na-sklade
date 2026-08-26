@@ -3,6 +3,7 @@ import { buildCargoPlan, buildBoxesPayload } from '../lib/ozonCargo';
 import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
+import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
 import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict } from '../lib/ozonSupplyLines';
 
@@ -50,6 +51,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const ozonClusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
+  const supplySettings = useWarehouseStore((state) => state.ozonSupplySettings);
   const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
 
   const [sending, setSending] = useState(false);
@@ -282,6 +284,27 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     });
   }, [ozonClusterRefs, ozonSettings, activeRows]);
 
+  /* ---- Пункт 58. Прямая поставка едет отдельной заявкой ---------------------------
+   * Запрет обязан жить и здесь, а не только на экране рекомендаций: иначе он обходится
+   * в два клика — отметить один кластер в рекомендациях, а второй дописать уже тут.
+   * Недоступный кластер из списка НЕ убирается, а показывается серым с объяснением:
+   * исчезнувший из списка Екатеринбург выглядел бы поломкой, а не правилом.
+   */
+  const directRules = useMemo(
+    () => parseDirectClusters(supplySettings.directClusters),
+    [supplySettings.directClusters]
+  );
+
+  /** Кластеры, которые уже есть в собираемой заявке. */
+  const supplyClusterIds = useMemo(() => {
+    const ids: string[] = [];
+    activeRows.forEach((r) => {
+      const cid = String(r.clusterId || '').trim();
+      if (cid && ids.indexOf(cid) < 0) ids.push(cid);
+    });
+    return ids;
+  }, [activeRows]);
+
   /** Articles offered for the chosen cluster: something must be free to ship on «Мой склад»,
    *  an Ozon SKU is required,
    *  otherwise the line cannot be sent at all, and the pair must not already be in the
@@ -365,6 +388,11 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     const cluster = clusterOptions.find((c) => c.clusterId === addForm.clusterId);
     if (!cluster) {
       toast.error('Выберите кластер');
+      return;
+    }
+    // Пункт 58. Сторож на случай, если выбор всё же прошёл мимо серого пункта списка.
+    if (!isClusterSelectable(directRules, supplyClusterIds, cluster.clusterId)) {
+      toast.error(disabledReason(directRules, supplyClusterIds, cluster.clusterId));
       return;
     }
     if (!addForm.article) {
@@ -998,9 +1026,14 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                     className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-400"
                   >
                     <option value="">Кластер…</option>
-                    {clusterOptions.map((c) => (
-                      <option key={c.clusterId} value={c.clusterId}>{c.clusterName}</option>
-                    ))}
+                    {clusterOptions.map((c) => {
+                      const blocked = !isClusterSelectable(directRules, supplyClusterIds, c.clusterId);
+                      return (
+                        <option key={c.clusterId} value={c.clusterId} disabled={blocked}>
+                          {blocked ? `${c.clusterName} — только отдельной заявкой` : c.clusterName}
+                        </option>
+                      );
+                    })}
                   </select>
                   <select
                     value={addForm.article}

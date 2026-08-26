@@ -7,6 +7,7 @@ import { OzonStockRow, FactoryOrder } from '../types';
 import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
+import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
 import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
@@ -91,6 +92,21 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [supplySummaryOpen, setSupplySummaryOpen] = useState(false);
 
   const supplyKey = (article: string, clusterId: string) => `${article}|||${clusterId}`;
+
+  // Пункт 58. Кластер прямой поставки едет ОДИН: смешанного черновика в Ozon не существует.
+  // Поэтому галочки взаимоисключающие, и правило смотрит на ВЕСЬ выбор по всем артикулам,
+  // а не на строку товара — иначе запрет обходился бы отметкой в соседней карточке.
+  const directRules = useMemo(() => parseDirectClusters(supplySettings.directClusters), [supplySettings.directClusters]);
+
+  const selectedClusterIds = useMemo(() => {
+    const ids: string[] = [];
+    Object.keys(selectedSupply).forEach((key) => {
+      if (!selectedSupply[key]) return;
+      const cid = key.split('|||')[1] || '';
+      if (cid && ids.indexOf(cid) < 0) ids.push(cid);
+    });
+    return ids;
+  }, [selectedSupply]);
 
   const toggleSupplyRow = (article: string, clusterId: string) => {
     const key = supplyKey(article, clusterId);
@@ -976,8 +992,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                           type="checkbox"
                                           checked={Boolean(selectedSupply[supplyKey(s.article, c.clusterId)])}
                                           onChange={() => toggleSupplyRow(s.article, c.clusterId)}
-                                          className="shrink-0 w-3.5 h-3.5 accent-indigo-600 cursor-pointer"
-                                          title="Включить в заявку на поставку"
+                                          disabled={!isClusterSelectable(directRules, selectedClusterIds, String(c.clusterId))}
+                                          className="shrink-0 w-3.5 h-3.5 accent-indigo-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                                          title={
+                                            disabledReason(directRules, selectedClusterIds, String(c.clusterId)) ||
+                                            'Включить в заявку на поставку'
+                                          }
                                         />
                                       )}
                                       {c.clusterName}

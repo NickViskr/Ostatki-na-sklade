@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   directWarehouseFor,
   disabledReason,
@@ -193,5 +195,52 @@ describe('склад для заявки', () => {
   it('кросс-докинговой заявке склад не нужен', () => {
     expect(directWarehouseFor(rules, [MSK, SPB])).toBeNull();
     expect(directWarehouseFor(rules, [])).toBeNull();
+  });
+});
+
+// Этап 3. Правило должно быть подключено В ДВУХ местах: галочки в «Рекомендациях» и
+// ручное добавление кластера в окне оформления. Без второго запрет обходится в два клика.
+// Компонентных тестов в проекте нет, поэтому подключение стережётся по исходному коду.
+describe('подключение правила к экранам', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const stocks = read('src/components/OzonStocksTab.tsx');
+  const modal = read('src/components/OzonSupplyModal.tsx');
+
+  it('«Рекомендации»: галочка гаснет по правилу', () => {
+    expect(stocks).toContain("disabled={!isClusterSelectable(directRules, selectedClusterIds, String(c.clusterId))}");
+  });
+
+  it('«Рекомендации»: причина показывается подсказкой', () => {
+    expect(stocks).toMatch(/title=\{\s*disabledReason\(directRules, selectedClusterIds, String\(c\.clusterId\)\)/);
+  });
+
+  it('«Рекомендации»: выбор собирается по ВСЕМ артикулам, а не по строке товара', () => {
+    expect(stocks).toMatch(/selectedClusterIds\s*=\s*useMemo/);
+    expect(stocks).toContain("key.split('|||')[1]");
+  });
+
+  it('«Рекомендации»: правила читаются из настроек, а не зашиты', () => {
+    expect(stocks).toContain('parseDirectClusters(supplySettings.directClusters)');
+    expect(stocks).not.toMatch(/['"`]4066['"`]/);
+  });
+
+  it('Мастер: недоступный кластер показан серым, а не спрятан', () => {
+    expect(modal).toContain('const blocked = !isClusterSelectable(directRules, supplyClusterIds, c.clusterId);');
+    expect(modal).toContain('disabled={blocked}');
+    expect(modal).toContain('только отдельной заявкой');
+  });
+
+  it('Мастер: добавление строки остановит сторож, даже если список обошли', () => {
+    expect(modal).toMatch(/if \(!isClusterSelectable\(directRules, supplyClusterIds, cluster\.clusterId\)\) \{[\s\S]{0,160}return;/);
+  });
+
+  it('Мастер: выбор считается по кластерам живого состава заявки', () => {
+    expect(modal).toMatch(/supplyClusterIds\s*=\s*useMemo/);
+    expect(modal).toContain('activeRows.forEach');
+  });
+
+  it('Мастер: правила читаются из настроек, а не зашиты', () => {
+    expect(modal).toContain('parseDirectClusters(supplySettings.directClusters)');
+    expect(modal).not.toMatch(/['"`]4066['"`]/);
   });
 });
