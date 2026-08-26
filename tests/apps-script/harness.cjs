@@ -357,6 +357,9 @@ module.exports = {
   },
   ozonCabinetFromDestination: (...args) => context.ozonCabinetFromDestination(...args),
   appendOzonCostForShipment: (...args) => context.appendOzonCostForShipment(...args),
+  // ---------- Item 47, stage 3: выгрузка в КАН ----------
+  getOzonCostExport: (...args) => context.getOzonCostExport(...args),
+  markOzonCostExported: (...args) => context.markOzonCostExported(...args),
   dumpOzonCost() {
     const sheet = sheetRegistry['Себестоимость Озон'];
     if (!sheet) return [];

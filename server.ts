@@ -256,7 +256,11 @@ async function startServer() {
     updateService: ['getServices'],
     deleteService: ['getServices'],
     addServiceRate: ['getServiceRates'],
-    saveFactoryOrder: ['getFactoryOrders', 'getOzonInitialData']
+    saveFactoryOrder: ['getFactoryOrders', 'getOzonInitialData'],
+    // Item 47, stage 3: stamping the exported rows touches nothing any other read returns,
+    // so the list is deliberately empty. It must still be present here: an action missing
+    // from this map wipes the whole cache.
+    markOzonCostExported: []
   };
 
   function invalidateCacheFor(writeAction: string): void {
@@ -355,7 +359,11 @@ async function startServer() {
     // it on EVERY load, so on every load the proxy treated it as a write and, finding no entry in
     // CACHE_INVALIDATION, wiped the entire response cache. That is why the cache never helped at
     // start-up, before or after the composite read was introduced.
-    'getLastPurchasePrices'
+    'getLastPurchasePrices',
+    // Item 47, stage 3: a pure read of the cost journal. Deliberately NOT given a cache
+    // lifetime below — the button stamps the rows it exported, so a cached answer would
+    // offer the same rows twice.
+    'getOzonCostExport'
   ];
 
   // API Endpoint to proxy GAS requests

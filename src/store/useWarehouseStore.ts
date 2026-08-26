@@ -7,6 +7,7 @@ import { parseInvoiceWithGemini } from '../lib/gemini';
 import { OzonSupplyRequestRow } from '../lib/ozonPending';
 import { OzonCoverageSettings, OzonClusterRef } from '../lib/ozonCoverage';
 import { BatchWriteOffGroup } from '../lib/ozonBatchWriteOff';
+import { buildKanCostCsv, KanCostRow, kanCostFileName } from '../lib/kanCostExport';
 import { toast } from 'sonner';
 
 // Пункт 40. Капитализацию здесь обнулять НЕЛЬЗЯ: у артикула с нулевым остатком она несёт
@@ -169,6 +170,8 @@ interface WarehouseState {
   bootFetchStarted: boolean;
   fetchOzonStocks: () => Promise<void>;
   runOzonStocksSync: () => Promise<void>;
+  /** Пункт 47, этап 3: собрать файл себестоимости для КАН и отметить выгруженные строки. */
+  exportKanCost: () => Promise<void>;
   ozonSales: OzonSalesRow[];
   fetchOzonSales: () => Promise<void>;
   ozonSupplyRequests: OzonSupplyRequestRow[];
@@ -1859,6 +1862,69 @@ export const useWarehouseStore = create<WarehouseState>()(
     } catch (e: any) {
       console.error(e);
       toast.error('Ошибка сети при обновлении остатков Ozon: ' + (e.message || String(e)));
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  // Пункт 47, этап 3. Порядок шагов важен: сначала собрать и отдать файл, и только потом
+  // проставить отметку. Сорвётся сборка — строки останутся невыгруженными, и следующее
+  // нажатие заберёт их снова. Обратный порядок потерял бы изменение себестоимости навсегда.
+  exportKanCost: async () => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('getOzonCostExport');
+      if (result.status !== 'success') {
+        toast.error(result.message || 'Не удалось получить себестоимость для КАН');
+        return;
+      }
+      const pending: any[] = result.data?.rows || [];
+      if (pending.length === 0) {
+        toast.info('Новых изменений себестоимости нет — выгружать нечего');
+        return;
+      }
+
+      const rows: KanCostRow[] = pending.map((r) => ({
+        date: String(r.date || ''),
+        sku: String(r.sku || ''),
+        article: String(r.article || ''),
+        cost: Number(r.cost) || 0,
+        cabinet: String(r.cabinet || ''),
+      }));
+
+      const blob = new Blob([buildKanCostCsv(rows)], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = kanCostFileName(new Date());
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      const mark = await get().fetchGas('markOzonCostExported', {
+        data: {
+          rows: pending.map((r) => ({
+            row: r.row,
+            opId: r.opId,
+            cabinet: r.cabinet,
+            article: r.article,
+          })),
+        },
+      });
+      if (mark.status === 'success') {
+        toast.success(`Файл для КАН собран: строк ${rows.length}`);
+        const mismatched = mark.data?.mismatched || [];
+        if (mismatched.length > 0) {
+          toast.error(`Не отмечено строк: ${mismatched.length}. Лист «Себестоимость Озон» изменился во время выгрузки — проверьте отметки вручную.`);
+        }
+      } else {
+        toast.error('Файл собран, но отметка о выгрузке не проставлена: ' + (mark.message || 'ошибка'));
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при выгрузке себестоимости для КАН: ' + (e.message || String(e)));
     } finally {
       set({ isProcessing: false });
     }

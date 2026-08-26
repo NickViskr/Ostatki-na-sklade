@@ -1527,6 +1527,153 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     kitRows[0]['Себестоимость после'] === 225, `получено: ${kitRows[0]['Себестоимость после']}`);
 })();
 
+// ================= Пункт 47, этап 3: выгрузка себестоимости в КАН =================
+
+(function test110() {
+  // Что попадает в файл: всё, чего КАН ещё не видел, включая строки «НАЧАЛЬНАЯ ТОЧКА».
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-A', 200.00, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '111' }),
+    costRow('2026-08-06', 'MaxiStore', 'ART-A', 210.50, 'op-1', { sku: '111', shipped: 50, shippedCost: 231.5 }),
+    costRow('2026-08-10', 'Mercurius', 'ART-B', 500.00, 'op-2', { sku: '222', exported: '2026-08-11 10:00:00 admin' }),
+  ]);
+
+  const res = h.getOzonCostExport();
+  check('Item 47: в выгрузку попали только строки без отметки',
+    res.pending === 2 && res.rows.every(r => r.article === 'ART-A'),
+    `получено: ${JSON.stringify(res.rows.map(r => r.article))}`);
+  check('Item 47: строка «НАЧАЛЬНАЯ ТОЧКА» тоже выгружается — это первая себестоимость артикула',
+    res.rows.some(r => r.opId === 'НАЧАЛЬНАЯ ТОЧКА'),
+    `получено: ${JSON.stringify(res.rows.map(r => r.opId))}`);
+  check('Item 47: строки идут в порядке листа, от старой к новой',
+    res.rows[0].date === '2026-08-01' && res.rows[1].date === '2026-08-06',
+    `получено: ${res.rows.map(r => r.date).join(', ')}`);
+  check('Item 47: в КАН уходит «Себестоимость после», а не себестоимость отгрузки',
+    res.rows[1].cost === 210.5, `получено: ${res.rows[1].cost}`);
+  check('Item 47: каждая строка знает свой номер в листе — по нему потом ставится отметка',
+    res.rows[0].row === 2 && res.rows[1].row === 3,
+    `получено: ${res.rows.map(r => r.row).join(', ')}`);
+})();
+
+(function test111() {
+  // Отметка ставится только тем строкам, что реально ушли в файл, и только один раз.
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-A', 200.00, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '111' }),
+    costRow('2026-08-06', 'MaxiStore', 'ART-A', 210.50, 'op-1', { sku: '111' }),
+  ]);
+
+  const first = h.getOzonCostExport();
+  const marked = h.markOzonCostExported({ rows: first.rows.map(r => ({
+    row: r.row, opId: r.opId, cabinet: r.cabinet, article: r.article
+  })) }, 'tester');
+
+  check('Item 47: отмечены обе выгруженные строки, расхождений нет',
+    marked.marked === 2 && marked.mismatched.length === 0,
+    `отмечено: ${marked.marked}, расхождений: ${marked.mismatched.length}`);
+
+  const rows = h.dumpOzonCost();
+  check('Item 47: отметка записана в колонку «Выгружено в КАН» и несёт имя пользователя',
+    rows.every(r => String(r['Выгружено в КАН']).indexOf('tester') !== -1),
+    `получено: ${JSON.stringify(rows.map(r => r['Выгружено в КАН']))}`);
+
+  const second = h.getOzonCostExport();
+  check('Item 47: повторное нажатие без новых отгрузок отдаёт пустой список, а не те же строки',
+    second.pending === 0 && second.rows.length === 0,
+    `получено строк: ${second.pending}`);
+  check('Item 47: и общее число строк журнала при этом не изменилось',
+    second.total === 2, `получено: ${second.total}`);
+})();
+
+(function test112() {
+  // Новая отгрузка после выгрузки: в файл идёт только она.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-N', quantity: 200, avgCost: 300, capitalization: 60000 }]);
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-N', 500.00, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '777' })]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-N', available: 300, sku: '777' }]);
+
+  const before = h.getOzonCostExport();
+  h.markOzonCostExported({ rows: before.rows.map(r => ({
+    row: r.row, opId: r.opId, cabinet: r.cabinet, article: r.article
+  })) }, 'tester');
+
+  h.commitTransaction(
+    [{ article: 'ART-N', quantity: 100, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-26T09:00:00Z', 'op-new'
+  );
+
+  const after = h.getOzonCostExport();
+  check('Item 47: после новой отгрузки в выгрузку идёт ровно одна новая строка',
+    after.pending === 1 && after.rows[0].opId === 'op-new',
+    `получено: ${JSON.stringify(after.rows.map(r => r.opId))}`);
+  check('Item 47: уже выгруженная строка второй раз не выгружается',
+    after.rows.every(r => r.opId !== 'НАЧАЛЬНАЯ ТОЧКА'),
+    `получено: ${JSON.stringify(after.rows.map(r => r.opId))}`);
+})();
+
+(function test113() {
+  // Строка сдвинулась после сборки файла — отметку ставить нельзя: она попадёт не туда,
+  // и изменение себестоимости КАН не увидит никогда.
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-A', 200.00, 'op-1', { sku: '111' }),
+    costRow('2026-08-02', 'MaxiStore', 'ART-B', 300.00, 'op-2', { sku: '222' }),
+  ]);
+
+  const wrongOp = h.markOzonCostExported({ rows: [
+    { row: 2, opId: 'op-ЧУЖОЙ', cabinet: 'MaxiStore', article: 'ART-A' }
+  ] }, 'tester');
+  check('Item 47: чужой ключ операции — отметка НЕ ставится, расхождение возвращается',
+    wrongOp.marked === 0 && wrongOp.mismatched.length === 1,
+    `отмечено: ${wrongOp.marked}, расхождений: ${wrongOp.mismatched.length}`);
+
+  const wrongArticle = h.markOzonCostExported({ rows: [
+    { row: 2, opId: 'op-1', cabinet: 'MaxiStore', article: 'ART-B' }
+  ] }, 'tester');
+  check('Item 47: тот же ключ, но другой артикул — тоже расхождение, а не тихая отметка',
+    wrongArticle.marked === 0 && wrongArticle.mismatched.length === 1,
+    `отмечено: ${wrongArticle.marked}`);
+
+  const outOfRange = h.markOzonCostExported({ rows: [
+    { row: 99, opId: 'op-1', cabinet: 'MaxiStore', article: 'ART-A' }
+  ] }, 'tester');
+  check('Item 47: номера строки нет в листе — сообщение, а не падение',
+    outOfRange.marked === 0 && outOfRange.mismatched[0].reason.indexOf('нет') !== -1,
+    `получено: ${JSON.stringify(outOfRange.mismatched)}`);
+
+  check('Item 47: после трёх неудачных попыток обе строки остались невыгруженными',
+    h.getOzonCostExport().pending === 2, `получено: ${h.getOzonCostExport().pending}`);
+})();
+
+(function test114() {
+  // Пустой SKU выгрузку не роняет — товар мог не доехать до справочника Озона.
+  const h = freshHarness();
+  h.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-БЕЗ-SKU', 123.45, 'op-1'),
+  ]);
+  const res = h.getOzonCostExport();
+  check('Item 47: строка с пустым SKU выгружается, поле остаётся пустым',
+    res.pending === 1 && res.rows[0].sku === '' && res.rows[0].cost === 123.45,
+    `получено: ${JSON.stringify(res.rows)}`);
+
+  const marked = h.markOzonCostExported({ rows: [{
+    row: res.rows[0].row, opId: 'op-1', cabinet: 'MaxiStore', article: 'ART-БЕЗ-SKU'
+  }] }, 'tester');
+  check('Item 47: и отмечается она так же, как любая другая',
+    marked.marked === 1, `отмечено: ${marked.marked}`);
+})();
+
+(function test115() {
+  // Пустой список на входе — не запись в лист и не ошибка.
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 200.00, 'op-1')]);
+  const res = h.markOzonCostExported({ rows: [] }, 'tester');
+  check('Item 47: отметить нечего — ноль отмеченных и ни одной правки в листе',
+    res.marked === 0 && h.getOzonCostExport().pending === 1,
+    `отмечено: ${res.marked}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

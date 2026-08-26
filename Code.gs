@@ -439,6 +439,8 @@ function doPost(e) {
       case 'checkSupplyAvailability': result = checkSupplyAvailability(data); break;
       case 'saveOzonSupplyRequest': assertAdmin(currentUser); result = saveOzonSupplyRequest(data, currentUser.username); break;
       case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
+      case 'getOzonCostExport': assertAdmin(currentUser); result = getOzonCostExport(); break;
+      case 'markOzonCostExported': assertAdmin(currentUser); result = markOzonCostExported(data, currentUser.username); break;
       case 'saveSupplyDocsToDrive': assertAdmin(currentUser); result = saveSupplyDocsToDrive(data); break;
       default:
         throw new Error('Unknown action: ' + action);
@@ -3805,6 +3807,8 @@ function getOzonCostJournal() {
       dateStr = String(rawDate || '');
     }
     rows.push({
+      // Sheet row number, needed by the KAN export to stamp exactly the rows it took.
+      row: i + 1,
       date: dateStr,
       cabinet: String(row[idx['Кабинет']] || '').trim(),
       article: String(row[idx['Артикул']] || '').trim(),
@@ -4077,6 +4081,89 @@ function appendOzonCostForShipment(items, destination, dateStr, opId, username) 
     SpreadsheetApp.flush();
   }
   return { written: rows.length, skipped: skipped };
+}
+
+/**
+ * Item 47, stage 3: the rows the «Себестоимость КАН» button has to put into the file.
+ *
+ * Everything the journal has not yet handed to KAN, oldest first — including the
+ * «НАЧАЛЬНАЯ ТОЧКА» rows, which are the first cost each article ever had. The owner's
+ * rule of 26.08.2026 is that EVERY recomputation goes to KAN, one row per shipment, so
+ * nothing is collapsed to the latest value per article here.
+ *
+ * No alert for articles without a cost: the owner cancelled that on 26.08.2026 — those
+ * are articles that stopped selling long ago.
+ */
+function getOzonCostExport() {
+  const journal = getOzonCostJournal();
+  const pending = [];
+  journal.forEach(function(r) {
+    if (r.exported) return;
+    pending.push({
+      row: r.row,
+      date: r.date,
+      cabinet: r.cabinet,
+      article: r.article,
+      sku: r.sku,
+      cost: r.costAfter,
+      opId: r.opId,
+      source: r.source
+    });
+  });
+  return { rows: pending, pending: pending.length, total: journal.length };
+}
+
+/**
+ * Item 47, stage 3: stamp the rows that went into a file the user actually received.
+ *
+ * Called only AFTER the file has been built and handed over, so a failure while building it
+ * leaves the rows unexported and the next press picks them up again.
+ *
+ * Each row is identified by its sheet row number AND by the triple (OpID, cabinet, article)
+ * that produced it. The triple is verified before writing: if the sheet moved under us, the
+ * mismatch is reported instead of stamping the wrong row, because a wrongly stamped row is a
+ * cost change KAN would never learn about.
+ */
+function markOzonCostExported(data, username) {
+  const requested = (data && data.rows) || [];
+  if (requested.length === 0) return { marked: 0, mismatched: [] };
+
+  const ss = getSpreadsheet();
+  const sheet = getOzonCostSheet(ss);
+  ensureColumns(sheet, OZON_COST_HEADERS);
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(function(h) { return String(h).trim(); });
+  const colExported = headers.indexOf('Выгружено в КАН') + 1;
+  const idxOp = headers.indexOf('OpID');
+  const idxCab = headers.indexOf('Кабинет');
+  const idxArt = headers.indexOf('Артикул');
+  if (colExported === 0) throw new Error('В листе «Себестоимость Озон» нет колонки «Выгружено в КАН»');
+
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+    + ' ' + String(username || '');
+  const mismatched = [];
+  let marked = 0;
+
+  requested.forEach(function(r) {
+    const rowNumber = Number(r && r.row);
+    if (!rowNumber || rowNumber < 2 || rowNumber >= values.length + 1) {
+      mismatched.push({ row: rowNumber || 0, reason: 'строки нет в листе' });
+      return;
+    }
+    const sheetRow = values[rowNumber - 1];
+    const sameOp = String(sheetRow[idxOp] || '').trim() === String((r && r.opId) || '').trim();
+    const sameCab = String(sheetRow[idxCab] || '').trim() === String((r && r.cabinet) || '').trim();
+    const sameArt = String(sheetRow[idxArt] || '').trim() === String((r && r.article) || '').trim();
+    if (!sameOp || !sameCab || !sameArt) {
+      mismatched.push({ row: rowNumber, reason: 'строка изменилась после сборки файла' });
+      return;
+    }
+    sheet.getRange(rowNumber, colExported).setValue(stamp);
+    marked += 1;
+  });
+
+  SpreadsheetApp.flush();
+  return { marked: marked, mismatched: mismatched };
 }
 
 function getOzonSupplyRequests() {

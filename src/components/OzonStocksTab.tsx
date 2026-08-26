@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Columns3, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
+import { ChevronDown, ChevronRight, Columns3, FileDown, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -53,6 +53,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const ozonStocksSyncIssues = useWarehouseStore((state) => state.ozonStocksSyncIssues);
   const fetchOzonStocks = useWarehouseStore((state) => state.fetchOzonStocks);
   const runOzonStocksSync = useWarehouseStore((state) => state.runOzonStocksSync);
+  const exportKanCost = useWarehouseStore((state) => state.exportKanCost);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const ozonSales = useWarehouseStore((state) => state.ozonSales);
@@ -787,6 +788,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
             >
               <Settings size={14} />
               Настройки
+            </button>
+            <button
+              type="button"
+              id="btn-kan-cost-export"
+              title="Собрать файл себестоимости для загрузки в КАН"
+              disabled={isProcessing}
+              onClick={exportKanCost}
+              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs disabled:opacity-50"
+            >
+              <FileDown size={14} />
+              Себестоимость КАН
             </button>
             <button
               type="button"
