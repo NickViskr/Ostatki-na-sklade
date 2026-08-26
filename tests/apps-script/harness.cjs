@@ -407,6 +407,7 @@ module.exports = {
 
   // ---------- Item 47, stage 3: выгрузка в КАН ----------
   // ---------- Item 47, stage 4, substage 4: проигрывание истории артикула ----------
+  errorMessage: (...args) => context.errorMessage(...args),
   restoreTransaction: (...args) => context.restoreTransaction(...args),
   deleteMultipleTransactions: (...args) => context.deleteMultipleTransactions(...args),
   applyReplayCorrections: (...args) => context.applyReplayCorrections(...args),

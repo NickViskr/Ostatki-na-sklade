@@ -2478,6 +2478,29 @@ function checkFidelity(name, h, article) {
     `получено даты: ${JSON.stringify(reissued.map(r => String(r['Дата']).slice(0, 10)))}`);
 })();
 
+// ====== Текст ошибки без служебной приставки ======
+
+(function test170() {
+  const h = freshHarness();
+  check('Ошибка отдаётся без приставки «Error:»',
+    h.errorMessage(new Error('Приход старше 30 дней удалять нельзя')) === 'Приход старше 30 дней удалять нельзя',
+    `получено: ${h.errorMessage(new Error('Приход старше 30 дней удалять нельзя'))}`);
+  check('И «Error:» не остаётся даже кусочком',
+    h.errorMessage(new Error('текст')).indexOf('Error') === -1,
+    `получено: ${h.errorMessage(new Error('текст'))}`);
+  check('Брошенная строка проходит как есть',
+    h.errorMessage('просто строка') === 'просто строка', `получено: ${h.errorMessage('просто строка')}`);
+  check('Пустое сообщение не превращается в пустой экран',
+    h.errorMessage(new Error('')) === 'Error', `получено: "${h.errorMessage(new Error(''))}"`);
+  check('null и undefined дают понятный текст, а не «null»',
+    h.errorMessage(null) === 'Неизвестная ошибка' && h.errorMessage(undefined) === 'Неизвестная ошибка',
+    `получено: ${h.errorMessage(null)} / ${h.errorMessage(undefined)}`);
+  check('Живой пример из приложения читается целиком',
+    h.errorMessage(new Error('Приход старше 30 дней удалять нельзя: этому приходу 50 дн.'))
+      === 'Приход старше 30 дней удалять нельзя: этому приходу 50 дн.',
+    'получено: ' + h.errorMessage(new Error('Приход старше 30 дней удалять нельзя: этому приходу 50 дн.')));
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

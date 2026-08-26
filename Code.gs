@@ -450,7 +450,7 @@ function doPost(e) {
       .setMimeType(ContentService.MimeType.JSON);
       
   } catch (error) {
-    return ContentService.createTextOutput(JSON.stringify({ status: 'error', message: error.toString() }))
+    return ContentService.createTextOutput(JSON.stringify({ status: 'error', message: errorMessage(error) }))
       .setMimeType(ContentService.MimeType.JSON);
   } finally {
     // Освобождаем блокировку
@@ -2055,6 +2055,22 @@ function reissueOzonCostRows(changedShipments, username) {
   sheet.getRange(startRow, 1, rowsToAppend.length, OZON_COST_HEADERS.length).setValues(rowsToAppend);
   SpreadsheetApp.flush();
   return { appended: rowsToAppend.length };
+}
+
+/**
+ * Текст ошибки для пользователя, без служебной приставки.
+ *
+ * `error.toString()` у объекта Error даёт «Error: текст», а экран добавляет к ответу своё
+ * «Ошибка: » — и пользователь читал «Ошибка: Error: Приход старше 30 дней…». Приставка
+ * ничего ему не сообщает и мешает прочесть саму суть. Берём `message`, а для всего, что
+ * бросили не объектом Error (строка, число), остаётся обычное приведение к строке.
+ */
+function errorMessage(error) {
+  if (error === null || error === undefined) return 'Неизвестная ошибка';
+  const msg = error.message;
+  if (typeof msg === 'string' && msg.trim() !== '') return msg;
+  const asString = String(error);
+  return asString.trim() === '' ? 'Неизвестная ошибка' : asString;
 }
 
 function isWriteOffDestination(dest) {
