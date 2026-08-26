@@ -3860,10 +3860,16 @@ function isOzonCostCounted(journal, opId, cabinet, article) {
 }
 
 /**
- * Item 47, stage 2. What already lies on Ozon for this cabinet and article, by the owner's
- * definition: «Доступно» + «В пути» + «Возвраты», summed over every warehouse.
+ * Item 47, stage 2. Goods Ozon has actually taken onto stock: «Доступно» + «Возвраты».
+ *
+ * «В пути» is deliberately NOT read here. The owner's rule (26.08.2026) is that Ozon puts a
+ * supply onto stock only at the destination cluster, when that cluster's supply is COMPLETED;
+ * handing the goods over at the drop-off point means Ozon took them for carriage, nothing more.
+ * The column itself is ambiguous and not ours to control — on 25.08 the 294 pieces of a supply
+ * still IN_TRANSIT sat in it as 252 «В пути» plus 42 «В заявках» — so the goods in flight are
+ * counted from OUR OWN records instead, by getOzonShippedNotAcceptedForCost.
  */
-function getOzonStockForCost(cabinet, article) {
+function getOzonAcceptedStockForCost(cabinet, article) {
   const ss = getSpreadsheet();
   const sheet = getSheetByNameRobust(ss, 'Остатки Ozon');
   if (!sheet) return 0;
@@ -3871,7 +3877,7 @@ function getOzonStockForCost(cabinet, article) {
   if (values.length <= 1) return 0;
   const headers = values[0].map(function(h) { return String(h).trim(); });
   const ci = headers.indexOf('Кабинет'), ai = headers.indexOf('Артикул');
-  const parts = ['Доступно', 'В пути', 'Возвраты'].map(function(n) { return headers.indexOf(n); });
+  const parts = ['Доступно', 'Возвраты'].map(function(n) { return headers.indexOf(n); });
   if (ci === -1 || ai === -1) return 0;
   const cab = String(cabinet).trim(), art = String(article).trim();
   let total = 0;
@@ -3881,6 +3887,80 @@ function getOzonStockForCost(cabinet, article) {
     parts.forEach(function(idx) { if (idx !== -1) total += parseNumber(row[idx]); });
   }
   return total;
+}
+
+/** Ozon has finished with a supply: its goods are on stock, or they are never coming. */
+const OZON_SUPPLY_SETTLED_STATUSES = ['COMPLETED', 'CANCELLED'];
+
+/** offerId/штрихкод позиции Ozon -> наш артикул. */
+function buildOzonArticleResolver() {
+  const ss = getSpreadsheet();
+  const sheet = getSheetByNameRobust(ss, 'SKU');
+  const byBarcode = {}, byLower = {};
+  if (sheet) {
+    const values = sheet.getDataRange().getValues();
+    if (values.length > 1) {
+      const headers = values[0].map(function(h) { return String(h).trim(); });
+      const si = headers.indexOf('SKU'), bi = headers.indexOf('ШК Ozon');
+      for (let i = 1; i < values.length; i++) {
+        const sku = String(values[i][si] || '').trim();
+        if (!sku) continue;
+        byLower[sku.toLowerCase()] = sku;
+        if (bi !== -1) {
+          const bc = String(values[i][bi] || '').trim();
+          if (bc) byBarcode[bc] = sku;
+        }
+      }
+    }
+  }
+  return function(item) {
+    const bc = String((item && item.barcode) || '').trim();
+    if (bc && byBarcode[bc]) return byBarcode[bc];
+    const offer = String((item && (item.offerId || item.offer_id)) || '').trim();
+    if (!offer) return '';
+    return byLower[offer.toLowerCase()] || offer;
+  };
+}
+
+/**
+ * Item 47, stage 2. Goods we have already written off but Ozon has not finished accepting.
+ *
+ * Их себестоимость уже подмешана в среднюю, поэтому они обязаны быть в основании — иначе
+ * следующая поставка будет считаться от заниженного остатка. Считаем по СВОИМ записям, а не
+ * по колонке «В пути»: поставка помечена обработанной ровно тогда, когда мы её списали.
+ *
+ * Поставка, которую списывают ПРЯМО СЕЙЧАС, сюда не попадает: её поставки помечаются
+ * обработанными уже после проведения расхода. Поэтому вычитать её из основания не нужно —
+ * задвоения не возникает по построению.
+ */
+function getOzonShippedNotAcceptedForCost(cabinet, resolveArticle) {
+  const ss = getSpreadsheet();
+  const sheet = getSheetByNameRobust(ss, 'Внешние отгрузки');
+  const byArticle = {};
+  if (!sheet) return byArticle;
+  const values = sheet.getDataRange().getValues();
+  if (values.length <= 1) return byArticle;
+  const headers = values[0].map(function(h) { return String(h).trim(); });
+  const ci = headers.indexOf('Кабинет'), sti = headers.indexOf('Статус');
+  const osi = headers.indexOf('Статус Ozon'), ii = headers.indexOf('ПозицииJSON');
+  if (sti === -1 || osi === -1 || ii === -1) return byArticle;
+  const cab = String(cabinet).trim();
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (ci !== -1 && String(row[ci]).trim() !== cab) continue;
+    if (String(row[sti]).trim().toLowerCase() !== 'processed') continue;
+    const ozonStatus = String(row[osi]).trim().toUpperCase();
+    if (OZON_SUPPLY_SETTLED_STATUSES.indexOf(ozonStatus) !== -1) continue;
+    let items;
+    try { items = JSON.parse(String(row[ii] || '[]')); } catch (e) { continue; }
+    if (!Array.isArray(items)) continue;
+    items.forEach(function(it) {
+      const article = resolveArticle(it);
+      if (!article) return;
+      byArticle[article] = (byArticle[article] || 0) + (Number(it.quantity) || 0);
+    });
+  }
+  return byArticle;
 }
 
 /** «Ozon (Магазин) [расходы]» -> «Магазин». Пустая строка, если это не отгрузка на Ozon. */
@@ -3934,6 +4014,10 @@ function appendOzonCostForShipment(items, destination, dateStr, opId, username) 
     byArticle[key].value += qty * price;
   });
 
+  // Оба справочника строятся один раз на всю операцию: она может везти несколько артикулов.
+  const resolveArticle = buildOzonArticleResolver();
+  const inFlight = getOzonShippedNotAcceptedForCost(cabinet, resolveArticle);
+
   const rows = [];
   let skipped = 0;
   Object.keys(byArticle).forEach(function(article) {
@@ -3941,8 +4025,9 @@ function appendOzonCostForShipment(items, destination, dateStr, opId, username) 
     const shipped = byArticle[article].qty;
     const shippedCost = roundToTwo(byArticle[article].value / shipped);
     const prior = state[cabinet + '|' + article];
-    const stockNow = getOzonStockForCost(cabinet, article);
-    const base = Math.max(0, stockNow - shipped);
+    // Основание: принятое Озоном плюс наши поставки в пути. Текущую поставку не вычитаем —
+    // её ещё нет ни в одном из двух слагаемых.
+    const base = Math.max(0, getOzonAcceptedStockForCost(cabinet, article) + (inFlight[article] || 0));
 
     let costAfter, source;
     if (!prior) {

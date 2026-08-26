@@ -1262,8 +1262,9 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   h.setOzonCostSheet([
     costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА', { sku: '111' }),
   ]);
-  // 400 на Озоне — в них уже входят 100 только что отгруженных
-  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 350, transit: 40, returns: 10 }]);
+  // Озон принял на остаток 300 (290 доступно + 10 возвратов). «В пути» 40 в основание НЕ идёт:
+  // это чужая колонка, товар в пути мы считаем по своим записям.
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 290, transit: 40, returns: 10 }]);
 
   const res = h.appendOzonCostForShipment(
     [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }],
@@ -1272,7 +1273,7 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   const rows = h.dumpOzonCost();
   const last = rows[rows.length - 1];
   check('Item 47: строка дописана в журнал', res.written === 1 && rows.length === 2, `получено: ${JSON.stringify(res)}`);
-  check('Item 47: основание — остаток минус эта поставка (400 - 100 = 300)',
+  check('Item 47: основание — принятое Озоном, своя поставка не вычитается (290 + 10 = 300)',
     last['Остаток до'] === 300, `получено: ${last['Остаток до']}`);
   check('Item 47: средняя пересчитана верно ((300×500 + 100×600) / 400 = 525)',
     last['Себестоимость после'] === 525, `получено: ${last['Себестоимость после']}`);
@@ -1289,7 +1290,7 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   // Требование владельца: приложение обязано знать, по какой поставке уже посчитано.
   const h = freshHarness();
   h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
-  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 400 }]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
   const items = [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }];
   const dest = 'Ozon (MaxiStore)';
 
@@ -1313,8 +1314,8 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     costRow('2026-08-01', 'Mercurius', 'ART-B', 1000.00, 'НАЧАЛЬНАЯ ТОЧКА'),
   ]);
   h.setOzonStocksSheet([
-    { cabinet: 'Mercurius', article: 'ART-A', available: 400 },
-    { cabinet: 'Mercurius', article: 'ART-B', available: 50 },
+    { cabinet: 'Mercurius', article: 'ART-A', available: 300 },
+    { cabinet: 'Mercurius', article: 'ART-B', available: 40 },
   ]);
   const res = h.appendOzonCostForShipment(
     [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' },
@@ -1334,7 +1335,7 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   // Партия из двух заявок: один артикул приходит двумя строками одной операции.
   const h = freshHarness();
   h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
-  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 400 }]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
   const res = h.appendOzonCostForShipment(
     [{ article: 'ART-A', quantity: 60, price: 600, status: 'ok' },
      { article: 'ART-A', quantity: 40, price: 600, status: 'ok' }],
@@ -1366,7 +1367,7 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
 (function test100() {
   const h = freshHarness();
   h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
-  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 400 }]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
 
   const notOzon = h.appendOzonCostForShipment(
     [{ article: 'ART-A', quantity: 10, price: 600, status: 'ok' }],
@@ -1392,7 +1393,8 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
 })();
 
 (function test101() {
-  // Остаток считается по трём колонкам и по всем складам сразу.
+  // Основание = «Доступно» + «Возвраты» по всем складам. «В пути», «В заявках», «Готовим»,
+  // «Излишки» и «Прочее» в него не входят: товар в пути считается по нашим записям.
   const h = freshHarness();
   h.setOzonStocksSheet([
     { cabinet: 'MaxiStore', article: 'ART-A', warehouse: 'W1', available: 100, transit: 10, returns: 1, preparing: 7, requested: 9, excess: 3, other: 5 },
@@ -1400,12 +1402,37 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     { cabinet: 'Mercurius', article: 'ART-A', warehouse: 'W1', available: 999 },
     { cabinet: 'MaxiStore', article: 'ART-B', warehouse: 'W1', available: 777 },
   ]);
-  check('Item 47: остаток = Доступно + В пути + Возвраты по всем складам (168), прочие колонки не в счёт',
-    h.getOzonStockForCost('MaxiStore', 'ART-A') === 168, `получено: ${h.getOzonStockForCost('MaxiStore', 'ART-A')}`);
+  check('Item 47: принято Озоном = Доступно + Возвраты по всем складам (153), «В пути» не в счёт',
+    h.getOzonAcceptedStockForCost('MaxiStore', 'ART-A') === 153,
+    `получено: ${h.getOzonAcceptedStockForCost('MaxiStore', 'ART-A')}`);
   check('Item 47: чужой магазин в остаток не попадает',
-    h.getOzonStockForCost('Mercurius', 'ART-A') === 999, `получено: ${h.getOzonStockForCost('Mercurius', 'ART-A')}`);
+    h.getOzonAcceptedStockForCost('Mercurius', 'ART-A') === 999, `получено: ${h.getOzonAcceptedStockForCost('Mercurius', 'ART-A')}`);
   check('Item 47: артикула нет на Озоне — ноль, а не падение',
-    h.getOzonStockForCost('MaxiStore', 'НЕТ-ТАКОГО') === 0, '');
+    h.getOzonAcceptedStockForCost('MaxiStore', 'НЕТ-ТАКОГО') === 0, '');
+})();
+
+(function test101b() {
+  // Товар в пути берём из СВОИХ записей: списанные поставки, которые Озон ещё не завершил.
+  const h = freshHarness();
+  h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], [['ART-A', 10, 'OZN-A'], ['ART-B', 10, 'OZN-B']]);
+  h.setExternalShipmentsSheet([
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'IN_TRANSIT', items: [{ offerId: 'ART-A', quantity: 40 }] },
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', items: [{ offerId: 'ART-A', quantity: 25 }] },
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'COMPLETED', items: [{ offerId: 'ART-A', quantity: 1000 }] },
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'CANCELLED', items: [{ offerId: 'ART-A', quantity: 500 }] },
+    { cabinet: 'MaxiStore', status: 'new', ozonStatus: 'IN_TRANSIT', items: [{ offerId: 'ART-A', quantity: 300 }] },
+    { cabinet: 'Mercurius', status: 'processed', ozonStatus: 'IN_TRANSIT', items: [{ offerId: 'ART-A', quantity: 700 }] },
+    { cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'IN_TRANSIT', items: [{ barcode: 'OZN-B', offerId: 'чужой-код', quantity: 9 }] },
+  ]);
+  const flight = h.getOzonShippedNotAcceptedForCost('MaxiStore', h.buildOzonArticleResolver());
+  check('Item 47: в пути считаются только списанные и не завершённые поставки (40 + 25 = 65)',
+    flight['ART-A'] === 65, `получено: ${JSON.stringify(flight)}`);
+  check('Item 47: завершённая поставка в «в пути» не идёт — её товар уже в «Доступно»',
+    flight['ART-A'] !== 1065, `получено: ${flight['ART-A']}`);
+  check('Item 47: НЕ списанная поставка в основание не идёт — её себестоимость ещё не подмешана',
+    flight['ART-A'] === 65, `получено: ${flight['ART-A']}`);
+  check('Item 47: артикул опознан по штрихкоду Ozon, когда offerId чужой',
+    flight['ART-B'] === 9, `получено: ${JSON.stringify(flight)}`);
 })();
 
 (function test102() {
@@ -1415,7 +1442,7 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
   h.ensureTransSheet();
   h.setStockSheet([{ article: 'ART-E2E', quantity: 200, avgCost: 300, capitalization: 60000 }]);
   h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-E2E', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
-  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-E2E', available: 400 }]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-E2E', available: 300 }]);
 
   h.commitTransaction(
     [{ article: 'ART-E2E', quantity: 100, price: 300 }],
@@ -1476,7 +1503,7 @@ const costRow = (date, cab, art, after, opId, extra = {}) => [
     { article: 'ПАКЕТ', quantity: 500, avgCost: 10, capitalization: 5000 },
   ]);
   h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'КОМПЛЕКТ', 200.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
-  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'КОМПЛЕКТ', available: 200 }]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'КОМПЛЕКТ', available: 100 }]);
 
   // 100 комплектов: 190 + 10 = 200 за комплектующие, плюс услуги 5000 на 100 шт = 50 на штуку.
   h.commitTransaction(

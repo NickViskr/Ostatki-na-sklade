@@ -200,6 +200,7 @@ const exportLine = `
 this.OZON_STOCKS_HEADERS = OZON_STOCKS_HEADERS;
 this.OZON_SALES_HEADERS = OZON_SALES_HEADERS;
 this.OZON_COST_HEADERS = OZON_COST_HEADERS;
+this.EXTERNAL_SHIPMENTS_HEADERS = EXTERNAL_SHIPMENTS_HEADERS;
 `;
 vm.runInContext(src + exportLine, context, { filename: 'Code.gs' });
 
@@ -242,7 +243,8 @@ module.exports = {
   updateOzonStockHistory: (...args) => context.updateOzonStockHistory(...args),
   // rows — массив массивов данных (без заголовка) листа SKU; headers — заголовки листа.
   setSkuSheet(headers, rows) {
-    skuSheet = makeFakeSheet(headers);
+    // Имя нужно getSheetByNameRobust: она ищет лист перебором ss.getSheets() и зовёт getName().
+    skuSheet = makeFakeSheet(headers, 'SKU');
     if (rows && rows.length > 0) skuSheet.__setData([headers.slice(), ...rows]);
   },
   clearSkuSheet() { skuSheet = null; },
@@ -332,7 +334,27 @@ module.exports = {
     sheetRegistry['Остатки Ozon'] = sheet;
     return sheet;
   },
-  getOzonStockForCost: (...args) => context.getOzonStockForCost(...args),
+  getOzonAcceptedStockForCost: (...args) => context.getOzonAcceptedStockForCost(...args),
+  getOzonShippedNotAcceptedForCost: (...args) => context.getOzonShippedNotAcceptedForCost(...args),
+  buildOzonArticleResolver: (...args) => context.buildOzonArticleResolver(...args),
+  // rows — массив {postingId, cabinet, status, ozonStatus, items:[{offerId, quantity, barcode?}]}
+  setExternalShipmentsSheet(rows) {
+    const headers = context.EXTERNAL_SHIPMENTS_HEADERS;
+    const idx = (n) => headers.indexOf(n);
+    const data = (rows || []).map((r, n) => {
+      const line = new Array(headers.length).fill('');
+      line[idx('PostingID')] = r.postingId || ('P' + (n + 1));
+      line[idx('Кабинет')] = r.cabinet;
+      line[idx('Статус')] = r.status;
+      line[idx('Статус Ozon')] = r.ozonStatus || '';
+      line[idx('ПозицииJSON')] = JSON.stringify(r.items || []);
+      return line;
+    });
+    const sheet = makeFakeSheet(headers, 'Внешние отгрузки');
+    if (data.length > 0) sheet.__setData([headers.slice(), ...data]);
+    sheetRegistry['Внешние отгрузки'] = sheet;
+    return sheet;
+  },
   ozonCabinetFromDestination: (...args) => context.ozonCabinetFromDestination(...args),
   appendOzonCostForShipment: (...args) => context.appendOzonCostForShipment(...args),
   dumpOzonCost() {
