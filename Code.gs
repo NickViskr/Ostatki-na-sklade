@@ -1652,15 +1652,46 @@ function updateTransaction(id, data, username) {
   const editedAdditional = (data.additionalCosts !== null && data.additionalCosts !== undefined
     && String(data.additionalCosts).trim() !== '') ? data.additionalCosts : storedAdditional;
 
+  // Подэтап 4. СВЕРКА ДО ПРАВКИ. Прежде чем тронуть хоть одну ячейку, проигрывание запускается
+  // на нетронутых данных и обязано воспроизвести их до копейки. Не воспроизвело — значит мои
+  // правила и правила, по которым эти строки проводились, разошлись, и переписывать историю
+  // по своим представлениям о ней нельзя. Отказ целиком, ни один байт не записан.
+  let replayFromMs = null;
+  if (storedRow && String(storedRow.type) === 'Приход') {
+    replayFromMs = new Date(String(storedRow.date)).getTime();
+    if (!isNaN(replayFromMs)) {
+      const verdict = replayMatchesFacts(replayArticle(storedRow.article, replayFromMs));
+      if (!verdict.ok) {
+        throw new Error('Правку пришлось отклонить: пересчёт себестоимости не сходится с базой ('
+          + verdict.reason + '). Правка прихода потянула бы за собой пересчёт отгрузок, а он в этом '
+          + 'состоянии дал бы неверные деньги. Разберитесь с этим товаром вручную.');
+      }
+    } else {
+      replayFromMs = null;
+    }
+  }
+
   // Количество из правки едет в удаление: приход вернётся на склад сразу же, и защита от
   // отрицательного остатка обязана судить по итогу, а не по середине операции.
   const replacementQty = String(data.type) === 'Приход' ? (Number(data.quantity) || 0) : null;
   deleteTransaction(id, username, true, replacementQty);
   const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional);
+
+  // Подэтап 4. ПЕРЕСЧЁТ. Приход изменился — значит изменилась средняя, по которой уезжали
+  // все последующие отгрузки. Проигрываем историю артикула заново и дописываем в журнал
+  // исправленную себестоимость для КАН датами тех самых отгрузок.
+  let recalculated = { changed: [], appended: 0 };
+  if (replayFromMs !== null) {
+    const applied = applyReplayCorrections(storedRow.article, replayFromMs);
+    const reissued = reissueOzonCostRows(applied.changed, username);
+    recalculated = { changed: applied.changed, appended: reissued.appended };
+  }
+
   return {
     stock: getStock(),
     newTransactions: getTransactions().rows,
-    skus: getSkus()
+    skus: getSkus(),
+    recalculated: recalculated
   };
 }
 
@@ -1743,18 +1774,30 @@ function replayStepForward(state, t) {
   return writeOff;
 }
 
-/** Один шаг назад. Только количество и капитализация: средняя при откате не нужна, а деление
- *  на этом пути как раз и дало бы дрейф. */
+/**
+ * Один шаг назад. Количество и капитализация откатываются точно — там только сложение.
+ *
+ * СРЕДНЯЯ ПЕРЕНОСИТСЯ, А НЕ ВЫЧИСЛЯЕТСЯ. Обычный расход среднюю не менял, значит при откате
+ * она остаётся та же — и это ТОЧНО. Выводить её делением капитализации на количество нельзя:
+ * на боевых данных 26.08.2026 средняя «Пакетов» лежит в листе как 5,889198396793588, то есть
+ * НЕ округлённой до копеек, и деление дало бы 5,89 — а по этой цифре считается каждое
+ * списание. Приход и списание брака среднюю переписывают, поэтому дальше назад она
+ * неизвестна: об этом честно сообщает флаг avgKnown, и вызывающий берёт приблизительную.
+ * В боевом пути это никогда не мешает: там список начинается с самого исправленного прихода,
+ * а он среднюю пересчитывает первым же шагом.
+ */
 function replayStepBackward(state, t) {
   if (t.type === 'Приход') {
     state.quantity = state.quantity - (Number(t.quantity) || 0);
     state.capitalization = roundToTwo(state.capitalization - roundToTwo(Number(t.total) || 0));
+    state.avgKnown = false;
     return;
   }
   if (isVirtualKitMainRow(t)) return;
   state.quantity = state.quantity + (Number(t.quantity) || 0);
   if (isWriteOffDestination(t.destination) && !isCapitalizationZeroed(t.destination)) {
-    // При проведении капитализацию не снимали — возвращать нечего.
+    // При проведении капитализацию не снимали — возвращать нечего, но среднюю переписали.
+    state.avgKnown = false;
     return;
   }
   state.capitalization = roundToTwo(state.capitalization + (Number(t.writeOffCost) || 0));
@@ -1787,16 +1830,22 @@ function replayArticle(article, fromDateMs) {
   if (!stock) return null;
   const rows = articleRowsForReplay(article, fromDateMs);
 
-  const back = { quantity: stock.quantity, capitalization: stock.capitalization };
+  const back = {
+    quantity: stock.quantity,
+    capitalization: stock.capitalization,
+    avgCost: stock.avgCost,
+    avgKnown: true
+  };
   for (let i = rows.length - 1; i >= 0; i--) replayStepBackward(back, rows[i]);
 
   const state = {
     quantity: back.quantity,
     capitalization: back.capitalization,
-    // Средняя «до» выводится из денег и количества. Она идёт в дело только если первой в
-    // списке стоит РАСХОД; при правке прихода первым стоит он сам и средняя тут же
-    // пересчитывается. Ошибку в этом месте ловит сверка с фактом.
-    avgCost: back.quantity > 0 ? roundToTwo(back.capitalization / back.quantity) : 0
+    // Средняя «до» точна, если по дороге назад не встретилось ни прихода, ни списания брака.
+    // Иначе остаётся вывести её из денег и количества — приблизительно; ошибку в этом месте
+    // ловит сверка с фактом, а в боевом пути этот случай не возникает.
+    avgCost: back.avgKnown ? back.avgCost
+      : (back.quantity > 0 ? roundToTwo(back.capitalization / back.quantity) : 0)
   };
   const before = { quantity: state.quantity, capitalization: state.capitalization, avgCost: state.avgCost };
 
@@ -1841,6 +1890,146 @@ function replayMatchesFacts(replayed) {
       + ', а по правилам выходит ' + replayed.final.capitalization };
   }
   return { ok: true, reason: '' };
+}
+
+/**
+ * Записывает результат проигрывания: исправленные себестоимости списания в «Историю» и
+ * итоговый остаток в «Остатки». Возвращает список изменившихся отгрузок, чтобы вызывающий
+ * отдал их в журнал себестоимости Озона.
+ *
+ * Цена строки и сумма правятся вместе с себестоимостью списания. Иначе журнал для КАН,
+ * который берёт себестоимость отгрузки ИМЕННО из цены строки (она несёт разнесённые услуги),
+ * остался бы со старой цифрой — то есть весь пересчёт до КАН бы не доехал.
+ */
+function applyReplayCorrections(article, fromDateMs) {
+  const replayed = replayArticle(article, fromDateMs);
+  if (!replayed) return { changed: [], final: null };
+
+  const ss = getSpreadsheet();
+  const transSheet = getTransactionSheet(ss);
+  const lastRow = transSheet.getLastRow();
+  const lastCol = transSheet.getLastColumn();
+  const data = transSheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const idIdx = headers.indexOf('ID');
+  const wIdx = headers.indexOf('Себестоимость списания');
+  const pIdx = headers.indexOf('Цена');
+  const tIdx = headers.indexOf('Сумма');
+  if (idIdx === -1 || wIdx === -1 || pIdx === -1 || tIdx === -1) {
+    throw new Error('Пересчёт невозможен: в листе «История» не хватает колонок ID, Цена, Сумма или Себестоимость списания.');
+  }
+  const rowById = {};
+  for (let i = 1; i < data.length; i++) rowById[String(data[i][idIdx]).trim()] = i + 1;
+
+  const changed = [];
+  replayed.steps.forEach(function(st) {
+    if (st.tx.type !== 'Расход') return;
+    if (isVirtualKitMainRow(st.tx)) return;
+    if (Math.abs(st.computed - st.stored) < 0.005) return;
+    const q = Number(st.tx.quantity) || 0;
+    if (q <= 0) return;
+    // Разнесённые услуги сидят в цене строки поверх чистой себестоимости. Их сохраняем как
+    // есть: правка прихода к услугам подрядчиков отношения не имеет.
+    const extrasPerUnit = roundToTwo((Number(st.tx.price) || 0) - st.stored / q);
+    const newPrice = roundToTwo(st.computed / q + extrasPerUnit);
+    const sheetRow = rowById[String(st.tx.id).trim()];
+    if (!sheetRow) return;
+    transSheet.getRange(sheetRow, wIdx + 1).setValue(st.computed);
+    transSheet.getRange(sheetRow, pIdx + 1).setValue(newPrice);
+    transSheet.getRange(sheetRow, tIdx + 1).setValue(roundToTwo(newPrice * q));
+    changed.push({
+      id: st.tx.id,
+      date: st.tx.date,
+      destination: st.tx.destination,
+      article: st.tx.article,
+      quantity: q,
+      oldWriteOff: st.stored,
+      newWriteOff: st.computed,
+      oldUnitCost: roundToTwo(Number(st.tx.price) || 0),
+      newUnitCost: newPrice
+    });
+  });
+
+  const sheet = getSheetByNameRobust(ss, 'Остатки');
+  sheet.getRange(replayed.stock.rowIdx, 2, 1, 3).setValues([[
+    replayed.final.quantity, replayed.final.avgCost, replayed.final.capitalization
+  ]]);
+  SpreadsheetApp.flush();
+  return { changed: changed, final: replayed.final };
+}
+
+/**
+ * Пункт 47, этап 4, подэтап 4. Переписывает цепочку себестоимости на Озоне после того, как
+ * пересчитались сами отгрузки, и дописывает исправленные строки в журнал — с ДАТАМИ ТЕХ
+ * отгрузок, как решил владелец 26.08.2026.
+ *
+ * Переписывается не только изменившаяся отгрузка, но и ВСЁ, что было после неё по этому
+ * товару и магазину: средняя на Озоне скользящая, поэтому сдвиг одной отгрузки двигает
+ * каждую следующую. Отдать в КАН одну строку и оставить хвост старым значило бы отдать
+ * цепочку, которая сама себе противоречит.
+ *
+ * Строки ДОПИСЫВАЮТСЯ, а не переписываются: журнал ведётся дозаписью, состояние берётся по
+ * последней строке, а отметка «Выгружено в КАН» у новых строк пуста — значит они уедут
+ * ближайшей выгрузкой.
+ */
+function reissueOzonCostRows(changedShipments, username) {
+  const relevant = (changedShipments || []).filter(function(c) {
+    return !!ozonCabinetFromDestination(c.destination);
+  });
+  if (relevant.length === 0) return { appended: 0 };
+
+  const newCostByKey = {};
+  relevant.forEach(function(c) {
+    newCostByKey[ozonCabinetFromDestination(c.destination) + '|' + c.article + '|' + String(c.date).slice(0, 10)] = c.newUnitCost;
+  });
+
+  const journal = getOzonCostJournal();
+  const groups = {};
+  journal.forEach(function(r) {
+    const key = r.cabinet + '|' + r.article;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(r);
+  });
+
+  const rowsToAppend = [];
+  Object.keys(groups).forEach(function(key) {
+    const rows = groups[key];
+    let prior = null;
+    let chainChanged = false;
+    rows.forEach(function(r) {
+      const stamp = r.cabinet + '|' + r.article + '|' + String(r.date).slice(0, 10);
+      const replacement = newCostByKey.hasOwnProperty(stamp) ? newCostByKey[stamp] : null;
+      // «НАЧАЛЬНАЯ ТОЧКА» и любая строка без отгрузки задают точку отсчёта и не пересчитываются.
+      if (!r.shipped) { prior = r.costAfter; return; }
+      const shippedCost = (replacement !== null) ? replacement : r.shippedCost;
+      const base = Number(r.stockBefore) || 0;
+      let costAfter;
+      if (prior === null || base <= 0) {
+        costAfter = roundToTwo(shippedCost);
+      } else {
+        costAfter = roundToTwo((base * prior + r.shipped * shippedCost) / (base + r.shipped));
+      }
+      if (replacement !== null || Math.abs(costAfter - r.costAfter) > 0.005) {
+        chainChanged = true;
+        rowsToAppend.push([
+          r.date, r.cabinet, r.article, r.sku,
+          base, prior === null ? '' : prior, r.shipped, roundToTwo(shippedCost), costAfter,
+          r.opId, '', 'пересчёт после правки прихода'
+        ]);
+      }
+      prior = costAfter;
+    });
+    if (!chainChanged) return;
+  });
+
+  if (rowsToAppend.length === 0) return { appended: 0 };
+  const ss = getSpreadsheet();
+  const sheet = getOzonCostSheet(ss);
+  ensureColumns(sheet, OZON_COST_HEADERS);
+  const startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 1, rowsToAppend.length, OZON_COST_HEADERS.length).setValues(rowsToAppend);
+  SpreadsheetApp.flush();
+  return { appended: rowsToAppend.length };
 }
 
 function isWriteOffDestination(dest) {

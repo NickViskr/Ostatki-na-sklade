@@ -403,6 +403,8 @@ module.exports = {
 
   // ---------- Item 47, stage 3: выгрузка в КАН ----------
   // ---------- Item 47, stage 4, substage 4: проигрывание истории артикула ----------
+  applyReplayCorrections: (...args) => context.applyReplayCorrections(...args),
+  reissueOzonCostRows: (...args) => context.reissueOzonCostRows(...args),
   replayArticle: (...args) => context.replayArticle(...args),
   replayMatchesFacts: (...args) => context.replayMatchesFacts(...args),
   articleRowsForReplay: (...args) => context.articleRowsForReplay(...args),

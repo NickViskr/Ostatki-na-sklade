@@ -868,7 +868,20 @@ export const useWarehouseStore = create<WarehouseState>()(
         });
         
         toast.success('Операция обновлена');
-        
+
+        // Подэтап 4: правка прихода тянет за собой пересчёт уже уехавших отгрузок. Молчать об
+        // этом нельзя — пользователь должен знать, что появились новые данные для КАН.
+        const recalculated = payloadData?.recalculated;
+        if (recalculated && recalculated.changed && recalculated.changed.length > 0) {
+          const shipments = recalculated.changed.length;
+          const forKan = recalculated.appended || 0;
+          toast.info(
+            forKan > 0
+              ? `Пересчитано отгрузок: ${shipments}. Для КАН готово строк: ${forKan} — нажмите «Себестоимость КАН».`
+              : `Пересчитано отгрузок: ${shipments}. На Озон этот товар не уезжал, в КАН ничего не уходит.`
+          );
+        }
+
         return true;
       } else {
         toast.error('Ошибка: ' + result.message);

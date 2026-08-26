@@ -1859,17 +1859,151 @@ function withShippedReceipt() {
   check('Количество на складе не поехало — по-прежнему 50 шт',
     h.stockOf('ART').quantity === 50, `получено: ${h.stockOf('ART').quantity}`);
 
-  // ВАЖНО ДЛЯ ПОДЭТАПА 4. Вся разница 100 x (400 - 300) = 10000 руб легла на ОСТАВШИЕСЯ
-  // 50 шт: 15000 + 10000 = 25000, то есть 500 руб/шт. Это действующее правило «долга
-  // себестоимости», а не ошибка — но владелец просил другого: отгруженные 50 шт должны
-  // стоить по 400. Подэтап 4 переносит 5000 руб с остатка на отгрузку.
+  // ПОДЭТАП 4. Разница 100 x (400 - 300) = 10000 руб НЕ оседает на остатке целиком:
+  // 5000 из них принадлежат уехавшим 50 шт. После пересчёта остаток 50 шт стоит 20000
+  // при средней 400, а отгрузка — тоже по 400.
   const after = h.stockOf('ART');
-  check('Пока вся разница ложится на остаток: 25000 руб на 50 шт, средняя 500',
-    after.capitalization === 25000 && after.avgCost === 500,
+  check('Подэтап 4: остаток 20000 руб на 50 шт, средняя 400 — а не 500',
+    after.capitalization === 20000 && after.avgCost === 400,
     `получено: кап=${after.capitalization}, средняя=${after.avgCost}`);
-  check('Журнал себестоимости Озона правкой ещё не тронут — это подэтап 4',
-    h.dumpOzonCost().length === 1 && h.dumpOzonCost()[0]['Себестоимость отгрузки'] === 300,
-    `получено: ${JSON.stringify(h.dumpOzonCost().map(r => r['Себестоимость отгрузки']))}`);
+  const shipped = h.getTransactions().rows.find(t => t.type === 'Расход');
+  check('Подэтап 4: себестоимость списания отгрузки пересчитана с 15000 на 20000',
+    shipped.writeOffCost === 20000, `получено: ${shipped.writeOffCost}`);
+  const journal = h.dumpOzonCost();
+  check('Подэтап 4: в журнал дописана строка с новой себестоимостью 400',
+    journal.length === 2 && journal[1]['Себестоимость отгрузки'] === 400,
+    `получено: ${JSON.stringify(journal.map(r => r['Себестоимость отгрузки']))}`);
+  check('Подэтап 4: у дописанной строки дата ТОЙ отгрузки, а не сегодняшняя',
+    String(journal[1]['Дата']).slice(0, 10) === '2026-08-10',
+    `получено: ${journal[1]['Дата']}`);
+  check('Подэтап 4: и она помечена как пересчёт, чтобы происхождение было видно',
+    String(journal[1]['Источник']).indexOf('пересчёт') !== -1,
+    `получено: ${journal[1]['Источник']}`);
+  check('Подэтап 4: отметка о выгрузке пуста — строка уедет в КАН ближайшей выгрузкой',
+    String(journal[1]['Выгружено в КАН']).trim() === '' && h.getOzonCostExport().pending === 2,
+    `получено: "${journal[1]['Выгружено в КАН']}", в очереди: ${h.getOzonCostExport().pending}`);
+})();
+
+(function test150() {
+  // Цена ВНИЗ: 300 -> 200. Отгруженные 50 шт должны подешеветь до 200.
+  const { h, id } = withShippedReceipt();
+  editReceipt(h, id, 200, 100);
+  const st = h.stockOf('ART');
+  const shipped = h.getTransactions().rows.find(t => t.type === 'Расход');
+  check('Подэтап 4: цена вниз — отгрузка списана по 200 (10000 руб)',
+    shipped.writeOffCost === 10000, `получено: ${shipped.writeOffCost}`);
+  check('Подэтап 4: и остаток 10000 руб на 50 шт, средняя 200',
+    st.capitalization === 10000 && st.avgCost === 200,
+    `получено: кап=${st.capitalization}, средняя=${st.avgCost}`);
+  check('Подэтап 4: в КАН уходит подешевевшая себестоимость 200',
+    h.dumpOzonCost().pop()['Себестоимость отгрузки'] === 200,
+    `получено: ${h.dumpOzonCost().pop()['Себестоимость отгрузки']}`);
+})();
+
+(function test151() {
+  // Правка КОЛИЧЕСТВА при той же цене среднюю не двигает — значит и пересчитывать нечего.
+  const { h, id } = withShippedReceipt();
+  editReceipt(h, id, 300, 120);
+  const shipped = h.getTransactions().rows.find(t => t.type === 'Расход');
+  check('Подэтап 4: цена не менялась — себестоимость отгрузки осталась 15000',
+    shipped.writeOffCost === 15000, `получено: ${shipped.writeOffCost}`);
+  check('Подэтап 4: и в журнал ничего лишнего не дописано',
+    h.dumpOzonCost().length === 1, `строк: ${h.dumpOzonCost().length}`);
+  check('Подэтап 4: остаток 70 шт по 300',
+    h.stockOf('ART').quantity === 70 && h.stockOf('ART').avgCost === 300,
+    `получено: ${h.stockOf('ART').quantity} шт, средняя=${h.stockOf('ART').avgCost}`);
+})();
+
+(function test152() {
+  // Правка «в ту же цену» не должна менять ничего вообще.
+  const { h, id } = withShippedReceipt();
+  const before = JSON.stringify(h.stockOf('ART'));
+  editReceipt(h, id, 300, 100);
+  check('Подэтап 4: правка без изменений оставила склад нетронутым',
+    JSON.stringify(h.stockOf('ART')) === before, `было ${before}, стало ${JSON.stringify(h.stockOf('ART'))}`);
+  check('Подэтап 4: и журнал не вырос',
+    h.dumpOzonCost().length === 1, `строк: ${h.dumpOzonCost().length}`);
+})();
+
+(function test153() {
+  // ДВЕ отгрузки после прихода: пересчитаться обязаны обе, и цепочка средней на Озоне тоже.
+  const { h, id } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 30, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-10T09:00:00Z', 'op-s1');
+  h.commitTransaction([{ article: 'ART', quantity: 20, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-12T09:00:00Z', 'op-s2');
+  editReceipt(h, id, 400, 100);
+  const outs = h.getTransactions().rows.filter(t => t.type === 'Расход')
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  check('Подэтап 4: пересчитаны ОБЕ отгрузки — 12000 и 8000',
+    outs[0].writeOffCost === 12000 && outs[1].writeOffCost === 8000,
+    `получено: ${outs.map(o => o.writeOffCost).join(', ')}`);
+  const j = h.dumpOzonCost();
+  const reissued = j.filter(r => String(r['Источник']).indexOf('пересчёт') !== -1);
+  check('Подэтап 4: в журнал дописаны обе строки, обе по 400',
+    reissued.length === 2 && reissued.every(r => r['Себестоимость отгрузки'] === 400),
+    `получено: ${JSON.stringify(reissued.map(r => r['Себестоимость отгрузки']))}`);
+  check('Подэтап 4: даты дописанных строк — даты тех отгрузок',
+    reissued.map(r => String(r['Дата']).slice(0, 10)).join(',') === '2026-08-10,2026-08-12',
+    `получено: ${reissued.map(r => String(r['Дата']).slice(0, 10)).join(',')}`);
+  check('Подэтап 4: вторая строка считает среднюю от ИСПРАВЛЕННОЙ первой, а не от старой',
+    reissued[1]['Себестоимость до'] === reissued[0]['Себестоимость после'],
+    `до второй: ${reissued[1]['Себестоимость до']}, после первой: ${reissued[0]['Себестоимость после']}`);
+})();
+
+(function test154() {
+  // Списание брака после прихода пересчитывается в «Истории», но в КАН не едет:
+  // на Озон этот товар не уезжал.
+  const { h, id } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 20, price: 300 }],
+    'Расход', 'Склад [Списание - Брак] [себестоимость обнулена]', '', 'tester', '2026-08-05T09:00:00Z', 'op-scrap');
+  editReceipt(h, id, 400, 100);
+  const scrap = h.getTransactions().rows.find(t => t.type === 'Расход');
+  check('Подэтап 4: списание брака пересчитано — 8000 вместо 6000',
+    scrap.writeOffCost === 8000, `получено: ${scrap.writeOffCost}`);
+  check('Подэтап 4: но в журнал себестоимости Озона оно не попало',
+    h.dumpOzonCost().length === 0, `строк: ${h.dumpOzonCost().length}`);
+})();
+
+(function test155() {
+  // ОТКАЗ. Если склад разошёлся с историей, пересчёт дал бы неверные деньги — правка
+  // отклоняется целиком, и ни одна ячейка не тронута.
+  const { h, id } = withShippedReceipt();
+  h.setStockSheet([{ article: 'ART', quantity: 50, avgCost: 300, capitalization: 99999 }]);
+  let message = '';
+  try { editReceipt(h, id, 400, 100); } catch (e) { message = String(e.message || e); }
+  check('Подэтап 4: расхождение склада с историей отклоняет правку',
+    message.indexOf('не сходится с базой') !== -1, `получено: ${message || 'без ошибки'}`);
+  check('Подэтап 4: сообщение называет расхождение поимённо — операцию и обе цифры',
+    message.indexOf('себестоимость списания операции от 2026-08-10') !== -1
+    && message.indexOf('в базе 15000') !== -1,
+    `получено: ${message}`);
+  check('Подэтап 4: после отказа цена прихода прежняя и склад не тронут',
+    h.getTransactions().rows.find(t => t.type === 'Приход').price === 300
+    && h.stockOf('ART').capitalization === 99999,
+    `цена: ${h.getTransactions().rows.find(t => t.type === 'Приход').price}, кап: ${h.stockOf('ART').capitalization}`);
+  check('Подэтап 4: и в журнал ничего не дописано',
+    h.dumpOzonCost().length === 1, `строк: ${h.dumpOzonCost().length}`);
+})();
+
+(function test156() {
+  // Отгрузка с услугами: пересчитывается ЧИСТАЯ себестоимость, а разнесённые услуги
+  // остаются на месте — правка прихода к подрядчикам отношения не имеет.
+  const { h, id } = withReceipt(300, 100);
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 300 }],
+    'Расход', 'Ozon (MaxiStore) [Упаковка: 50 шт. x 20₽ = 1000₽]', '', 'tester', '2026-08-10T09:00:00Z', 'op-svc');
+  const before = h.getTransactions().rows.find(t => t.type === 'Расход');
+  check('До правки: цена 320 (300 товар + 20 упаковка), списание 15000',
+    before.price === 320 && before.writeOffCost === 15000,
+    `цена: ${before.price}, списание: ${before.writeOffCost}`);
+  editReceipt(h, id, 400, 100);
+  const after = h.getTransactions().rows.find(t => t.type === 'Расход');
+  check('Подэтап 4: списание стало 20000, а цена 420 — упаковка те же 20 руб',
+    after.writeOffCost === 20000 && after.price === 420,
+    `цена: ${after.price}, списание: ${after.writeOffCost}`);
+  check('Подэтап 4: в КАН уходит полная себестоимость 420, с услугами',
+    h.dumpOzonCost().pop()['Себестоимость отгрузки'] === 420,
+    `получено: ${h.dumpOzonCost().pop()['Себестоимость отгрузки']}`);
 })();
 
 (function test127b() {
