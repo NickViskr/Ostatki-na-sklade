@@ -1664,6 +1664,185 @@ function updateTransaction(id, data, username) {
   };
 }
 
+/**
+ * ==========================================================================================
+ * Пункт 47, этап 4, подэтап 4. ПРОИГРЫВАНИЕ ИСТОРИИ АРТИКУЛА.
+ * ==========================================================================================
+ *
+ * Зачем. Владелец правит цену прихода задним числом, а часть того товара уже уехала на Озон
+ * по старой средней. Правило «долга себестоимости» само по себе оставляет всю поправку на
+ * ОСТАТКЕ: приход 100×300, отгружено 50, правка на 400 — и склад показывает 500 руб/шт вместо
+ * 400. Владелец 26.08.2026 попросил иного: пересчитать сами отгрузки, чтобы уехавшие 50 шт
+ * стоили по 400, и отдать новую себестоимость в КАН датами тех отгрузок.
+ *
+ * Как. Средняя скользящая, поэтому «разнести разницу на глазок» нельзя — единственный точный
+ * способ это проиграть историю артикула заново от исправленного прихода вперёд.
+ *
+ * ЧЕМ ЭТО ОПАСНО И ЧТО ЕГО СТОРОЖИТ. Ошибка здесь тихо испортит деньги по всей истории
+ * артикула. Поэтому перед любой записью проигрывание запускается на НЕТРОНУТЫХ данных и
+ * обязано воспроизвести их до копейки: каждую сохранённую себестоимость списания и итоговый
+ * остаток со средней и капитализацией. Не сошлось — значит правила в проигрывании и правила,
+ * по которым эти строки на самом деле проводились, разошлись, и трогать историю НЕЛЬЗЯ:
+ * правка отклоняется целиком, ни один байт не записан.
+ */
+
+/** Строка виртуального комплекта: сам комплект на складе не лежит, деньги несут комплектующие.
+ *  Признак тот же, что в deleteTransaction: расход с нулевой себестоимостью и групповым ключом. */
+function isVirtualKitMainRow(t) {
+  return t.type === 'Расход'
+    && roundToTwo(Number(t.writeOffCost) || 0) === 0
+    && String(t.groupId || '').trim() !== '';
+}
+
+/** Операции артикула от указанной даты и позже, в порядке проведения. */
+function articleRowsForReplay(article, fromDateMs) {
+  const all = getTransactions().rows.slice().reverse(); // getTransactions отдаёт новые сверху
+  const target = String(article).trim();
+  const picked = [];
+  for (let i = 0; i < all.length; i++) {
+    const t = all[i];
+    if (String(t.article).trim() !== target) continue;
+    if (t.type !== 'Приход' && t.type !== 'Расход') continue; // «Корректировка» склад не двигает
+    const ms = new Date(String(t.date)).getTime();
+    if (isNaN(ms)) {
+      throw new Error('Пересчёт невозможен: у операции ' + t.id + ' по товару "' + target
+        + '" нечитаемая дата "' + t.date + '". Исправьте дату и повторите.');
+    }
+    if (ms < fromDateMs) continue;
+    picked.push({ t: t, ms: ms, order: i });
+  }
+  picked.sort(function(a, b) { return (a.ms - b.ms) || (a.order - b.order); });
+  return picked.map(function(p) { return p.t; });
+}
+
+/** Один шаг вперёд. Повторяет арифметику commitTransaction буква в букву и возвращает
+ *  себестоимость списания, которую эта строка обязана нести. */
+function replayStepForward(state, t) {
+  if (t.type === 'Приход') {
+    const total = roundToTwo(Number(t.total) || 0);
+    state.quantity = state.quantity + (Number(t.quantity) || 0);
+    state.capitalization = roundToTwo(state.capitalization + total);
+    state.avgCost = state.quantity > 0 ? roundToTwo(state.capitalization / state.quantity) : 0;
+    return 0;
+  }
+  if (isVirtualKitMainRow(t)) return 0;
+  const q = Number(t.quantity) || 0;
+  const writeOff = roundToTwo(state.avgCost * q);
+  const newQty = state.quantity - q;
+  if (isWriteOffDestination(t.destination) && !isCapitalizationZeroed(t.destination)) {
+    // Пункт 40, этап B: списание уменьшает количество, но НЕ капитализацию — «долг
+    // себестоимости» остаётся на артикуле и растит среднюю на оставшихся штуках.
+    state.quantity = newQty;
+    state.avgCost = newQty > 0 ? roundToTwo(state.capitalization / newQty) : 0;
+  } else {
+    // Обычный расход: средняя НЕ пересчитывается, а переносится. Так сделано в
+    // commitTransaction, и делить заново нельзя — набежит копеечный дрейф.
+    state.quantity = newQty;
+    state.capitalization = roundToTwo(state.capitalization - writeOff);
+  }
+  return writeOff;
+}
+
+/** Один шаг назад. Только количество и капитализация: средняя при откате не нужна, а деление
+ *  на этом пути как раз и дало бы дрейф. */
+function replayStepBackward(state, t) {
+  if (t.type === 'Приход') {
+    state.quantity = state.quantity - (Number(t.quantity) || 0);
+    state.capitalization = roundToTwo(state.capitalization - roundToTwo(Number(t.total) || 0));
+    return;
+  }
+  if (isVirtualKitMainRow(t)) return;
+  state.quantity = state.quantity + (Number(t.quantity) || 0);
+  if (isWriteOffDestination(t.destination) && !isCapitalizationZeroed(t.destination)) {
+    // При проведении капитализацию не снимали — возвращать нечего.
+    return;
+  }
+  state.capitalization = roundToTwo(state.capitalization + (Number(t.writeOffCost) || 0));
+}
+
+function stockRowForArticle(article) {
+  const ss = getSpreadsheet();
+  const sheet = getSheetByNameRobust(ss, 'Остатки');
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(article).trim()) {
+      return {
+        rowIdx: i + 1,
+        quantity: Number(data[i][1]) || 0,
+        avgCost: Number(data[i][2]) || 0,
+        capitalization: Number(data[i][3]) || 0
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Откатывает склад до состояния ПЕРЕД первой из отобранных операций и проигрывает их вперёд.
+ * Ничего не записывает — только считает. Возвращает исходное состояние, пересчитанные строки
+ * и итог, чтобы вызывающий сам решил, сходится это с фактом или нет.
+ */
+function replayArticle(article, fromDateMs) {
+  const stock = stockRowForArticle(article);
+  if (!stock) return null;
+  const rows = articleRowsForReplay(article, fromDateMs);
+
+  const back = { quantity: stock.quantity, capitalization: stock.capitalization };
+  for (let i = rows.length - 1; i >= 0; i--) replayStepBackward(back, rows[i]);
+
+  const state = {
+    quantity: back.quantity,
+    capitalization: back.capitalization,
+    // Средняя «до» выводится из денег и количества. Она идёт в дело только если первой в
+    // списке стоит РАСХОД; при правке прихода первым стоит он сам и средняя тут же
+    // пересчитывается. Ошибку в этом месте ловит сверка с фактом.
+    avgCost: back.quantity > 0 ? roundToTwo(back.capitalization / back.quantity) : 0
+  };
+  const before = { quantity: state.quantity, capitalization: state.capitalization, avgCost: state.avgCost };
+
+  const steps = [];
+  rows.forEach(function(t) {
+    const computed = replayStepForward(state, t);
+    steps.push({
+      tx: t,
+      computed: computed,
+      stored: roundToTwo(Number(t.writeOffCost) || 0),
+      avgAfter: state.avgCost
+    });
+  });
+
+  return { before: before, steps: steps, final: state, stock: stock, rows: rows };
+}
+
+/**
+ * Сверка проигрывания с фактом. Запускается ДО правки, на нетронутых данных: если правила
+ * в проигрывании расходятся с тем, как строки проводились на самом деле, правку надо
+ * отклонить целиком, а не чинить историю по своим представлениям о ней.
+ */
+function replayMatchesFacts(replayed) {
+  if (!replayed) return { ok: false, reason: 'товара нет в листе «Остатки»' };
+  for (let i = 0; i < replayed.steps.length; i++) {
+    const st = replayed.steps[i];
+    if (st.tx.type !== 'Расход') continue;
+    if (Math.abs(st.computed - st.stored) > 0.005) {
+      return {
+        ok: false,
+        reason: 'себестоимость списания операции от ' + String(st.tx.date).slice(0, 10)
+          + ' в базе ' + st.stored + ', а по правилам должна быть ' + st.computed
+      };
+    }
+  }
+  if (Math.abs(replayed.final.quantity - replayed.stock.quantity) > 0.0001) {
+    return { ok: false, reason: 'количество на складе ' + replayed.stock.quantity
+      + ', а по правилам выходит ' + replayed.final.quantity };
+  }
+  if (Math.abs(replayed.final.capitalization - replayed.stock.capitalization) > 0.005) {
+    return { ok: false, reason: 'капитализация на складе ' + replayed.stock.capitalization
+      + ', а по правилам выходит ' + replayed.final.capitalization };
+  }
+  return { ok: true, reason: '' };
+}
+
 function isWriteOffDestination(dest) {
   return String(dest || '').indexOf('Списание') !== -1;
 }

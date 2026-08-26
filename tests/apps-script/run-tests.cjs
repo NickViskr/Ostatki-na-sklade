@@ -2016,6 +2016,177 @@ const editAtDay = (nowIso, qty) => {
     `получено: ${h.daysSinceTransactionDate('')}, ${h.daysSinceTransactionDate('не дата')}`);
 })();
 
+// ====== Подэтап 4, шаг 1: ВЕРНОСТЬ ПРОИГРЫВАНИЯ ======
+// Прежде чем что-то пересчитывать, проигрывание обязано в точности воспроизвести историю,
+// которую написал сам сервер. Не воспроизводит — значит мои правила и настоящие правила
+// разошлись, и трогать деньги нельзя. Каждый сценарий строится НАСТОЯЩИМ commitTransaction.
+
+const FROM = new Date('2026-07-01T00:00:00Z').getTime();
+
+function replayBench() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART', available: 5000, sku: '999' }]);
+  h.setStockSheet([{ article: 'ART', quantity: 0, avgCost: 0, capitalization: 0 }]);
+  return h;
+}
+
+function checkFidelity(name, h, article) {
+  const replayed = h.replayArticle(article || 'ART', FROM);
+  const verdict = h.replayMatchesFacts(replayed);
+  check('Верность проигрывания: ' + name,
+    verdict.ok === true, `не сошлось: ${verdict.reason}`);
+  return replayed;
+}
+
+(function test140() {
+  // Простейшее: приход и обычный расход.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 100, price: 300 }],
+    'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'a1');
+  h.commitTransaction([{ article: 'ART', quantity: 40, price: 300 }],
+    'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-05T09:00:00Z', 'a2');
+  checkFidelity('приход и расход', h);
+})();
+
+(function test141() {
+  // Приходы по разным ценам вперемешку с расходами — средняя гуляет.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 100, price: 300 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'b1');
+  h.commitTransaction([{ article: 'ART', quantity: 30, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-02T09:00:00Z', 'b2');
+  h.commitTransaction([{ article: 'ART', quantity: 70, price: 517.33 }], 'Приход', 'Склад', '', 'tester', '2026-08-03T09:00:00Z', 'b3');
+  h.commitTransaction([{ article: 'ART', quantity: 45, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-04T09:00:00Z', 'b4');
+  h.commitTransaction([{ article: 'ART', quantity: 13, price: 1207.77 }], 'Приход', 'Склад', '', 'tester', '2026-08-05T09:00:00Z', 'b5');
+  h.commitTransaction([{ article: 'ART', quantity: 61, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-06T09:00:00Z', 'b6');
+  const r = checkFidelity('пять приходов и расходов с некруглыми ценами', h);
+  check('Верность: и остаток совпал с фактом до копейки',
+    Math.abs(r.final.capitalization - r.stock.capitalization) < 0.005
+    && r.final.quantity === r.stock.quantity,
+    `проигрыш: ${r.final.quantity} шт / ${r.final.capitalization}, факт: ${r.stock.quantity} / ${r.stock.capitalization}`);
+})();
+
+(function test142() {
+  // Списание брака БЕЗ обнуления: количество уходит, деньги остаются долгом на артикуле.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 100, price: 300 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'c1');
+  h.commitTransaction([{ article: 'ART', quantity: 20, price: 0 }], 'Расход', 'Склад [Списание - Брак]', '', 'tester', '2026-08-02T09:00:00Z', 'c2');
+  h.commitTransaction([{ article: 'ART', quantity: 10, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-03T09:00:00Z', 'c3');
+  const r = checkFidelity('списание брака без обнуления — долг себестоимости', h);
+  check('Верность: долг поднял среднюю выше цены прихода',
+    r.stock.avgCost > 300, `средняя: ${r.stock.avgCost}`);
+})();
+
+(function test143() {
+  // Списание С обнулением: деньги снимаются вместе с товаром.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 100, price: 300 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'd1');
+  h.commitTransaction([{ article: 'ART', quantity: 20, price: 0 }], 'Расход', 'Склад [Списание - Брак] [себестоимость обнулена]', '', 'tester', '2026-08-02T09:00:00Z', 'd2');
+  h.commitTransaction([{ article: 'ART', quantity: 10, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-03T09:00:00Z', 'd3');
+  const r = checkFidelity('списание с обнулением себестоимости', h);
+  check('Верность: средняя после обнулённого списания осталась 300',
+    r.stock.avgCost === 300, `средняя: ${r.stock.avgCost}`);
+})();
+
+(function test144() {
+  // Расход с доп. расходами: цена строки выше средней, себестоимость списания — чистая.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 100, price: 300 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'e1');
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 300 }],
+    'Расход', 'Ozon (MaxiStore) [Упаковка: 50 шт. x 20₽ = 1000₽]', '', 'tester', '2026-08-02T09:00:00Z', 'e2');
+  const r = checkFidelity('отгрузка с упаковкой в цене', h);
+  const out = h.getTransactions().rows.find(t => t.type === 'Расход');
+  check('Верность: цена строки несёт расходы (320), а списание — чистое (15000)',
+    out.price === 320 && out.writeOffCost === 15000,
+    `цена: ${out.price}, списание: ${out.writeOffCost}`);
+})();
+
+(function test145() {
+  // Виртуальный комплект: сам комплект склад не двигает, двигают комплектующие.
+  const h = replayBench();
+  h.setStockSheet([
+    { article: 'ART', quantity: 0, avgCost: 0, capitalization: 0 },
+    { article: 'COMP', quantity: 0, avgCost: 0, capitalization: 0 }
+  ]);
+  h.setKitSheet([{ kitSku: 'KIT', componentSku: 'COMP', quantity: 2, kitType: 'virtual' }]);
+  h.commitTransaction([{ article: 'COMP', quantity: 200, price: 95 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'f1');
+  h.commitTransaction([{ article: 'KIT', quantity: 30, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-02T09:00:00Z', 'f2');
+  checkFidelity('комплектующее под виртуальным комплектом', h, 'COMP');
+  const kitRow = h.getTransactions().rows.find(t => t.article === 'KIT');
+  check('Верность: строка комплекта опознана как виртуальная и склад не двигает',
+    h.isVirtualKitMainRow(kitRow) === true, `получено: ${JSON.stringify(kitRow)}`);
+})();
+
+(function test146() {
+  // Остаток уходит в ноль и снова наполняется.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 300 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'g1');
+  h.commitTransaction([{ article: 'ART', quantity: 50, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-02T09:00:00Z', 'g2');
+  h.commitTransaction([{ article: 'ART', quantity: 80, price: 410 }], 'Приход', 'Склад', '', 'tester', '2026-08-03T09:00:00Z', 'g3');
+  h.commitTransaction([{ article: 'ART', quantity: 20, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-04T09:00:00Z', 'g4');
+  checkFidelity('остаток обнулялся и наполнялся заново', h);
+})();
+
+(function test147() {
+  // Несколько операций одной датой: порядок обязан остаться тем, в котором их провели.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 100, price: 300 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'h1');
+  h.commitTransaction([{ article: 'ART', quantity: 40, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-01T09:00:00Z', 'h2');
+  h.commitTransaction([{ article: 'ART', quantity: 60, price: 500 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'h3');
+  h.commitTransaction([{ article: 'ART', quantity: 30, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-01T09:00:00Z', 'h4');
+  const r = checkFidelity('четыре операции одной и той же датой', h);
+  check('Верность: порядок в проигрывании — порядок проведения',
+    r.rows.map(t => t.type).join(',') === 'Приход,Расход,Приход,Расход',
+    `получено: ${r.rows.map(t => t.type).join(',')}`);
+})();
+
+(function test147b() {
+  // ГЛАВНАЯ ЛОВУШКА ПРОИГРЫВАНИЯ. При обычном расходе средняя ПЕРЕНОСИТСЯ, а не считается
+  // заново делением. Пока капитализация ровно равна «средняя x количество», делить и
+  // переносить — одно и то же, и подмену не видно. Здесь она видна: приход 1 шт за 3 копейки
+  // делает капитализацию 700,03 при средней 87,50, то есть на 3 копейки больше, чем
+  // 87,50 x 8. После расхода 7 шт остаётся 87,53 руб на 1 шт — и деление дало бы 87,53
+  // вместо честных 87,50.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 7, price: 100 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'j1');
+  h.commitTransaction([{ article: 'ART', quantity: 1, price: 0.03 }], 'Приход', 'Склад', '', 'tester', '2026-08-02T09:00:00Z', 'j2');
+  h.commitTransaction([{ article: 'ART', quantity: 7, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-03T09:00:00Z', 'j3');
+  h.commitTransaction([{ article: 'ART', quantity: 1, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-04T09:00:00Z', 'j4');
+  checkFidelity('копеечный расход средней и капитализации', h);
+  const last = h.getTransactions().rows.filter(t => t.type === 'Расход')
+    .sort((a, b) => String(a.date).localeCompare(String(b.date))).pop();
+  check('Верность: последний расход списан по перенесённой средней 87,50, а не по 87,53',
+    last.writeOffCost === 87.5, `получено: ${last.writeOffCost}`);
+})();
+
+(function test147c() {
+  // Комплект, чей артикул ЕСТЬ в листе «Остатки». Строка комплекта склад двигать не должна:
+  // товар лежит комплектующими. Без этой фикстуры подмену признака комплекта не видно.
+  const h = replayBench();
+  h.setStockSheet([
+    { article: 'COMP', quantity: 0, avgCost: 0, capitalization: 0 },
+    { article: 'KIT', quantity: 0, avgCost: 0, capitalization: 0 }
+  ]);
+  h.setKitSheet([{ kitSku: 'KIT', componentSku: 'COMP', quantity: 2, kitType: 'virtual' }]);
+  h.commitTransaction([{ article: 'COMP', quantity: 200, price: 95 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'k1');
+  h.commitTransaction([{ article: 'KIT', quantity: 30, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', '2026-08-02T09:00:00Z', 'k2');
+  checkFidelity('комплект, заведённый и в «Остатках»', h, 'KIT');
+  check('Верность: склад комплекта остался нулевым',
+    h.stockRowForArticle('KIT').quantity === 0, `получено: ${h.stockRowForArticle('KIT').quantity}`);
+})();
+
+(function test148() {
+  // Нечитаемая дата обязана останавливать пересчёт, а не тихо выпадать из него.
+  const h = replayBench();
+  h.commitTransaction([{ article: 'ART', quantity: 100, price: 300 }], 'Приход', 'Склад', '', 'tester', '2026-08-01T09:00:00Z', 'i1');
+  h.commitTransaction([{ article: 'ART', quantity: 10, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '', 'tester', 'позавчера', 'i2');
+  let message = '';
+  try { h.replayArticle('ART', FROM); } catch (e) { message = String(e.message || e); }
+  check('Верность: нечитаемая дата останавливает пересчёт с понятным сообщением',
+    message.indexOf('нечитаемая дата') !== -1, `получено: ${message || 'без ошибки'}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
