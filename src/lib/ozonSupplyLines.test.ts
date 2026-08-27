@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { capForSupplyLine, supplyLineKey } from './ozonSupplyLines';
+import fs from 'node:fs';
+import path from 'node:path';
+import { capForSupplyLine, supplyLineKey,
+  canTickCluster,
+  sortClustersBySalesShare
+} from './ozonSupplyLines';
 
 const free = { 'ART-A': 100, 'ART-B': 30, 'ART-ZERO': 0 };
 
@@ -225,5 +230,102 @@ describe('«Скорректировать поставку» приводит �
       .map((l) => acceptedForLine(folded, { ...l, qty: res.quantities[`${l.article}|||${l.clusterId}`] }).notAccepted)
       .reduce((a, b) => a + b, 0);
     expect(left).toBe(0);
+  });
+});
+
+// ===== Пункт 60. Кластеры без остатка и порядок списка =====
+
+describe('пункт 60: галочка у кластера, которому остатка не хватило', () => {
+  it('кластер с рекомендацией отмечается, как и раньше', () => {
+    expect(canTickCluster(4, 4)).toBe(true);
+  });
+
+  it('кластеру нужна поставка, но остатка нет — галочка ЕСТЬ', () => {
+    expect(canTickCluster(0, 1)).toBe(true);
+    expect(canTickCluster(0, 2)).toBe(true);
+  });
+
+  it('кластеру ничего не нужно — галочки нет', () => {
+    expect(canTickCluster(0, 0)).toBe(false);
+  });
+
+  it('отсутствующие числа не превращаются в галочку', () => {
+    expect(canTickCluster(null, null)).toBe(false);
+    expect(canTickCluster(undefined, undefined)).toBe(false);
+    expect(canTickCluster(NaN as any, NaN as any)).toBe(false);
+  });
+});
+
+describe('пункт 60: порядок кластеров по доле продаж', () => {
+  const clusters = [
+    { clusterId: '4007', clusterName: 'Санкт-Петербург и СЗО' },
+    { clusterId: '4039', clusterName: 'Москва, МО и Дальние регионы' },
+    { clusterId: '4066', clusterName: 'Екатеринбург' },
+    { clusterId: '4071', clusterName: 'Ростов' }
+  ];
+  const shares = { '4039': 41.2, '4007': 23.8, '4071': 9.4 };
+
+  it('сначала кластеры с большей долей продаж', () => {
+    const sorted = sortClustersBySalesShare(clusters, shares);
+    expect(sorted.map((c) => c.clusterId)).toEqual(['4039', '4007', '4071', '4066']);
+  });
+
+  it('кластер без продаж уходит в конец, а не наверх', () => {
+    const sorted = sortClustersBySalesShare(clusters, shares);
+    expect(sorted[sorted.length - 1].clusterId).toBe('4066');
+  });
+
+  it('при равных долях порядок по названию', () => {
+    const sorted = sortClustersBySalesShare(
+      [
+        { clusterId: 'b', clusterName: 'Ярославль' },
+        { clusterId: 'a', clusterName: 'Астрахань' }
+      ],
+      { a: 5, b: 5 }
+    );
+    expect(sorted.map((c) => c.clusterName)).toEqual(['Астрахань', 'Ярославль']);
+  });
+
+  it('исходный массив не изменяется', () => {
+    // Ловушка: общая фикстура уже отсортирована предыдущими проверками, и сортировка
+    // «на месте» на ней незаметна. Массив собирается заново прямо здесь.
+    const own = [
+      { clusterId: '4007', clusterName: 'Санкт-Петербург и СЗО' },
+      { clusterId: '4039', clusterName: 'Москва, МО и Дальние регионы' },
+      { clusterId: '4066', clusterName: 'Екатеринбург' }
+    ];
+    const before = own.map((c) => c.clusterId);
+    const sorted = sortClustersBySalesShare(own, shares);
+    expect(own.map((c) => c.clusterId)).toEqual(before);
+    expect(sorted.map((c) => c.clusterId)).toEqual(['4039', '4007', '4066']);
+  });
+
+  it('пустая карта долей и пустой список не роняют расчёт', () => {
+    expect(sortClustersBySalesShare(clusters, {}).map((c) => c.clusterId)).toEqual(['4066', '4039', '4071', '4007']);
+    expect(sortClustersBySalesShare([], shares)).toEqual([]);
+  });
+});
+
+describe('подключение пункта 60 к экранам', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const stocks = read('src/components/OzonStocksTab.tsx');
+  const modal = read('src/components/OzonSupplyModal.tsx');
+
+  it('«Рекомендации»: галочка рисуется по правилу, а не по одним коробкам', () => {
+    expect(stocks).toContain('canTickCluster(c.recommendation.boxes, c.needBoxes)');
+    expect(stocks).not.toContain('{c.recommendation.boxes > 0 && (');
+  });
+
+  it('«Рекомендации»: кластер с нулём попадает в заявку по тому же правилу', () => {
+    expect(stocks).toMatch(/if \(!canTickCluster\(c\.recommendation\.boxes, c\.needBoxes\)\) continue;/);
+  });
+
+  it('«Рекомендации»: доли кластеров уезжают в мастер', () => {
+    expect(stocks).toContain('clusterSalesShare={clusterShares.byClusterId}');
+    expect(stocks).toContain('byClusterId[clusterId] = total > 0');
+  });
+
+  it('Мастер: список кластеров сортируется правилом', () => {
+    expect(modal).toContain('sortClustersBySalesShare(refs, clusterSalesShare)');
   });
 });

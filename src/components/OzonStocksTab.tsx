@@ -9,6 +9,7 @@ import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
 import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
+import { canTickCluster } from '../lib/ozonSupplyLines';
 import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
@@ -583,7 +584,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       .filter((c) => c.qty > 0)
       .map((c) => ({ ...c, pct: total > 0 ? (c.qty / total) * 100 : 0 }))
       .sort((a, b) => b.qty - a.qty);
-    return { list, total };
+    // Пункт 60. Тот же расчёт в виде «КластерID -> доля»: по нему мастер поставки
+    // сортирует список кластеров, чтобы порядок совпадал с графиком долей.
+    const byClusterId: Record<string, number> = {};
+    Object.keys(map).forEach((clusterId) => {
+      byClusterId[clusterId] = total > 0 ? (map[clusterId].qty / total) * 100 : 0;
+    });
+    return { list, total, byClusterId };
   }, [coverageRows]);
 
   const fmtDateShort = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}` : '');
@@ -725,7 +732,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
     for (const row of recommendations.supplies as any[]) {
       for (const c of row.clusters) {
-        if (!c.recommendation || c.recommendation.boxes <= 0) continue;
+        // Пункт 60. Кластер, которому поставка нужна, но свободного остатка на него не
+        // хватило, тоже попадает в заявку — с нулём. Количество владелец распределяет сам
+        // в окне оформления, там же где уменьшает другие кластеры.
+        if (!c.recommendation) continue;
+        if (!canTickCluster(c.recommendation.boxes, c.needBoxes)) continue;
         if (!selectedSupply[supplyKey(row.article, c.clusterId)]) continue;
 
         rows.push({
@@ -1008,7 +1019,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 {s.clusters.map((c: any) => (
                                   <div key={c.clusterId} className="flex items-center justify-between gap-2 text-[11px]">
                                     <span className="text-slate-600 truncate flex items-center gap-1.5" title={c.clusterName}>
-                                      {c.recommendation.boxes > 0 && (
+                                      {canTickCluster(c.recommendation.boxes, c.needBoxes) && (
                                         <input
                                           type="checkbox"
                                           checked={Boolean(selectedSupply[supplyKey(s.article, c.clusterId)])}
@@ -1021,7 +1032,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                           title={
                                             disabledReason(directRules, selectedClusterIds, String(c.clusterId)) ||
                                             cabinetDisabledReason(selectedCabinetSets, cabinetsByArticleMap[s.article] || []) ||
-                                            'Включить в заявку на поставку'
+                                            (c.recommendation.boxes > 0
+                                              ? 'Включить в заявку на поставку'
+                                              : 'Добавить кластер в заявку с нулём: количество распределите сами в окне оформления')
                                           }
                                         />
                                       )}
@@ -1898,6 +1911,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         rows={supplyPlan.rows}
         stockOptions={supplyStockOptions}
         cabinet={resolveSupplyCabinet(selectedCabinetSets) || (cabinetFilter !== 'all' ? cabinetFilter : '')}
+        clusterSalesShare={clusterShares.byClusterId}
         dropOffWarehouseId={supplySettings.dropOffWarehouseId}
         dropOffWarehouseName={supplySettings.dropOffWarehouseName}
         dropOffWarehouseType={supplySettings.dropOffWarehouseType}

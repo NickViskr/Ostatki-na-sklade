@@ -139,3 +139,37 @@ export const applyOzonCorrection = (
     removedClusterIds: seenClusters.filter((id) => !keptByCluster[id])
   };
 };
+
+/* ---- Пункт 60. Кластеры, которым остатка не хватило ------------------------------
+ * Решение владельца 27.08.2026: кластер, которому поставка нужна, но свободного остатка
+ * на него не хватило, тоже можно отметить галочкой. В заявку он входит с НУЛЁМ, а сколько
+ * ему отдать — владелец решает сам в окне оформления, уменьшая там другие кластеры.
+ * Прежде такой кластер галочки не имел вовсе, и перераспределить остаток было нельзя.
+ */
+
+/** Кластер можно отметить: расчёт дал ему коробки ЛИБО он нуждается в поставке. */
+export const canTickCluster = (
+  recommendedBoxes: number | null | undefined,
+  neededBoxes: number | null | undefined
+): boolean => {
+  const boxes = Number(recommendedBoxes) || 0;
+  const need = Number(neededBoxes) || 0;
+  return boxes > 0 || need > 0;
+};
+
+/**
+ * Пункт 60. Порядок кластеров в списке «Добавить позицию» — по доле кластера в продажах,
+ * как на графике «Доли кластеров в продажах». Кластер без продаж доли не имеет и уходит
+ * в конец, там порядок по названию. Массив не изменяется на месте.
+ */
+export const sortClustersBySalesShare = <T extends { clusterId: string; clusterName: string }>(
+  clusters: T[],
+  shareByClusterId: Record<string, number>
+): T[] => {
+  const share = (clusterId: string) => Number((shareByClusterId || {})[clusterId]) || 0;
+  return [...(clusters || [])].sort((a, b) => {
+    const diff = share(b.clusterId) - share(a.clusterId);
+    if (diff !== 0) return diff;
+    return String(a.clusterName || '').localeCompare(String(b.clusterName || ''), 'ru');
+  });
+};

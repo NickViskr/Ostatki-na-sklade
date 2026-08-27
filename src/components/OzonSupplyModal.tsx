@@ -6,7 +6,7 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClusters, validateSelection } from '../lib/ozonDirectSupply';
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
-import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict } from '../lib/ozonSupplyLines';
+import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
 
 export interface SupplyPlanRow {
   article: string;
@@ -35,6 +35,8 @@ interface OzonSupplyModalProps {
   rows: SupplyPlanRow[];
   stockOptions: SupplyStockOption[];
   cabinet: string;
+  /** Пункт 60. Доля кластера в продажах, %: КластерID -> доля. Задаёт порядок списка кластеров. */
+  clusterSalesShare: Record<string, number>;
   dropOffWarehouseId: string;
   dropOffWarehouseName: string;
   dropOffWarehouseType: string;
@@ -45,7 +47,7 @@ const REQUEST_TIMEOUT_SEC = 60;
 const FINALIZE_TIMEOUT_SEC = 180; // достройка идёт по каждому кластеру, минуты не хватает
 
 export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
-  isOpen, onClose, rows, stockOptions, cabinet, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated
+  isOpen, onClose, rows, stockOptions, cabinet, clusterSalesShare, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated
 }) => {
   const skus = useWarehouseStore((state) => state.skus);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
@@ -277,15 +279,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
    *  so offering it here would contradict the rest of the screen. */
   const clusterOptions = useMemo(() => {
     const excluded = parseExcludedClusters(ozonSettings ? ozonSettings.excludedClusters : '');
-    const used = new Set(activeRows.map((r) => r.clusterId));
     const refs = (ozonClusterRefs || []).filter((c) => c.clusterId && !excluded.has(c.clusterId));
-    return [...refs].sort((a, b) => {
-      const ua = used.has(a.clusterId) ? 0 : 1;
-      const ub = used.has(b.clusterId) ? 0 : 1;
-      if (ua !== ub) return ua - ub;
-      return a.clusterName.localeCompare(b.clusterName, 'ru');
-    });
-  }, [ozonClusterRefs, ozonSettings, activeRows]);
+    // Пункт 60. Порядок — по доле кластера в продажах, как на графике «Доли кластеров
+    // в продажах» вкладки «Остатки Озон»: сначала те, куда уходит больше товара.
+    // Прежний порядок «сначала уже добавленные, потом по алфавиту» отменён решением
+    // владельца 27.08.2026. Кластер без продаж доли не имеет и уходит в конец списка.
+    return sortClustersBySalesShare(refs, clusterSalesShare);
+  }, [ozonClusterRefs, ozonSettings, clusterSalesShare]);
 
   /* ---- Пункт 58. Прямая поставка едет отдельной заявкой ---------------------------
    * Запрет обязан жить и здесь, а не только на экране рекомендаций: иначе он обходится
