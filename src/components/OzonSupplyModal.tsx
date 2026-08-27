@@ -6,7 +6,7 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClusters, validateSelection } from '../lib/ozonDirectSupply';
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
-import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
+import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, resolveAddLine, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
 
 export interface SupplyPlanRow {
   article: string;
@@ -338,14 +338,16 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
    *  supply — rowKey is article|||clusterId and a duplicate would collide. */
   const articleOptions = useMemo(() => {
     if (!addForm.clusterId) return [];
-    const taken = new Set(allRows.filter((r) => r.clusterId === addForm.clusterId).map((r) => r.article));
+    // Пункт 61. Занятыми считаются только ЖИВЫЕ строки: удалённая строка не должна
+    // навсегда вычёркивать товар из списка — её как раз и нужно вернуть.
+    const taken = new Set(activeRows.filter((r) => r.clusterId === addForm.clusterId).map((r) => r.article));
     return (stockOptions || [])
       .filter((o) => o.freeMyStock > 0 && skuMap[o.article] && !taken.has(o.article))
       // Пункт 59. Заявка принадлежит одному магазину, поэтому товары чужого кабинета
       // в список не попадают вовсе: добавленный сюда артикул уехал бы по чужим ключам.
       .filter((o) => isCabinetCompatible([[cabinet]], o.cabinets || []))
       .sort((a, b) => a.article.localeCompare(b.article, 'ru'));
-  }, [addForm.clusterId, stockOptions, skuMap, allRows, cabinet]);
+  }, [addForm.clusterId, stockOptions, skuMap, activeRows, cabinet]);
 
   /* ---- Ozon's answer, folded into the composition -------------------------------
    * Ozon replies per cluster with two lists of items: what will go into the supply and
@@ -439,8 +441,21 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       return;
     }
     const key = `${addForm.article}|||${addForm.clusterId}`;
-    if (allRows.some((r) => rowKey(r) === key)) {
+    const action = resolveAddLine(allRows.map((r) => rowKey(r)), Object.keys(removedRows).filter((k) => removedRows[k]), key);
+    if (action === 'duplicate') {
       toast.error('Такой товар уже есть в этом кластере — измените количество в строке');
+      return;
+    }
+    if (action === 'restore') {
+      // Пункт 61. Строка с таким ключом уже есть, просто помечена удалённой. Заводить
+      // вторую нельзя — ключи совпадут, и новая строка тут же скроется как удалённая.
+      const nextRemoved = { ...removedRows };
+      delete nextRemoved[key];
+      setRemovedRows(nextRemoved);
+      setQtyEdit({ ...qtyEdit, [key]: asked });
+      setAddForm({ clusterId: addForm.clusterId, article: '', qty: '' });
+      markDirty();
+      toast.success(`${addForm.article} возвращён в заявку: ${asked} шт`);
       return;
     }
     const perBox = pcsPerBoxMap[addForm.article] || 0;

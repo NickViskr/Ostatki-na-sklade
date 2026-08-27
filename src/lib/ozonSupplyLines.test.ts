@@ -5,7 +5,8 @@ import { capForSupplyLine, supplyLineKey,
   canTickCluster,
   sortClustersBySalesShare,
   qtyFieldValue,
-  shouldBlankQtyOnFocus
+  shouldBlankQtyOnFocus,
+  resolveAddLine
 } from './ozonSupplyLines';
 
 const free = { 'ART-A': 100, 'ART-B': 30, 'ART-ZERO': 0 };
@@ -378,5 +379,51 @@ describe('подключение пункта 60а к полю количест�
 
   it('после ухода курсора поле снова показывает число', () => {
     expect(modal).toMatch(/onBlur=\{\(\) => \{[\s\S]{0,200}delete next\[rowKey\(r\)\];/);
+  });
+});
+
+describe('пункт 61: удалённый кластер возвращается в заявку', () => {
+  const KEY = 'BowlGrayMini_01|||4066';
+
+  it('такого ключа ещё нет — заводится новая строка', () => {
+    expect(resolveAddLine([], [], KEY)).toBe('new');
+    expect(resolveAddLine(['ART|||4039'], [], KEY)).toBe('new');
+  });
+
+  it('строка есть и помечена удалённой — она ВОЗВРАЩАЕТСЯ, а не заводится заново', () => {
+    expect(resolveAddLine([KEY], [KEY], KEY)).toBe('restore');
+  });
+
+  it('строка есть и жива — это дубль', () => {
+    expect(resolveAddLine([KEY], [], KEY)).toBe('duplicate');
+  });
+
+  it('удалён ДРУГОЙ кластер того же товара — на этот ключ это не влияет', () => {
+    expect(resolveAddLine([KEY], ['BowlGrayMini_01|||4039'], KEY)).toBe('duplicate');
+  });
+
+  it('пустой ключ и пустые списки не роняют расчёт', () => {
+    expect(resolveAddLine([KEY], [KEY], '')).toBe('new');
+    expect(resolveAddLine(null as any, null as any, KEY)).toBe('new');
+  });
+});
+
+describe('подключение пункта 61 к мастеру', () => {
+  const modal = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonSupplyModal.tsx'), 'utf8');
+
+  it('список товаров считает занятыми только живые строки', () => {
+    expect(modal).toContain('const taken = new Set(activeRows.filter((r) => r.clusterId === addForm.clusterId)');
+    expect(modal).not.toContain('const taken = new Set(allRows.filter');
+  });
+
+  it('добавление различает три случая, а не два', () => {
+    expect(modal).toContain('const action = resolveAddLine(');
+    expect(modal).toMatch(/action === 'duplicate'/);
+    expect(modal).toMatch(/action === 'restore'/);
+  });
+
+  it('возврат снимает пометку удаления, а не заводит вторую строку', () => {
+    expect(modal).toMatch(/delete nextRemoved\[key\];[\s\S]{0,120}setRemovedRows\(nextRemoved\)/);
+    expect(modal).toMatch(/action === 'restore'[\s\S]{0,600}setQtyEdit\(\{ \.\.\.qtyEdit, \[key\]: asked \}\)/);
   });
 });

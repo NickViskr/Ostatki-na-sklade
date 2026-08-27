@@ -188,3 +188,25 @@ export const shouldBlankQtyOnFocus = (qty: number | null | undefined): boolean =
 /** Что показывает поле: пустоту, пока его чистят, иначе само количество. */
 export const qtyFieldValue = (qty: number | null | undefined, blanked: boolean): string =>
   blanked ? '' : String(Number(qty) || 0);
+
+/* ---- Пункт 61. Удалённый кластер должен возвращаться в заявку ---------------------
+ * Строка заявки опознаётся ключом «артикул|||кластер», а удаление только ПОМЕЧАЕТ строку,
+ * не выбрасывая её. Отсюда два дефекта, найденные владельцем 27.08.2026: список товаров
+ * считал помеченную строку занятой и не предлагал этот товар, а если бы и предложил —
+ * новая строка получила бы тот же ключ и была бы тут же скрыта как удалённая.
+ * Поэтому добавление РАЗЛИЧАЕТ три случая, а не два.
+ */
+
+/** Что делает добавление строки: заводит новую, возвращает удалённую или упирается в дубль. */
+export type AddLineAction = 'new' | 'restore' | 'duplicate';
+
+export const resolveAddLine = (
+  existingKeys: string[],
+  removedKeys: string[],
+  key: string
+): AddLineAction => {
+  const wanted = String(key || '');
+  if (!wanted) return 'new';
+  if ((existingKeys || []).indexOf(wanted) < 0) return 'new';
+  return (removedKeys || []).indexOf(wanted) >= 0 ? 'restore' : 'duplicate';
+};
