@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Columns3, FileDown, HelpCircle, Maximize2, Minimize2, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
+import { ChevronDown, ChevronRight, Columns3, FileDown, HelpCircle, Maximize2, Minimize2, PackagePlus, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -10,6 +10,7 @@ import { OzonSupplyModal } from './OzonSupplyModal';
 import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { canTickCluster } from '../lib/ozonSupplyLines';
+import { buildManualPlan, clampManualQty, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
 import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
@@ -127,6 +128,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const [factoryModalArticle, setFactoryModalArticle] = useState<string | null>(null);
   const [pendingModalArticle, setPendingModalArticle] = useState<string | null>(null);
   const [showRecommendations, setShowRecommendations] = useState(false);
+  /* ---- Пункт 63. Поставка, собранная руками по таблице остатков --------------------
+   * Рекомендации отвечают на вопрос «где заканчивается товар». Вопрос «я хочу перевезти
+   * вот это вот туда» они не решают, а он законный: владелец видит картину по кластерам
+   * и распределяет остаток сам. Режим включается кнопкой и живёт ОТДЕЛЬНО от галочек в
+   * «Рекомендациях» — решение владельца 27.08.2026, у каждого списка своя заявка.
+   * Значение по ключу — текст поля количества: пустая строка это отмеченный кластер,
+   * которому количество ещё не задали. */
+  const [manualMode, setManualMode] = useState(false);
+  const [manualQty, setManualQty] = useState<Record<string, string>>({});
+  const [manualSummaryOpen, setManualSummaryOpen] = useState(false);
 
   const [showColsMenu, setShowColsMenu] = useState(false);
   const [hiddenCols, setHiddenCols] = useState<string[]>(() => {
@@ -662,6 +673,52 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     [coverageRows]
   );
 
+  // Пункт 63. Ручной выбор: правила пунктов 58 и 59 применяются к НЕМУ, а не к галочкам
+  // рекомендаций — иначе запрет прямой поставки обходился бы переключением списка.
+  const manualPicks = useMemo(() => readManualPicks(manualQty), [manualQty]);
+  const manualClusterIds = useMemo(() => pickedClusterIds(manualPicks), [manualPicks]);
+  const manualCabinetSets = useMemo(
+    () => pickedCabinetSets(manualPicks, cabinetsByArticleMap),
+    [manualPicks, cabinetsByArticleMap]
+  );
+  const manualInfos = useMemo(
+    () => (coverageRows as any[]).map((row) => ({
+      article: row.article,
+      name: row.name || '',
+      pcsPerBox: Number(row.pcsPerBox) || 0,
+      freeMyStock: Number(row.freeMyStock) || 0,
+      cabinets: (row.cabinets || []) as string[],
+      clusters: (row.clusters || []).map((c: any) => ({
+        clusterId: String(c.clusterId),
+        clusterName: String(c.clusterName || '')
+      }))
+    })),
+    [coverageRows]
+  );
+  const manualPlan = useMemo(() => buildManualPlan(manualPicks, manualInfos), [manualPicks, manualInfos]);
+
+  const toggleManualPick = (article: string, clusterId: string) => {
+    const key = manualKey(article, clusterId);
+    setManualQty((prev) => {
+      const next = { ...prev };
+      if (next[key] !== undefined) delete next[key];
+      else next[key] = '';
+      return next;
+    });
+  };
+
+  const changeManualQty = (article: string, clusterId: string, raw: string, freeMyStock: number) => {
+    const key = manualKey(article, clusterId);
+    // Пустое поле оставляем пустым: владелец стирает цифру, чтобы набрать новую.
+    const value = raw === '' ? '' : String(clampManualQty(raw, freeMyStock, manualPicks, article, clusterId));
+    setManualQty((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const exitManualMode = () => {
+    setManualMode(false);
+    setManualQty({});
+  };
+
   const recommendations = useMemo(() => {
     const supplies: any[] = [];
     const factories: any[] = [];
@@ -792,6 +849,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {/* Пункт 63. Вход в режим ручного выбора. Пока он выключен, таблица работает как раньше. */}
+            <button
+              type="button"
+              id="btn-ozon-manual-supply"
+              onClick={() => (manualMode ? exitManualMode() : setManualMode(true))}
+              className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl transition-all shadow-xs border ${
+                manualMode
+                  ? 'text-white bg-indigo-600 border-indigo-600 hover:bg-indigo-700'
+                  : 'text-indigo-600 bg-white border-slate-200 hover:border-slate-300 hover:text-indigo-700'
+              }`}
+            >
+              <PackagePlus size={14} />
+              {manualMode ? 'Отменить выбор' : 'Оформить поставку'}
+            </button>
             <button
               type="button"
               id="btn-ozon-fullscreen"
@@ -1141,6 +1212,47 @@ export const OzonStocksTab: React.FC = React.memo(() => {
               </span>
             </div>
 
+            {/* Пункт 63. Итог ручного выбора и вход в мастер. Заявка идёт тем же путём,
+                что и из рекомендаций, — это тот же мастер оформления. */}
+            {manualMode && (
+              <div className="p-3 rounded-2xl border border-indigo-200 bg-indigo-50 flex flex-col gap-2" id="ozon-manual-supply-bar">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-xs font-semibold text-indigo-900">
+                    {manualPlan.rows.length === 0
+                      ? 'Отметьте кластеры у нужных товаров и задайте количество'
+                      : `Выбрано: ${manualPlan.rows.length} строк · ${fmtInt(manualPlan.totalQty)} шт (${fmtInt(manualPlan.totalBoxes)} кор) · кластеров: ${manualPlan.clusters.length}`}
+                  </span>
+                  <button
+                    type="button"
+                    id="btn-ozon-manual-supply-create"
+                    disabled={
+                      manualPlan.rows.length === 0
+                      || manualPlan.cabinets.length > 1
+                      || manualPlan.over.length > 0
+                      || !supplySettings.dropOffWarehouseId
+                    }
+                    onClick={() => setManualSummaryOpen(true)}
+                    className="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-1.5 rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Оформить поставку
+                  </button>
+                </div>
+                {manualPlan.cabinets.length > 1 && (
+                  <div className="text-[11px] text-amber-700">
+                    Выбраны товары из разных магазинов ({manualPlan.cabinets.join(', ')}). Заявка создаётся в одном магазине — снимите лишние галочки.
+                  </div>
+                )}
+                {manualPlan.over.map((o) => (
+                  <div key={o.article} className="text-[11px] text-red-600">
+                    {o.article}: назначено {fmtInt(o.asked)} шт, а свободно {fmtInt(o.free)} шт. Остаток изменился — уменьшите количество.
+                  </div>
+                ))}
+                {!supplySettings.dropOffWarehouseId && (
+                  <div className="text-[11px] text-amber-700">Не выбрана точка отгрузки — укажите её в настройках Ozon.</div>
+                )}
+              </div>
+            )}
+
             {visibleRows.length === 0 ? (
               <div className="bg-white p-6 rounded-2xl border border-slate-200 text-center text-sm text-slate-500" id="ozon-stocks-empty">
                 Данных пока нет. Нажмите „Обновить", чтобы загрузить остатки со складов Ozon.
@@ -1325,6 +1437,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       <span key={cab} className="text-[10px] px-1.5 py-0.5 rounded-md font-bold tracking-wide bg-indigo-50 text-indigo-600 border border-indigo-100">{cab}</span>
                                     ))}
                                     <span className="font-mono font-bold text-slate-800">{art.article}</span>
+                                    {/* Пункт 63. Остаток тает по мере того, как владелец раскладывает его по кластерам. */}
+                                    {manualMode && (
+                                      <span
+                                        className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-indigo-50 text-indigo-700 border border-indigo-100"
+                                        title="Свободно на «Моём складе» с учётом того, что уже разложено по кластерам в этом выборе"
+                                      >
+                                        свободно {fmtInt(remainingForArticle(art.freeMyStock, manualPicks, art.article, ''))} шт
+                                      </span>
+                                    )}
                                   </div>
                                   <span className="text-slate-500 truncate block text-[11px]" title={art.name}>{art.name}</span>
                                 </div>
@@ -1582,6 +1703,41 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   >
                                     <td className="p-2.5 pl-8">
                                       <div className="flex items-center gap-1.5">
+                                        {/* Пункт 63. Галочка и количество. Клик по ним не должен раскрывать строку,
+                                            иначе каждая отметка ещё и разворачивала бы список складов. */}
+                                        {manualMode && (() => {
+                                          const mKey = manualKey(art.article, String(cls.clusterId));
+                                          const picked = manualQty[mKey] !== undefined;
+                                          const blockedDirect = !isClusterSelectable(directRules, manualClusterIds, String(cls.clusterId));
+                                          const blockedCabinet = !isCabinetCompatible(manualCabinetSets, art.cabinets || []);
+                                          const why =
+                                            disabledReason(directRules, manualClusterIds, String(cls.clusterId))
+                                            || cabinetDisabledReason(manualCabinetSets, art.cabinets || [])
+                                            || undefined;
+                                          return (
+                                            <span className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                                              <input
+                                                type="checkbox"
+                                                id={`ozon-manual-pick-${art.article}-${cls.clusterId}`}
+                                                checked={picked}
+                                                disabled={blockedDirect || blockedCabinet}
+                                                title={why}
+                                                onChange={() => toggleManualPick(art.article, String(cls.clusterId))}
+                                                className="rounded border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                                              />
+                                              {picked && (
+                                                <input
+                                                  type="number"
+                                                  min={0}
+                                                  placeholder="0"
+                                                  value={manualQty[mKey]}
+                                                  onChange={(e) => changeManualQty(art.article, String(cls.clusterId), e.target.value, art.freeMyStock)}
+                                                  className="w-16 px-1.5 py-0.5 text-[11px] text-right rounded-lg border border-indigo-200 bg-white focus:outline-none focus:border-indigo-400"
+                                                />
+                                              )}
+                                            </span>
+                                          );
+                                        })()}
                                         {isClsExpanded ? <ChevronDown size={12} className="text-slate-400" /> : <ChevronRight size={12} className="text-slate-400" />}
                                         <span className="font-semibold text-slate-700 text-[11px]">{cls.clusterName}</span>
                                         {cls.excluded && (
@@ -1916,6 +2072,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         dropOffWarehouseName={supplySettings.dropOffWarehouseName}
         dropOffWarehouseType={supplySettings.dropOffWarehouseType}
         onCreated={() => setSelectedSupply({})}
+      />
+      {/* Пункт 63. Тот же мастер, что и у рекомендаций: ручной выбор идёт стандартным путём
+          создания заявки. Выборы независимы, поэтому и окна разные. */}
+      <OzonSupplyModal
+        isOpen={manualSummaryOpen && manualPlan.rows.length > 0}
+        onClose={() => setManualSummaryOpen(false)}
+        rows={manualPlan.rows}
+        stockOptions={supplyStockOptions}
+        cabinet={resolveSupplyCabinet(manualCabinetSets) || (cabinetFilter !== 'all' ? cabinetFilter : '')}
+        clusterSalesShare={clusterShares.byClusterId}
+        dropOffWarehouseId={supplySettings.dropOffWarehouseId}
+        dropOffWarehouseName={supplySettings.dropOffWarehouseName}
+        dropOffWarehouseType={supplySettings.dropOffWarehouseType}
+        onCreated={() => { setManualQty({}); setManualMode(false); setManualSummaryOpen(false); }}
       />
       {factoryModalArticle && (
         <FactoryOrderModal
