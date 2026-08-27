@@ -1191,9 +1191,15 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
 
     const articleQtySold = speed.qtyByArticle[article] || 0;
 
+    // Пункт 66. Список кластеров товара — это остатки ПЛЮС продажи ПЛЮС кластеры, куда
+    // товар уже едет по созданной заявке. Без третьего слагаемого кластер, в который
+    // только что оформили поставку, пропадал из таблицы до самой приёмки: остатка там
+    // ещё нет и продаж нет, а товар в пути. Рекомендаций это не добавляет — скорость
+    // в таком кластере нулевая, и расчёт всё равно возвращает null.
     const clusterIds = new Set<string>([
       ...Object.keys(stockAgg.byCluster),
-      ...Object.keys(qtyByClusterId)
+      ...Object.keys(qtyByClusterId),
+      ...Object.keys(pendingByCluster).filter((id) => (Number(pendingByCluster[id]) || 0) > 0)
     ]);
 
     const clusterRows: ClusterCoverageRow[] = [];

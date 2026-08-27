@@ -2117,7 +2117,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         dropOffWarehouseId={supplySettings.dropOffWarehouseId}
         dropOffWarehouseName={supplySettings.dropOffWarehouseName}
         dropOffWarehouseType={supplySettings.dropOffWarehouseType}
-        onCreated={() => setSelectedSupply({})}
+        onCreated={() => {
+          setSelectedSupply({});
+          // Пункт 66. Созданная заявка гасит режим ручного выбора, из какого бы списка
+          // она ни ушла. Иначе полный список кластеров оставался на экране после
+          // оформления — режим выключен только у своей кнопки, а рисуют его обе.
+          exitManualMode();
+        }}
       />
       {/* Пункт 63. Тот же мастер, что и у рекомендаций: ручной выбор идёт стандартным путём
           создания заявки. Выборы независимы, поэтому и окна разные. */}
@@ -2131,7 +2137,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         dropOffWarehouseId={supplySettings.dropOffWarehouseId}
         dropOffWarehouseName={supplySettings.dropOffWarehouseName}
         dropOffWarehouseType={supplySettings.dropOffWarehouseType}
-        onCreated={() => { setManualQty({}); setManualMode(false); setManualSummaryOpen(false); }}
+        onCreated={() => { exitManualMode(); setManualSummaryOpen(false); }}
       />
       {factoryModalArticle && (
         <FactoryOrderModal

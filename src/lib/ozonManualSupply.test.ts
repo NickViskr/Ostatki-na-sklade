@@ -342,8 +342,14 @@ describe('ручной выбор на экране остатков', () => {
     expect(stocks).toMatch(/manualPlan\.rows\.length === 0\s*\n\s*\|\| manualPlan\.cabinets\.length > 1\s*\n\s*\|\| manualPlan\.over\.length > 0\s*\n\s*\|\| !supplySettings\.dropOffWarehouseId/);
   });
 
-  it('выбор рекомендаций остаётся нетронутым: у него своё состояние', () => {
-    expect(stocks).toContain('onCreated={() => setSelectedSupply({})}');
-    expect(stocks).toContain('onCreated={() => { setManualQty({}); setManualMode(false); setManualSummaryOpen(false); }}');
+  it('у каждого списка своё состояние: заявка из рекомендаций чистит свой выбор', () => {
+    expect(stocks).toContain('setSelectedSupply({});');
+  });
+
+  it('созданная заявка гасит режим выбора, из какого бы списка она ни ушла', () => {
+    // Пункт 66. Режим рисуют обе кнопки, а выключала его только своя — после заявки
+    // из рекомендаций полный список кластеров оставался на экране.
+    expect(stocks).toMatch(/onCreated=\{\(\) => \{\s*\n\s*setSelectedSupply\(\{\}\);[\s\S]{0,400}exitManualMode\(\);/);
+    expect(stocks).toContain('onCreated={() => { exitManualMode(); setManualSummaryOpen(false); }}');
   });
 });

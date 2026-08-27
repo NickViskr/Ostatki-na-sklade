@@ -988,3 +988,58 @@ describe('Окно скорости решает, попадёт ли класт
     expect(clusterRec(wide, 'C1')!.perDay).toBeLessThan(clusterRec(narrow, 'C1')!.perDay);
   });
 });
+
+/* ---- Пункт 66. Кластер, куда товар уже едет, остаётся в таблице -------------------
+ * Список кластеров товара — объединение остатков и продаж. Кластер, в который только
+ * что оформили поставку, не имеет ни того, ни другого и пропадал с экрана до самой
+ * приёмки, хотя товар туда едет. Владелец 27.08.2026: «должны оставаться только
+ * кластера с реальными остатками и кластера в которые товар едет или скоро появится».
+ */
+describe('buildOzonCoverage: кластер с созданной заявкой остаётся в списке', () => {
+  const withCluster = (offerId: string, clusterId: string, clusterName: string, available: number): OzonStockRow => ({
+    ...makeStockRow(offerId, available),
+    clusterId,
+    clusterName
+  });
+
+  const input = (pendingByCluster: Record<string, number>): OzonCoverageInput => ({
+    stocks: [withCluster('TOVAR', '4007', 'Москва', 20)],
+    sales: makeSalesRows('TOVAR', 28),
+    skus: [makeSku({ sku: 'TOVAR', pcsPerBox: 10 })],
+    clusters: [],
+    settings: makeSettings(),
+    myStockAvailability: { TOVAR: 100 },
+    pending: { byArticleCluster: { TOVAR: pendingByCluster }, byArticle: { TOVAR: 0 } },
+    now: NOW
+  });
+
+  it('кластер без остатка и без продаж, но с заявкой, виден в таблице', () => {
+    const row = buildOzonCoverage(input({ '4066': 30 })).articles.find(a => a.article === 'TOVAR')!;
+    const ekb = row.clusters.find(c => c.clusterId === '4066');
+    expect(ekb).toBeDefined();
+    expect(ekb!.pendingQty).toBe(30);
+    expect(ekb!.estimated).toBe(0);
+  });
+
+  it('заявка на ноль штук кластер не воскрешает', () => {
+    const row = buildOzonCoverage(input({ '4066': 0 })).articles.find(a => a.article === 'TOVAR')!;
+    expect(row.clusters.find(c => c.clusterId === '4066')).toBeUndefined();
+  });
+
+  it('без заявок список кластеров прежний — остатки и продажи', () => {
+    const row = buildOzonCoverage(input({})).articles.find(a => a.article === 'TOVAR')!;
+    expect(row.clusters.map(c => c.clusterId)).toEqual(['4007']);
+  });
+
+  it('кластер в пути рекомендацию НЕ получает: продаж там нет, скорость нулевая', () => {
+    // Иначе на пустой кластер посыпались бы поставки просто потому, что туда что-то едет.
+    const row = buildOzonCoverage(input({ '4066': 30 })).articles.find(a => a.article === 'TOVAR')!;
+    expect(row.clusters.find(c => c.clusterId === '4066')!.recommendation).toBeNull();
+  });
+
+  it('свой кластер с остатком не дублируется заявкой', () => {
+    const row = buildOzonCoverage(input({ '4007': 15 })).articles.find(a => a.article === 'TOVAR')!;
+    expect(row.clusters.filter(c => c.clusterId === '4007')).toHaveLength(1);
+    expect(row.clusters.find(c => c.clusterId === '4007')!.available).toBe(20);
+  });
+});
