@@ -1724,7 +1724,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         ' Нажми, чтобы всё равно отметить заказ на фабрике.'
                                       }
                                     >
-                                      —
+                                      не нужно
                                     </button>
                                   )}
                                 </td>

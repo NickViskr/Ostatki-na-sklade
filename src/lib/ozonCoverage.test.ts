@@ -1057,8 +1057,10 @@ describe('заказ на фабрике вне рекомендаций', () =>
 
   it('состояние «заказ не нужен» открывает окно заказа', () => {
     // Прочерк в колонке был мёртвым текстом — по нему нельзя было отметить заказ.
+    // Владелец 27.08.2026 заменил прочерк на «не нужно» — ту же надпись, что в таблице
+    // компонентов: пустая ячейка не читается как приглашение, а надпись читается.
     expect(stocks).toMatch(
-      /className="text-slate-300 hover:text-slate-500 hover:underline"[\s\S]{0,900}?—\s*<\/button>/
+      /onClick=\{\(e\) => \{ e\.stopPropagation\(\); setFactoryModalArticle\(art\.article\); \}\}\s*\n\s*className="text-slate-300 hover:text-slate-500 hover:underline"[\s\S]{0,700}?>\s*\n\s*не нужно\s*\n\s*<\/button>/
     );
   });
 
