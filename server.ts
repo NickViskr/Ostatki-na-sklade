@@ -7,6 +7,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import * as XLSX from "xlsx";
 import { chooseDirectWarehouse, directWarehouseMessage, readDraftWarehouses } from "./src/lib/ozonDirectDraft";
+import { draftErrorLogLine, draftFailureHint, draftFailureTitle, readDraftErrors } from "./src/lib/ozonDraftErrors";
 
 dotenv.config();
 
@@ -1507,6 +1508,11 @@ async function startServer() {
   const CABINET_REQUIRED_MESSAGE =
     'Не указан магазин: заявка на поставку принадлежит одному кабинету, и подставлять первый попавшийся нельзя';
 
+  // Пункт 62. Ozon разрешает создавать не больше 2 черновиков в минуту (50 в час, 500 в день).
+  // Повтор сразу после отказа упирается в лимит, и общий текст про «синхронизацию» сбивает с толку.
+  const DRAFT_RATE_LIMIT_MESSAGE =
+    'Ozon разрешает не больше 2 проверок черновика в минуту. Подождите 30 секунд и нажмите «Проверить в Ozon» ещё раз.';
+
   function pickCabinet(keys: OzonKeysBundle, name?: string): OzonCabinetKeys {
     const wanted = String(name || '').trim().toLowerCase();
     if (wanted) {
@@ -1701,7 +1707,20 @@ async function startServer() {
 
       const draftId = createData?.draft_id;
       if (!draftId) {
-        return res.status(502).json({ status: "error", stage: "ozon_api", message: "Ozon не вернул draft_id", details: createData?.errors || null });
+        // Пункт 62. Ozon отказал ещё на создании черновика и назвал причину в errors[].
+        const createFailures = readDraftErrors(createData?.errors);
+        console.error(draftErrorLogLine('CREATE_REJECTED', createFailures));
+        return res.status(502).json({
+          status: "error",
+          stage: "ozon_draft_failed",
+          message: createFailures.length > 0
+            ? draftFailureTitle('CREATE_REJECTED', createFailures)
+            : "Ozon не принял черновик и не назвал причину",
+          hint: draftFailureHint(createFailures, clustersInfo.length),
+          draftStatus: 'CREATE_REJECTED',
+          failures: createFailures,
+          details: createData?.errors || null
+        });
       }
 
       // Расчёт черновика асинхронный: опрашиваем до готовности
@@ -1716,10 +1735,19 @@ async function startServer() {
       }
 
       if (String(info?.status || '') !== 'SUCCESS') {
+        // Пункт 62. Причина отказа приходит в errors[]: код, виноватые кластеры и
+        // отклонённые SKU. Раньше она молча ложилась в details, и владелец видел одно
+        // слово FAILED. Теперь она пишется в лог Cloud Run и доезжает до экрана.
+        const draftStatus = String(info?.status || '');
+        const failures = readDraftErrors(info?.errors);
+        console.error(draftErrorLogLine(draftStatus, failures));
         return res.status(502).json({
           status: "error",
-          stage: "ozon_api",
-          message: "Ozon не рассчитал черновик: статус " + String(info?.status || 'нет ответа'),
+          stage: "ozon_draft_failed",
+          message: draftFailureTitle(draftStatus, failures),
+          hint: draftFailureHint(failures, clustersInfo.length),
+          draftStatus,
+          failures,
           details: info?.errors || null
         });
       }
@@ -1813,7 +1841,7 @@ async function startServer() {
         status: "error",
         stage: error.stage || "ozon_api",
         httpStatus: error.httpStatus || 500,
-        message: error.message || String(error)
+        message: error.httpStatus === 429 ? DRAFT_RATE_LIMIT_MESSAGE : (error.message || String(error))
       });
     }
   });

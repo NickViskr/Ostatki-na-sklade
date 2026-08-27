@@ -7,6 +7,7 @@ import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClu
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
 import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, resolveAddLine, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
+import type { DraftFailure } from '../lib/ozonDraftErrors';
 
 export interface SupplyPlanRow {
   article: string;
@@ -76,6 +77,14 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const [secondsLeft, setSecondsLeft] = useState(REQUEST_TIMEOUT_SEC);
   const [timedOut, setTimedOut] = useState(false);
   const [progressText, setProgressText] = useState('');
+  /* ---- Пункт 62. Почему Ozon отказался считать черновик -------------------------
+   * Ozon присылает причину в errors[], но до пункта 62 она уходила в details и там
+   * умирала: владелец видел только слово FAILED и не знал, какой кластер виноват.
+   * Пустой draftFailureText — отказа не было.
+   */
+  const [draftFailures, setDraftFailures] = useState<DraftFailure[]>([]);
+  const [draftFailureText, setDraftFailureText] = useState('');
+  const [draftHint, setDraftHint] = useState('');
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -95,6 +104,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       setSecondsLeft(REQUEST_TIMEOUT_SEC);
       setTimedOut(false);
       setProgressText('');
+      setDraftFailures([]);
+      setDraftFailureText('');
+      setDraftHint('');
     }
   }, [isOpen]);
 
@@ -289,6 +301,19 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     // владельца 27.08.2026. Кластер без продаж доли не имеет и уходит в конец списка.
     return sortClustersBySalesShare(refs, clusterSalesShare);
   }, [ozonClusterRefs, ozonSettings, clusterSalesShare]);
+
+  // Пункт 62. Ozon винит кластеры по идентификатору — владельцу нужно название.
+  const clusterNameById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of ozonClusterRefs || []) {
+      if (c.clusterId && c.clusterName) map[c.clusterId] = c.clusterName;
+    }
+    for (const r of rows) {
+      if (r.clusterId && r.clusterName && !map[r.clusterId]) map[r.clusterId] = r.clusterName;
+    }
+    return map;
+  }, [ozonClusterRefs, rows]);
+  const clusterLabel = (id: string) => clusterNameById[id] || ('кластер ' + id);
 
   /* ---- Пункт 58. Прямая поставка едет отдельной заявкой ---------------------------
    * Запрет обязан жить и здесь, а не только на экране рекомендаций: иначе он обходится
@@ -798,12 +823,20 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     }
 
     if (result.status !== 'success') {
-      toast.error(result.message || 'Ozon не рассчитал черновик');
+      // Пункт 62. Причина отказа остаётся на экране: тост живёт секунды, а разбираться
+      // с закрытым кластером владельцу приходится дольше.
+      setDraftFailures(Array.isArray(result.failures) ? result.failures : []);
+      setDraftFailureText(result.message || 'Ozon не рассчитал черновик');
+      setDraftHint(String(result.hint || ''));
+      toast.error(result.message || 'Ozon не рассчитал черновик', { duration: 15000 });
       setSending(false);
       return;
     }
 
     const data = result.data;
+    setDraftFailures([]);
+    setDraftFailureText('');
+    setDraftHint('');
     setDraftId(String(data.draftId || ''));
     setVerdict(data);
     setDirty(false);
@@ -1103,6 +1136,36 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                   );
                 })}
               </div>
+
+              {/* Пункт 62. Ozon назвал причину отказа — показываем её вместо слова FAILED,
+                  вместе с названиями виноватых кластеров и отклонёнными SKU. */}
+              {draftFailureText && (
+                <div className="p-3 rounded-2xl border border-rose-200 bg-rose-50 flex flex-col gap-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-rose-600">Ozon не рассчитал заявку</div>
+                  {draftFailures.length === 0 ? (
+                    <div className="text-sm font-semibold text-rose-900">{draftFailureText}</div>
+                  ) : (
+                    draftFailures.map((f, i) => (
+                      <div key={i} className="flex flex-col gap-0.5">
+                        <div className="text-sm font-semibold text-rose-900">{f.text || f.message || f.code}</div>
+                        {f.reasons.length > 0 && (
+                          <div className="text-xs text-rose-800">{f.reasons.join('; ')}</div>
+                        )}
+                        {f.clusterIds.length > 0 && (
+                          <div className="text-xs text-rose-800">Кластеры: {f.clusterIds.map(clusterLabel).join(', ')}</div>
+                        )}
+                        {f.items.map((it, j) => (
+                          <div key={j} className="text-xs text-rose-800">
+                            SKU {it.sku}{it.clusterId ? ' · ' + clusterLabel(it.clusterId) : ''}: {it.reasons.join(', ')}
+                          </div>
+                        ))}
+                        {f.message && f.text && <div className="text-xs text-rose-800">{f.message}</div>}
+                      </div>
+                    ))
+                  )}
+                  {draftHint && <div className="text-xs text-rose-700">{draftHint}</div>}
+                </div>
+              )}
 
               {verdict && (verdict.rejectedItems || []).length > 0 && (
                 <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
