@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  DRAFT_MAX_AUTO_RETRIES,
+  DRAFT_RETRY_DELAY_SEC,
   blamedClusterIds,
+  draftRetryExhaustedMessage,
+  draftRetryNotice,
+  isDraftRateLimited,
+  shouldAutoRetryDraft,
   draftErrorLogLine,
   draftFailureHint,
   draftFailureTitle,
@@ -175,6 +181,50 @@ describe('строка для журнала Cloud Run', () => {
   });
 });
 
+describe('автоповтор после лимита Ozon', () => {
+  // Пункт 65. Ozon разрешает 2 черновика в минуту. Ждать лимит должно приложение.
+  const limited = { status: 'error', httpStatus: 429, message: 'лимит' };
+
+  it('пауза больше половины минуты: лимит считается у Ozon, а не у нас', () => {
+    expect(DRAFT_RETRY_DELAY_SEC).toBeGreaterThan(30);
+  });
+
+  it('отказ по лимиту опознаётся по КОДУ, а не по тексту сообщения', () => {
+    // Текст правится, и правка молча выключила бы автоповтор.
+    expect(isDraftRateLimited(limited)).toBe(true);
+    expect(isDraftRateLimited({ status: 'error', httpStatus: 429, message: '' })).toBe(true);
+    expect(isDraftRateLimited({ status: 'error', message: 'не больше 2 проверок черновика в минуту' })).toBe(false);
+  });
+
+  it('любой другой отказ сам не пройдёт — повторять его бессмысленно', () => {
+    expect(shouldAutoRetryDraft({ status: 'error', httpStatus: 502, message: 'FAILED' }, 0)).toBe(false);
+    expect(shouldAutoRetryDraft({ status: 'error', httpStatus: 400 }, 0)).toBe(false);
+    expect(shouldAutoRetryDraft(null, 0)).toBe(false);
+  });
+
+  it('повторяем ограниченное число раз: окно может остаться без человека', () => {
+    expect(shouldAutoRetryDraft(limited, 0)).toBe(true);
+    expect(shouldAutoRetryDraft(limited, DRAFT_MAX_AUTO_RETRIES - 1)).toBe(true);
+    expect(shouldAutoRetryDraft(limited, DRAFT_MAX_AUTO_RETRIES)).toBe(false);
+    expect(shouldAutoRetryDraft(limited, DRAFT_MAX_AUTO_RETRIES + 5)).toBe(false);
+  });
+
+  it('отсчёт показывает секунды и номер попытки', () => {
+    expect(draftRetryNotice(35, 0)).toBe('Повторю проверку сам через 35 сек (попытка 1 из ' + DRAFT_MAX_AUTO_RETRIES + ')');
+    expect(draftRetryNotice(12, 2)).toBe('Повторю проверку сам через 12 сек (попытка 3 из ' + DRAFT_MAX_AUTO_RETRIES + ')');
+  });
+
+  it('отсчёт не показывает отрицательных секунд и дробей', () => {
+    expect(draftRetryNotice(-4, 0)).toContain('через 0 сек');
+    expect(draftRetryNotice(4.2, 0)).toContain('через 5 сек');
+  });
+
+  it('когда повторы кончились, решение возвращается человеку', () => {
+    expect(draftRetryExhaustedMessage()).toContain(String(DRAFT_MAX_AUTO_RETRIES));
+    expect(draftRetryExhaustedMessage()).toContain('нажмите «Проверить в Ozon» сами');
+  });
+});
+
 describe('причина отказа доезжает до владельца', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
   const server = read('server.ts');
@@ -197,6 +247,31 @@ describe('причина отказа доезжает до владельца',
     expect(server).toContain('message: error.httpStatus === 429 ? DRAFT_RATE_LIMIT_MESSAGE');
   });
 
+  it('окно назначает автоповтор именно на лимит и считает попытки', () => {
+    expect(modal).toContain('if (shouldAutoRetryDraft(result, retryCount)) {');
+    expect(modal).toContain('setRetryAt(Date.now() + DRAFT_RETRY_DELAY_SEC * 1000);');
+    expect(modal).toContain('setRetryCount(retryCount + 1);');
+  });
+
+  it('таймер живёт только пока окно открыто', () => {
+    // Закрытое окно, которое само стучится в Ozon, — это ловушка.
+    expect(modal).toContain('if (!isOpen || !retryAt) {');
+    expect(modal).toContain('return () => clearInterval(id);');
+  });
+
+  it('повтор берёт актуальный состав, а не тот, что был при постановке таймера', () => {
+    expect(modal).toContain('runDraftRef.current = runDraft;');
+    expect(modal).toContain('runDraftRef.current();');
+  });
+
+  it('ручное нажатие снимает назначенный автоповтор', () => {
+    expect(modal).toMatch(/setSending\(true\);[\s\S]{0,180}setRetryAt\(0\);/);
+  });
+
+  it('успешный расчёт обнуляет счётчик попыток', () => {
+    expect(modal).toMatch(/setRetryAt\(0\);\s*\n\s*setRetryCount\(0\);/);
+  });
+
   it('окно поставки сохраняет причину в состоянии, а не только в тосте', () => {
     expect(modal).toContain('setDraftFailures(Array.isArray(result.failures) ? result.failures : []);');
     expect(modal).toContain("setDraftHint(String(result.hint || ''));");
@@ -209,6 +284,8 @@ describe('причина отказа доезжает до владельца',
   });
 
   it('успешный пересчёт стирает старую причину', () => {
-    expect(modal).toMatch(/setDraftFailures\(\[\]\);\s*\n\s*setDraftFailureText\(''\);\s*\n\s*setDraftHint\(''\);\s*\n\s*setDraftId/);
+    // Между сбросом причины и setDraftId встал сброс автоповтора (пункт 65) — сторож
+    // это допускает, но по-прежнему требует все три сброса ДО записи нового черновика.
+    expect(modal).toMatch(/setDraftFailures\(\[\]\);\s*\n\s*setDraftFailureText\(''\);\s*\n\s*setDraftHint\(''\);[\s\S]{0,120}setDraftId/);
   });
 });

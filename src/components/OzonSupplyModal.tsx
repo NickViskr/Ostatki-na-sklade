@@ -8,6 +8,7 @@ import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
 import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, resolveAddLine, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
 import type { DraftFailure } from '../lib/ozonDraftErrors';
+import { DRAFT_RETRY_DELAY_SEC, draftRetryExhaustedMessage, draftRetryNotice, isDraftRateLimited, shouldAutoRetryDraft } from '../lib/ozonDraftErrors';
 
 export interface SupplyPlanRow {
   article: string;
@@ -85,6 +86,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const [draftFailures, setDraftFailures] = useState<DraftFailure[]>([]);
   const [draftFailureText, setDraftFailureText] = useState('');
   const [draftHint, setDraftHint] = useState('');
+  /* ---- Пункт 65. Автоповтор после лимита Ozon --------------------------------------
+   * Ozon разрешает 2 черновика в минуту. Человек упирается в лимит и ждёт наугад —
+   * теперь ждёт приложение. retryAt — момент повтора; ноль означает, что повтора нет. */
+  const [retryAt, setRetryAt] = useState(0);
+  const [retryLeft, setRetryLeft] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
+  const runDraftRef = useRef<() => void>(() => {});
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -107,8 +115,33 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       setDraftFailures([]);
       setDraftFailureText('');
       setDraftHint('');
+      setRetryAt(0);
+      setRetryLeft(0);
+      setRetryCount(0);
     }
   }, [isOpen]);
+
+  // Пункт 65. Отсчёт до автоповтора. Таймер живёт РОВНО пока окно открыто и повтор
+  // назначен: закрытое окно, которое само стучится в Ozon, — это ловушка.
+  useEffect(() => {
+    if (!isOpen || !retryAt) {
+      setRetryLeft(0);
+      return;
+    }
+    const tick = () => {
+      const left = Math.ceil((retryAt - Date.now()) / 1000);
+      if (left > 0) {
+        setRetryLeft(left);
+        return;
+      }
+      setRetryAt(0);
+      setRetryLeft(0);
+      runDraftRef.current();
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [isOpen, retryAt]);
 
   // Обратный отсчёт во время работы с Ozon
   useEffect(() => {
@@ -803,6 +836,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     }
 
     setSending(true);
+    // Пункт 65. Нажали руками — назначенный автоповтор снимается: два запроса разом
+    // снова упрутся в лимит.
+    setRetryAt(0);
 
     let result: any;
     try {
@@ -826,9 +862,21 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       // Пункт 62. Причина отказа остаётся на экране: тост живёт секунды, а разбираться
       // с закрытым кластером владельцу приходится дольше.
       setDraftFailures(Array.isArray(result.failures) ? result.failures : []);
-      setDraftFailureText(result.message || 'Ozon не рассчитал черновик');
       setDraftHint(String(result.hint || ''));
-      toast.error(result.message || 'Ozon не рассчитал черновик', { duration: 15000 });
+
+      // Пункт 65. Лимит Ozon проходит сам — ждать его должно приложение, а не человек.
+      if (shouldAutoRetryDraft(result, retryCount)) {
+        setDraftFailureText(result.message || 'Ozon не рассчитал черновик');
+        setRetryCount(retryCount + 1);
+        setRetryAt(Date.now() + DRAFT_RETRY_DELAY_SEC * 1000);
+      } else if (isDraftRateLimited(result)) {
+        // Повторы кончились: дальше решает человек, иначе окно будет долбить чужой API.
+        setDraftFailureText(draftRetryExhaustedMessage());
+        toast.error(draftRetryExhaustedMessage(), { duration: 15000 });
+      } else {
+        setDraftFailureText(result.message || 'Ozon не рассчитал черновик');
+        toast.error(result.message || 'Ozon не рассчитал черновик', { duration: 15000 });
+      }
       setSending(false);
       return;
     }
@@ -837,6 +885,8 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     setDraftFailures([]);
     setDraftFailureText('');
     setDraftHint('');
+    setRetryAt(0);
+    setRetryCount(0);
     setDraftId(String(data.draftId || ''));
     setVerdict(data);
     setDirty(false);
@@ -892,6 +942,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   // Первое нажатие только СЧИТАЕТ черновик — надпись обязана это говорить, иначе человек
   // думает, что уже оформил заявку. Создаёт её только «Создать заявку в этом составе».
+  // Пункт 65. Отсчёт вызывает АКТУАЛЬНЫЙ runDraft, а не тот, что был при постановке
+  // таймера: состав к моменту повтора мог измениться.
+  runDraftRef.current = runDraft;
+
   const primaryLabel = !verdict ? 'Проверить в Ozon' : dirty ? 'Пересчитать в Ozon' : 'Создать заявку в этом составе';
   const primaryIsSafe = Boolean(verdict) && dirty;
 
@@ -1164,6 +1218,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                     ))
                   )}
                   {draftHint && <div className="text-xs text-rose-700">{draftHint}</div>}
+                  {/* Пункт 65. Без отсчёта окно выглядит зависшим, и человек жмёт кнопку
+                      сам — ровно то, что снова упирается в лимит. */}
+                  {retryLeft > 0 && (
+                    <div className="text-xs font-bold text-rose-700" id="ozon-draft-retry-countdown">
+                      {draftRetryNotice(retryLeft, retryCount - 1)}
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -215,3 +215,47 @@ export function draftErrorLogLine(status: string, failures: DraftFailure[]): str
   });
   return 'OZON DRAFT ' + (str(status) || 'NO_STATUS') + (parts.length > 0 ? ' | ' + parts.join(' | ') : ' | без errors[]');
 }
+
+/* ---- Пункт 65. Автоповтор после лимита Ozon ---------------------------------------
+ * Ozon разрешает создавать 2 черновика в минуту. После отказа человек почти всегда
+ * жмёт «Проверить в Ozon» снова, упирается в лимит и ждёт наугад. Задача владельца
+ * 27.08.2026: приложение должно повторить запрос само через 35 секунд.
+ * 35, а не 30: лимит считается у Ozon, а не у нас, и запас в пять секунд дешевле,
+ * чем ещё один отказ.
+ * Повторов НЕ бесконечно. Окно может остаться открытым без человека, и вечный
+ * автоповтор превратится в долбёжку по чужому API.
+ */
+
+/** Пауза перед автоповтором, секунд. */
+export const DRAFT_RETRY_DELAY_SEC = 35;
+
+/** Сколько раз приложение повторяет само, прежде чем вернуть решение человеку. */
+export const DRAFT_MAX_AUTO_RETRIES = 3;
+
+/**
+ * Отказ именно по лимиту. Смотрим на КОД ответа, а не на текст сообщения: текст
+ * правится, и правка молча выключила бы автоповтор.
+ */
+export function isDraftRateLimited(result: any): boolean {
+  return Number(result && result.httpStatus) === 429;
+}
+
+/** Повторять ли самим. Любой другой отказ повторять бессмысленно: сам он не пройдёт. */
+export function shouldAutoRetryDraft(result: any, retriesDone: number): boolean {
+  if (!isDraftRateLimited(result)) return false;
+  const done = Number(retriesDone);
+  return Number.isFinite(done) && done < DRAFT_MAX_AUTO_RETRIES;
+}
+
+/** Что показать, пока идёт отсчёт: без этого окно выглядит зависшим. */
+export function draftRetryNotice(secondsLeft: number, retriesDone: number): string {
+  const left = Math.max(0, Math.ceil(Number(secondsLeft) || 0));
+  const attempt = Math.max(1, Math.floor(Number(retriesDone) || 0) + 1);
+  return 'Повторю проверку сам через ' + left + ' сек (попытка ' + attempt + ' из ' + DRAFT_MAX_AUTO_RETRIES + ')';
+}
+
+/** Автоповторы кончились — решение возвращается человеку. */
+export function draftRetryExhaustedMessage(): string {
+  return 'Ozon держит лимит после ' + DRAFT_MAX_AUTO_RETRIES
+    + ' автоматических попыток. Подождите минуту и нажмите «Проверить в Ozon» сами.';
+}
