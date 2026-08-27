@@ -424,7 +424,14 @@ async function startServer() {
       // Причина: при обрыве по таймауту выполнение Apps Script продолжается
       // и продолжает держать LockService. Повтор через секунду упирался
       // в этот же замок и падал с Lock timeout, добавляя нагрузку вместо помощи.
-      const retryDelayMs = 20_000;
+      //
+      // 27.08.2026: cut back from 20 s to 5 s. The 20 s were the whole defence against the
+      // lock, and they cost the owner 20 s of staring at an open window every time a write
+      // ran long. The defence now sits where the lock actually is: doPost in Code.gs gives a
+      // commit 30 s to get it instead of 10 s, so the repeat waits for the aborted execution
+      // to finish rather than dying on it. Measured on 21.08.2026: 90 s of timeout + 20 s of
+      // pause + 5,1 s of the repeat = the 115,1 s the owner spent in front of an open form.
+      const retryDelayMs = 5_000;
       const isWriteAction = action === 'commit' || (action && !READ_ONLY_ACTIONS.includes(action));
       // Пункт 28, этап D. Замеры 01.08.2026: обычная запись укладывается в 8 с,
       // самая долгая наблюдавшаяся — около 30 с. Порог 90 с даёт трёхкратный запас
@@ -512,6 +519,19 @@ async function startServer() {
               status: "error",
               message: `Google Apps Script returned a non-JSON response. Raw response snippet: ${rawText.substring(0, 300)}`
             });
+          }
+
+          // 27.08.2026. A write repeated by THIS proxy after its own aborted attempt comes
+          // back marked idempotentHit: the record is already in the sheet, put there by the
+          // attempt whose connection we dropped. That is our repeat, not the user's — and
+          // showing «эта операция уже была записана ранее» over a first-ever receipt made
+          // the owner believe he had created a duplicate. The flag is cleared so the client
+          // reports a plain successful write; the repeat itself stays in the log above.
+          // A genuine hit — the user pressing twice, the client re-sending — arrives on
+          // attempt 1 and keeps the flag.
+          if (attempt > 1 && data?.data?.idempotentHit === true) {
+            console.log(`GASRETRY action=${action} attempt=${attempt}/${maxTries} write confirmed by idempotency key, reported as a normal success`);
+            delete data.data.idempotentHit;
           }
 
           // Если GAS ответил успехом для сессии, сохраняем токен в кэш

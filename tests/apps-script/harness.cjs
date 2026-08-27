@@ -58,6 +58,10 @@ function makeFakeSheet(headers, name) {
   // data[0] всегда заголовки; строки 1.. — данные (может быть пусто).
   let data = [headers.slice()];
   let setValuesCallCount = 0; // сервисный счётчик стенда: сколько раз реально вызвали setValues на этом листе
+  // The same for reads. A request to Google Sheets costs the same whether it reads or writes,
+  // and the price of a slow operation is the NUMBER of requests — so a test that claims a
+  // sheet is read once has to be able to count.
+  let getValuesCallCount = 0;
   return {
     getName() { return name; },
     appendRow(row) {
@@ -83,6 +87,7 @@ function makeFakeSheet(headers, name) {
       if (numCols === undefined) numCols = 1;
       return {
         getValues() {
+          getValuesCallCount++;
           const result = [];
           for (let r = 0; r < numRows; r++) {
             const rowIdx = startRow - 1 + r;
@@ -139,7 +144,9 @@ function makeFakeSheet(headers, name) {
     __setData(d) { data = d.map(r => r.slice()); },
     getSheetId: () => 1,
     __getSetValuesCallCount() { return setValuesCallCount; },
-    __resetSetValuesCallCount() { setValuesCallCount = 0; }
+    __resetSetValuesCallCount() { setValuesCallCount = 0; },
+    __getGetValuesCallCount() { return getValuesCallCount; },
+    __resetGetValuesCallCount() { getValuesCallCount = 0; }
   };
 }
 

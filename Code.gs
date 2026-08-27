@@ -244,7 +244,13 @@ function doPost(e) {
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();
-      lock.waitLock(10000);
+      // 27.08.2026. A commit waits for the lock three times longer than everything else.
+      // The proxy now repeats a write it had to abort after 5 s instead of 20 s, and at that
+      // moment the aborted execution may still be finishing its work under the lock. Ten
+      // seconds did not outlive it: the repeat died on the lock and the owner was shown an
+      // error on an operation that had in fact been written. Thirty seconds do — and a lock
+      // held longer than that is a stuck script, which ends in an error either way.
+      lock.waitLock(action === 'commit' ? 30000 : 10000);
     }
     
     switch (action) {
@@ -1395,28 +1401,58 @@ function updateSku(skuData, oldSku) {
   return { skus: getSkus(), stock: getStock() };
 }
 
-function ensureSkuExists(article) {
+/**
+ * Creates the SKU rows that are missing, for a whole list of articles at once.
+ *
+ * 27.08.2026. The single-article ensureSkuExists used to be called from INSIDE the loop of
+ * commitTransaction, so a receipt of N positions read the header row and then the whole SKU
+ * sheet N times over — although nothing can change that sheet between those reads: the loop
+ * is the only writer and the whole request runs under the script lock. Cloud Run logs of
+ * 21.08.2026 measured the price of it: a receipt cost 6-9 s in a quiet minute, 29,8 s under
+ * load and, once, more than the 90 s after which the proxy gives up on the connection.
+ *
+ * Returns true when at least one article was actually created — the caller uses it to decide
+ * whether the SKU list has to be re-read for the answer.
+ */
+function ensureSkusExist(articles) {
+  const wanted = [];
+  const seen = {};
+  (articles || []).forEach(function(article) {
+    if (article === '' || article === null || article === undefined) return;
+    const key = String(article);
+    if (seen[key]) return;
+    seen[key] = true;
+    wanted.push(article);
+  });
+  if (wanted.length === 0) return false;
+
   const ss = getSpreadsheet();
   const sheet = ss.getSheetByName('SKU');
-  if (!sheet) return;
-  
+  if (!sheet) return false;
+
   ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Название Ozon']);
-  
+
   const data = sheet.getDataRange().getValues();
-  const exists = data.some(row => String(row[0]) === String(article));
-  
-  if (!exists) {
-    const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+  const known = {};
+  for (let i = 0; i < data.length; i++) known[String(data[i][0])] = true;
+
+  const missing = wanted.filter(function(article) { return !known[String(article)]; });
+  if (missing.length === 0) return false;
+
+  // The header row is taken from the read above instead of a second request to the sheet:
+  // ensureColumns has already widened it by now, so data[0] is the final header row.
+  const currentHeaders = (data[0] || []).map(function(h) { return String(h).trim(); });
+
+  const skuIdx = currentHeaders.indexOf('SKU') !== -1 ? currentHeaders.indexOf('SKU') : 0;
+  const pcsIdx = currentHeaders.indexOf('ШТ/КОР') !== -1 ? currentHeaders.indexOf('ШТ/КОР') : 1;
+  const minStockIdx = currentHeaders.indexOf('Мин. остаток') !== -1 ? currentHeaders.indexOf('Мин. остаток') : 2;
+  const ozonIdx = currentHeaders.indexOf('ШК Ozon') !== -1 ? currentHeaders.indexOf('ШК Ozon') : 3;
+  const wbIdx = currentHeaders.indexOf('Баркод WB') !== -1 ? currentHeaders.indexOf('Баркод WB') : 4;
+  const bppIdx = currentHeaders.indexOf('КОР/ПАЛ') !== -1 ? currentHeaders.indexOf('КОР/ПАЛ') : 5;
+  const volIdx = currentHeaders.indexOf('Литраж (л)') !== -1 ? currentHeaders.indexOf('Литраж (л)') : 6;
+
+  const rows = missing.map(function(article) {
     const newRow = new Array(currentHeaders.length).fill('');
-    
-    const skuIdx = currentHeaders.indexOf('SKU') !== -1 ? currentHeaders.indexOf('SKU') : 0;
-    const pcsIdx = currentHeaders.indexOf('ШТ/КОР') !== -1 ? currentHeaders.indexOf('ШТ/КОР') : 1;
-    const minStockIdx = currentHeaders.indexOf('Мин. остаток') !== -1 ? currentHeaders.indexOf('Мин. остаток') : 2;
-    const ozonIdx = currentHeaders.indexOf('ШК Ozon') !== -1 ? currentHeaders.indexOf('ШК Ozon') : 3;
-    const wbIdx = currentHeaders.indexOf('Баркод WB') !== -1 ? currentHeaders.indexOf('Баркод WB') : 4;
-    const bppIdx = currentHeaders.indexOf('КОР/ПАЛ') !== -1 ? currentHeaders.indexOf('КОР/ПАЛ') : 5;
-    const volIdx = currentHeaders.indexOf('Литраж (л)') !== -1 ? currentHeaders.indexOf('Литраж (л)') : 6;
-    
     if (skuIdx !== -1) newRow[skuIdx] = article;
     if (pcsIdx !== -1) newRow[pcsIdx] = 1;
     if (minStockIdx !== -1) newRow[minStockIdx] = 0;
@@ -1424,9 +1460,16 @@ function ensureSkuExists(article) {
     if (wbIdx !== -1) newRow[wbIdx] = '';
     if (bppIdx !== -1) newRow[bppIdx] = 0;
     if (volIdx !== -1) newRow[volIdx] = 0;
-    
-    sheet.appendRow(newRow);
-  }
+    return newRow;
+  });
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, currentHeaders.length).setValues(rows);
+  return true;
+}
+
+/** One article is a particular case of a list. Kept for the callers that hold a single one. */
+function ensureSkuExists(article) {
+  return ensureSkusExist([article]);
 }
 
 function deleteSku(sku, deletedBy) {
@@ -2164,6 +2207,77 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     };
   }
 
+  // 27.08.2026. Writes to the «Остатки» sheet are collected here and leave in ONE request at
+  // the end. Every position used to write its own row with its own setValues call, so a
+  // receipt of ten positions cost ten requests to the Table and the time of the operation
+  // grew with the number of positions.
+  //
+  // Only the B:D block is rewritten (quantity, average cost, capitalization) — the operation
+  // does not touch «Продажи 120» and «Оборачиваемость». The untouched rows that happen to
+  // fall inside the block get exactly the values read into stockData by this very call: the
+  // whole commit runs under the LockService lock, so there is nobody to change them in
+  // between, and no formulas live in that sheet.
+  const STOCK_ROW_WIDTH = 6;
+  const firstNewStockRow = stockData.length + 1;
+  const pendingStockRows = {};
+  const newStockRows = [];
+
+  function writeStockRow(rowIdx, quantity, avgCost, capitalization) {
+    if (rowIdx >= firstNewStockRow) {
+      // A row this same operation has just created: it has not been written out yet, so the
+      // change goes straight into it instead of queueing a second write on top.
+      const fresh = newStockRows[rowIdx - firstNewStockRow];
+      fresh[1] = quantity;
+      fresh[2] = avgCost;
+      fresh[3] = capitalization;
+      return;
+    }
+    pendingStockRows[rowIdx] = [quantity, avgCost, capitalization];
+  }
+
+  function appendStockRow(article, quantity, avgCost, capitalization) {
+    const rowIdx = firstNewStockRow + newStockRows.length;
+    const fresh = new Array(STOCK_ROW_WIDTH).fill('');
+    fresh[0] = article;
+    fresh[1] = quantity;
+    fresh[2] = avgCost;
+    fresh[3] = capitalization;
+    fresh[4] = 0;
+    fresh[5] = 0;
+    newStockRows.push(fresh);
+    return rowIdx;
+  }
+
+  function flushStockRows() {
+    const touched = Object.keys(pendingStockRows).map(Number);
+    if (touched.length > 0) {
+      let minRow = touched[0];
+      let maxRow = touched[0];
+      for (let i = 1; i < touched.length; i++) {
+        if (touched[i] < minRow) minRow = touched[i];
+        if (touched[i] > maxRow) maxRow = touched[i];
+      }
+      const block = [];
+      for (let r = minRow; r <= maxRow; r++) {
+        const pending = pendingStockRows[r];
+        if (pending) {
+          block.push(pending);
+        } else {
+          const source = stockData[r - 1] || [];
+          block.push([
+            source[1] === undefined ? '' : source[1],
+            source[2] === undefined ? '' : source[2],
+            source[3] === undefined ? '' : source[3]
+          ]);
+        }
+      }
+      stockSheet.getRange(minRow, 2, block.length, 3).setValues(block);
+    }
+    if (newStockRows.length > 0) {
+      stockSheet.getRange(firstNewStockRow, 1, newStockRows.length, STOCK_ROW_WIDTH).setValues(newStockRows);
+    }
+  }
+
   if (type === 'Расход') {
     const requestedQty = {};
     items.forEach(item => {
@@ -2211,6 +2325,15 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
   const newTransactions = [];
   const shipmentTotalQty = items.reduce(function(s, it){ if (it.status && it.status !== 'ok') return s; return s + (Number(it.quantity) || 0); }, 0);
   
+  // 27.08.2026: the missing articles are created BEFORE the loop, in one pass over the SKU
+  // sheet, instead of once per position from inside it.
+  let skusCreated = false;
+  if (type === 'Приход') {
+    skusCreated = ensureSkusExist(items
+      .filter(function(it) { return !(it.status && it.status !== 'ok'); })
+      .map(function(it) { return it.article; }));
+  }
+
   const rowsToAppend = [];
   items.forEach(item => {
     if (item.status && item.status !== 'ok') return;
@@ -2263,7 +2386,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
             stockMap[comp.componentSku].quantity = newCompQty;
             stockMap[comp.componentSku].capitalization = newCompCap;
             stockMap[comp.componentSku].avgCost = newCompAvg;
-            stockSheet.getRange(compStock.rowIdx, 2, 1, 3).setValues([[newCompQty, newCompAvg, newCompCap]]);
+            writeStockRow(compStock.rowIdx, newCompQty, newCompAvg, newCompCap);
           }
           
           const compTransId = Utilities.getUuid();
@@ -2306,7 +2429,6 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     }
     
     if (type === 'Приход') {
-      ensureSkuExists(article);
       if (stockMap[article]) {
         const curr = stockMap[article];
         const newQty = curr.quantity + qty;
@@ -2317,11 +2439,10 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
         stockMap[article].capitalization = newCap;
         stockMap[article].avgCost = newAvgCost;
         
-        stockSheet.getRange(curr.rowIdx, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
+        writeStockRow(curr.rowIdx, newQty, newAvgCost, newCap);
       } else {
-        stockSheet.appendRow([article, qty, price, total, 0, 0]);
         stockMap[article] = {
-          rowIdx: stockSheet.getLastRow(),
+          rowIdx: appendStockRow(article, qty, price, total),
           quantity: qty,
           avgCost: price,
           capitalization: total,
@@ -2359,7 +2480,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
           stockMap[article].capitalization = newCap;
           stockMap[article].avgCost = newAvgCost;
           
-          stockSheet.getRange(curr.rowIdx, 2, 1, 3).setValues([[newQty, newAvgCost, newCap]]);
+          writeStockRow(curr.rowIdx, newQty, newAvgCost, newCap);
         }
       }
     }
@@ -2411,6 +2532,8 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     });
   });
 
+  flushStockRows();
+
   if (rowsToAppend.length > 0) {
     if (opIdStr) {
       const opColIdx = getTransColIndex(transSheet, 'OpID');
@@ -2446,11 +2569,15 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     }
   }
 
-  return {
+  const commitResult = {
     stock: getStock(),
-    newTransactions: newTransactions,
-    skus: getSkus() // return skus explicitly since we might have added one in ensureSkuExists
+    newTransactions: newTransactions
   };
+  // 27.08.2026: the SKU list is re-read only when the operation has actually created an
+  // article. It used to be read on every single commit although it changes in almost none of
+  // them; when it is absent the client keeps the list it already holds.
+  if (skusCreated) commitResult.skus = getSkus();
+  return commitResult;
 }
 
 // --- User Management & Authentication ---

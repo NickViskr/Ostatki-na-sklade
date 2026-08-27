@@ -2562,6 +2562,179 @@ function checkFidelity(name, h, article) {
     `получено: ${JSON.stringify(two)}`);
 })();
 
+// ================= Speed of commitTransaction: the cost of an operation must not grow with =
+// ================= the number of positions in it (27.08.2026) ==============================
+//
+// Cloud Run logs of 21.08.2026: a receipt from the factory took 29,8 s, and once more than
+// the 90 s after which the proxy gives up on the connection, waits 20 s and repeats the write
+// — which the server then answered "already recorded", scaring the owner with a duplicate
+// that never existed. The cause was not the volume of data but the NUMBER of requests to
+// Google Sheets: the SKU sheet was re-read for every position, and every position wrote its
+// stock row separately.
+//
+// These checks measure requests, not seconds. A second is not reproducible; a request is.
+
+const SPEED_SKU_HEADERS = ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Название Ozon'];
+
+function speedHarness(articles) {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setSkuSheet(SPEED_SKU_HEADERS, articles.map(a => buildSkuRow(SPEED_SKU_HEADERS, { SKU: a })));
+  const stockSheet = h.setStockSheet(articles.map(a => ({
+    article: a, quantity: 10, avgCost: 5, capitalization: 50, sales120: 7, turnover: 3
+  })));
+  h.getSkuSheet().__resetGetValuesCallCount();
+  stockSheet.__resetSetValuesCallCount();
+  return { h, stockSheet };
+}
+
+(function testSpeed1() {
+  // The SKU sheet is read the same number of times for one position and for five.
+  const five = ['A1', 'A2', 'A3', 'A4', 'A5'];
+  const one = speedHarness(five);
+  one.h.commitTransaction([{ article: 'A1', quantity: 2, price: 4 }],
+    'Приход', 'Фабрика', '', 'tester', '2026-01-05T09:00:00Z', '');
+  const readsForOne = one.h.getSkuSheet().__getGetValuesCallCount();
+
+  const many = speedHarness(five);
+  many.h.commitTransaction(five.map(a => ({ article: a, quantity: 2, price: 4 })),
+    'Приход', 'Фабрика', '', 'tester', '2026-01-05T09:00:00Z', '');
+  const readsForFive = many.h.getSkuSheet().__getGetValuesCallCount();
+
+  check('Скорость 1: лист SKU читается одинаково для 1 и для 5 позиций',
+    readsForOne === readsForFive, `1 позиция: ${readsForOne}, 5 позиций: ${readsForFive}`);
+  check('Скорость 1: лист SKU читается ровно дважды (шапка + данные), а не 2 раза на позицию',
+    readsForFive === 2, `получено чтений: ${readsForFive}`);
+
+  // The same for writes to «Остатки»: one request whatever the number of positions.
+  const writesForOne = one.stockSheet.__getSetValuesCallCount();
+  const writesForFive = many.stockSheet.__getSetValuesCallCount();
+  check('Скорость 1: в «Остатки» пишем одинаково для 1 и для 5 позиций',
+    writesForOne === writesForFive, `1 позиция: ${writesForOne}, 5 позиций: ${writesForFive}`);
+  check('Скорость 1: в «Остатки» ровно одна запись на всю операцию',
+    writesForFive === 1, `получено записей: ${writesForFive}`);
+})();
+
+(function testSpeed2() {
+  // The one block write must not damage what it passes over: neither the rows between the
+  // touched ones, nor the columns «Продажи за 120д» / «Оборачиваемость» of the touched rows.
+  const { h, stockSheet } = speedHarness(['B1', 'B2', 'B3', 'B4', 'B5']);
+  h.commitTransaction(
+    [{ article: 'B1', quantity: 5, price: 6 }, { article: 'B5', quantity: 5, price: 6 }],
+    'Приход', 'Фабрика', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const dump = h.dumpStockSheet();
+  const row = (a) => dump.rows.find(r => String(r[0]) === a);
+
+  check('Скорость 2: непричастная строка внутри блока не изменилась',
+    row('B3') && Number(row('B3')[1]) === 10 && Number(row('B3')[2]) === 5 && Number(row('B3')[3]) === 50,
+    `получено: ${JSON.stringify(row('B3'))}`);
+  check('Скорость 2: у непричастной строки уцелели «Продажи за 120д» и «Оборачиваемость»',
+    row('B3') && Number(row('B3')[4]) === 7 && Number(row('B3')[5]) === 3,
+    `получено: ${JSON.stringify(row('B3'))}`);
+  check('Скорость 2: у изменённой строки уцелели «Продажи за 120д» и «Оборачиваемость»',
+    row('B1') && Number(row('B1')[4]) === 7 && Number(row('B1')[5]) === 3,
+    `получено: ${JSON.stringify(row('B1'))}`);
+  check('Скорость 2: приход посчитан верно (10+5 шт, капитализация 50+30)',
+    row('B1') && Number(row('B1')[1]) === 15 && Number(row('B1')[3]) === 80 && Number(row('B1')[2]) === 5.33,
+    `получено: ${JSON.stringify(row('B1'))}`);
+  check('Скорость 2: вторая изменённая строка на другом краю блока тоже верна',
+    row('B5') && Number(row('B5')[1]) === 15 && Number(row('B5')[3]) === 80,
+    `получено: ${JSON.stringify(row('B5'))}`);
+  check('Скорость 2: запись всё ещё одна', stockSheet.__getSetValuesCallCount() === 1,
+    `получено записей: ${stockSheet.__getSetValuesCallCount()}`);
+})();
+
+(function testSpeed3() {
+  // Articles unknown to the warehouse: created in the SKU sheet and in «Остатки» in one batch,
+  // and only in this case is the SKU list re-read for the answer.
+  const { h, stockSheet } = speedHarness(['C1']);
+  const res = h.commitTransaction(
+    [{ article: 'NEW1', quantity: 3, price: 10 }, { article: 'NEW2', quantity: 4, price: 20 }],
+    'Приход', 'Фабрика', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const dump = h.dumpStockSheet();
+  const row = (a) => dump.rows.find(r => String(r[0]) === a);
+  const skuDump = h.dumpSkuSheet();
+  const skuNames = skuDump.rows.map(r => String(r[0]));
+
+  check('Скорость 3: оба новых артикула появились в «Остатки»',
+    row('NEW1') && row('NEW2') && Number(row('NEW1')[1]) === 3 && Number(row('NEW2')[1]) === 4,
+    `получено: ${JSON.stringify(dump.rows)}`);
+  check('Скорость 3: старый артикул на месте', row('C1') && Number(row('C1')[1]) === 10,
+    `получено: ${JSON.stringify(row('C1'))}`);
+  check('Скорость 3: оба новых артикула заведены в листе SKU',
+    skuNames.indexOf('NEW1') !== -1 && skuNames.indexOf('NEW2') !== -1, `получено: ${skuNames.join(',')}`);
+  check('Скорость 3: две новых строки «Остатки» записаны одним обращением',
+    stockSheet.__getSetValuesCallCount() === 1, `получено записей: ${stockSheet.__getSetValuesCallCount()}`);
+  check('Скорость 3: два новых SKU записаны одним обращением',
+    h.getSkuSheet().__getSetValuesCallCount() === 1, `получено записей: ${h.getSkuSheet().__getSetValuesCallCount()}`);
+  check('Скорость 3: список SKU возвращён, потому что артикулы заведены',
+    Array.isArray(res.skus) && res.skus.some(s => s.sku === 'NEW1'),
+    `получено: ${res.skus ? res.skus.length + ' строк' : 'нет поля skus'}`);
+})();
+
+(function testSpeed4() {
+  // Nothing created — the SKU list is not re-read, and the answer does not carry it.
+  const { h } = speedHarness(['D1']);
+  const res = h.commitTransaction([{ article: 'D1', quantity: 2, price: 4 }],
+    'Приход', 'Фабрика', '', 'tester', '2026-01-05T09:00:00Z', '');
+  check('Скорость 4: поля skus в ответе нет, когда артикулы не заводились',
+    res.skus === undefined, `получено: ${JSON.stringify(res.skus)}`);
+  check('Скорость 4: остаток при этом обновлён', res.stock.find(r => r.article === 'D1').quantity === 12,
+    `получено: ${JSON.stringify(res.stock.find(r => r.article === 'D1'))}`);
+})();
+
+(function testSpeed5() {
+  // One and the same NEW article in two positions of one receipt: it must get ONE row with the
+  // two quantities added up, not two rows. This is the branch where a change lands on a row
+  // this very operation has just created and has not written out yet.
+  const { h, stockSheet } = speedHarness(['E1']);
+  h.commitTransaction(
+    [{ article: 'NEWDUP', quantity: 3, price: 10 }, { article: 'NEWDUP', quantity: 2, price: 15 }],
+    'Приход', 'Фабрика', '', 'tester', '2026-01-05T09:00:00Z', ''
+  );
+  const dump = h.dumpStockSheet();
+  const hits = dump.rows.filter(r => String(r[0]) === 'NEWDUP');
+  check('Скорость 5: новый артикул из двух позиций занял одну строку',
+    hits.length === 1, `получено строк: ${hits.length}`);
+  check('Скорость 5: количество сложилось (3+2), капитализация 30+30',
+    hits.length === 1 && Number(hits[0][1]) === 5 && Number(hits[0][3]) === 60,
+    `получено: ${JSON.stringify(hits[0])}`);
+  check('Скорость 5: запись по-прежнему одна', stockSheet.__getSetValuesCallCount() === 1,
+    `получено записей: ${stockSheet.__getSetValuesCallCount()}`);
+})();
+
+(function testSpeed6() {
+  // Expense of a kit: the components are written in the same single request, and the numbers
+  // stay what they were before the batching.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setKitSheet([
+    { kitSku: 'KIT', componentSku: 'CMP1', quantity: 2, kitType: 'virtual' },
+    { kitSku: 'KIT', componentSku: 'CMP2', quantity: 1, kitType: 'virtual' }
+  ]);
+  const stockSheet = h.setStockSheet([
+    { article: 'CMP1', quantity: 20, avgCost: 3, capitalization: 60 },
+    { article: 'CMP2', quantity: 20, avgCost: 7, capitalization: 140 }
+  ]);
+  stockSheet.__resetSetValuesCallCount();
+
+  h.commitTransaction([{ article: 'KIT', quantity: 4, price: 0 }],
+    'Расход', 'Продажа Ozon', '', 'tester', '2026-01-05T09:00:00Z', '');
+
+  const dump = h.dumpStockSheet();
+  const row = (a) => dump.rows.find(r => String(r[0]) === a);
+  check('Скорость 6: компонент CMP1 списан (20-8=12), капитализация 60-24=36',
+    row('CMP1') && Number(row('CMP1')[1]) === 12 && Number(row('CMP1')[3]) === 36,
+    `получено: ${JSON.stringify(row('CMP1'))}`);
+  check('Скорость 6: компонент CMP2 списан (20-4=16), капитализация 140-28=112',
+    row('CMP2') && Number(row('CMP2')[1]) === 16 && Number(row('CMP2')[3]) === 112,
+    `получено: ${JSON.stringify(row('CMP2'))}`);
+  check('Скорость 6: оба компонента записаны одним обращением',
+    stockSheet.__getSetValuesCallCount() === 1, `получено записей: ${stockSheet.__getSetValuesCallCount()}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
