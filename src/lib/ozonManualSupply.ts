@@ -17,6 +17,8 @@
 // to one shop) are NOT re-implemented here: they live in ozonDirectSupply and
 // ozonSupplyCabinet and are applied to this selection as they are.
 
+import { sortClustersBySalesShare } from './ozonSupplyLines';
+
 /** Отмеченный кластер и количество, которое владелец туда назначил. */
 export interface ManualPick {
   article: string;
@@ -209,4 +211,53 @@ export function buildManualPlan(picks: ManualPick[], infos: ManualArticleInfo[])
     totalBoxes: rows.reduce((s, r) => s + r.boxes, 0),
     over
   };
+}
+
+/* ---- Пункт 64. В ручном режиме видны ВСЕ кластеры поставки ------------------------
+ * Таблица остатков показывает у товара только те кластеры, где он лежит или продаётся:
+ * так устроено покрытие — список кластеров это объединение остатков и продаж. Для
+ * рекомендаций этого достаточно, а для ручной поставки нет: везти товар в новый регион
+ * как раз и значит выбрать кластер, где его сейчас НЕТ.
+ * Решение владельца 27.08.2026: показывать весь список кластеров, по убыванию доли в
+ * ОБЩЕМ объёме продаж — тот же порядок, что на графике «Доли кластеров в продажах» и в
+ * мастере поставки, поэтому правило сортировки берётся оттуда, а не пишется заново.
+ */
+
+export interface ManualClusterRef {
+  clusterId: string;
+  clusterName: string;
+}
+
+/**
+ * Полный список кластеров товара для режима выбора: к своим кластерам добавляются
+ * остальные кластеры поставки, пустые строки для них делает вызывающий код —
+ * форму строки таблицы этот модуль не знает и знать не должен.
+ *
+ * Кластер, который у товара УЖЕ есть, не подменяется пустышкой ни при каких условиях:
+ * иначе на экране пропали бы остатки и рекомендация.
+ */
+export function manualClusterList<T extends { clusterId: string; clusterName: string }>(
+  own: T[],
+  refs: ManualClusterRef[],
+  shareByClusterId: Record<string, number>,
+  makeEmpty: (ref: ManualClusterRef) => T
+): T[] {
+  const out: T[] = [];
+  const seen: Record<string, boolean> = {};
+
+  for (const cls of own || []) {
+    const id = String(cls.clusterId || '').trim();
+    if (!id || seen[id]) continue;
+    seen[id] = true;
+    out.push(cls);
+  }
+
+  for (const ref of refs || []) {
+    const id = String(ref && ref.clusterId ? ref.clusterId : '').trim();
+    if (!id || seen[id]) continue;
+    seen[id] = true;
+    out.push(makeEmpty({ clusterId: id, clusterName: String(ref.clusterName || '').trim() }));
+  }
+
+  return sortClustersBySalesShare(out, shareByClusterId);
 }

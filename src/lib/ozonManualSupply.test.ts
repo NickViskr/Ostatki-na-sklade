@@ -9,6 +9,7 @@ import {
   pickedCabinetSets,
   pickedClusterIds,
   readManualPicks,
+  manualClusterList,
   remainingForArticle
 } from './ozonManualSupply';
 import type { ManualArticleInfo } from './ozonManualSupply';
@@ -174,9 +175,27 @@ describe('сборка заявки из галочек', () => {
     expect(plan.cabinets).toEqual(['Mercurius', 'MaxiStore']);
   });
 
-  it('кластер, которого у товара нет, в заявку не попадает', () => {
+  it('кластер, которого нет в списке товара, в заявку не попадает', () => {
+    // Защита от мусора в состоянии галочек. Список кластеров товара экран собирает
+    // ПОЛНЫМ (пункт 64) и передаёт сюда же — см. тест про новый кластер ниже.
     const picks = readManualPicks({ [manualKey('Полка_бел', '9999')]: '10' });
     expect(buildManualPlan(picks, [info()]).rows).toEqual([]);
+  });
+
+  it('кластер, куда товар ещё не ездил, попадает в заявку наравне с остальными', () => {
+    // Пункт 64, скрытая половина: если бы сборка заявки брала только «свои» кластеры
+    // товара, отмеченный на экране новый кластер молча исчез бы из поставки.
+    const full = manualClusterList(
+      [{ clusterId: '4007', clusterName: 'Москва' }],
+      [{ clusterId: '4041', clusterName: 'Казань' }],
+      { '4007': 41.2 },
+      (ref) => ({ ...ref })
+    );
+    const picks = readManualPicks({ [manualKey('Полка_бел', '4041')]: '12' });
+    const plan = buildManualPlan(picks, [info({ clusters: full })]);
+    expect(plan.rows).toHaveLength(1);
+    expect(plan.rows[0].clusterName).toBe('Казань');
+    expect(plan.rows[0].qty).toBe(12);
   });
 
   it('товар без галочек не даёт ни строк, ни магазина', () => {
@@ -203,6 +222,65 @@ describe('сборка заявки из галочек', () => {
     const picks = readManualPicks({ [manualKey('Полка_бел', '4007')]: '7' });
     const plan = buildManualPlan(picks, [info({ pcsPerBox: 0 })]);
     expect(plan.rows[0].boxes).toBe(7);
+  });
+});
+
+describe('в ручном режиме видны все кластеры поставки', () => {
+  // Пункт 64. У товара в таблице есть только кластеры, где он лежит или продаётся.
+  // Везти товар в новый регион — это как раз выбрать кластер, где его сейчас НЕТ.
+  type Row = { clusterId: string; clusterName: string; available?: number; stub?: boolean };
+  const empty = (ref: { clusterId: string; clusterName: string }): Row => ({ ...ref, stub: true });
+
+  const refs = [
+    { clusterId: '4007', clusterName: 'Москва' },
+    { clusterId: '4039', clusterName: 'Санкт-Петербург и СЗО' },
+    { clusterId: '4066', clusterName: 'Екатеринбург' },
+    { clusterId: '4041', clusterName: 'Казань' }
+  ];
+  const shares = { '4007': 41.2, '4039': 18.6, '4041': 7.4 };
+
+  it('к своим кластерам добавляются остальные', () => {
+    const own: Row[] = [{ clusterId: '4007', clusterName: 'Москва', available: 12 }];
+    const list = manualClusterList(own, refs, shares, empty);
+    expect(list.map((c) => c.clusterId)).toEqual(['4007', '4039', '4041', '4066']);
+  });
+
+  it('порядок — по убыванию доли в общем объёме продаж, кластеры без продаж в конце', () => {
+    const list = manualClusterList([], refs, shares, empty);
+    expect(list.map((c) => c.clusterName)).toEqual([
+      'Москва', 'Санкт-Петербург и СЗО', 'Казань', 'Екатеринбург'
+    ]);
+  });
+
+  it('свой кластер не подменяется пустышкой — иначе пропали бы остатки', () => {
+    const own: Row[] = [{ clusterId: '4007', clusterName: 'Москва', available: 12 }];
+    const list = manualClusterList(own, refs, shares, empty);
+    const moscow = list.find((c) => c.clusterId === '4007');
+    expect(moscow!.available).toBe(12);
+    expect(moscow!.stub).toBeUndefined();
+  });
+
+  it('кластер товара, которого нет в справочнике, не теряется', () => {
+    // Справочник кластеров может отстать от остатков — молча выбросить остаток нельзя.
+    const own: Row[] = [{ clusterId: '9999', clusterName: 'Новый кластер', available: 5 }];
+    const list = manualClusterList(own, refs, shares, empty);
+    expect(list.map((c) => c.clusterId)).toContain('9999');
+    expect(list).toHaveLength(5);
+  });
+
+  it('повторы в справочнике не удваивают строку', () => {
+    const list = manualClusterList([], [...refs, { clusterId: '4007', clusterName: 'Москва' }], shares, empty);
+    expect(list.filter((c) => c.clusterId === '4007')).toHaveLength(1);
+  });
+
+  it('кластер без идентификатора пропускается', () => {
+    const list = manualClusterList([], [{ clusterId: '', clusterName: 'Пусто' }], shares, empty);
+    expect(list).toEqual([]);
+  });
+
+  it('пустой справочник оставляет только свои кластеры', () => {
+    const own: Row[] = [{ clusterId: '4007', clusterName: 'Москва', available: 12 }];
+    expect(manualClusterList(own, [], shares, empty).map((c) => c.clusterId)).toEqual(['4007']);
   });
 });
 
@@ -234,6 +312,20 @@ describe('ручной выбор на экране остатков', () => {
   it('ввод количества обрезается по свободному остатку', () => {
     expect(stocks).toContain("const value = raw === '' ? '' : String(clampManualQty(raw, freeMyStock, manualPicks, article, clusterId));");
     expect(stocks).toContain('onChange={(e) => changeManualQty(art.article, String(cls.clusterId), e.target.value, art.freeMyStock)}');
+  });
+
+  it('таблица в режиме выбора показывает ВСЕ кластеры поставки', () => {
+    expect(stocks).toContain('manualClusterList(art.clusters || [], supplyClusterRefs, clusterShares.byClusterId, emptyManualCluster)');
+  });
+
+  it('сборка заявки берёт тот же полный список, что и таблица', () => {
+    // Иначе отмеченный новый кластер молча исчезнет из поставки.
+    expect(stocks).toMatch(/clusters: manualClusterList\(\s*\n\s*row\.clusters \|\| \[\],\s*\n\s*supplyClusterRefs,/);
+  });
+
+  it('исключённые настройкой кластеры сами не добавляются', () => {
+    expect(stocks).toContain("const excluded = parseExcludedClusters(ozonSettings ? ozonSettings.excludedClusters : '');");
+    expect(stocks).toContain('.filter((c: any) => c.clusterId && !excluded.has(String(c.clusterId)))');
   });
 
   it('строка товара показывает, сколько ещё свободно', () => {

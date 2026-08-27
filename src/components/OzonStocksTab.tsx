@@ -10,10 +10,36 @@ import { OzonSupplyModal } from './OzonSupplyModal';
 import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { canTickCluster } from '../lib/ozonSupplyLines';
-import { buildManualPlan, clampManualQty, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
-import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, resolveOzonArticle } from '../lib/ozonCoverage';
+import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
+import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
+
+/** Пункт 64. Кластер, куда товар ещё ни разу не ездил: строка есть, чисел нет.
+ *  Строится здесь, а не в правиле: форму строки таблицы знает только экран. */
+const emptyManualCluster = (ref: { clusterId: string; clusterName: string }): any => ({
+  clusterId: ref.clusterId,
+  clusterName: ref.clusterName,
+  qtySold: 0,
+  perDay: 0,
+  sharePct: 0,
+  available: 0,
+  transit: 0,
+  returns: 0,
+  estimated: 0,
+  coverageDays: null,
+  excluded: false,
+  priority: false,
+  priorityK: 1,
+  unmetQty: 0,
+  pendingQty: 0,
+  requestedQty: 0,
+  pendingEffective: 0,
+  needQty: 0,
+  needBoxes: 0,
+  recommendation: null,
+  warehouses: []
+});
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
 
@@ -675,6 +701,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
   // Пункт 63. Ручной выбор: правила пунктов 58 и 59 применяются к НЕМУ, а не к галочкам
   // рекомендаций — иначе запрет прямой поставки обходился бы переключением списка.
+  // Пункт 64. Куда вообще можно везти: справочник кластеров минус исключённые настройкой.
+  // Исключённый кластер САМ не добавляется, но если товар там уже лежит, своя строка
+  // остаётся — прятать остаток нельзя.
+  const supplyClusterRefs = useMemo(() => {
+    const excluded = parseExcludedClusters(ozonSettings ? ozonSettings.excludedClusters : '');
+    return (clusterRefs || [])
+      .filter((c: any) => c.clusterId && !excluded.has(String(c.clusterId)))
+      .map((c: any) => ({ clusterId: String(c.clusterId), clusterName: String(c.clusterName || '') }));
+  }, [clusterRefs, ozonSettings]);
+
   const manualPicks = useMemo(() => readManualPicks(manualQty), [manualQty]);
   const manualClusterIds = useMemo(() => pickedClusterIds(manualPicks), [manualPicks]);
   const manualCabinetSets = useMemo(
@@ -688,12 +724,19 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       pcsPerBox: Number(row.pcsPerBox) || 0,
       freeMyStock: Number(row.freeMyStock) || 0,
       cabinets: (row.cabinets || []) as string[],
-      clusters: (row.clusters || []).map((c: any) => ({
+      // Пункт 64. ТОТ ЖЕ список, что рисует таблица. Если брать только свои кластеры
+      // товара, отмеченный новый кластер молча исчезнет из заявки.
+      clusters: manualClusterList(
+        row.clusters || [],
+        supplyClusterRefs,
+        clusterShares.byClusterId,
+        emptyManualCluster
+      ).map((c: any) => ({
         clusterId: String(c.clusterId),
         clusterName: String(c.clusterName || '')
       }))
     })),
-    [coverageRows]
+    [coverageRows, supplyClusterRefs, clusterShares]
   );
   const manualPlan = useMemo(() => buildManualPlan(manualPicks, manualInfos), [manualPicks, manualInfos]);
 
@@ -1691,7 +1734,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             </tr>
 
                             {/* LEVEL 2: CLUSTERS */}
-                            {isArtExpanded && art.clusters.map((cls: any) => {
+                            {isArtExpanded && (manualMode
+                              ? manualClusterList(art.clusters || [], supplyClusterRefs, clusterShares.byClusterId, emptyManualCluster)
+                              : art.clusters
+                            ).map((cls: any) => {
                               const clusterKey = `${art.article}:::${cls.clusterId}`;
                               const isClsExpanded = !!expandedClusters[clusterKey];
                               return (
