@@ -3,7 +3,7 @@ import { buildCargoPlan, buildBoxesPayload } from '../lib/ozonCargo';
 import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
+import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClusters, validateSelection } from '../lib/ozonDirectSupply';
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
 import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict } from '../lib/ozonSupplyLines';
@@ -299,6 +299,16 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   );
 
   /** Кластеры, которые уже есть в собираемой заявке. */
+  /**
+   * Пункт 58, этап 5. Прямая поставка: заявка едет ОДНИМ кластером, точки отгрузки у неё нет,
+   * а склад размещения называет продавец. Склад по умолчанию берётся из настроек; если Ozon
+   * его не даёт, человек выбирает замену сам — приложение не подменяет молча.
+   */
+  const [pickedWarehouseId, setPickedWarehouseId] = useState('');
+  const [pickedWarehouseName, setPickedWarehouseName] = useState('');
+  const [warehouseAlternatives, setWarehouseAlternatives] = useState<{ warehouseId: string; name: string; address: string }[]>([]);
+  const [warehouseProblem, setWarehouseProblem] = useState('');
+
   const supplyClusterIds = useMemo(() => {
     const ids: string[] = [];
     activeRows.forEach((r) => {
@@ -307,6 +317,17 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     });
     return ids;
   }, [activeRows]);
+
+  /** Правило прямой поставки для собранного состава: null — заявка кросс-докинговая. */
+  const directRule = useMemo(
+    () => directWarehouseFor(directRules, supplyClusterIds),
+    [directRules, supplyClusterIds]
+  );
+  const isDirect = directRule !== null;
+
+  /** Склад, который поедет в Ozon: выбранная замена важнее склада из настроек. */
+  const activeWarehouseId = pickedWarehouseId || (directRule ? directRule.warehouseId : '');
+  const activeWarehouseName = pickedWarehouseName || (directRule ? directRule.warehouseName : '');
 
   /** Articles offered for the chosen cluster: something must be free to ship on «Мой склад»,
    *  an Ozon SKU is required,
@@ -645,6 +666,8 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
         cabinet,
         draftId: useDraftId,
         clusterIds,
+        supplyType: isDirect ? 'DIRECT' : 'CROSSDOCK',
+        storageWarehouseId: isDirect ? activeWarehouseId : '',
         availabilityCheck: buildAvailabilityCheck()
       }));
     } catch (e: any) {
@@ -678,7 +701,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
           cabinet,
           draftId: useDraftId,
           orderId,
-          dropOffName: dropOffWarehouseName,
+          dropOffName: isDirect ? (activeWarehouseName + ' (привезу сам)') : dropOffWarehouseName,
           clusters: clusterIds.join(','),
           itemsJSON: JSON.stringify(activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) }))),
           status: 'Создана'
@@ -710,7 +733,19 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       toast.error('Магазин заявки не определён: соберите заявку из товаров одного магазина или выберите магазин фильтром вкладки');
       return;
     }
-    if (!dropOffWarehouseId || !dropOffWarehouseType) {
+    // Пункт 58. У прямой поставки точки отгрузки нет вовсе, зато обязателен склад,
+    // и состав обязан пройти сторож правила: смешанная заявка в Ozon не существует.
+    const selectionProblem = validateSelection(directRules, supplyClusterIds);
+    if (selectionProblem) {
+      toast.error(selectionProblem);
+      return;
+    }
+    if (isDirect) {
+      if (!activeWarehouseId) {
+        toast.error('Не выбран склад прямой поставки — укажите его в настройках Ozon');
+        return;
+      }
+    } else if (!dropOffWarehouseId || !dropOffWarehouseType) {
       toast.error('Не выбрана точка отгрузки — укажите её в настройках Ozon');
       return;
     }
@@ -729,7 +764,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     let result: any;
     try {
       result = await fetchWithTimeout('/api/ozon/supply/draft', proxyBody({
-        cabinet, dropOffWarehouseId, dropOffWarehouseType, clusters
+        cabinet, dropOffWarehouseId, dropOffWarehouseType, clusters,
+        supplyType: isDirect ? 'DIRECT' : 'CROSSDOCK',
+        storageWarehouseId: isDirect ? activeWarehouseId : '',
+        storageWarehouseName: isDirect ? activeWarehouseName : ''
       }));
     } catch (e: any) {
       if (e?.name === 'AbortError') {
@@ -751,6 +789,18 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     setDraftId(String(data.draftId || ''));
     setVerdict(data);
     setDirty(false);
+
+    // Ozon не дал склад: показываем причину и список замен, но сами не подменяем.
+    const directAnswer = data.directWarehouse;
+    if (isDirect && directAnswer && directAnswer.problem) {
+      setWarehouseProblem(String(directAnswer.message || 'Ozon не принимает поставку на выбранный склад'));
+      setWarehouseAlternatives(Array.isArray(directAnswer.alternatives) ? directAnswer.alternatives : []);
+      toast.error(directAnswer.message || 'Ozon не принимает поставку на выбранный склад', { duration: 15000 });
+      setSending(false);
+      return;
+    }
+    setWarehouseProblem('');
+    setWarehouseAlternatives([]);
 
     const hasRejected = Array.isArray(data.rejectedItems) && data.rejectedItems.length > 0;
     const hasBadCluster = (data.clusters || []).some((c: any) => c.state !== 'FULL_AVAILABLE');
@@ -801,7 +851,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
           <div>
             <h3 className="text-xl font-bold text-slate-900">Оформить поставку в Ozon</h3>
             <div className="text-xs text-slate-500 mt-0.5">
-              Точка отгрузки: {dropOffWarehouseName || 'не выбрана'}
+              {isDirect
+                ? `Привезу самостоятельно · склад ${activeWarehouseName || 'не выбран'}`
+                : `Точка отгрузки: ${dropOffWarehouseName || 'не выбрана'}`}
               {cabinet ? ` · кабинет ${cabinet}` : ''}
             </div>
           </div>
@@ -1028,6 +1080,41 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                 </div>
               )}
 
+              {/* Пункт 58, этап 5. Ozon не дал склад прямой поставки: показываем причину и
+                  доступные склады этого кластера. Подменять склад молча нельзя — решение,
+                  куда физически везти груз, принимает человек. */}
+              {isDirect && warehouseProblem && (
+                <div className="p-3 rounded-2xl border border-amber-200 bg-amber-50 flex flex-col gap-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-amber-600">Склад прямой поставки</div>
+                  <div className="text-sm font-semibold text-amber-900">{warehouseProblem}</div>
+                  {warehouseAlternatives.length === 0 ? (
+                    <div className="text-xs text-amber-800">
+                      Замен нет. Уберите этот кластер из заявки или дождитесь, пока Ozon откроет склад.
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      {warehouseAlternatives.map((w) => (
+                        <button
+                          key={w.warehouseId}
+                          type="button"
+                          onClick={() => {
+                            setPickedWarehouseId(w.warehouseId);
+                            setPickedWarehouseName(w.name);
+                            setWarehouseProblem('');
+                            setWarehouseAlternatives([]);
+                            markDirty();
+                            toast.success('Склад заменён на «' + (w.name || w.warehouseId) + '». Нажмите «Пересчитать в Ozon»');
+                          }}
+                          className="w-full text-left p-2.5 rounded-xl border border-amber-200 bg-white hover:bg-amber-100/50 transition-colors"
+                        >
+                          <div className="text-sm font-bold text-slate-800 break-words">{w.name || w.warehouseId}</div>
+                          {w.address && <div className="text-xs text-slate-400 mt-0.5 break-words">{w.address}</div>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {/* Item 45. Adding a cluster or an article that the recommendation did not propose. */}
               <div className="p-3 rounded-2xl border border-slate-200 bg-slate-50 flex flex-col gap-2">
                 <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Добавить позицию</div>

@@ -1881,13 +1881,38 @@ async function startServer() {
         return res.status(400).json({ status: "error", stage: "no_cabinet", message: CABINET_REQUIRED_MESSAGE });
       }
 
+      // Пункт 58, этап 5. Прямая поставка создаётся тем же методом, но другим типом,
+      // и ТОЛЬКО у неё в selected_cluster_warehouses идёт storage_warehouse_id: продавец
+      // сам называет склад, куда повезёт груз.
+      const createSupplyType = String(req.body?.supplyType || 'CROSSDOCK').trim().toUpperCase() === 'DIRECT'
+        ? 'DIRECT'
+        : 'MULTI_CLUSTER';
+      const createStorageWarehouseId = String(req.body?.storageWarehouseId || '').trim();
+
+      if (createSupplyType === 'DIRECT') {
+        if (clusterIds.length !== 1) {
+          return res.status(400).json({
+            status: "error",
+            message: "Прямой поставкой едет один кластер за заявку, а передано: " + clusterIds.length
+          });
+        }
+        if (!createStorageWarehouseId) {
+          return res.status(400).json({
+            status: "error",
+            message: "Не указан склад прямой поставки — заявка в Ozon не отправлена"
+          });
+        }
+      }
+
       // Для MULTI_CLUSTER передаются все кластеры расчёта; storage_warehouse_id только для DIRECT
       await fetchOzonApi("/v2/draft/supply/create",
         { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
         {
           draft_id: draftId,
-          supply_type: "MULTI_CLUSTER",
-          selected_cluster_warehouses: clusterIds.map((id: any) => ({ macrolocal_cluster_id: Number(id) }))
+          supply_type: createSupplyType,
+          selected_cluster_warehouses: createSupplyType === 'DIRECT'
+            ? [{ macrolocal_cluster_id: Number(clusterIds[0]), storage_warehouse_id: Number(createStorageWarehouseId) }]
+            : clusterIds.map((id: any) => ({ macrolocal_cluster_id: Number(id) }))
         });
 
       let statusData: any = null;

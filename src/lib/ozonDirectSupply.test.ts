@@ -244,4 +244,36 @@ describe('подключение правила к экранам', () => {
     expect(modal).toContain('parseDirectClusters(supplySettings.directClusters)');
     expect(modal).not.toMatch(/['"`]4066['"`]/);
   });
+
+  // Этап 5: вторая дорога до Ozon.
+  it('Мастер: прямая заявка уходит своим типом и со складом', () => {
+    expect(modal).toMatch(/supply\/draft'[\s\S]{0,400}supplyType: isDirect \? 'DIRECT' : 'CROSSDOCK'/);
+    expect(modal).toMatch(/supply\/create'[\s\S]{0,400}supplyType: isDirect \? 'DIRECT' : 'CROSSDOCK'/);
+    expect(modal).toMatch(/storageWarehouseId: isDirect \? activeWarehouseId : ''/);
+  });
+
+  it('Мастер: у прямой заявки точка отгрузки не требуется, а склад требуется', () => {
+    expect(modal).toMatch(/if \(isDirect\) \{[\s\S]{0,300}!activeWarehouseId[\s\S]{0,200}\} else if \(!dropOffWarehouseId/);
+  });
+
+  it('Мастер: состав проходит сторож правила перед отправкой', () => {
+    expect(modal).toMatch(/validateSelection\(directRules, supplyClusterIds\)[\s\S]{0,200}return;/);
+  });
+
+  it('Мастер: способ доставки виден на экране', () => {
+    expect(modal).toContain('Привезу самостоятельно · склад');
+  });
+
+  it('Мастер: отказ Ozon по складу останавливает расчёт и предлагает замены', () => {
+    expect(modal).toMatch(/directAnswer\.problem[\s\S]{0,300}setWarehouseAlternatives/);
+    expect(modal).toContain('setPickedWarehouseId(w.warehouseId)');
+  });
+
+  it('Мастер: замена склада НЕ подставляется молча — человек нажимает сам', () => {
+    expect(modal).toMatch(/onClick=\{\(\) => \{[\s\S]{0,200}setPickedWarehouseId\(w\.warehouseId\)/);
+  });
+
+  it('Мастер: в журнале заявок у прямой поставки записан склад', () => {
+    expect(modal).toContain("isDirect ? (activeWarehouseName + ' (привезу сам)') : dropOffWarehouseName");
+  });
 });
