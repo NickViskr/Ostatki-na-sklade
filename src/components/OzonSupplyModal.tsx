@@ -6,7 +6,7 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClusters, validateSelection } from '../lib/ozonDirectSupply';
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
-import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
+import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
 
 export interface SupplyPlanRow {
   article: string;
@@ -61,6 +61,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   const [sending, setSending] = useState(false);
   const [qtyEdit, setQtyEdit] = useState<Record<string, number>>({});
+  // Пункт 60а. Поля, у которых ноль стёрт на время правки: пока курсор внутри,
+  // поле пустое, и набранное число не приходится вбивать поверх нуля.
+  const [blankedQty, setBlankedQty] = useState<Record<string, boolean>>({});
   const [removedRows, setRemovedRows] = useState<Record<string, boolean>>({});
   // Item 45. Lines the user added by hand. They live beside the recommended ones and go
   // through exactly the same path afterwards — payload, availability check, itemsJSON —
@@ -1047,8 +1050,25 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                                 min="0"
                                 step="1"
                                 max={hasFreeFigure(r.article) ? capForRow(r.article, rowKey(r)) : undefined}
-                                value={getQty(r)}
-                                onChange={(e) => changeQty(r, e.target.value)}
+                                value={qtyFieldValue(getQty(r), Boolean(blankedQty[rowKey(r)]))}
+                                onFocus={() => {
+                                  if (shouldBlankQtyOnFocus(getQty(r))) {
+                                    setBlankedQty({ ...blankedQty, [rowKey(r)]: true });
+                                  }
+                                }}
+                                onBlur={() => {
+                                  const next = { ...blankedQty };
+                                  delete next[rowKey(r)];
+                                  setBlankedQty(next);
+                                }}
+                                onChange={(e) => {
+                                  // Поле опустошили — держим его пустым, а не подставляем ноль обратно.
+                                  const next = { ...blankedQty };
+                                  if (e.target.value === '') next[rowKey(r)] = true;
+                                  else delete next[rowKey(r)];
+                                  setBlankedQty(next);
+                                  changeQty(r, e.target.value);
+                                }}
                                 className="w-24 px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-slate-400 outline-none text-sm font-semibold text-slate-800 bg-white"
                               />
                               <span className="text-[11px] text-slate-400 shrink-0">шт</span>

@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { capForSupplyLine, supplyLineKey,
   canTickCluster,
-  sortClustersBySalesShare
+  sortClustersBySalesShare,
+  qtyFieldValue,
+  shouldBlankQtyOnFocus
 } from './ozonSupplyLines';
 
 const free = { 'ART-A': 100, 'ART-B': 30, 'ART-ZERO': 0 };
@@ -327,5 +329,54 @@ describe('подключение пункта 60 к экранам', () => {
 
   it('Мастер: список кластеров сортируется правилом', () => {
     expect(modal).toContain('sortClustersBySalesShare(refs, clusterSalesShare)');
+  });
+});
+
+describe('пункт 60а: ноль в поле количества не приходится стирать', () => {
+  it('ноль стирается при постановке курсора', () => {
+    expect(shouldBlankQtyOnFocus(0)).toBe(true);
+  });
+
+  it('набранное число при постановке курсора НЕ стирается', () => {
+    expect(shouldBlankQtyOnFocus(36)).toBe(false);
+    expect(shouldBlankQtyOnFocus(1)).toBe(false);
+  });
+
+  it('отсутствующее количество считается нулём и стирается', () => {
+    expect(shouldBlankQtyOnFocus(null)).toBe(true);
+    expect(shouldBlankQtyOnFocus(undefined)).toBe(true);
+    expect(shouldBlankQtyOnFocus(NaN as any)).toBe(true);
+  });
+
+  it('пока поле чистят, оно пустое', () => {
+    expect(qtyFieldValue(0, true)).toBe('');
+    expect(qtyFieldValue(36, true)).toBe('');
+  });
+
+  it('вне правки поле показывает количество, включая ноль', () => {
+    expect(qtyFieldValue(0, false)).toBe('0');
+    expect(qtyFieldValue(36, false)).toBe('36');
+    expect(qtyFieldValue(null, false)).toBe('0');
+  });
+});
+
+describe('подключение пункта 60а к полю количества', () => {
+  const modal = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonSupplyModal.tsx'), 'utf8');
+
+  it('поле рисуется правилом, а не сырым количеством', () => {
+    expect(modal).toContain('value={qtyFieldValue(getQty(r), Boolean(blankedQty[rowKey(r)]))}');
+    expect(modal).not.toContain('value={getQty(r)}');
+  });
+
+  it('ноль стирается по фокусу', () => {
+    expect(modal).toMatch(/onFocus=\{\(\) => \{[\s\S]{0,200}shouldBlankQtyOnFocus\(getQty\(r\)\)/);
+  });
+
+  it('опустошённое поле не заполняется нулём обратно', () => {
+    expect(modal).toMatch(/if \(e\.target\.value === ''\) next\[rowKey\(r\)\] = true;/);
+  });
+
+  it('после ухода курсора поле снова показывает число', () => {
+    expect(modal).toMatch(/onBlur=\{\(\) => \{[\s\S]{0,200}delete next\[rowKey\(r\)\];/);
   });
 });

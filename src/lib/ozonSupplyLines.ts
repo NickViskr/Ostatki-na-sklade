@@ -173,3 +173,18 @@ export const sortClustersBySalesShare = <T extends { clusterId: string; clusterN
     return String(a.clusterName || '').localeCompare(String(b.clusterName || ''), 'ru');
   });
 };
+
+/* ---- Пункт 60а. Ноль в поле количества не приходится стирать ----------------------
+ * Кластеры без остатка входят в заявку с нулём, и этот ноль стоял в поле ввода: чтобы
+ * набрать число, его сначала надо было удалить. Решение владельца 27.08.2026: при
+ * постановке курсора ноль пропадает сам, и пока человек правит поле, обратно не лезет.
+ * НЕнулевое количество не стирается никогда — молча потерять набранное число нельзя.
+ */
+
+/** Ноль стирается при получении фокуса; всё остальное остаётся на месте. */
+export const shouldBlankQtyOnFocus = (qty: number | null | undefined): boolean =>
+  (Number(qty) || 0) === 0;
+
+/** Что показывает поле: пустоту, пока его чистят, иначе само количество. */
+export const qtyFieldValue = (qty: number | null | undefined, blanked: boolean): string =>
+  blanked ? '' : String(Number(qty) || 0);
