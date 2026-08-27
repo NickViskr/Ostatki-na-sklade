@@ -1623,6 +1623,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   )}
                                 </td>
                               )}
+                              {/* Item 50. Every state of this cell opens the order window, including the
+                                  states where the calculation asks for nothing: the owner sometimes orders
+                                  anyway and the order must still land in «Заказы на фабрике» and in the ТРУБА.
+                                  The only exception is a virtual kit — its components are ordered instead,
+                                  and their own cells live in the components table below. */}
                               {isColVisible('factory') && (
                                 <td className="p-3 text-right">
                                   {factoryOverdueList.length > 0 ? (
@@ -1668,13 +1673,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         <span className="block text-[10px] font-normal text-sky-600">заказано {fmtInt(factoryWaitingQty)} шт · ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}</span>
                                       </button>
                                     ) : (
-                                      <span
-                                        className="text-[10px] font-semibold text-slate-500"
-                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно.`}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
+                                        className="text-[10px] font-semibold text-slate-500 text-right hover:underline"
+                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно. Нажми, чтобы всё равно отметить заказ на фабрике.`}
                                       >
                                         дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
                                         <span className="block text-[10px] font-normal text-slate-400">товар есть, лежит не там</span>
-                                      </span>
+                                      </button>
                                     )
                                   ) : factoryWaitingQty > 0 ? (
                                     <button
@@ -1697,23 +1704,28 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       </span>
                                     </span>
                                   ) : (Number(art.leadTimeDays) || 0) === 0 ? (
-                                    <span
-                                      className="text-[10px] font-semibold text-slate-400"
-                                      title="Не заполнена колонка «Срок поставки, дн» в SKU Базе. Пока она пуста, сигнал по общему остатку сработает только при падении ниже неснижаемого запаса."
+                                    <button
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
+                                      className="text-[10px] font-semibold text-slate-400 text-right hover:underline"
+                                      title="Не заполнена колонка «Срок поставки, дн» в SKU Базе. Пока она пуста, сигнал по общему остатку сработает только при падении ниже неснижаемого запаса. Нажми, чтобы всё равно отметить заказ на фабрике."
                                     >
                                       срок не задан
-                                    </span>
+                                    </button>
                                   ) : (
-                                    <span
-                                      className="text-slate-300"
+                                    <button
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
+                                      className="text-slate-300 hover:text-slate-500 hover:underline"
                                       title={
-                                        art.factoryDaysLeft === null
+                                        (art.factoryDaysLeft === null
                                           ? 'Продаж за расчётное окно нет — сигнал не считается.'
-                                          : `Заказ не нужен: запаса хватит на ${Math.round(art.factoryDaysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн., непокрытой потребности у кластеров нет.`
+                                          : `Заказ не нужен: запаса хватит на ${Math.round(art.factoryDaysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн., непокрытой потребности у кластеров нет.`) +
+                                        ' Нажми, чтобы всё равно отметить заказ на фабрике.'
                                       }
                                     >
                                       —
-                                    </span>
+                                    </button>
                                   )}
                                 </td>
                               )}
@@ -2065,7 +2077,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   <span className="block text-[10px] font-semibold text-sky-600">ждём {nearest && nearest.expectedAt ? fmtDateShort(nearest.expectedAt) : '—'}</span>
                                 </button>
                               ) : (
-                                <span className="text-slate-300">не нужно</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setFactoryModalArticle(c.component)}
+                                  className="text-slate-300 hover:text-slate-500 hover:underline"
+                                  title="Заказ по расчёту не нужен. Нажми, чтобы всё равно отметить заказ на фабрике по этому компоненту."
+                                >
+                                  не нужно
+                                </button>
                               )}
                             </td>
                           </tr>

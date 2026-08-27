@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   buildOzonCoverage,
   calcCoverageDays,
@@ -1041,5 +1043,55 @@ describe('buildOzonCoverage: кластер с созданной заявкой
     const row = buildOzonCoverage(input({ '4007': 15 })).articles.find(a => a.article === 'TOVAR')!;
     expect(row.clusters.filter(c => c.clusterId === '4007')).toHaveLength(1);
     expect(row.clusters.find(c => c.clusterId === '4007')!.available).toBe(20);
+  });
+});
+
+/** Item 50. A factory order placed for an article the calculation never asked for.
+ *  Nothing about the RECORD changes — Code.gs already accepts any article and the ТРУБА
+ *  already counts every active order — so the whole item lives in the entry points on
+ *  screen. These are source guards over the cell states that used to be dead text. */
+describe('заказ на фабрике вне рекомендаций', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const stocks = read('src/components/OzonStocksTab.tsx');
+  const modal = read('src/components/FactoryOrderModal.tsx');
+
+  it('состояние «заказ не нужен» открывает окно заказа', () => {
+    // Прочерк в колонке был мёртвым текстом — по нему нельзя было отметить заказ.
+    expect(stocks).toMatch(
+      /className="text-slate-300 hover:text-slate-500 hover:underline"[\s\S]{0,900}?—\s*<\/button>/
+    );
+  });
+
+  it('состояние «срок не задан» открывает окно заказа', () => {
+    expect(stocks).toMatch(
+      /\(Number\(art\.leadTimeDays\) \|\| 0\) === 0 \? \(\s*\n\s*<button/
+    );
+    expect(stocks).toMatch(/срок не задан\s*\n\s*<\/button>/);
+  });
+
+  it('состояние «товар есть, лежит не там» открывает окно заказа', () => {
+    expect(stocks).toMatch(
+      /дефицит в кластерах \{fmtInt\(art\.factory\.unmetDeficitQty\)\} шт[\s\S]{0,220}?<\/button>/
+    );
+  });
+
+  it('компонент комплекта заказывается со строки «не нужно»', () => {
+    // У комплекта своей кнопки нет намеренно: на фабрике заказывают компоненты.
+    expect(stocks).toMatch(
+      /onClick=\{\(\) => setFactoryModalArticle\(c\.component\)\}\s*\n\s*className="text-slate-300 hover:text-slate-500 hover:underline"\s*\n\s*title="[^"]*"\s*\n\s*>\s*\n\s*не нужно/
+    );
+    expect(stocks).toContain('узкое место: {bottleneckByKit[art.article].componentSku}');
+  });
+
+  it('все новые входы ведут в то же окно заказа и не раскрывают строку', () => {
+    const clicks = stocks.match(/setFactoryModalArticle\(art\.article\)/g) || [];
+    expect(clicks.length).toBeGreaterThanOrEqual(6);
+    const unguarded = stocks.match(/onClick=\{\(e\) => \{ setFactoryModalArticle/g) || [];
+    expect(unguarded).toHaveLength(0);
+  });
+
+  it('окно честно говорит, что расчёт такого заказа не предлагал', () => {
+    expect(modal).toContain('id="factory-order-off-plan"');
+    expect(modal).toMatch(/!order && suggestedQty <= 0/);
   });
 });

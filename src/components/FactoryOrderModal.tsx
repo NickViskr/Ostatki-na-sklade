@@ -169,6 +169,13 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
                 'Укажи количество'
               )}
               {!order && suggestedQty > 0 ? ` · расчёт предлагает ${Math.ceil(suggestedQty)} шт` : ''}
+              {/* Item 50. An order the calculation never asked for: say so plainly, so the empty
+                  «расчёт предлагает» line is not read as a missing number. */}
+              {!order && suggestedQty <= 0 && (
+                <span className="block text-slate-400" id="factory-order-off-plan">
+                  Расчёт этот заказ не предлагает — вносишь вручную. В запас он войдёт как любой другой заказ.
+                </span>
+              )}
             </div>
           </div>
 
