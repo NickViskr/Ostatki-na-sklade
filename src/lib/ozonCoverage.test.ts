@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  buildComponentCoverage,
   buildOzonCoverage,
   calcCoverageDays,
   calcSupplyRecommendation,
@@ -316,6 +317,161 @@ function makeKitsInput(overrides: Partial<OzonCoverageInput> = {}): OzonCoverage
     ...overrides
   };
 }
+
+// ============================================================================================
+// Дефицит кластеров виртуального комплекта доходит до компонента, который держит сборку
+// (29.08.2026, по разбору боевого случая BowlGrayMini_01).
+//
+// Комплект на фабрике не заказывают, поэтому сигнал заказа у него всегда null. До этой правки
+// его непокрытая потребность кластеров не доходила НИКУДА: компонентам она передавалась
+// жёстким нулём. Владелец видел «дефицит» у комплекта и полное молчание по бутылкам, из-за
+// которых дефицит и возник, — при 1200 мисок серых на складе.
+// ============================================================================================
+
+const DEFICIT_SPEED: any = {
+  weeks: ['2024-01-01'],
+  windowDays: 7,
+  totalQty: 0,
+  totalPerDay: 0,
+  qtyByArticle: {},
+  perDayByArticle: { 'KIT-A': 1, 'KIT-B': 1 },
+  qtyByCluster: {},
+  qtyByArticleCluster: {}
+};
+
+/** Комплект из трёх компонентов: один в обрез, два в избытке — как серая миска в боевом случае. */
+const DEFICIT_KITS: KitItem[] = [
+  {
+    kitSku: 'KIT-A',
+    type: 'virtual',
+    components: [
+      { componentSku: 'MISKA', quantity: 1 },
+      { componentSku: 'BOTTLE', quantity: 2 },
+      { componentSku: 'PACK', quantity: 1 }
+    ]
+  }
+];
+
+function componentsWithUnmet(
+  unmetByKit: Record<string, number>,
+  myStock: Record<string, number>,
+  kits: KitItem[] = DEFICIT_KITS
+) {
+  const { components } = buildComponentCoverage(
+    kits,
+    DEFICIT_SPEED,
+    {},
+    [
+      makeSku({ sku: 'MISKA', pcsPerBox: 1, leadTimeDays: 10 }),
+      makeSku({ sku: 'BOTTLE', pcsPerBox: 1, leadTimeDays: 10 }),
+      makeSku({ sku: 'PACK', pcsPerBox: 1, leadTimeDays: 10 })
+    ],
+    myStock,
+    {},
+    makeSettings({ minStockDays: 7 }),
+    undefined,
+    undefined,
+    unmetByKit
+  );
+  const by: Record<string, number> = {};
+  for (const c of components) by[c.component] = c.factory ? c.factory.unmetDeficitQty : 0;
+  return { by, components };
+}
+
+describe('дефицит комплекта доходит до компонента, который держит сборку', () => {
+  it('узкое место получает дефицит комплекта, умноженный на норму', () => {
+    // Свободно: MISKA 100 (хватает на 100 комплектов), BOTTLE 4 (на 2), PACK 100 (на 100).
+    // Сборку держит BOTTLE. Дефицит комплекта 50 шт превращается в 50 × 2 = 100 шт бутылок.
+    const { by } = componentsWithUnmet({ 'KIT-A': 50 }, { MISKA: 100, BOTTLE: 4, PACK: 100 });
+    expect(by.BOTTLE).toBe(100);
+  });
+
+  it('компонент, лежащий в избытке, дефицита НЕ получает', () => {
+    // Это и есть жалоба владельца: миски серые на складе есть, звать заказывать их нельзя.
+    const { by } = componentsWithUnmet({ 'KIT-A': 50 }, { MISKA: 100, BOTTLE: 4, PACK: 100 });
+    expect(by.MISKA).toBe(0);
+    expect(by.PACK).toBe(0);
+  });
+
+  it('когда сборку держат двое одинаково, дефицит получают оба', () => {
+    // MISKA 3 шт -> 3 комплекта, BOTTLE 6 шт при норме 2 -> тоже 3. Ничья.
+    const { by } = componentsWithUnmet({ 'KIT-A': 10 }, { MISKA: 3, BOTTLE: 6, PACK: 100 });
+    expect(by.MISKA).toBe(10);
+    expect(by.BOTTLE).toBe(20);
+    expect(by.PACK).toBe(0);
+  });
+
+  it('компонент двух комплектов складывает дефициты обоих', () => {
+    const twoKits: KitItem[] = [
+      { kitSku: 'KIT-A', type: 'virtual', components: [{ componentSku: 'BOTTLE', quantity: 2 }] },
+      { kitSku: 'KIT-B', type: 'virtual', components: [{ componentSku: 'BOTTLE', quantity: 1 }] }
+    ];
+    const { by } = componentsWithUnmet({ 'KIT-A': 10, 'KIT-B': 7 }, { BOTTLE: 0 }, twoKits);
+    expect(by.BOTTLE).toBe(10 * 2 + 7 * 1);
+  });
+
+  it('комплект без дефицита не передаёт компонентам ничего', () => {
+    const { by } = componentsWithUnmet({}, { MISKA: 100, BOTTLE: 4, PACK: 100 });
+    expect(by.BOTTLE).toBe(0);
+    expect(by.MISKA).toBe(0);
+  });
+
+  it('дефицит поднимает сигнал у компонента, которому заказ по порогу не нужен', () => {
+    // Запаса компонента хватает надолго, поэтому по порогу сигнала нет. Дефицит кластеров
+    // обязан его зажечь — иначе комплект «в дефиците», а компонент молчит, как и было.
+    const { components } = componentsWithUnmet({ 'KIT-A': 50 }, { MISKA: 100, BOTTLE: 4000, PACK: 100 });
+    const bottle = components.find(c => c.component === 'BOTTLE')!;
+    const miska = components.find(c => c.component === 'MISKA')!;
+    // BOTTLE: свободно 4000 -> 2000 комплектов, это НЕ узкое место, дефицит уходит к MISKA/PACK.
+    expect(bottle.factory).toBeNull();
+    expect(miska.factory).not.toBeNull();
+    expect(miska.factory!.reason).toBe('clusterDeficit');
+    expect(miska.factory!.orderQty).toBe(0);
+  });
+
+  it('весь путь целиком: дефицит кластера у комплекта выходит на его компонент', () => {
+    // Комплект продаётся в Москве, на Ozon его там нет — кластеру нужна поставка. Собрать
+    // можно всего 2 штуки: бутылок свободно 2, мисок 500. Остальное кластеру не достанется,
+    // и эта непокрытая потребность обязана дойти до БУТЫЛОК — не до мисок.
+    const res = buildOzonCoverage({
+      stocks: [
+        { cabinet: 'test', sku: '', offerId: 'KIT-A', name: 'KIT-A', warehouseName: 'W1', clusterName: 'Москва', clusterId: 'C1', available: 0, preparing: 0, requested: 0, transit: 0, excess: 0, returns: 0, other: 0 } as OzonStockRow
+      ],
+      sales: ['2023-12-11', '2023-12-18', '2023-12-25', '2024-01-01'].map((week) => ({
+        week, cabinet: 'test', offerId: 'KIT-A', clusterName: 'Москва', qty: 7, updatedAt: '', days: 7
+      })),
+      skus: [
+        makeSku({ sku: 'KIT-A', pcsPerBox: 1 }),
+        makeSku({ sku: 'BOTTLE', pcsPerBox: 1, leadTimeDays: 10 }),
+        makeSku({ sku: 'MISKA', pcsPerBox: 1, leadTimeDays: 10 })
+      ],
+      clusters: [{ clusterId: 'C1', clusterName: 'Москва' }],
+      settings: makeSettings({ speedWeeks: 4, minStockDays: 7, targetStockDays: 20 }),
+      myStockAvailability: { 'KIT-A': 2, BOTTLE: 2, MISKA: 500 },
+      kits: [
+        {
+          kitSku: 'KIT-A',
+          type: 'virtual',
+          components: [{ componentSku: 'BOTTLE', quantity: 1 }, { componentSku: 'MISKA', quantity: 1 }]
+        }
+      ],
+      now: WIDE_NOW
+    });
+
+    const kitRow = res.articles.find(a => a.article === 'KIT-A')!;
+    const bottle = res.components.find(c => c.component === 'BOTTLE')!;
+    const miska = res.components.find(c => c.component === 'MISKA')!;
+
+    // У самого комплекта заказа на фабрике нет и быть не может — заказывают компоненты.
+    expect(kitRow.factory).toBeNull();
+    expect(kitRow.unmetDeficitQty).toBeGreaterThan(0);
+    // Норма 1, поэтому дефицит переходит на бутылки один в один.
+    expect(bottle.factory).not.toBeNull();
+    expect(bottle.factory!.unmetDeficitQty).toBe(kitRow.unmetDeficitQty);
+    // Мисок 500 — сборку они не держат и дефицита не получают.
+    expect(miska.factory ? miska.factory.unmetDeficitQty : 0).toBe(0);
+  });
+});
 
 describe('buildOzonCoverage: компоненты виртуальных комплектов (пункт 36)', () => {
   it('компонент одного комплекта: скорость и запас считаются по формуле', () => {
@@ -1043,6 +1199,48 @@ describe('buildOzonCoverage: кластер с созданной заявкой
     const row = buildOzonCoverage(input({ '4007': 15 })).articles.find(a => a.article === 'TOVAR')!;
     expect(row.clusters.filter(c => c.clusterId === '4007')).toHaveLength(1);
     expect(row.clusters.find(c => c.clusterId === '4007')!.available).toBe(20);
+  });
+});
+
+/** 29.08.2026. Дефицит комплекта, дошедший до компонента, должен быть ВИДЕН: расчёт без
+ *  показа на экране владельцу ничем не помогает. Плюс колонка «Запас» переименована —
+ *  её крупное число читалось как складской остаток, а это вся труба целиком. */
+describe('дефицит компонента и честная подпись колонки', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const stocks = read('src/components/OzonStocksTab.tsx');
+
+  it('колонка больше не называется «Запас»', () => {
+    expect(stocks).toContain('>\n                          В обороте\n                        </th>');
+    expect(stocks).not.toMatch(/<th className="py-2 pr-2 text-right">Запас<\/th>/);
+  });
+
+  it('в подписи колонки сказано, что складская часть — только доля числа', () => {
+    expect(stocks).toMatch(/НЕ остаток на Моём складе[\s\S]{0,400}?внутри готовых комплектов/);
+  });
+
+  it('компонент, держащий сборку, показан отдельным состоянием с количеством', () => {
+    expect(stocks).toMatch(
+      /\) : c\.factory && c\.factory\.unmetDeficitQty > 0 \? \([\s\S]{0,1600}?держит сборку · \{fmtInt\(c\.factory\.unmetDeficitQty\)\} шт/
+    );
+  });
+
+  it('состояние кликабельно — по нему можно оформить заказ на фабрике', () => {
+    expect(stocks).toMatch(
+      /c\.factory && c\.factory\.unmetDeficitQty > 0 \? \([\s\S]{0,900}?onClick=\{\(\) => setFactoryModalArticle\(c\.component\)\}/
+    );
+  });
+
+  it('строка компонента подсвечивается, как просроченный заказ', () => {
+    expect(stocks).toMatch(
+      /overdueList\.length > 0 \|\| \(c\.factory && c\.factory\.unmetDeficitQty > 0\) \? 'bg-amber-50\/60'/
+    );
+  });
+
+  it('расчёт передаёт дефицит комплектов вниз, а не жёсткий ноль', () => {
+    const lib = read('src/lib/ozonCoverage.ts');
+    expect(lib).toMatch(/unmetByComponent\[componentSku\] \|\| 0,\s*\n\s*onOrderQty/);
+    expect(lib).toMatch(/if \(row\.unmetDeficitQty > 0\) unmetByKit\[row\.article\] = row\.unmetDeficitQty;/);
+    expect(lib).toMatch(/input\.pending\?\.byArticle,\s*\n\s*unmetByKit\s*\n\s*\);/);
   });
 });
 

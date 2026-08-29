@@ -981,7 +981,13 @@ export function buildComponentCoverage(
   forecastPerDayByArticle?: Record<string, number>,
   // Зачёт по созданным заявкам, шт по артикулу КОМПЛЕКТА (поле byArticle из OzonPendingLike).
   // Тип — простой Record, а не импорт модуля заявок: обратная зависимость дала бы цикл модулей.
-  pendingByArticle?: Record<string, number>
+  pendingByArticle?: Record<string, number>,
+  // 29.08.2026. Непокрытая потребность кластеров по артикулу КОМПЛЕКТА, шт комплектов.
+  // Комплект на фабрике не заказывают, поэтому сигнал у него всегда null — и до этой правки
+  // его дефицит не доходил вообще никуда: компонентам он передавался жёстким нулём. Владелец
+  // видел «дефицит» у BowlGrayMini_01 и полное молчание по бутылкам, из-за которых дефицит
+  // и возник.
+  unmetByKit?: Record<string, number>
 ): { components: ComponentCoverage[]; bottlenecks: KitBottleneck[] } {
   const virtualKits = (kits || []).filter(k => k && k.type === 'virtual');
   if (!virtualKits.length) return { components: [], bottlenecks: [] };
@@ -1022,6 +1028,48 @@ export function buildComponentCoverage(
     }
   }
 
+  // Свободный остаток компонента — то, из чего прямо сейчас можно собирать: сырой остаток
+  // минус обещанное созданным заявкам. Нужен до основного цикла, чтобы понять, КАКОЙ компонент
+  // держит сборку комплекта.
+  const freeByComponent: Record<string, number> = {};
+  for (const [componentSku, accRow] of acc) {
+    const my = Number(myStockAvailability[componentSku]) || 0;
+    freeByComponent[componentSku] = Math.max(0, my - accRow.reservedQty);
+  }
+
+  // Дефицит комплекта переносится ТОЛЬКО на те компоненты, которые его держат, — на те, чей
+  // свободный остаток и ограничивает сборку. Разносить дефицит по всем компонентам подряд
+  // было бы неправдой: у BowlGrayMini_01 не хватает бутылок, а миски серые лежат на складе
+  // тысячей штук, и подсвечивать их как дефицитные значило бы звать заказывать то, чего и так
+  // в избытке.
+  const unmetByComponent: Record<string, number> = {};
+  for (const kit of virtualKits) {
+    const kitSku = String(kit.kitSku || '').trim();
+    if (!kitSku) continue;
+    const kitUnmet = unmetByKit ? Math.max(0, Number(unmetByKit[kitSku]) || 0) : 0;
+    if (!(kitUnmet > 0)) continue;
+
+    const parts: { sku: string; norm: number; canGive: number }[] = [];
+    let canAssemble = Number.POSITIVE_INFINITY;
+    for (const comp of kit.components || []) {
+      const componentSku = String(comp.componentSku || '').trim();
+      const norm = Number(comp.quantity) || 0;
+      if (!componentSku || !(norm > 0)) continue;
+      const canGive = Math.floor((freeByComponent[componentSku] || 0) / norm);
+      parts.push({ sku: componentSku, norm, canGive });
+      if (canGive < canAssemble) canAssemble = canGive;
+    }
+    if (!parts.length) continue;
+    if (!isFinite(canAssemble)) canAssemble = 0;
+
+    for (const part of parts) {
+      // Держит сборку тот, у кого свободного остатка ровно столько же, сколько у самого
+      // узкого места. Ничья возможна — тогда дефицит получают оба.
+      if (part.canGive > canAssemble) continue;
+      unmetByComponent[part.sku] = (unmetByComponent[part.sku] || 0) + kitUnmet * part.norm;
+    }
+  }
+
   const components: ComponentCoverage[] = [];
   const byComponent: Record<string, ComponentCoverage> = {};
   for (const [componentSku, row] of acc) {
@@ -1036,7 +1084,8 @@ export function buildComponentCoverage(
     const freeMyStockQty = Math.max(0, myStockQty - reservedQty);
     const onOrderQty = Math.max(0, Number(factoryOnOrder[componentSku]) || 0);
     // Сигнал считается той же функцией, что и по обычным товарам: роль «остатка Ozon» играет
-    // запас, пришедший из расчётных остатков комплектов. Дефицита кластеров у компонента нет.
+    // запас, пришедший из расчётных остатков комплектов. Непокрытая потребность кластеров
+    // приходит от комплектов, которые этот компонент держит.
     const factory = calcFactorySignal(
       row.fromKitsQty,
       myStockQty,
@@ -1044,7 +1093,7 @@ export function buildComponentCoverage(
       leadTimeDays,
       pcsPerBox,
       settings,
-      0,
+      unmetByComponent[componentSku] || 0,
       onOrderQty
     );
 
@@ -1320,6 +1369,15 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
 
   articles.sort((a, b) => b.perDay - a.perDay);
 
+  // Дефицит кластеров у виртуального комплекта посчитан выше вместе со всеми товарами, но
+  // самому комплекту он бесполезен: на фабрике заказывают не его, а компоненты. Собираем его
+  // здесь и передаём вниз.
+  const unmetByKit: Record<string, number> = {};
+  for (const row of articles) {
+    if (!virtualKitSkus.has(row.article)) continue;
+    if (row.unmetDeficitQty > 0) unmetByKit[row.article] = row.unmetDeficitQty;
+  }
+
   const { components, bottlenecks } = buildComponentCoverage(
     input.kits || [],
     speed,
@@ -1329,7 +1387,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     input.factoryOnOrder || {},
     input.settings,
     forecastPerDayByArticle,
-    input.pending?.byArticle
+    input.pending?.byArticle,
+    unmetByKit
   );
 
   return { speed, articles, components, bottlenecks, trends };

@@ -1950,7 +1950,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                   <span className="font-normal text-slate-400 ml-2">компонентов в расчёте: {componentRows.length}</span>
                 </div>
                 <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
-                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма скоростей комплектов, куда он входит, умноженная на норму расхода: у компонента с нормой 1 она в точности равна скорости комплекта из таблицы выше. Заказ считается не по ней, а по прогнозной скорости (факт × тренд продаж комплекта) — она показана второй строкой, когда отличается от факта. Запас — расчётный остаток комплектов на Ozon, пересчитанный в компоненты, плюс собственный остаток компонента на Моём складе и заказанное на фабрике.
+                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма скоростей комплектов, куда он входит, умноженная на норму расхода: у компонента с нормой 1 она в точности равна скорости комплекта из таблицы выше. Заказ считается не по ней, а по прогнозной скорости (факт × тренд продаж комплекта) — она показана второй строкой, когда отличается от факта. «В обороте» — это НЕ складской остаток: сюда входит и тот же компонент внутри готовых комплектов, уже уехавших на Ozon. Он будет продан, но собрать из него новые комплекты нельзя — для сборки есть только складская часть, и она показана в разбивке под числом.
                 </div>
                 <div className="overflow-auto">
                   <table className="w-full text-left text-[11px] border-collapse" id="ozon-components-table">
@@ -1958,7 +1958,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                       <tr className="text-slate-500 font-semibold border-b border-slate-200">
                         <th className="py-2 pr-2 min-w-[200px]">Компонент</th>
                         <th className="py-2 pr-2 text-right">Скорость, шт/д</th>
-                        <th className="py-2 pr-2 text-right">Запас</th>
+                        <th
+                          className="py-2 pr-2 text-right"
+                          title="НЕ остаток на Моём складе. Это весь компонент, который сейчас есть в обороте: собственный остаток на складе, плюс тот же компонент внутри готовых комплектов, уже лежащих на Ozon, плюс заказанное на фабрике. Разбивка — строкой ниже под числом. Собрать новые комплекты можно только из складской части."
+                        >
+                          В обороте
+                        </th>
                         <th className="py-2 pr-2 text-right">Срок поставки, дней</th>
                         <th className="py-2 pr-2 text-right">Хватит на</th>
                         <th className="py-2 pr-2 text-right">Требуемый заказ</th>
@@ -1985,7 +1990,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                           <tr
                             key={c.component}
                             id={`ozon-comp-row-${c.component}`}
-                            className={`border-b border-slate-100 ${needOrder ? 'bg-rose-50/60' : overdueList.length > 0 ? 'bg-amber-50/60' : ''}`}
+                            className={`border-b border-slate-100 ${needOrder ? 'bg-rose-50/60' : overdueList.length > 0 || (c.factory && c.factory.unmetDeficitQty > 0) ? 'bg-amber-50/60' : ''}`}
                           >
                             <td className="py-2 pr-2">
                               <span className="font-mono font-bold text-slate-800">{c.component}</span>
@@ -2064,6 +2069,22 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   {waitingQty > 0 ? 'дозаказать ' : ''}{fmtInt(c.factory.orderQty)} шт
                                   <span className="block text-[10px] font-semibold text-rose-400">
                                     {fmtInt(c.factory.orderBoxes)} кор · {waitingQty > 0 ? `уже заказано ${fmtInt(waitingQty)} шт` : `хватит на ${Math.round(c.factory.daysLeft)} дн.`}
+                                  </span>
+                                </button>
+                              ) : c.factory && c.factory.unmetDeficitQty > 0 ? (
+                                /* 29.08.2026. Дефицит кластеров комплекта теперь доходит до компонента,
+                                   который держит сборку. Заказа на фабрике при этом может и не быть:
+                                   общего запаса хватает надолго, не хватает именно свободного склада
+                                   прямо сейчас — и это два разных утверждения, которые нельзя смешивать. */
+                                <button
+                                  type="button"
+                                  onClick={() => setFactoryModalArticle(c.component)}
+                                  className="text-[10px] font-semibold text-amber-700 text-right hover:underline"
+                                  title={`Кластерам не досталось ${fmtInt(c.factory.unmetDeficitQty)} шт из-за этого компонента: собрать больше комплектов не из чего. Свободно на складе ${fmtInt(c.freeMyStockQty)} шт из ${fmtInt(c.myStockQty)} — остальное обещано созданным заявкам. Общего запаса при этом хватает на ${Math.round(c.factory.daysLeft)} дн. при пороге ${Math.round(threshold)} дн., поэтому расчёт заказа на фабрике не требует.${waitingQty > 0 ? ` Уже заказано ${fmtInt(waitingQty)} шт.` : ''} Нажми, чтобы оформить заказ на фабрике.`}
+                                >
+                                  держит сборку · {fmtInt(c.factory.unmetDeficitQty)} шт
+                                  <span className="block text-[10px] font-normal text-amber-600">
+                                    свободно {fmtInt(c.freeMyStockQty)} шт{waitingQty > 0 ? ` · заказано ${fmtInt(waitingQty)} шт` : ''}
                                   </span>
                                 </button>
                               ) : waitingQty > 0 ? (
