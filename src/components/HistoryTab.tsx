@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
-import { formatCurrency, parseAppDate } from '../lib/utils';
+import { buildDestinationOptions, destinationMain, formatCurrency, parseAppDate, parseDestination } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -27,22 +27,11 @@ const DestinationCell: React.FC<{ destination: string }> = ({ destination }) => 
   const [isOpen, setIsOpen] = useState(false);
 
   if (!destination) return <span className="text-slate-400">-</span>;
-  
-  const bracketMatch = destination.match(/(.*?)\[(.*?)\]$/);
-  const stringMatch = destination.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
 
-  let main = '';
-  let tags: string[] = [];
-
-  if (bracketMatch) {
-    main = bracketMatch[1].trim();
-    tags = bracketMatch[2].split('|').map(s => s.trim());
-  } else if (stringMatch) {
-    main = stringMatch[1].trim();
-    if (stringMatch[2]) tags = [stringMatch[2].trim()];
-  } else {
-    main = destination.trim();
-  }
+  // Разбор один на всех: та же функция кормит выпадающий список фильтра и сам фильтр.
+  // Пока у ячейки была своя копия регулярных выражений, фильтр мог не согласиться с тем,
+  // что написано в строке на экране, — и не соглашался.
+  const { main, tags } = parseDestination(destination);
 
   if (tags.length === 0) {
     return <span className="font-medium text-slate-700">{main}</span>;
@@ -194,11 +183,22 @@ export const HistoryTab: React.FC = React.memo(() => {
         }
       }
       
-      const matchesDest = histDestFilter === 'all' || t.destination === histDestFilter;
+      const matchesDest = histDestFilter === 'all' || destinationMain(t.destination) === histDestFilter;
 
       return matchesSku && matchesType && dateMatched && matchesDest && !t.isComponent;
     });
   }, [transactions, histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter]);
+
+  // 29.08.2026. Список объектов собирается из САМИХ операций, а не только из настройки в
+  // браузере. Настройка пополняется единственным способом — когда объект впервые вручную
+  // напечатали на этом компьютере во вкладке «Загрузка» или «Ручной ввод». Всё остальное мимо
+  // неё: объект, заведённый на другом устройстве, объект из отгрузки на Ozon, «Списание - Брак»,
+  // приход партии с фабрики. Новый склад «Wildberries FBS» именно поэтому и не показывался.
+  // Настроечные объекты остаются в списке, даже если операций по ним ещё нет.
+  const destinationOptions = useMemo(
+    () => buildDestinationOptions(transactions, destinations),
+    [transactions, destinations]
+  );
 
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>({ key: 'date', direction: 'desc' });
 
@@ -495,8 +495,8 @@ export const HistoryTab: React.FC = React.memo(() => {
             className="w-full pl-10 pr-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500 appearance-none"
           >
             <option value="all">Все объекты</option>
-            {destinations.map((dest, idx) => (
-              <option key={idx} value={dest}>{dest}</option>
+            {destinationOptions.map((dest) => (
+              <option key={dest} value={dest}>{dest}</option>
             ))}
           </select>
           <MapPin className="absolute left-3 top-2.5 text-slate-400" size={18} />

@@ -152,3 +152,63 @@ export const daysSinceReceipt = (raw?: string | null, now: Date = new Date()): n
   if (diff <= 0) return 0;
   return Math.floor(diff / 86400000);
 };
+
+/**
+ * Splits a stored destination into the object itself and the tail the app appends to it.
+ *
+ * 29.08.2026. The History filter used to compare the WHOLE stored string with the name of a
+ * warehouse, and the stored string routinely carries a tail: «Услуги: …» and «Доп. расходы …»
+ * are appended in square brackets when an operation is confirmed, and a batch write-off adds
+ * «[Общая поставка: заявки № …]» on top of that. One and the same warehouse therefore lives in
+ * the sheet under many different strings, and the filter matched only the bare ones — so the
+ * owner saw some months of a warehouse and not others.
+ *
+ * The parsing itself is not new: the History table has always drawn the cell this way. What is
+ * new is that the filter, the drop-down list and the cell now share ONE function, so a filter
+ * can no longer disagree with what the row on screen shows.
+ */
+export function parseDestination(destination?: string | null): { main: string; tags: string[] } {
+  const raw = String(destination || '');
+  if (!raw.trim()) return { main: '', tags: [] };
+
+  const bracketMatch = raw.match(/(.*?)\[(.*?)\]$/);
+  const stringMatch = raw.match(/(.*?)(?:\.\s*)?(Услуги:\s*.*|Доп\. услуги:\s*.*)$/);
+
+  if (bracketMatch) {
+    return { main: bracketMatch[1].trim(), tags: bracketMatch[2].split('|').map(s => s.trim()) };
+  }
+  if (stringMatch) {
+    return { main: stringMatch[1].trim(), tags: stringMatch[2] ? [stringMatch[2].trim()] : [] };
+  }
+  return { main: raw.trim(), tags: [] };
+}
+
+/** The object of an operation without the appended tail. What the History filter matches on. */
+export const destinationMain = (destination?: string | null): string => parseDestination(destination).main;
+
+/**
+ * The list of objects for the History filter: every object that actually occurs in the
+ * operations, plus the ones configured in the browser even when nothing has been written to
+ * them yet. Sorted by the Russian alphabet, because the list is long and is read by eye.
+ *
+ * 29.08.2026. Before this the drop-down offered ONLY the configured list, which lives in this
+ * browser's localStorage and grows by one path alone: someone typing a new object by hand in
+ * «Загрузка» or «Ручной ввод» on this very machine. An object created on another device, or
+ * composed by the app itself (an Ozon shipment, «Списание - Брак», a receipt from the
+ * factory), never entered it — so it could not be filtered on at all.
+ */
+export function buildDestinationOptions(
+  rows: { destination?: string | null }[],
+  configured: string[] = []
+): string[] {
+  const seen = new Set<string>();
+  for (const row of rows || []) {
+    const main = destinationMain(row && row.destination);
+    if (main) seen.add(main);
+  }
+  for (const dest of configured || []) {
+    const main = destinationMain(dest);
+    if (main) seen.add(main);
+  }
+  return Array.from(seen).sort((a, b) => a.localeCompare(b, 'ru'));
+}
