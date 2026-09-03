@@ -203,8 +203,9 @@ describe('calcSupplyRecommendation', () => {
     expect(rec!.boxes).toBe(200);
   });
 
-  it('ограничение остатком Моего склада: коробок хватает не на всю потребность', () => {
-    // need = 200, boxesNeeded = ceil(200/12) = 17, но на складе только 100 шт => maxBoxes = 8
+  it('ограничение остатком Моего склада: остаток раздаётся в штуках (пункт 51)', () => {
+    // need = 200, wantQty = ceil(200/12)*12 = 204, а на складе 100 шт.
+    // До пункта 51 здесь было 8 коробок и 96 шт: четыре штуки оставались лежать без дела.
     const rec = calcSupplyRecommendation(
       10,
       0,
@@ -213,8 +214,9 @@ describe('calcSupplyRecommendation', () => {
       100
     );
     expect(rec).not.toBeNull();
-    expect(rec!.boxes).toBe(8);
-    expect(rec!.qty).toBe(96);
+    expect(rec!.wantQty).toBe(204);
+    expect(rec!.qty).toBe(100);
+    expect(rec!.boxes).toBe(9);
     expect(rec!.limitedByMyStock).toBe(true);
   });
 
@@ -1293,5 +1295,173 @@ describe('заказ на фабрике вне рекомендаций', () =>
   it('окно честно говорит, что расчёт такого заказа не предлагал', () => {
     expect(modal).toContain('id="factory-order-off-plan"');
     expect(modal).toMatch(/!order && suggestedQty <= 0/);
+  });
+});
+
+// ============================================================================================
+// ПУНКТ 51. Неполная коробка: медленный кластер больше не выкидывается молча, и остаток
+// Моего склада раздаётся в штуках, а не в целых коробках.
+// Решение владельца 03.09.2026. Отменяет половину решения от 09.08.2026 (пункт 34): такой
+// кластер теперь обычный — он встаёт в очередь за остатком и его нехватка доходит до сигнала
+// на фабрику.
+// ============================================================================================
+
+/** Продажи одного кластера, разложенные ровно по окну скорости. */
+function makeClusterSales(offerId: string, qty: number, clusterName: string): OzonSalesRow[] {
+  return SALES_WEEKS.map(week => ({
+    week, cabinet: 'test', offerId, clusterName, qty: qty / SALES_WEEKS.length, updatedAt: '', days: 7
+  }));
+}
+
+/** Остаток кластера: та же строка, но с КластерID — иначе кластерных рекомендаций нет. */
+function makeClusterStock(offerId: string, available: number, clusterId: string, clusterName: string): OzonStockRow {
+  return { ...makeStockRow(offerId, available), clusterId, clusterName };
+}
+
+describe('пункт 51: неполная коробка вместо молчаливого выкидывания', () => {
+  // Числа владельца из плана: скорость 0,07 шт/д, коробка 42 шт, целевой запас 30 дней.
+  const SLOW = makeSettings({ targetStockDays: 30, maxClusterDays: 100 });
+
+  it('медленный кластер получает неполную коробку, а не null', () => {
+    // need = 0.07*30 = 2.1 -> ceil = 3 шт. Полная коробка 42 шт дала бы 600 дней при потолке 100.
+    const rec = calcSupplyRecommendation(0.07, 0, SLOW, 42, 1000);
+    expect(rec).not.toBeNull();
+    expect(rec!.wantQty).toBe(3);
+    expect(rec!.qty).toBe(3);
+    expect(rec!.boxes).toBe(1);
+    expect(rec!.partialByMaxDays).toBe(true);
+    expect(rec!.limitedByMyStock).toBe(false);
+  });
+
+  it('в рекомендации сказано, на сколько дней хватило бы ПОЛНОЙ коробки', () => {
+    const rec = calcSupplyRecommendation(0.07, 0, SLOW, 42, 1000);
+    expect(rec!.fullBoxDays).toBeCloseTo(42 / 0.07, 6);
+    expect(Math.round(rec!.fullBoxDays)).toBe(600);
+  });
+
+  it('после неполной коробки в кластере ровно целевой запас, потолок не пробит', () => {
+    const rec = calcSupplyRecommendation(0.07, 0, SLOW, 42, 1000);
+    const daysAfter = rec!.qty / 0.07;
+    expect(daysAfter).toBeGreaterThanOrEqual(30);
+    expect(daysAfter).toBeLessThanOrEqual(100);
+  });
+
+  it('обычный кластер коробку не дробит: partialByMaxDays false, qty кратно коробке', () => {
+    // need = 3*30 = 90, коробка 42 -> 126 шт, это 42 дня при потолке 100: отсекателю не за что зацепиться.
+    const rec = calcSupplyRecommendation(3, 0, SLOW, 42, 1000);
+    expect(rec!.partialByMaxDays).toBe(false);
+    expect(rec!.fullBoxDays).toBe(0);
+    expect(rec!.qty).toBe(126);
+    expect(rec!.qty % 42).toBe(0);
+  });
+
+  it('отсекатель остаётся страховкой: потолок ниже целевого запаса — рекомендации нет', () => {
+    // need = 0.005*30 = 0.15 -> ceil = 1 шт, но и одна штука это 200 дней при потолке 100.
+    expect(calcSupplyRecommendation(0.005, 0, SLOW, 42, 1000)).toBeNull();
+  });
+
+  it('остатка не хватает на полную коробку — везём неполную, а не ноль', () => {
+    // need = 10*30 = 300, коробка 42 -> 8 коробок = 336 шт, а на складе только 5 шт.
+    const rec = calcSupplyRecommendation(10, 0, SLOW, 42, 5);
+    expect(rec!.wantQty).toBe(336);
+    expect(rec!.qty).toBe(5);
+    expect(rec!.boxes).toBe(1);
+    expect(rec!.limitedByMyStock).toBe(true);
+    expect(rec!.partialByMaxDays).toBe(false);
+  });
+
+  it('на складе пусто — рекомендация с нулём, как и прежде', () => {
+    const rec = calcSupplyRecommendation(10, 0, SLOW, 42, 0);
+    expect(rec!.qty).toBe(0);
+    expect(rec!.boxes).toBe(0);
+    expect(rec!.limitedByMyStock).toBe(true);
+  });
+
+  // ---- Весь путь целиком: правка в calcSupplyRecommendation бесполезна, если очередь раздачи
+  // остатка Моего склада продолжает округлять до целых коробок (ловушка 80). ----
+
+  function slowInput(over: Partial<OzonCoverageInput> = {}): OzonCoverageInput {
+    return {
+      stocks: [makeClusterStock('SLOW', 0, '1', 'Москва')],
+      sales: makeClusterSales('SLOW', 2, 'Москва'), // 2 шт за 28 дней = 1/14 шт/д
+      skus: [makeSku({ sku: 'SLOW', pcsPerBox: 42, leadTimeDays: 10 })],
+      clusters: [{ clusterId: '1', clusterName: 'Москва' }],
+      settings: makeSettings({ minStockDays: 7, targetStockDays: 30, maxClusterDays: 100 }),
+      myStockAvailability: { SLOW: 1000 },
+      factoryOnOrder: {},
+      now: NOW,
+      ...over
+    };
+  }
+
+  it('сквозь весь расчёт: медленный кластер доезжает до рекомендации неполной коробкой', () => {
+    const res = buildOzonCoverage(slowInput());
+    const cluster = res.articles[0].clusters.find(c => c.clusterId === '1')!;
+    expect(cluster.recommendation).not.toBeNull();
+    expect(cluster.recommendation!.qty).toBe(3);
+    expect(cluster.recommendation!.boxes).toBe(1);
+    expect(cluster.recommendation!.partialByMaxDays).toBe(true);
+    expect(Math.round(cluster.recommendation!.fullBoxDays)).toBe(588);
+  });
+
+  it('сквозь весь расчёт: нехватка медленного кластера доходит до заказа на фабрике', () => {
+    // Решение владельца 03.09.2026, отмена половины решения от 09.08.2026.
+    const res = buildOzonCoverage(slowInput({ myStockAvailability: { SLOW: 0 } }));
+    const article = res.articles[0];
+    expect(article.clusters[0].unmetQty).toBe(3);
+    expect(article.unmetDeficitQty).toBe(3);
+    expect(article.factory!.unmetDeficitQty).toBe(3);
+  });
+
+  it('сквозь весь расчёт: остатка меньше коробки — кластер получает его, а не ноль', () => {
+    // Своими словами владельца (пункт 51): «если остатков на своем складе не хватает на полную
+    // коробку но требуется поставка куда-то в рекомендациях нужно предлагать неполную коробку».
+    const res = buildOzonCoverage(slowInput({
+      sales: makeClusterSales('SLOW', 84, 'Москва'), // 3 шт/д, нужно 3 коробки = 126 шт
+      myStockAvailability: { SLOW: 20 }              // меньше одной коробки в 42 шт
+    }));
+    const cluster = res.articles[0].clusters.find(c => c.clusterId === '1')!;
+    expect(cluster.recommendation!.qty).toBe(20);
+    expect(cluster.recommendation!.boxes).toBe(1);
+    expect(cluster.unmetQty).toBe(106);
+  });
+
+  it('очередь раздачи отдаёт остаток В ШТУКАХ, а не целыми коробками', () => {
+    // Скорость 3 шт/д: нужно 90 шт = 3 коробки по 42 = 126 шт, а свободно только 50 шт.
+    // Целыми коробками кластер получил бы одну (42 шт), 8 штук осели бы мёртвым грузом.
+    const res = buildOzonCoverage(slowInput({
+      sales: makeClusterSales('SLOW', 84, 'Москва'),
+      myStockAvailability: { SLOW: 50 }
+    }));
+    const cluster = res.articles[0].clusters.find(c => c.clusterId === '1')!;
+    expect(cluster.recommendation!.wantQty).toBe(126);
+    expect(cluster.recommendation!.qty).toBe(50);
+    expect(cluster.recommendation!.boxes).toBe(2);
+    expect(cluster.recommendation!.limitedByMyStock).toBe(true);
+    expect(cluster.unmetQty).toBe(76);
+  });
+});
+
+// ---- Пункт 51 в интерфейсе. Расчёт может быть верным, а экран продолжать округлять
+// потребность до целой коробки и называть медленный кластер исключённым. ----
+describe('пункт 51: экран показывает неполную коробку', () => {
+  const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+
+  it('полная потребность берётся из wantQty в ОБОИХ местах, а не пересчитывается из neededQty', () => {
+    const fromWant = stocks.match(/cls\.recommendation\.wantQty/g) || [];
+    expect(fromWant).toHaveLength(2);
+    expect(stocks).not.toMatch(/Math\.ceil\(cls\.recommendation\.neededQty/);
+  });
+
+  it('неполная коробка подписана в обоих местах: и в панели, и в строке кластера', () => {
+    const notes = stocks.match(/partialByMaxDays &&/g) || [];
+    expect(notes).toHaveLength(2);
+    expect(stocks).toContain('полная коробка = запас на {fmtInt(c.recommendation.fullBoxDays)} дн');
+    expect(stocks).toContain('полная = запас на {fmtInt(cls.recommendation.fullBoxDays)} дн');
+  });
+
+  it('подсказка колонки больше не обещает, что медленные кластеры исключаются', () => {
+    expect(stocks).not.toContain('из рекомендации исключаются');
+    expect(stocks).toContain('предлагается неполная коробка ровно на потребность');
   });
 });

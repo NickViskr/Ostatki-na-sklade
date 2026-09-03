@@ -379,12 +379,18 @@ export function calcCoverageDays(
 export interface SupplyRecommendation {
   /** Расчётная потребность, шт (до ограничения Моим складом и округления). */
   neededQty: number;
-  /** Рекомендовано коробок (округление вверх, с ограничением Моим складом). */
+  /** Item 51. Pieces to ship if stock were unlimited: whole boxes, or a partial one. */
+  wantQty: number;
+  /** Boxes recommended; a partial box still counts as a box. */
   boxes: number;
-  /** Рекомендовано штук = boxes × pcsPerBox. */
+  /** Pieces recommended. A multiple of the box ALWAYS, except the partial box of item 51. */
   qty: number;
-  /** true, если рекомендация урезана остатком Моего склада. */
+  /** true when the recommendation was cut down by the stock of «Мой склад». */
   limitedByMyStock: boolean;
+  /** Item 51: the box is partial because a FULL one would bury a slow cluster. */
+  partialByMaxDays: boolean;
+  /** How many days a FULL box would last. 0 when the box is full. */
+  fullBoxDays: number;
 }
 
 /**
@@ -392,10 +398,16 @@ export interface SupplyRecommendation {
  * Пункт 34, дефект 1: неснижаемый остаток входит ВНУТРЬ целевого запаса, поэтому
  * нужно = скорость × целевой запас − расчётный остаток (без слагаемого minStockDays).
  * Порог включения рекомендации равен целевому запасу.
- * Пункт 34, дефект 2: округление ВВЕРХ до целых коробок способно завалить медленный
- * кластер запасом на годы, поэтому кластер исключается целиком, если после поставки
- * его расчётный срок продаж превысит maxClusterDays.
- * Дальше — ограничение остатком Моего склада (в целых коробках).
+ * Пункт 34, дефект 2: rounding UP to whole boxes can bury a slow cluster under years of stock.
+ * ITEM 51, owner's decision of 03.09.2026: such a cluster is NO LONGER dropped in silence —
+ * it is offered a PARTIAL box holding exactly the need. The need is
+ * perDay × targetStockDays − estimated, so after that delivery the cluster sits on exactly
+ * the target stock and the maxClusterDays ceiling is never breached.
+ * The cutoff stays as insurance and now fires only where the ceiling is BELOW the target
+ * stock itself: there even the exact need breaches it, and the cluster gets no
+ * recommendation — that is a settings mismatch, not a slow cluster.
+ * ITEM 51, second half: the stock of «Мой склад» is also cut IN PIECES, not in whole boxes.
+ * A cluster short of a full box used to get nothing at all.
  */
 export function calcSupplyRecommendation(
   perDay: number,
@@ -412,17 +424,29 @@ export function calcSupplyRecommendation(
   const box = pcsPerBox > 0 ? pcsPerBox : 1;
   const boxesNeeded = Math.ceil(need / box);
 
+  let wantQty = boxesNeeded * box;
+  let partialByMaxDays = false;
+  let fullBoxDays = 0;
   const maxDays = Number(settings.maxClusterDays) || 0;
-  if (maxDays > 0 && (estimated + boxesNeeded * box) / perDay > maxDays) return null;
+  if (maxDays > 0 && (estimated + wantQty) / perDay > maxDays) {
+    fullBoxDays = (estimated + wantQty) / perDay;
+    wantQty = Math.ceil(need);
+    partialByMaxDays = true;
+    // Insurance: a ceiling below the target stock — not even the exact need fits under it.
+    if ((estimated + wantQty) / perDay > maxDays) return null;
+  }
 
-  const maxBoxes = Math.floor(Math.max(0, myStockAvailable) / box);
-  const boxes = Math.min(boxesNeeded, maxBoxes);
+  const stock = Math.floor(Math.max(0, myStockAvailable));
+  const qty = Math.min(wantQty, stock);
 
   return {
     neededQty: need,
-    boxes,
-    qty: boxes * box,
-    limitedByMyStock: boxes < boxesNeeded
+    wantQty,
+    boxes: Math.ceil(qty / box),
+    qty,
+    limitedByMyStock: qty < wantQty,
+    partialByMaxDays,
+    fullBoxDays
   };
 }
 
@@ -1304,6 +1328,10 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     // Распределение остатка Моего склада между кластерами: остаток один на всех, поэтому
     // рекомендации выдаются по очереди — сначала приоритетные (по убыванию коэффициента),
     // затем остальные по возрастанию покрытия. Кому не хватило — урезанная рекомендация.
+    // Item 51: the hand-out goes IN PIECES, not in whole boxes, and the amount comes from
+    // wantQty — the single place where «how much this cluster needs» is decided, partial box
+    // of a slow cluster included. Before, boxesNeeded was recomputed from neededQty here, so
+    // the box rounding lived in two places at once and would have drifted apart.
     const boxSize = pcsPerBox > 0 ? pcsPerBox : 1;
     let remainingStock = freeMyStock;
     const distributionOrder = clusterRows
@@ -1317,15 +1345,14 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       });
     for (const row of distributionOrder) {
       const rec = row.recommendation as SupplyRecommendation;
-      const boxesNeeded = Math.ceil(rec.neededQty / boxSize);
-      const boxesGiven = Math.min(boxesNeeded, Math.floor(remainingStock / boxSize));
-      remainingStock -= boxesGiven * boxSize;
-      row.unmetQty = (boxesNeeded - boxesGiven) * boxSize;
+      const giveQty = Math.min(rec.wantQty, Math.floor(Math.max(0, remainingStock)));
+      remainingStock -= giveQty;
+      row.unmetQty = rec.wantQty - giveQty;
       row.recommendation = {
-        neededQty: rec.neededQty,
-        boxes: boxesGiven,
-        qty: boxesGiven * boxSize,
-        limitedByMyStock: boxesGiven < boxesNeeded
+        ...rec,
+        boxes: Math.ceil(giveQty / boxSize),
+        qty: giveQty,
+        limitedByMyStock: giveQty < rec.wantQty
       };
     }
 

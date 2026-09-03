@@ -39,9 +39,12 @@ function makeCluster(over: { clusterName: string; boxes: number; unmetQty: numbe
     pendingEffective: 0,
     recommendation: {
       neededQty: over.boxes * 10 + over.unmetQty,
+      wantQty: over.boxes * 10 + over.unmetQty,
       boxes: over.boxes,
       qty: over.boxes * 10,
-      limitedByMyStock: over.unmetQty > 0
+      limitedByMyStock: over.unmetQty > 0,
+      partialByMaxDays: false,
+      fullBoxDays: 0
     }
   };
 }

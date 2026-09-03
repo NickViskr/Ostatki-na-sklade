@@ -539,11 +539,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         : null;
       const box = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
       const clustersWithNeed = art.clusters.map((cls) => {
-        const needBoxes = cls.recommendation ? Math.ceil(cls.recommendation.neededQty / box) : 0;
+        // Item 51. The full need is wantQty: whole boxes normally, a partial box for a slow
+        // cluster. Recomputing it from neededQty here would round a 3-piece need up to a box.
+        const needQty = cls.recommendation ? cls.recommendation.wantQty : 0;
         return {
           ...cls,
-          needBoxes,
-          needQty: needBoxes * box,
+          needBoxes: Math.ceil(needQty / box),
+          needQty,
           warehouses: stockRows.filter((s) => String(s.clusterId || '').trim() === cls.clusterId),
         };
       });
@@ -777,8 +779,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       const box = row.pcsPerBox > 0 ? row.pcsPerBox : 1;
       const sourceClusters = wideArticle
         ? wideArticle.clusters.map((cls) => {
-            const needBoxes = cls.recommendation ? Math.ceil(cls.recommendation.neededQty / box) : 0;
-            return { ...cls, needBoxes, needQty: needBoxes * box };
+            const needQty = cls.recommendation ? cls.recommendation.wantQty : 0;
+            return { ...cls, needBoxes: Math.ceil(needQty / box), needQty };
           })
         : row.clusters;
       const clusters = sourceClusters.filter((c: any) => c.recommendation && (c.recommendation.boxes > 0 || c.needQty > 0));
@@ -1156,8 +1158,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       {c.priority && <span className="ml-1 text-amber-600 font-bold">×{c.priorityK}</span>}
                                     </span>
                                     {c.recommendation.boxes > 0 ? (
-                                      <span className={`shrink-0 font-semibold ${c.recommendation.limitedByMyStock ? 'text-amber-600' : 'text-indigo-600'}`}>
+                                      <span className={`shrink-0 text-right font-semibold ${c.recommendation.limitedByMyStock ? 'text-amber-600' : 'text-indigo-600'}`}>
                                         {fmtInt(c.recommendation.boxes)} кор ({fmtInt(c.recommendation.qty)} шт)
+                                        {c.recommendation.partialByMaxDays && (
+                                          <span
+                                            className="block text-[10px] font-normal text-slate-500"
+                                            title={`Полная коробка дала бы кластеру запас на ${fmtInt(c.recommendation.fullBoxDays)} дн — дольше настройки «Максимальный срок продаж кластера, дней». Везём ровно столько, сколько нужно до целевого запаса.`}
+                                          >
+                                            неполная: полная коробка = запас на {fmtInt(c.recommendation.fullBoxDays)} дн
+                                          </span>
+                                        )}
                                       </span>
                                     ) : (
                                       <span className="shrink-0 font-semibold text-red-600">
@@ -1429,7 +1439,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('recommendation') && (
                           <th className="p-3 text-right">
                             Рекомендация
-                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Неснижаемый остаток входит внутрь целевого запаса, а не прибавляется к нему. Всегда кратно коробке. Медленные кластеры, которым даже одна коробка даст запас дольше настройки «Максимальный срок продаж кластера, дней», из рекомендации исключаются и непокрытой потребности не создают. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
+                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Неснижаемый остаток входит внутрь целевого запаса, а не прибавляется к нему. Кратно коробке, кроме двух случаев: медленному кластеру, которому целая коробка дала бы запас дольше настройки «Максимальный срок продаж кластера, дней», предлагается неполная коробка ровно на потребность, и неполная коробка предлагается тогда, когда на складе не набирается целой. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
                           </th>
                         )}
                         {isColVisible('factory') && (
@@ -1841,6 +1851,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                             title={cls.recommendation.limitedByMyStock ? `Урезано остатком Моего склада: полная потребность ${fmtInt(cls.needQty)} шт` : undefined}
                                           >
                                             {fmtInt(cls.recommendation.boxes)} кор ({fmtInt(cls.recommendation.qty)} шт)
+                                            {cls.recommendation.partialByMaxDays && (
+                                              <span
+                                                className="block text-[10px] font-normal text-slate-500"
+                                                title={`Полная коробка дала бы кластеру запас на ${fmtInt(cls.recommendation.fullBoxDays)} дн — дольше настройки «Максимальный срок продаж кластера, дней». Везём ровно столько, сколько нужно до целевого запаса.`}
+                                              >
+                                                неполная коробка: полная = запас на {fmtInt(cls.recommendation.fullBoxDays)} дн
+                                              </span>
+                                            )}
                                           </span>
                                         ) : cls.recommendation && cls.needQty > 0 ? (
                                           <span className="text-red-600 font-semibold" title="Кластеру нужна поставка, но на Моём складе нет товара">
