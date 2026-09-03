@@ -1465,3 +1465,51 @@ describe('пункт 51: экран показывает неполную кор
     expect(stocks).toContain('предлагается неполная коробка ровно на потребность');
   });
 });
+
+// ---- Пункт 48. Фильтр по магазину действует на весь экран, а не на одну таблицу.
+// Владелец 03.09.2026: «магазин» — это тот же кабинет Ozon, другого дробления нет.
+// Дефект был в том, что четыре числа наверху, бейджи магазина и отметка свежести данных
+// считались по ВСЕМ магазинам сразу: таблица под ними сжималась, а числа стояли на месте.
+describe('пункт 48: фильтр по магазину на вкладке «Остатки Озон»', () => {
+  const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+
+  it('от нефильтрованных остатков зависит РОВНО один расчёт — список магазинов для выбора', () => {
+    // Фильтр, прячущий собственные варианты, назад уже не переключить.
+    const unfiltered = stocks.match(/\}, \[ozonStocks\]\);/g) || [];
+    expect(unfiltered).toHaveLength(1);
+    expect(stocks).toMatch(/const ozonStocksCabinets = useMemo\(\(\) => \{[\s\S]{0,220}?\}, \[ozonStocks\]\);/);
+  });
+
+  it('числа наверху считаются по выбранному магазину', () => {
+    expect(stocks).toMatch(
+      /const ozonTotals = useMemo\(\(\) => \{[\s\S]{0,400}?for \(const s of filteredOzonStocks\)[\s\S]{0,300}?\}, \[filteredOzonStocks\]\);/
+    );
+  });
+
+  it('бейдж магазина и отметка свежести данных тоже считаются по выбранному', () => {
+    expect(stocks).toMatch(/const uniqueCabinetsCount = useMemo\(\(\) => \{[\s\S]{0,200}?\}, \[filteredOzonStocks\]\);/);
+    expect(stocks).toMatch(/const maxUpdatedAt = useMemo\(\(\) => \{[\s\S]{0,300}?\}, \[filteredOzonStocks\]\);/);
+  });
+
+  it('фильтр объявлен ДО всего, что от него считается', () => {
+    // Иначе const используется до объявления и экран падает на первом же рендере.
+    const filterAt = stocks.indexOf('const filteredOzonStocks = useMemo');
+    expect(filterAt).toBeGreaterThan(-1);
+    for (const dependent of ['const maxUpdatedAt = useMemo', 'const ozonTotals = useMemo', 'const uniqueCabinetsCount = useMemo']) {
+      expect(stocks.indexOf(dependent)).toBeGreaterThan(filterAt);
+    }
+  });
+
+  it('экран называет выбранный магазин, чтобы изменившиеся числа не выглядели ошибкой', () => {
+    expect(stocks).toMatch(/cabinetFilter !== 'all' && \([\s\S]{0,300}?показан только/);
+    expect(stocks).toContain('Данные по магазинам:');
+  });
+
+  it('на экране одно слово — «магазин»; «личный кабинет Ozon» остаётся собой', () => {
+    expect(stocks).toContain('<option value="all">Все магазины</option>');
+    expect(stocks).not.toContain('Все кабинеты');
+    expect(stocks).not.toContain('Данные по кабинетам');
+    expect(stocks).not.toContain('из разных кабинетов');
+    expect(stocks).toContain('в личном кабинете Ozon');
+  });
+});

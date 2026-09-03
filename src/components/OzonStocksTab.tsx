@@ -312,42 +312,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return 'text-emerald-600 font-semibold';
   };
 
-  const maxUpdatedAt = useMemo(() => {
-    if (!ozonStocks || ozonStocks.length === 0) return '';
-    let max = '';
-    for (const s of ozonStocks) {
-      if (s.updatedAt && s.updatedAt > max) {
-        max = s.updatedAt;
-      }
-    }
-    return max;
-  }, [ozonStocks]);
-
+  // Item 48. The list of shops for the drop-down is the ONLY thing here that must stay
+  // unfiltered — a filter that hides its own options cannot be undone. Everything else on
+  // the screen reads filteredOzonStocks, so it is declared first: the summary cards, the
+  // shop badges and the freshness stamp all used to be computed from every shop at once,
+  // and the four big numbers went on standing still while the table below them shrank.
   const ozonStocksCabinets = useMemo(() => {
     if (!ozonStocks || ozonStocks.length === 0) return [];
     return Array.from(new Set(ozonStocks.map(s => s.cabinet).filter(Boolean)));
-  }, [ozonStocks]);
-
-  const ozonTotals = useMemo(() => {
-    let available = 0;
-    let requested = 0;
-    let transit = 0;
-    let returns = 0;
-    if (ozonStocks) {
-      for (const s of ozonStocks) {
-        available += s.available || 0;
-        requested += s.requested || 0;
-        transit += s.transit || 0;
-        returns += s.returns || 0;
-      }
-    }
-    return { available, requested, transit, returns };
-  }, [ozonStocks]);
-
-  const uniqueCabinetsCount = useMemo(() => {
-    if (!ozonStocks) return 0;
-    const cabs = new Set(ozonStocks.map(s => s.cabinet));
-    return cabs.size;
   }, [ozonStocks]);
 
   const filteredOzonStocks = useMemo(() => {
@@ -355,6 +327,36 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     if (cabinetFilter === 'all') return ozonStocks;
     return ozonStocks.filter((s) => s.cabinet === cabinetFilter);
   }, [ozonStocks, cabinetFilter]);
+
+  const maxUpdatedAt = useMemo(() => {
+    if (filteredOzonStocks.length === 0) return '';
+    let max = '';
+    for (const s of filteredOzonStocks) {
+      if (s.updatedAt && s.updatedAt > max) {
+        max = s.updatedAt;
+      }
+    }
+    return max;
+  }, [filteredOzonStocks]);
+
+  const ozonTotals = useMemo(() => {
+    let available = 0;
+    let requested = 0;
+    let transit = 0;
+    let returns = 0;
+    for (const s of filteredOzonStocks) {
+      available += s.available || 0;
+      requested += s.requested || 0;
+      transit += s.transit || 0;
+      returns += s.returns || 0;
+    }
+    return { available, requested, transit, returns };
+  }, [filteredOzonStocks]);
+
+  const uniqueCabinetsCount = useMemo(() => {
+    const cabs = new Set(filteredOzonStocks.map(s => s.cabinet));
+    return cabs.size;
+  }, [filteredOzonStocks]);
 
   const filteredOzonSales = useMemo(() => {
     if (!ozonSales) return [];
@@ -980,12 +982,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         <div className="space-y-4" id="ozon-stocks-content">
             {ozonStocksSyncIssues.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl p-4 text-sm font-semibold" id="ozon-stocks-partial-warning">
-                Данные неполные: не удалось обновить {ozonStocksSyncIssues.map(i => i.name).join(', ')}. Показаны последние успешно полученные данные по остальным кабинетам.
+                Данные неполные: не удалось обновить {ozonStocksSyncIssues.map(i => i.name).join(', ')}. Показаны последние успешно полученные данные по остальным магазинам.
               </div>
             )}
             {ozonStocksCabinets.length > 0 && (
               <div className="text-xs text-slate-500 font-medium" id="ozon-stocks-cabinets-info">
-                Данные по кабинетам: {ozonStocksCabinets.join(', ')}
+                Данные по магазинам: {ozonStocksCabinets.join(', ')}
+                {cabinetFilter !== 'all' && (
+                  <span className="text-indigo-600 font-semibold">
+                    {' '}· показан только «{cabinetFilter}»: и числа наверху, и таблица считаются по нему
+                  </span>
+                )}
               </div>
             )}
             {/* Summary Cards */}
@@ -1072,7 +1079,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
                           {supplyPlan.cabinets.length > 1 && (
                             <div className="mt-2 text-[11px] font-semibold text-red-700">
-                              Выбраны товары из разных кабинетов ({supplyPlan.cabinets.join(', ')}). Заявка создаётся в одном кабинете — отфильтруйте кабинет выше.
+                              Выбраны товары из разных магазинов ({supplyPlan.cabinets.join(', ')}). Заявка создаётся в одном магазине — отфильтруйте магазин выше.
                             </div>
                           )}
 
@@ -1245,7 +1252,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                   onChange={(e) => setCabinetFilter(e.target.value)}
                   className="text-xs border border-slate-200 rounded-xl px-3 py-1.5 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-100"
                 >
-                  <option value="all">Все кабинеты</option>
+                  <option value="all">Все магазины</option>
                   {ozonStocksCabinets.map((cab: string) => (
                     <option key={cab} value={cab}>{cab}</option>
                   ))}
