@@ -2000,6 +2000,11 @@ function applyReplayCorrections(article, fromDateMs) {
     changed.push({
       id: st.tx.id,
       date: st.tx.date,
+      // The journal is dated by the day of the SUPPLY since 03.09.2026, and the rows written
+      // before that carry the day of the write-off. The recomputation has to find both, so it
+      // states both days and looks the row up by either.
+      kanDay: ozonCostDayFor(st.tx.deliveryDate, st.tx.date),
+      operationDay: String(st.tx.date || '').slice(0, 10),
       destination: st.tx.destination,
       article: st.tx.article,
       quantity: q,
@@ -2040,7 +2045,14 @@ function reissueOzonCostRows(changedShipments, username) {
 
   const newCostByKey = {};
   relevant.forEach(function(c) {
-    newCostByKey[ozonCabinetFromDestination(c.destination) + '|' + c.article + '|' + String(c.date).slice(0, 10)] = c.newUnitCost;
+    const cabinet = ozonCabinetFromDestination(c.destination);
+    // Both days point at the same replacement: rows written since 03.09.2026 are dated by the
+    // supply, older ones by the write-off, and one edit can touch either.
+    const days = [c.kanDay, c.operationDay, String(c.date).slice(0, 10)];
+    days.forEach(function(day) {
+      if (!day) return;
+      newCostByKey[cabinet + '|' + c.article + '|' + day] = c.newUnitCost;
+    });
   });
 
   const journal = getOzonCostJournal();
@@ -2563,7 +2575,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
         .map(function(t) {
           return { article: t.article, quantity: t.quantity, price: t.price, status: 'ok' };
         });
-      appendOzonCostForShipment(shippedRows, destination, dateStr, opIdStr, username);
+      appendOzonCostForShipment(shippedRows, destination, dateStr, opIdStr, username, deliveryDate);
     } catch (costErr) {
       Logger.log('Себестоимость Озон не обновлена: ' + costErr);
     }
@@ -4606,7 +4618,36 @@ function ozonCabinetFromDestination(destination) {
  * Failures here must never break the write-off itself — the expense is the operation the user
  * asked for, the cost journal is bookkeeping on top of it. The caller wraps this in try/catch.
  */
-function appendOzonCostForShipment(items, destination, dateStr, opId, username) {
+/**
+ * The day a cost change is dated with for KAN — the day the goods arrive at Ozon, not the day
+ * the write-off was typed in.
+ *
+ * 03.09.2026, found by the owner on production: the file for KAN carried the date of the
+ * write-off, while the price it announces starts on the day of the supply. The delivery date
+ * was sitting in the very same call of commitTransaction, in the neighbouring argument, and
+ * simply had never been passed down.
+ *
+ * The operation date stays as the fallback: an Ozon shipment cannot be confirmed without the
+ * delivery date (the confirmation screen demands «Дата поставки на маркетплейс»), but rows
+ * typed into the sheet by hand and rows from older versions have no such guarantee. Both
+ * ГГГГ-ММ-ДД and the Russian ДД.ММ.ГГГГ are accepted; anything else falls back rather than
+ * being guessed at.
+ */
+function ozonCostDayFor(deliveryDate, operationDate) {
+  const raw = String(deliveryDate || '').trim();
+  const iso = raw.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const ru = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (ru) return ru[3] + '-' + ru[2] + '-' + ru[1];
+
+  let day = String(operationDate || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    day = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  return day;
+}
+
+function appendOzonCostForShipment(items, destination, dateStr, opId, username, deliveryDate) {
   const cabinet = ozonCabinetFromDestination(destination);
   if (!cabinet) return { written: 0, skipped: 0 };
 
@@ -4616,10 +4657,7 @@ function appendOzonCostForShipment(items, destination, dateStr, opId, username) 
   const journal = getOzonCostJournal();
   const state = getOzonCostState();
 
-  let day = String(dateStr || '').slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-    day = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  }
+  const day = ozonCostDayFor(deliveryDate, dateStr);
 
   // Одинаковые артикулы одной операции складываются: иначе вторая строка того же артикула
   // сочла бы себя уже посчитанной и потерялась.

@@ -60,6 +60,35 @@ export const normaliseKanDate = (value: string): string => {
   return raw;
 };
 
+/**
+ * One article, one day, one shop — one row.
+ *
+ * 03.09.2026, found by the owner on production: he made several separate write-offs of the
+ * same article on the same day, and the file carried a row for each of them —
+ * BowlGrayMini_01 three times over, at 245,61, 234,61 and 233,67. The numbers were right and
+ * all three were stale but the last: the cost on Ozon is a running average, recomputed at
+ * every shipment, so 233,67 is what the goods actually cost once all three had gone. The two
+ * earlier rows are intermediate states of the same day.
+ *
+ * The LAST row of the group wins, and that is not an arithmetic mean of the three: the mean
+ * (237,96 for that article) matches no state the goods were ever in. The last value already
+ * IS a weighted average — every step of the chain mixes the new batch into what lies on Ozon
+ * by quantity — and it is the cost the goods carry from that date onward.
+ *
+ * The order of the rows is the order of the journal, so the last occurrence of a group is its
+ * newest computation. The collapsing happens HERE, at the file, and never in the journal: the
+ * journal is the ledger the running average is built from and the «Выгружено в КАН» stamps
+ * point into, and every row that fed a group still gets stamped.
+ */
+export const collapseKanCostRows = (rows: KanCostRow[]): KanCostRow[] => {
+  const byKey = new Map<string, KanCostRow>();
+  (rows || []).forEach((row) => {
+    const key = [normaliseKanDate(String(row.date ?? '')), String(row.cabinet ?? ''), String(row.article ?? '')].join('|');
+    byKey.set(key, row);
+  });
+  return Array.from(byKey.values());
+};
+
 export const buildKanCostCsv = (rows: KanCostRow[]): string => {
   const lines = [KAN_COST_CSV_HEADER];
   (rows || []).forEach((row) => {

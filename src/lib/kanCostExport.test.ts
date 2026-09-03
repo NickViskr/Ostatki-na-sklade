@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   buildKanCostCsv,
+  collapseKanCostRows,
   KAN_COST_CSV_HEADER,
   KanCostRow,
   kanCostFileName,
@@ -109,6 +110,125 @@ describe('дата', () => {
 
   it('непонятное значение отдаётся как есть, чтобы его было видно в файле', () => {
     expect(normaliseKanDate('позавчера')).toBe('позавчера');
+  });
+});
+
+/**
+ * Один артикул за один день — одна строка (03.09.2026, по боевому файлу владельца).
+ *
+ * Он оформил несколько отдельных списаний одного артикула за день, и в файл ушла строка на
+ * каждое: BowlGrayMini_01 трижды — 245,61, 234,61 и 233,67. Все три числа верные, но два
+ * первых — промежуточные состояния того же дня: себестоимость на Ozon скользящая и
+ * пересчитывается при каждой отгрузке.
+ */
+describe('схлопывание строк одного дня', () => {
+  it('три строки одного артикула дают одну с ПОСЛЕДНИМ значением', () => {
+    const rows = [
+      row({ article: 'BowlGrayMini_01', cost: 245.61 }),
+      row({ article: 'BowlGrayMini_01', cost: 234.61 }),
+      row({ article: 'BowlGrayMini_01', cost: 233.67 }),
+    ];
+    const out = collapseKanCostRows(rows);
+    expect(out).toHaveLength(1);
+    // Именно последнее, а не среднее арифметическое трёх: 237,96 не соответствует ни одному
+    // состоянию, в котором товар когда-либо был.
+    expect(out[0].cost).toBe(233.67);
+    expect(out[0].cost).not.toBeCloseTo(237.9633, 3);
+  });
+
+  it('разные даты поставки не схлопываются', () => {
+    const out = collapseKanCostRows([
+      row({ article: 'A', date: '2026-09-10', cost: 10 }),
+      row({ article: 'A', date: '2026-09-11', cost: 20 }),
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out.map(r => r.cost)).toEqual([10, 20]);
+  });
+
+  it('одна дата в разных записях приводится к общему виду и схлопывается', () => {
+    // Строку могли вписать в лист руками в русском формате — это тот же день.
+    const out = collapseKanCostRows([
+      row({ article: 'A', date: '2026-09-10', cost: 10 }),
+      row({ article: 'A', date: '10.09.2026', cost: 20 }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].cost).toBe(20);
+  });
+
+  it('разные магазины не схлопываются', () => {
+    const out = collapseKanCostRows([
+      row({ article: 'A', cabinet: 'MaxiStore', cost: 10 }),
+      row({ article: 'A', cabinet: 'Mercurius', cost: 20 }),
+    ]);
+    expect(out).toHaveLength(2);
+  });
+
+  it('разные артикулы не схлопываются', () => {
+    const out = collapseKanCostRows([row({ article: 'A' }), row({ article: 'B' })]);
+    expect(out).toHaveLength(2);
+  });
+
+  it('одиночная строка проходит как была', () => {
+    const one = [row({ article: 'Полка_выдв_27см', cost: 677.21 })];
+    expect(collapseKanCostRows(one)).toEqual(one);
+  });
+
+  it('порядок первого появления групп сохраняется', () => {
+    const out = collapseKanCostRows([
+      row({ article: 'B', cost: 1 }),
+      row({ article: 'A', cost: 2 }),
+      row({ article: 'B', cost: 3 }),
+    ]);
+    expect(out.map(r => r.article)).toEqual(['B', 'A']);
+    expect(out.map(r => r.cost)).toEqual([3, 2]);
+  });
+
+  it('пустой список не ломает схлопывание', () => {
+    expect(collapseKanCostRows([])).toEqual([]);
+  });
+
+  it('боевой файл владельца от 03.09.2026: 9 строк превращаются в 5', () => {
+    // Ровно те строки, что он прислал, в том же порядке.
+    const live: KanCostRow[] = [
+      { date: '2026-09-03', sku: '2889355808', article: 'BowlGrayMini_01', cost: 245.61, cabinet: 'MaxiStore' },
+      { date: '2026-09-03', sku: '2889355808', article: 'BowlGrayMini_01', cost: 234.61, cabinet: 'MaxiStore' },
+      { date: '2026-09-03', sku: '2889355808', article: 'BowlGrayMini_01', cost: 233.67, cabinet: 'MaxiStore' },
+      { date: '2026-09-03', sku: '4498013867', article: 'Миска_двойная', cost: 229.79, cabinet: 'MaxiStore' },
+      { date: '2026-09-03', sku: '4498013867', article: 'Миска_двойная', cost: 229.58, cabinet: 'MaxiStore' },
+      { date: '2026-09-03', sku: '2071666870', article: 'Полка_выдв_27см', cost: 677.21, cabinet: 'Mercurius' },
+      { date: '2026-09-03', sku: '3034379862', article: 'Набор_полок_выдв_бел', cost: 1650.49, cabinet: 'Mercurius' },
+      { date: '2026-09-03', sku: '3034379862', article: 'Набор_полок_выдв_бел', cost: 1647.59, cabinet: 'Mercurius' },
+      { date: '2026-09-03', sku: '3361571448', article: 'Органайзер_2_пол_PureWhite', cost: 584.51, cabinet: 'Mercurius' },
+    ];
+    const out = collapseKanCostRows(live);
+    expect(out).toHaveLength(5);
+    expect(out.map(r => [r.article, r.cost])).toEqual([
+      ['BowlGrayMini_01', 233.67],
+      ['Миска_двойная', 229.58],
+      ['Полка_выдв_27см', 677.21],
+      ['Набор_полок_выдв_бел', 1647.59],
+      ['Органайзер_2_пол_PureWhite', 584.51],
+    ]);
+    // В файле каждый артикул встречается ровно один раз.
+    const csvLines = buildKanCostCsv(out).replace(/^﻿/, '').split('\r\n').slice(1);
+    expect(csvLines).toHaveLength(5);
+    expect(csvLines.filter(l => l.includes('BowlGrayMini_01'))).toHaveLength(1);
+  });
+});
+
+/** Проверки формы кода: расчёт, не подключённый к кнопке, владельцу ничем не помогает. */
+describe('схлопывание подключено к выгрузке', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const store = read('src/store/useWarehouseStore.ts');
+
+  it('файл собирается из схлопнутых строк', () => {
+    expect(store).toContain('buildKanCostCsv(collapseKanCostRows(rows))');
+  });
+
+  it('отметку «выгружено» получают ВСЕ исходные строки журнала, а не только попавшие в файл', () => {
+    // Иначе схлопнутые сочли бы себя невыгруженными и вылезли бы следующей выгрузкой.
+    expect(store).toMatch(/rows: pending\.map\(\(r\) => \(\{/);
+    expect(store).not.toMatch(/rows: collapse\w*\(/);
   });
 });
 

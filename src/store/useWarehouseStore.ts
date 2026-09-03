@@ -7,7 +7,7 @@ import { parseInvoiceWithGemini } from '../lib/gemini';
 import { OzonSupplyRequestRow } from '../lib/ozonPending';
 import { OzonCoverageSettings, OzonClusterRef } from '../lib/ozonCoverage';
 import { BatchWriteOffGroup } from '../lib/ozonBatchWriteOff';
-import { buildKanCostCsv, KanCostRow, kanCostFileName } from '../lib/kanCostExport';
+import { buildKanCostCsv, collapseKanCostRows, KanCostRow, kanCostFileName } from '../lib/kanCostExport';
 import { toast } from 'sonner';
 
 // Пункт 40. Капитализацию здесь обнулять НЕЛЬЗЯ: у артикула с нулевым остатком она несёт
@@ -1909,7 +1909,10 @@ export const useWarehouseStore = create<WarehouseState>()(
         cabinet: String(r.cabinet || ''),
       }));
 
-      const blob = new Blob([buildKanCostCsv(rows)], { type: 'text/csv;charset=utf-8;' });
+      // 03.09.2026. В файл идёт по одной строке на артикул за день, с последним значением.
+      // Отметку «выгружено» ниже получают ВСЕ исходные строки журнала, а не только попавшие
+      // в файл: иначе схлопнутые сочли бы себя невыгруженными и вылезли бы в следующий раз.
+      const blob = new Blob([buildKanCostCsv(collapseKanCostRows(rows))], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;

@@ -2735,6 +2735,107 @@ function speedHarness(articles) {
     stockSheet.__getSetValuesCallCount() === 1, `получено записей: ${stockSheet.__getSetValuesCallCount()}`);
 })();
 
+// ================= Дата для КАН — день поставки на Ozon, а не день оформления списания ======
+// 03.09.2026, найдено владельцем на боевой базе: в файле для КАН стояла дата, когда он нажал
+// «Записать», хотя цена начинает действовать в день поставки. Дата поставки лежала в том же
+// вызове commitTransaction, в соседнем аргументе, и просто никогда не передавалась дальше.
+
+(function testKanDay1() {
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
+
+  h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }],
+    'Ozon (MaxiStore)', '2026-09-03T09:00:00Z', 'op-day-1', 'tester', '2026-09-10'
+  );
+  const rows = h.dumpOzonCost();
+  const last = rows[rows.length - 1];
+  check('КАН-дата: в журнал попала дата поставки, а не дата оформления',
+    last['Дата'] === '2026-09-10', `получено: ${last['Дата']}`);
+})();
+
+(function testKanDay2() {
+  // Дата поставки в русском виде тоже принимается: строку могли вписать в лист руками.
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
+
+  h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }],
+    'Ozon (MaxiStore)', '2026-09-03T09:00:00Z', 'op-day-2', 'tester', '10.09.2026'
+  );
+  const last = h.dumpOzonCost().pop();
+  check('КАН-дата: ДД.ММ.ГГГГ разворачивается в ГГГГ-ММ-ДД',
+    last['Дата'] === '2026-09-10', `получено: ${last['Дата']}`);
+})();
+
+(function testKanDay3() {
+  // Гвардия: без даты поставки поведение остаётся прежним. Отгрузку на Ozon без неё
+  // подтвердить нельзя, но старые и вписанные руками строки такой гарантии не дают.
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
+
+  h.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }],
+    'Ozon (MaxiStore)', '2026-09-03T09:00:00Z', 'op-day-3', 'tester', ''
+  );
+  const empty = h.dumpOzonCost().pop();
+  check('КАН-дата: пустая дата поставки оставляет дату операции',
+    empty['Дата'] === '2026-09-03', `получено: ${empty['Дата']}`);
+
+  const h2 = freshHarness();
+  h2.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h2.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
+  h2.appendOzonCostForShipment(
+    [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }],
+    'Ozon (MaxiStore)', '2026-09-03T09:00:00Z', 'op-day-4', 'tester', 'когда-нибудь'
+  );
+  const junk = h2.dumpOzonCost().pop();
+  check('КАН-дата: мусор вместо даты поставки не угадывается, берётся дата операции',
+    junk['Дата'] === '2026-09-03', `получено: ${junk['Дата']}`);
+})();
+
+(function testKanDay4() {
+  // Дата поставки в будущем — обычный случай: поставка оформляется заранее.
+  const h = freshHarness();
+  h.setOzonCostSheet([costRow('2026-08-01', 'Mercurius', 'ART-B', 100.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'Mercurius', article: 'ART-B', available: 100 }]);
+
+  h.appendOzonCostForShipment(
+    [{ article: 'ART-B', quantity: 100, price: 200, status: 'ok' }],
+    'Ozon (Mercurius)', '2026-09-03T09:00:00Z', 'op-day-5', 'tester', '2026-12-31'
+  );
+  const last = h.dumpOzonCost().pop();
+  check('КАН-дата: дата поставки в будущем принимается как есть',
+    last['Дата'] === '2026-12-31', `получено: ${last['Дата']}`);
+  check('КАН-дата: расчёт себестоимости от смены даты не поехал ((100×100 + 100×200)/200 = 150)',
+    last['Себестоимость после'] === 150, `получено: ${last['Себестоимость после']}`);
+})();
+
+(function testKanDay5() {
+  // ГЛАВНАЯ проверка этой правки. Сама функция журнала дату поставки принимала и раньше —
+  // сломано было ЗВЕНО: commitTransaction её не передавал. Поэтому проверка идёт через весь
+  // путь целиком, от проведения расхода до строки в журнале, а не по функции журнала отдельно.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'ART-A', quantity: 500, avgCost: 400, capitalization: 200000 }]);
+  h.setOzonCostSheet([costRow('2026-08-01', 'MaxiStore', 'ART-A', 500.00, 'НАЧАЛЬНАЯ ТОЧКА')]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-A', available: 300 }]);
+
+  h.commitTransaction(
+    [{ article: 'ART-A', quantity: 100, price: 600, status: 'ok' }],
+    'Расход', 'Ozon (MaxiStore)', '2026-09-10', 'tester', '2026-09-03T09:00:00Z', 'op-chain-1'
+  );
+
+  const last = h.dumpOzonCost().pop();
+  check('КАН-дата: проведение расхода доносит дату поставки до журнала',
+    last['Дата'] === '2026-09-10', `получено: ${last['Дата']}`);
+  check('КАН-дата: строка журнала при этом относится к той же операции',
+    last['OpID'] === 'op-chain-1', `получено: ${last['OpID']}`);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
