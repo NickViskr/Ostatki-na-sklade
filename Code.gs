@@ -3542,6 +3542,150 @@ function setupDailyAnalyticsTrigger() {
   Logger.log('Ежедневная аналитика и очистка сессий установлены');
 }
 
+// ── Стоимость остатков своего склада для платёжного календаря ──────────────────
+// Задача владельца 10.09.2026: платёжный календарь (отдельная таблица, отдельный проект)
+// показывает строку «Товар на своём складе». Договор сторон согласован письменно.
+//
+// WHY THE WRITER LIVES HERE, not in the calendar. The reading side must never reach into
+// this database: it also holds the «Пользователи» sheet, and IMPORTRANGE grants read of the
+// WHOLE source file to anyone who can edit the target. So the flow is one-way — this script
+// pushes one number, and the calendar's spreadsheet stays ignorant of everything else.
+//
+// The id of the target spreadsheet lives in a script property, NOT in this file: the
+// repository is public and this file is committed to it.
+const STOCK_SUMMARY_PROPERTY = 'stock_summarySpreadsheetId';
+const STOCK_SUMMARY_SHEET = 'Капитализация склада';
+const STOCK_SUMMARY_HEADERS = ['Дата', 'Капитализация, ₽'];
+
+/**
+ * Дата, которую ОПИСЫВАЕТ строка, и её ключ для сверки.
+ *
+ * The trigger runs in the small hours of day D and sees the warehouse as it closed on D−1,
+ * so the row is stamped D−1. Stamping D would shift the whole series one day forward and
+ * every reading of the chart would be wrong by a day.
+ *
+ * The value is built with new Date(y, m, d) on purpose: in Apps Script that is midnight in
+ * the SCRIPT's timezone, which is the timezone the target spreadsheet is read in. A UTC
+ * midnight would land on the previous day for any spreadsheet west of Greenwich.
+ */
+function stockSummaryDay(now) {
+  const tz = Session.getScriptTimeZone() || 'GMT';
+  const key = Utilities.formatDate(new Date(now.getTime() - 24 * 60 * 60 * 1000), tz, 'yyyy-MM-dd');
+  const parts = key.split('-');
+  return { key: key, date: new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])) };
+}
+
+/**
+ * Ключ дня строки календаря: «ГГГГ-ММ-ДД».
+ *
+ * A Date is read with LOCAL getters, never with Utilities.formatDate, because the value was
+ * built with new Date(y, m, d) — a local-time constructor. Mixing a local constructor with a
+ * timezone-aware formatter makes the round trip lose a day whenever the runtime timezone and
+ * the script timezone differ, and the row for today would then be written twice.
+ * A hand-typed text date still goes through formatDateString: it understands ГГГГ-ММ-ДД and
+ * ДД.ММ.ГГГГ, and the calendar's owner may well have typed one.
+ */
+function stockSummaryKeyOf(value) {
+  if (value instanceof Date) {
+    const month = String(value.getMonth() + 1);
+    const day = String(value.getDate());
+    return value.getFullYear()
+      + '-' + (month.length < 2 ? '0' + month : month)
+      + '-' + (day.length < 2 ? '0' + day : day);
+  }
+  return formatDateString(value);
+}
+
+/**
+ * Сумма колонки «Капитализация» листа «Остатки» — деньги, лежащие на своём складе.
+ * Колонка ищется ПО ЗАГОЛОВКУ: порядок колонок листа менялся и может поменяться снова.
+ */
+function stockCapitalizationTotal() {
+  const sheet = getSheetByNameRobust(getSpreadsheet(), 'Остатки');
+  if (!sheet) return null;
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 1) return null;
+  const headers = data[0].map(function (h) { return String(h).trim(); });
+  const idx = headers.indexOf('Капитализация');
+  if (idx < 0) return null;
+  let total = 0;
+  // A trailing empty row of the sheet contributes parseNumber('') === 0, so it needs no guard:
+  // a check for it would be code that cannot be observed failing, and a mutation proved it.
+  for (let i = 1; i < data.length; i++) {
+    total += parseNumber(data[i][idx]);
+  }
+  return roundToTwo(total);
+}
+
+/**
+ * Пишет в таблицу платёжного календаря одну строку: «дата — капитализация склада».
+ *
+ * Идемпотентна по дате: повторный запуск ПЕРЕЗАПИСЫВАЕТ строку этого дня, а не добавляет
+ * вторую. Календарь берёт только те дни, которых у него ещё нет, и задним числом ничего не
+ * перечитывает, поэтому задвоенная строка осталась бы в таблице навсегда.
+ *
+ * Ничего не бросает наружу: функция висит на ночном триггере, и падение означало бы письмо
+ * об ошибке владельцу каждую ночь. Причина всегда уходит в журнал выполнений и в результат.
+ */
+function writeStockSummary() {
+  const targetId = String(PropertiesService.getScriptProperties().getProperty(STOCK_SUMMARY_PROPERTY) || '').trim();
+  if (!targetId) {
+    Logger.log('Стоимость остатков: свойство ' + STOCK_SUMMARY_PROPERTY + ' не задано — выгрузка пропущена');
+    return { written: false, reason: 'no-property' };
+  }
+
+  const total = stockCapitalizationTotal();
+  if (total === null) {
+    Logger.log('Стоимость остатков: лист «Остатки» или колонка «Капитализация» не найдены — выгрузка пропущена');
+    return { written: false, reason: 'no-stock-sheet' };
+  }
+
+  const day = stockSummaryDay(new Date());
+
+  let sheet;
+  try {
+    sheet = getOrCreateSheet(SpreadsheetApp.openById(targetId), STOCK_SUMMARY_SHEET, STOCK_SUMMARY_HEADERS);
+  } catch (e) {
+    Logger.log('Стоимость остатков: таблица ' + targetId + ' недоступна — ' + (e && e.message ? e.message : e));
+    return { written: false, reason: 'target-unavailable' };
+  }
+
+  // Заголовки восстанавливаются, если их стёрли или переименовали: без них читающая сторона
+  // ищет колонки по тексту первой строки и молча пропускает весь лист.
+  const head = sheet.getRange(1, 1, 1, STOCK_SUMMARY_HEADERS.length).getValues()[0];
+  if (String(head[0]).trim() !== STOCK_SUMMARY_HEADERS[0] || String(head[1]).trim() !== STOCK_SUMMARY_HEADERS[1]) {
+    sheet.getRange(1, 1, 1, STOCK_SUMMARY_HEADERS.length).setValues([STOCK_SUMMARY_HEADERS]);
+    Logger.log('Стоимость остатков: заголовки листа «' + STOCK_SUMMARY_SHEET + '» восстановлены');
+  }
+
+  const values = sheet.getDataRange().getValues();
+  let row = 0;
+  for (let i = 1; i < values.length; i++) {
+    if (stockSummaryKeyOf(values[i][0]) === day.key) { row = i + 1; break; }
+  }
+  const replaced = row > 0;
+  if (!replaced) row = Math.max(sheet.getLastRow(), 1) + 1;
+
+  sheet.getRange(row, 1, 1, 2).setValues([[day.date, total]]);
+  Logger.log('Стоимость остатков: ' + day.key + ' = ' + total + ' ₽ (' + (replaced ? 'строка обновлена' : 'строка добавлена') + ')');
+  return { written: true, day: day.key, total: total, replaced: replaced };
+}
+
+/** Ночной триггер выгрузки: 02:00 по времени скрипта, один раз в сутки. */
+function setupStockSummaryTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'writeStockSummary'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+
+  ScriptApp.newTrigger('writeStockSummary')
+    .timeBased()
+    .everyDays(1)
+    .atHour(2)
+    .create();
+
+  Logger.log('Выгрузка стоимости остатков установлена: ежедневно в 02:00');
+}
+
 // ── Мультикабинет Ozon (пункт 8в) ──
 // Возвращает список кабинетов [{name, clientId, apiKey}].
 // Источник — Script Property global_ozonCabinets (JSON-массив).

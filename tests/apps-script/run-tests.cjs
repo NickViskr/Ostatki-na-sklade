@@ -2836,6 +2836,160 @@ function speedHarness(articles) {
     last['OpID'] === 'op-chain-1', `получено: ${last['OpID']}`);
 })();
 
+// ================= Стоимость остатков своего склада уезжает в платёжный календарь =========
+// Задача владельца 10.09.2026. Договор с читающей стороной согласован письменно: лист
+// «Капитализация склада», A1 «Дата», B1 «Капитализация, ₽», одна строка на календарный день,
+// дата — НАСТОЯЩЕЙ датой, строка описывает день, который закрылся.
+{
+  const PROP = 'stock_summarySpreadsheetId';
+  const SHEET = 'Капитализация склада';
+
+  // Триггер срабатывает ночью 10.09, значит строка обязана описывать 09.09.
+  const NIGHT_OF_10 = '2026-09-10T00:30:00Z'; // 03:30 МСК 10 сентября
+
+  function standWithStock(items, nowIso) {
+    const h = freshHarness();
+    h.setNow(nowIso || NIGHT_OF_10);
+    h.setStockSheet(items);
+    h.setScriptProperty(PROP, h.targetSpreadsheetId);
+    return h;
+  }
+
+  // ---- Пустое свойство: выгрузки нет, но и падения нет ----
+  {
+    const h = freshHarness();
+    h.setNow(NIGHT_OF_10);
+    h.setStockSheet([{ article: 'A', quantity: 1, avgCost: 10, capitalization: 10 }]);
+    const res = h.context.writeStockSummary();
+    check('Стоимость остатков: без свойства выгрузка пропускается', res.written === false && res.reason === 'no-property', 'reason=' + res.reason);
+    check('Стоимость остатков: без свойства чужая таблица не трогается', h.getTargetSheet(SHEET) === null, 'лист не создан');
+  }
+
+  // ---- Обычный день: сумма, лист, заголовки, дата ----
+  {
+    const h = standWithStock([
+      { article: 'A', quantity: 10, avgCost: 100.5, capitalization: 1005 },
+      { article: 'B', quantity: 3, avgCost: 200.25, capitalization: 600.75 }
+    ]);
+    const res = h.context.writeStockSummary();
+    check('Стоимость остатков: сумма колонки «Капитализация»', res.written === true && res.total === 1605.75, 'total=' + res.total);
+
+    const dump = h.dumpTargetSheet(SHEET);
+    check('Стоимость остатков: лист создан с нужными заголовками',
+      dump && dump[0][0] === 'Дата' && dump[0][1] === 'Капитализация, ₽', JSON.stringify(dump && dump[0]));
+    check('Стоимость остатков: ровно одна строка данных', dump && dump.length === 2, 'строк=' + (dump ? dump.length : 'нет'));
+    check('Стоимость остатков: в колонке B число, а не текст', dump && typeof dump[1][1] === 'number', 'тип=' + (dump ? typeof dump[1][1] : '-'));
+
+    const cell = dump[1][0];
+    check('Стоимость остатков: в колонке A НАСТОЯЩАЯ дата (просьба читающей стороны)', cell instanceof Date, 'тип=' + typeof cell);
+    const isYesterday = cell instanceof Date && cell.getFullYear() === 2026 && cell.getMonth() === 8 && cell.getDate() === 9;
+    check('Стоимость остатков: строка описывает ЗАКРЫВШИЙСЯ день, а не день запуска', isYesterday, 'дата=' + String(cell));
+    check('Стоимость остатков: ключ дня возвращается наружу', res.day === '2026-09-09', 'day=' + res.day);
+  }
+
+  // ---- Повторный запуск того же дня: строка ЗАМЕНЯЕТСЯ ----
+  {
+    const h = standWithStock([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.context.writeStockSummary();
+    h.setStockSheet([{ article: 'A', quantity: 12, avgCost: 100, capitalization: 1200 }]);
+    const res = h.context.writeStockSummary();
+    const dump = h.dumpTargetSheet(SHEET);
+    check('Стоимость остатков: повтор в тот же день НЕ задваивает строку', dump.length === 2, 'строк=' + dump.length);
+    check('Стоимость остатков: повтор перезаписывает значение', dump[1][1] === 1200 && res.replaced === true, 'B=' + dump[1][1]);
+  }
+
+  // ---- Следующий день: история растёт ----
+  {
+    const h = standWithStock([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.context.writeStockSummary();
+    h.setNow('2026-09-11T00:30:00Z');
+    h.setStockSheet([{ article: 'A', quantity: 20, avgCost: 100, capitalization: 2000 }]);
+    const res = h.context.writeStockSummary();
+    const dump = h.dumpTargetSheet(SHEET);
+    check('Стоимость остатков: новый день ДОБАВЛЯЕТ строку', dump.length === 3 && res.replaced === false, 'строк=' + dump.length);
+    check('Стоимость остатков: прежний день не тронут', dump[1][1] === 1000 && dump[2][1] === 2000, JSON.stringify([dump[1][1], dump[2][1]]));
+  }
+
+  // ---- Строка того же дня, записанная в другом формате даты, всё равно узнаётся ----
+  {
+    const h = standWithStock([{ article: 'A', quantity: 1, avgCost: 7, capitalization: 7 }]);
+    h.setTargetSheet(SHEET, [['Дата', 'Капитализация, ₽'], ['09.09.2026', 999]]);
+    h.context.writeStockSummary();
+    const dump = h.dumpTargetSheet(SHEET);
+    check('Стоимость остатков: день узнаётся и в формате ДД.ММ.ГГГГ, строка не задваивается', dump.length === 2 && dump[1][1] === 7, JSON.stringify(dump));
+  }
+
+  // ---- Стёртые заголовки восстанавливаются ----
+  {
+    const h = standWithStock([{ article: 'A', quantity: 1, avgCost: 5, capitalization: 5 }]);
+    h.setTargetSheet(SHEET, [['дата', 'сумма'], []]);
+    h.context.writeStockSummary();
+    const dump = h.dumpTargetSheet(SHEET);
+    check('Стоимость остатков: переименованные заголовки восстанавливаются',
+      dump[0][0] === 'Дата' && dump[0][1] === 'Капитализация, ₽', JSON.stringify(dump[0]));
+  }
+
+  // ---- Колонка ищется по ЗАГОЛОВКУ, а не по номеру ----
+  {
+    const h = freshHarness();
+    h.setNow(NIGHT_OF_10);
+    h.setScriptProperty(PROP, h.targetSpreadsheetId);
+    h.setStockSheetRaw([
+      ['Артикул', 'Капитализация', 'Количество на складе', 'Средняя себестоимость'],
+      ['A', 111.11, 5, 22.22]
+    ]);
+    const res = h.context.writeStockSummary();
+    check('Стоимость остатков: колонка «Капитализация» ищется по заголовку', res.total === 111.11, 'total=' + res.total);
+  }
+
+  // ---- Пустой склад — это ноль, а не пропуск ----
+  {
+    const h = standWithStock([]);
+    const res = h.context.writeStockSummary();
+    const dump = h.dumpTargetSheet(SHEET);
+    check('Стоимость остатков: пустой склад даёт 0, а не пустую ячейку', res.written === true && dump[1][1] === 0, 'B=' + dump[1][1]);
+  }
+
+  // ---- Копейки ----
+  {
+    const h = standWithStock([
+      { article: 'A', quantity: 1, avgCost: 0.005, capitalization: 0.005 },
+      { article: 'B', quantity: 1, avgCost: 10.111, capitalization: 10.111 }
+    ]);
+    const res = h.context.writeStockSummary();
+    check('Стоимость остатков: сумма округляется до копеек', res.total === 10.12, 'total=' + res.total);
+  }
+
+  // ---- Нет листа «Остатки» ----
+  {
+    const h = freshHarness();
+    h.setNow(NIGHT_OF_10);
+    h.setScriptProperty(PROP, h.targetSpreadsheetId);
+    h.clearStockSheet();
+    const res = h.context.writeStockSummary();
+    check('Стоимость остатков: без листа «Остатки» не падает', res.written === false && res.reason === 'no-stock-sheet', 'reason=' + res.reason);
+  }
+
+  // ---- Таблица недоступна ----
+  {
+    const h = standWithStock([{ article: 'A', quantity: 1, avgCost: 1, capitalization: 1 }]);
+    h.setScriptProperty(PROP, 'нет-такой-таблицы');
+    let threw = false;
+    let res = null;
+    try { res = h.context.writeStockSummary(); } catch (e) { threw = true; }
+    check('Стоимость остатков: недоступная таблица не роняет ночной триггер',
+      threw === false && res && res.written === false && res.reason === 'target-unavailable', 'threw=' + threw + ' reason=' + (res && res.reason));
+  }
+
+  // ---- Лист «Остатки» ЧИТАЕТСЯ, а не изменяется ----
+  {
+    const h = standWithStock([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    const before = JSON.stringify(h.dumpStockSheet());
+    h.context.writeStockSummary();
+    check('Стоимость остатков: собственный лист «Остатки» не изменяется', JSON.stringify(h.dumpStockSheet()) === before, 'лист остался прежним');
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

@@ -162,6 +162,11 @@ const sheetRegistry = {};
 // it actually has a column to add.
 let lockRequests = 0;
 
+// ---------- Свойства скрипта и ЧУЖАЯ таблица платёжного календаря ----------
+let scriptProperties = {};
+const targetSpreadsheetId = 'fake-calendar-spreadsheet-id';
+let targetSheets = {};
+
 // ---------- Сборка контекста vm ----------
 const sandbox = {
   console,
@@ -185,7 +190,31 @@ const sandbox = {
       return { waitLock: () => true, releaseLock: () => {} };
     }
   },
+  // Script properties. Code.gs keeps the id of the payment-calendar spreadsheet here rather
+  // than in the file itself: the repository is public.
+  PropertiesService: {
+    getScriptProperties: () => ({
+      getProperty: (key) => (Object.prototype.hasOwnProperty.call(scriptProperties, key) ? scriptProperties[key] : null),
+      setProperty: (key, value) => { scriptProperties[key] = String(value); },
+      deleteProperty: (key) => { delete scriptProperties[key]; }
+    })
+  },
   SpreadsheetApp: {
+    // The payment calendar is a DIFFERENT spreadsheet, opened by id. Only the registered id
+    // opens: an unknown id throws, exactly as Apps Script does when access is missing.
+    openById: (id) => {
+      if (id !== targetSpreadsheetId) throw new Error('Requested entity was not found: ' + id);
+      return {
+        getId: () => targetSpreadsheetId,
+        getSheetByName: (name) => targetSheets[name] || null,
+        getSheets: () => Object.keys(targetSheets).map(k => targetSheets[k]),
+        insertSheet: (name) => {
+          const sheet = makeFakeSheet([], name);
+          targetSheets[name] = sheet;
+          return sheet;
+        }
+      };
+    },
     getActiveSpreadsheet: () => ({
       // deleteMultipleTransactions спрашивает идентификатор ещё до сканирования строк:
       // без заглушки массовое удаление вообще не проверить.
@@ -261,6 +290,24 @@ module.exports = {
   OZON_STOCK_HISTORY_HEADERS: context.OZON_STOCK_HISTORY_HEADERS,
   updateOzonStockHistory: (...args) => context.updateOzonStockHistory(...args),
   // rows — массив массивов данных (без заголовка) листа SKU; headers — заголовки листа.
+  // ---- Стоимость остатков: свойства скрипта и таблица календаря ----
+  targetSpreadsheetId,
+  setScriptProperty(key, value) { scriptProperties[key] = String(value); },
+  clearScriptProperties() { scriptProperties = {}; },
+  resetTargetSpreadsheet() { targetSheets = {}; },
+  getTargetSheet(name) { return targetSheets[name] || null; },
+  setTargetSheet(name, rows) {
+    const sheet = makeFakeSheet(rows[0].slice(), name);
+    if (rows.length > 1) sheet.__setData(rows.map(r => r.slice()));
+    targetSheets[name] = sheet;
+    return sheet;
+  },
+  dumpTargetSheet(name) {
+    const sheet = targetSheets[name];
+    if (!sheet) return null;
+    const data = sheet.__dump();
+    return data.slice(0, sheet.getLastRow());
+  },
   setSkuSheet(headers, rows) {
     // Имя нужно getSheetByNameRobust: она ищет лист перебором ss.getSheets() и зовёт getName().
     skuSheet = makeFakeSheet(headers, 'SKU');
@@ -290,6 +337,15 @@ module.exports = {
     sheetRegistry['Остатки'] = sheet;
     return sheet;
   },
+  // Лист «Остатки» с ПРОИЗВОЛЬНЫМ порядком колонок: нужен, чтобы доказать, что колонка
+  // «Капитализация» ищется по заголовку, а не по номеру.
+  setStockSheetRaw(rows) {
+    const sheet = makeFakeSheet(rows[0].slice(), 'Остатки');
+    if (rows.length > 1) sheet.__setData(rows.map(r => r.slice()));
+    sheetRegistry['Остатки'] = sheet;
+    return sheet;
+  },
+  clearStockSheet() { delete sheetRegistry['Остатки']; },
   dumpStockSheet() {
     const sheet = sheetRegistry['Остатки'];
     if (!sheet) return null;
