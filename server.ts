@@ -5,7 +5,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
-import * as XLSX from "xlsx";
+import { buildCompositionXlsxBase64, readCargoIds } from "./src/lib/ozonComposition";
+import { parseOzonJson } from "./src/lib/ozonJson";
 import { chooseDirectWarehouse, directWarehouseMessage, readDraftWarehouses } from "./src/lib/ozonDirectDraft";
 import { draftErrorLogLine, draftFailureHint, draftFailureTitle, readDraftErrors } from "./src/lib/ozonDraftErrors";
 
@@ -662,7 +663,9 @@ async function startServer() {
       errorObj.httpStatus = status;
       throw errorObj;
     }
-    return res.json();
+    // The answer is read as TEXT and parsed by parseOzonJson: res.json() would hand int64
+    // fields (cargo_id) to a double and round their last digits away before we saw them.
+    return parseOzonJson(await res.text());
   }
 
   // ── Ozon Cluster Сache ────────────────────────────────────────────────────────
@@ -787,7 +790,7 @@ async function startServer() {
         return res.status(502).json({ status: "error", message: `Ozon API вернул ошибку ${ozRes.status}: ${errText.slice(0, 200)}` });
       }
 
-      const data: any = await ozRes.json();
+      const data: any = parseOzonJson(await ozRes.text());
       const name = String(data?.company?.name || '').trim();
       if (!name) {
         return res.status(502).json({ status: "error", message: "Ozon ответил без названия кабинета (company.name пуст)" });
@@ -2015,54 +2018,6 @@ async function startServer() {
     return cleaned || 'Без названия';
   }
 
-  function zoneToRussian(zone: string): string {
-    const z = String(zone || '').toUpperCase();
-    if (z === 'SORT') return 'Сортируемый товар';
-    if (z === 'NON_SORT') return 'Несортируемый товар';
-    if (z === 'KGT') return 'Крупногабаритный товар';
-    return String(zone || '');
-  }
-
-  // Файл «Состав ГМ поставки»: семь колонок в том же порядке, что отдаёт кабинет Ozon.
-  // Одна строка = один артикул в одном грузоместе.
-  function buildCompositionXlsxBase64(
-    boxes: any[],
-    cargoIdByKey: Record<string, string>,
-    zones: Record<string, string>
-  ): string {
-    const rows: any[][] = [[
-      'ШК товара',
-      'Артикул товара',
-      'Кол-во товаров',
-      'Зона размещения',
-      'Срок годности ДО в формате YYYY-MM-DD (необязательно)',
-      'ШК ГМ',
-      'Тип ГМ (не обязательно)'
-    ]];
-
-    for (const box of boxes) {
-      const cargoId = cargoIdByKey[String(box?.key || '')] || '';
-      const items = Array.isArray(box?.items) ? box.items : [];
-      for (const it of items) {
-        const barcode = String(it?.barcode || '');
-        rows.push([
-          barcode,
-          String(it?.offerId || ''),
-          Number(it?.quantity) || 0,
-          zoneToRussian(zones[barcode] || ''),
-          '',
-          cargoId,
-          'Коробка'
-        ]);
-      }
-    }
-
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Состав ГМ поставки');
-    return XLSX.write(wb, { bookType: 'xlsx', type: 'base64' }) as string;
-  }
-
   // Создание грузомест одной поставки с полной перезаписью прежней раскладки
   async function createCargoesForSupply(cab: any, supplyId: string, boxes: any[]): Promise<Record<string, string>> {
     const payload = {
@@ -2091,20 +2046,12 @@ async function startServer() {
       throw new Error('Ozon не принял грузоместа: ' + (reasons.length ? reasons.join(', ') : 'нет operation_id'));
     }
 
-    const cargoIdByKey: Record<string, string> = {};
     for (let attempt = 0; attempt < CARGO_POLL_ATTEMPTS; attempt++) {
       const info: any = await fetchOzonApi("/v2/cargoes/create/info",
         { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { operation_id: operationId });
       const st = String(info?.status || '');
       if (st === 'SUCCESS') {
-        const list = Array.isArray(info?.result?.cargoes) ? info.result.cargoes : [];
-        // Порядок элементов у Ozon произвольный — сопоставляем только по key
-        for (const c of list) {
-          const k = String(c?.key || '').trim();
-          const id = String(c?.value?.cargo_id ?? '').trim();
-          if (k && id) cargoIdByKey[k] = id;
-        }
-        return cargoIdByKey;
+        return readCargoIds(info?.result);
       }
       if (st === 'FAILED') {
         const reasons = info?.errors?.error_reasons || [];
