@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   buildPendingSupplies,
   getPendingQty,
@@ -311,5 +313,32 @@ describe('битые данные не роняют расчёт', () => {
     const res = build({});
     expect(res.details).toHaveLength(0);
     expect(res.byArticle).toEqual({});
+  });
+});
+
+// ---- 12.09.2026, a defect found by the owner on production: after «Заявка создана в Ozon»
+// the block «Рекомендации» kept the old numbers until he left the tab and came back.
+// The netting reads the journal «Заявки Ozon» (ozonSupplyRequests) once on entry to the tab;
+// the wizard appended the new row and never re-read the list. The guard pins the one place
+// that re-reads it and the ORDER: right after the creation toast, before the cargo/Drive
+// stage, so the numbers move while the supply is still being finished.
+describe('рекомендации пересчитываются сразу после создания заявки', () => {
+  const modal = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonSupplyModal.tsx'), 'utf8');
+
+  it('мастер берёт перечитывание журнала из хранилища', () => {
+    expect(modal).toContain('const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);');
+  });
+
+  it('журнал перечитывается сразу после сообщения «Заявка создана», ДО достройки поставки', () => {
+    const toastAt = modal.indexOf("toast.success('Заявка создана в Ozon. Номер: ' + orderId);");
+    const refetchAt = modal.indexOf('fetchOzonSupplyRequests();');
+    const finalizeAt = modal.indexOf('await finalizeSupply(orderId, verdictData);');
+    expect(toastAt).toBeGreaterThan(-1);
+    expect(refetchAt).toBeGreaterThan(toastAt);
+    expect(finalizeAt).toBeGreaterThan(refetchAt);
+  });
+
+  it('перечитывание не ждётся: достройка не должна стоять за чтением журнала', () => {
+    expect(modal).not.toContain('await fetchOzonSupplyRequests()');
   });
 });

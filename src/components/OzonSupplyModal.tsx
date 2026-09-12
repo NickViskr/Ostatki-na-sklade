@@ -57,6 +57,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const devMode = useWarehouseStore((state) => state.devMode);
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
+  const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
   const ozonClusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
   const supplySettings = useWarehouseStore((state) => state.ozonSupplySettings);
   const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
@@ -788,6 +789,11 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     }
 
     toast.success('Заявка создана в Ozon. Номер: ' + orderId);
+    // The recommendations net off the journal «Заявки Ozon», which the tab reads once on
+    // entry. The row was just appended above, so the journal is re-read HERE — before the
+    // cargo/labels/Drive stage — and the coverage recomputes under the open window while
+    // the supply is being finished. Not awaited: finishing must not wait for the reading.
+    fetchOzonSupplyRequests();
     await finalizeSupply(orderId, verdictData);
     setProgressText('');
     onCreated();
