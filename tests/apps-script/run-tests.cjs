@@ -2990,6 +2990,24 @@ function speedHarness(articles) {
   }
 }
 
+// ================= clasp: what leaves for script.google.com =================
+// Since 12.09.2026 Code.gs is deployed by `clasp push` from the repository root. clasp pushes
+// every file under rootDir that .claspignore lets through, and the repository root also holds
+// server.ts, src/, node_modules/. A broken ignore file would push the whole repository into
+// the bound script of the production spreadsheet, and the mistake would sit there unnoticed —
+// the script would still run. The manifest and Code.gs are the only two files allowed out.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const ignore = fs.readFileSync(path.join(__dirname, '..', '..', '.claspignore'), 'utf8');
+  const rules = ignore.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  check('clasp: всё под корнем закрыто правилом **/**', rules[0] === '**/**', 'первое правило: ' + rules[0]);
+  check('clasp: наружу выпущены ровно манифест и Code.gs',
+    JSON.stringify(rules.slice(1).sort()) === JSON.stringify(['!Code.gs', '!appsscript.json']), 'правила: ' + rules.slice(1).join(' '));
+  check('clasp: .clasp.json с идентификатором скрипта не уходит в публичный репозиторий',
+    fs.readFileSync(path.join(__dirname, '..', '..', '.gitignore'), 'utf8').split('\n').includes('.clasp.json'), '.gitignore');
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

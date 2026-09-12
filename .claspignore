@@ -1,0 +1,6 @@
+# Only the Apps Script project goes to script.google.com: the manifest and the bound script.
+# Everything else in this repository (the React app, the proxy, tests, docs, node_modules)
+# must never be pushed.
+**/**
+!appsscript.json
+!Code.gs

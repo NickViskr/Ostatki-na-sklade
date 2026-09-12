@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# clasp: the script id stays on this machine only (public repository)
+.clasp.json
