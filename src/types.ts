@@ -119,6 +119,8 @@ export interface ExternalShipment {
   isVirtual?: boolean;
   /** Пункт 31. Исходная поставка виртуальной заявки. Хранится только для справки. */
   originalSupplyId?: string;
+  /** Item 68 stage 2. The return of the unshipped part: lines, receipt ids, when and by whom. Empty = never returned. */
+  shippedJSON?: string;
 }
 
 export interface OzonStockRow {

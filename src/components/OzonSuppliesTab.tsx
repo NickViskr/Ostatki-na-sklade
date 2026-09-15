@@ -16,6 +16,7 @@ import { toast } from 'sonner';
 import { buildOzonGroups, useProcessOzonGroup, useProcessOzonGroups, OzonGroup } from '../lib/ozonGroups';
 import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
 import { detectPeresort } from '../lib/ozonPeresort';
+import { buildUnshippedLines, parseShippedRecord, UnshippedLine } from '../lib/ozonUnshipped';
 import { formatCurrency } from '../lib/utils';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -1160,6 +1161,157 @@ const PeresortModal: React.FC<PeresortModalProps> = ({ shipment, onClose }) => {
 };
 
 
+// Item 68 stage 2. «Отгружено меньше»: the supply was written off in full, part of it stayed
+// on the shelf. The owner states what actually left; Code.gs posts the difference back as a
+// receipt at the write-off prices. Prefilled from Ozon's own virtual supply when there is one.
+interface UnshippedReturnModalProps {
+  shipment: ExternalShipment;
+  onClose: () => void;
+}
+
+const UnshippedReturnModal: React.FC<UnshippedReturnModalProps> = ({ shipment, onClose }) => {
+  const skus = useWarehouseStore((state) => state.skus);
+  const externalShipments = useWarehouseStore((state) => state.externalShipments);
+  const commitUnshippedReturn = useWarehouseStore((state) => state.commitUnshippedReturn);
+  const isProcessing = useWarehouseStore((state) => state.isProcessing);
+
+  const initialLines = useMemo(
+    () => buildUnshippedLines(shipment, externalShipments || [], skus),
+    [shipment, externalShipments, skus]
+  );
+  const [lines, setLines] = useState<UnshippedLine[]>(initialLines);
+  useEffect(() => { setLines(initialLines); }, [initialLines]);
+  const [showConfirm, setShowConfirm] = useState(false);
+
+  const prefilledByOzon = useMemo(
+    () => initialLines.some(l => l.shipped < l.declared),
+    [initialLines]
+  );
+  const returning = lines.filter(l => l.declared > l.shipped);
+  const invalid = lines.filter(l => !Number.isInteger(l.shipped) || l.shipped < 0 || l.shipped > l.declared);
+
+  const setShipped = (offerId: string, value: string) => {
+    const n = value === '' ? 0 : Number(value);
+    setLines(prev => prev.map(l => (l.offerId === offerId ? { ...l, shipped: n } : l)));
+  };
+
+  const handleCommit = async () => {
+    setShowConfirm(false);
+    const ok = await commitUnshippedReturn(
+      shipment.postingId,
+      lines.map(l => ({ offerId: l.offerId, article: l.article, shipped: l.shipped }))
+    );
+    if (ok) onClose();
+  };
+
+  return (
+    <div id="unshipped-modal-overlay" className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 transition-all">
+      <div id="unshipped-modal-card" className="bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="p-6 border-b border-slate-100 shrink-0 flex justify-between items-center">
+          <div>
+            <h3 className="text-xl font-black text-slate-900 tracking-tight">Отгружено меньше: поставка № {shipment.postingId}</h3>
+            <p className="text-slate-500 text-sm font-medium mt-1">
+              Склад хранения: <span className="font-semibold text-indigo-600">{shipment.storageWarehouse || '—'}</span>
+              {shipment.orderNumber ? <> · заявка № {shipment.orderNumber}</> : null}
+            </p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-all text-slate-400 cursor-pointer" title="Закрыть">
+            <span className="font-bold text-lg leading-none">✕</span>
+          </button>
+        </div>
+
+        <div className="p-6 overflow-y-auto flex-1 space-y-4">
+          <div className="text-sm text-slate-600">
+            Списание по этой поставке проведено на заявленное количество. Укажи, сколько на самом деле уехало —
+            разница вернётся на «Мой склад» приходом по цене того же списания (комплект — компонентами).
+            Средняя себестоимость не изменится; себестоимость Ozon и журнал КАН не трогаются.
+          </div>
+          {prefilledByOzon && (
+            <div className="bg-violet-50 border border-violet-200 text-violet-800 rounded-2xl p-3 text-xs font-semibold">
+              Количество «уехало» подставлено из виртуальной поставки, которую Ozon создал по этой отгрузке. Проверь и поправь, если нужно.
+            </div>
+          )}
+          <div className="overflow-x-auto rounded-2xl border border-slate-200">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100 text-[10px] uppercase tracking-wider text-slate-400">
+                  <th className="px-3 py-2 text-left font-bold">Артикул</th>
+                  <th className="px-3 py-2 text-center font-bold">Заявлено</th>
+                  <th className="px-3 py-2 text-center font-bold">Уехало</th>
+                  <th className="px-3 py-2 text-center font-bold">Вернётся</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map(l => (
+                  <tr key={l.offerId} className="border-b border-slate-50 last:border-0">
+                    <td className="px-3 py-2 font-bold text-slate-800">{l.article}</td>
+                    <td className="px-3 py-2 text-center font-mono">{l.declared}</td>
+                    <td className="px-3 py-2 text-center">
+                      <input
+                        id={`unshipped-shipped-${l.offerId}`}
+                        type="number"
+                        min={0}
+                        max={l.declared}
+                        step={1}
+                        value={l.shipped}
+                        onChange={(e) => setShipped(l.offerId, e.target.value)}
+                        className="w-24 text-center border border-slate-300 rounded-lg px-2 py-1 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                      />
+                    </td>
+                    <td className={`px-3 py-2 text-center font-mono font-bold ${l.declared - l.shipped > 0 ? 'text-emerald-700' : 'text-slate-400'}`}>
+                      {l.declared - l.shipped > 0 ? l.declared - l.shipped : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {invalid.length > 0 && (
+            <div className="text-xs font-semibold text-red-600">Уехало должно быть целым числом от 0 до заявленного.</div>
+          )}
+          {invalid.length === 0 && returning.length === 0 && (
+            <div className="text-xs font-semibold text-slate-500">Уехало столько же, сколько заявлено — возвращать нечего.</div>
+          )}
+        </div>
+
+        <div className="p-6 border-t border-slate-100 shrink-0 flex justify-end gap-3">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-xl font-bold text-sm bg-slate-100 text-slate-700 hover:bg-slate-200 transition-all cursor-pointer">
+            Отмена
+          </button>
+          <button
+            id="btn-unshipped-commit"
+            onClick={() => setShowConfirm(true)}
+            disabled={isProcessing || invalid.length > 0 || returning.length === 0}
+            className="px-5 py-2.5 rounded-xl font-bold text-sm bg-emerald-600 text-white hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all cursor-pointer"
+          >
+            Вернуть на склад
+          </button>
+        </div>
+      </div>
+
+      <ConfirmDialog
+        show={showConfirm}
+        title="Вернуть неотгруженное на склад?"
+        onConfirm={handleCommit}
+        onCancel={() => setShowConfirm(false)}
+        confirmLabel="Вернуть"
+        cancelLabel="Отмена"
+        message={
+          <div className="space-y-3">
+            <div className="text-sm font-semibold text-slate-700">На «Мой склад» вернётся:</div>
+            <ul className="list-disc pl-5 text-sm text-slate-600 space-y-1">
+              {returning.map(l => (
+                <li key={l.offerId}>{l.article} — {l.declared - l.shipped} шт (уехало {l.shipped} из {l.declared})</li>
+              ))}
+            </ul>
+            <div className="text-xs text-slate-500">Приход встанет в «Историю» с объектом «Корректировка: возврат неотгруженного…». Повторно по этой поставке возврат не даётся; отменить — удалить приход из «Истории».</div>
+          </div>
+        }
+      />
+    </div>
+  );
+};
+
 export const OzonSuppliesTab: React.FC = React.memo(() => {
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
@@ -1190,6 +1342,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set());
   const [selectedAcceptanceShipment, setSelectedAcceptanceShipment] = useState<ExternalShipment | null>(null);
   const [selectedPeresortShipment, setSelectedPeresortShipment] = useState<ExternalShipment | null>(null);
+  const [selectedUnshippedShipment, setSelectedUnshippedShipment] = useState<ExternalShipment | null>(null);
 
   useEffect(() => {
     setIsLoading(true);
@@ -1884,6 +2037,27 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           Списана
                                         </span>
                                       )}
+                                      {/* Item 68 stage 2. A written-off supply either has its return on record or can get one. */}
+                                      {s.status === 'processed' && (() => {
+                                        const record = parseShippedRecord(s.shippedJSON);
+                                        if (record) {
+                                          const returned = record.lines.reduce((sum, l) => sum + (l.declared - l.shipped), 0);
+                                          return (
+                                            <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-700" title={`Возврат неотгруженного проведён ${record.returnedAt.slice(0, 10)} · ${record.by}`}>
+                                              Возврат: {returned} шт
+                                            </span>
+                                          );
+                                        }
+                                        return (
+                                          <button
+                                            id={`btn-unshipped-${s.postingId}`}
+                                            onClick={(e) => { e.stopPropagation(); setSelectedUnshippedShipment(s); }}
+                                            className="px-2.5 py-1 rounded-lg text-xs font-bold bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all cursor-pointer"
+                                          >
+                                            Отгружено меньше
+                                          </button>
+                                        );
+                                      })()}
                                       {s.status === 'ignored' && (
                                         <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 text-slate-600">
                                           Не отгружена
@@ -1983,6 +2157,12 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
         <PeresortModal
           shipment={selectedPeresortShipment}
           onClose={() => setSelectedPeresortShipment(null)}
+        />
+      )}
+      {selectedUnshippedShipment && (
+        <UnshippedReturnModal
+          shipment={selectedUnshippedShipment}
+          onClose={() => setSelectedUnshippedShipment(null)}
         />
       )}
     </div>

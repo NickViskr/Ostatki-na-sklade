@@ -9,6 +9,7 @@ import { OzonCoverageSettings, OzonClusterRef } from '../lib/ozonCoverage';
 import { BatchWriteOffGroup } from '../lib/ozonBatchWriteOff';
 import { buildKanCostCsv, collapseKanCostRows, KanCostRow, kanCostFileName } from '../lib/kanCostExport';
 import { toast } from 'sonner';
+import { newOperationId } from '../lib/utils';
 
 // Пункт 40. Капитализацию здесь обнулять НЕЛЬЗЯ: у артикула с нулевым остатком она несёт
 // «долг себестоимости» — стоимость списанного брака, которая ляжет на ближайший приход.
@@ -136,6 +137,8 @@ interface WarehouseState {
   saveShipmentAcceptance: (postingId: string, acceptedJSON: string) => Promise<boolean>;
   saveShipmentPeresort: (postingId: string, peresortJSON: string) => Promise<boolean>;
   commitShipmentPeresort: (postingId: string) => Promise<boolean>;
+  /** Item 68 stage 2. Returns the unshipped part of a written-off supply to «Мой склад». */
+  commitUnshippedReturn: (postingId: string, shipped: Array<{ offerId: string; article: string; shipped: number }>) => Promise<boolean>;
   saveShipmentShortageRecalc: (postingId: string, recalcJSON: string, historyNotes: { article: string; note: string }[]) => Promise<boolean>;
   returnLinkedOzonSupplies: (deletedIds: string[]) => Promise<void>;
   fetchExternalShipments: () => Promise<void>;
@@ -1487,6 +1490,32 @@ export const useWarehouseStore = create<WarehouseState>()(
     } catch (e: any) {
       console.error(e);
       toast.error('Ошибка проведения пересорта');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  commitUnshippedReturn: async (postingId, shipped) => {
+    set({ isProcessing: true });
+    try {
+      // One operation id per attempt: a repeated send of the same attempt is not a second return.
+      const res = await get().fetchGas('commitUnshippedReturn', { data: { postingId, shipped, opId: newOperationId() } });
+      if (res.status === 'success') {
+        if (res.data && Array.isArray(res.data.stock)) {
+          set({ stock: normalizeStock(res.data.stock) });
+        }
+        // The receipt rows live in «История» and the row carries «ОтгруженоJSON» now: both re-read.
+        await get().fetchStock();
+        await get().fetchExternalShipments();
+        toast.success('Неотгруженное возвращено на склад');
+        return true;
+      }
+      toast.error(res.message || 'Возврат не проведён');
+      return false;
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при возврате: ' + (e?.message || ''));
       return false;
     } finally {
       set({ isProcessing: false });
