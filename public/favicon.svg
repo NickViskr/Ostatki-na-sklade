@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Same mark as the sidebar logo: indigo-600 rounded square with the lucide layout-dashboard icon. -->
+  <rect width="32" height="32" rx="8" fill="#4f46e5"/>
+  <g transform="translate(4 4)" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="7" height="9" x="3" y="3" rx="1"/>
+    <rect width="7" height="5" x="14" y="3" rx="1"/>
+    <rect width="7" height="9" x="14" y="12" rx="1"/>
+    <rect width="7" height="5" x="3" y="16" rx="1"/>
+  </g>
+</svg>
