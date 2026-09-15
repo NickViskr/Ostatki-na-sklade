@@ -423,6 +423,10 @@ module.exports = {
       line[idx('Статус')] = r.status;
       line[idx('Статус Ozon')] = r.ozonStatus || '';
       line[idx('ПозицииJSON')] = JSON.stringify(r.items || []);
+      // Item 68 stage 2: the columns the unshipped return reads and writes.
+      line[idx('TransGroupInfo')] = r.transGroupInfo || '';
+      line[idx('Номер заявки')] = r.orderNumber || '';
+      line[idx('ОтгруженоJSON')] = r.shippedJSON || '';
       return line;
     });
     const sheet = makeFakeSheet(headers, 'Внешние отгрузки');
@@ -430,6 +434,16 @@ module.exports = {
     sheetRegistry['Внешние отгрузки'] = sheet;
     return sheet;
   },
+  dumpExternalShipments() {
+    const sheet = sheetRegistry['Внешние отгрузки'];
+    if (!sheet) return [];
+    const data = sheet.__dump();
+    const headers = data[0].map(h => String(h).trim());
+    return data.slice(1)
+      .filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => { const o = {}; headers.forEach((h, i) => o[h] = r[i]); return o; });
+  },
+  commitUnshippedReturn: (...args) => context.commitUnshippedReturn(...args),
   ozonCabinetFromDestination: (...args) => context.ozonCabinetFromDestination(...args),
   appendOzonCostForShipment: (...args) => context.appendOzonCostForShipment(...args),
   // ---------- Пункт 47, этап 4: правка и удаление операций ----------

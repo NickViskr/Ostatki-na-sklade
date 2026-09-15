@@ -2990,6 +2990,162 @@ function speedHarness(articles) {
   }
 }
 
+// ================= Item 68, stage 2: the unshipped part of a written-off supply returns =================
+// The owner's case of 15.09.2026: supply 2000065651020 of order 127380557-1 was written off as
+// 36 kits BowlGrayMini_01 (two boxes), one box went to Ozon, the other stayed on the shelf.
+// The write-off is one operation for the whole order and is never cut; the difference comes
+// back as a receipt of the kit's COMPONENTS at their write-off prices, so the average cost
+// does not move, and the receipt is marked «Корректировка» so it never becomes a factory price.
+{
+  const POSTING = '2000065651020';
+  const ORDER_NO = '127380557-1';
+  const KIT = 'BowlGrayMini_01';
+
+  /** Stock, a virtual kit of three components, and a write-off of 36 kits linked to one supply row. */
+  function standWithWrittenOffSupply(opts) {
+    const o = opts || {};
+    const h = freshHarness();
+    h.ensureTransSheet();
+    h.setKitSheet([
+      { kitSku: KIT, componentSku: 'Миска серая', quantity: 1, kitType: 'virtual' },
+      { kitSku: KIT, componentSku: 'Бутылки', quantity: 1, kitType: 'virtual' },
+      { kitSku: KIT, componentSku: 'Пакеты', quantity: 1, kitType: 'virtual' }
+    ]);
+    h.setStockSheet([
+      { article: 'Миска серая', quantity: 100, avgCost: 150, capitalization: 15000 },
+      { article: 'Бутылки', quantity: 100, avgCost: 12, capitalization: 1200 },
+      { article: 'Пакеты', quantity: 100, avgCost: 5, capitalization: 500 },
+      { article: 'ART-PLAIN', quantity: 10, avgCost: 7, capitalization: 70 }
+    ]);
+    const writeOff = h.commitTransaction(
+      [{ article: KIT, quantity: 36, price: 0 }, { article: 'ART-PLAIN', quantity: 10, price: 7 }],
+      'Расход', 'Ozon (MaxiStore)', '2026-09-16', 'tester', '2026-09-06T10:00:00Z', ''
+    );
+    const txIds = writeOff.newTransactions.map(t => String(t.id));
+    h.setExternalShipmentsSheet([{
+      postingId: POSTING, cabinet: 'MaxiStore', status: o.status || 'processed', ozonStatus: 'REJECTED_AT_SUPPLY_WAREHOUSE',
+      items: [{ offerId: KIT, barcode: 'OZN1368918716', quantity: 36 }, { offerId: 'ART-PLAIN', barcode: 'OZN2', quantity: 10 }],
+      transGroupInfo: o.noLink ? '' : JSON.stringify(txIds),
+      orderNumber: ORDER_NO,
+      shippedJSON: o.shippedJSON || ''
+    }]);
+    return h;
+  }
+  const oneBox = [{ offerId: KIT, article: KIT, shipped: 18 }, { offerId: 'ART-PLAIN', article: 'ART-PLAIN', shipped: 10 }];
+  const receipts = (h) => h.dumpTransSheet().filter(r => String(r['Тип']) === 'Приход');
+
+  // ---- The whole path: write-off → return → stock, history, the row ----
+  {
+    const h = standWithWrittenOffSupply();
+    check('Возврат: до возврата компоненты списаны (100 − 36 = 64)', h.stockOf('Миска серая').quantity === 64, 'получено ' + h.stockOf('Миска серая').quantity);
+    const res = h.commitUnshippedReturn(POSTING, oneBox, 'tester', 'op-return-1');
+    check('Возврат: компоненты вернулись ровно на разницу (64 + 18 = 82)',
+      h.stockOf('Миска серая').quantity === 82 && h.stockOf('Бутылки').quantity === 82 && h.stockOf('Пакеты').quantity === 82,
+      [h.stockOf('Миска серая').quantity, h.stockOf('Бутылки').quantity, h.stockOf('Пакеты').quantity].join('/'));
+    check('Возврат: средняя себестоимость компонентов не сдвинулась',
+      h.stockOf('Миска серая').avgCost === 150 && h.stockOf('Бутылки').avgCost === 12 && h.stockOf('Пакеты').avgCost === 5,
+      [h.stockOf('Миска серая').avgCost, h.stockOf('Бутылки').avgCost, h.stockOf('Пакеты').avgCost].join('/'));
+    check('Возврат: капитализация выросла ровно на 18 × цену списания', h.stockOf('Миска серая').capitalization === 82 * 150, 'получено ' + h.stockOf('Миска серая').capitalization);
+    check('Возврат: артикул без разницы (уехало столько же) не трогается', h.stockOf('ART-PLAIN').quantity === 0, 'получено ' + h.stockOf('ART-PLAIN').quantity);
+    const rec = receipts(h);
+    check('Возврат: в «Истории» три прихода — по компоненту, а не по комплекту',
+      rec.length === 3 && rec.every(r => r['Артикул'] !== KIT), rec.map(r => r['Артикул']).join(', '));
+    check('Возврат: приход идёт по цене списания, а не по нулю комплекта',
+      rec.every(r => Number(r['Количество']) === 18) && rec.find(r => r['Артикул'] === 'Миска серая')['Цена'] === 150,
+      rec.map(r => r['Артикул'] + '@' + r['Цена']).join(', '));
+    check('Возврат: объект прихода несёт слово «Корректировка», номер поставки и заявки',
+      rec.every(r => String(r['Объект']) === 'Корректировка: возврат неотгруженного, поставка № ' + POSTING + ' (заявка № ' + ORDER_NO + ')'),
+      String(rec[0]['Объект']));
+    const row = h.dumpExternalShipments()[0];
+    let record = null;
+    try { record = JSON.parse(String(row['ОтгруженоJSON'])); } catch (e) {}
+    check('Возврат: в строку записано, что уехало, и id проводок',
+      record && record.lines.length === 2 && record.lines[0].shipped === 18 && record.lines[0].declared === 36
+        && record.returnTxIds.length === 3 && record.by === 'tester',
+      String(row['ОтгруженоJSON']).slice(0, 160));
+    check('Возврат: id проводок в строке — это id приходов из «Истории»',
+      record && rec.every(r => record.returnTxIds.indexOf(String(r['ID'])) >= 0), 'ids');
+    check('Возврат: ответ несёт список возвращённого', Array.isArray(res.returned) && res.returned.length === 3, 'returned=' + (res.returned && res.returned.length));
+  }
+
+  // ---- The price of the write-off wins over today's average ----
+  {
+    const h = standWithWrittenOffSupply();
+    // A receipt at another price after the write-off: the average of the bowl moves to 175.
+    h.commitTransaction([{ article: 'Миска серая', quantity: 64, price: 200 }], 'Приход', 'Поставка', '', 'tester', '2026-09-10T10:00:00Z', '');
+    check('Возврат: подготовка — средняя миски после нового прихода 175', h.stockOf('Миска серая').avgCost === 175, 'получено ' + h.stockOf('Миска серая').avgCost);
+    h.commitUnshippedReturn(POSTING, oneBox, 'tester', 'op-return-2');
+    const bowl = receipts(h).filter(r => r['Артикул'] === 'Миска серая').pop();
+    check('Возврат: цена возврата — цена ТОГО списания (150), а не сегодняшняя средняя (175)', bowl && bowl['Цена'] === 150, 'получено ' + (bowl && bowl['Цена']));
+  }
+
+  // ---- Refusals: nothing is written before the checks ----
+  {
+    const h = standWithWrittenOffSupply();
+    let msg = '';
+    try { h.commitUnshippedReturn(POSTING, [{ offerId: KIT, article: KIT, shipped: 37 }], 'tester', 'op-x'); } catch (e) { msg = String(e.message || e); }
+    check('Возврат: больше заявленного — отказ', msg.indexOf('от 0 до 36') >= 0, msg);
+    check('Возврат: после отказа остатки не тронуты', h.stockOf('Миска серая').quantity === 64 && receipts(h).length === 0, 'qty=' + h.stockOf('Миска серая').quantity);
+    check('Возврат: после отказа строка не помечена', String(h.dumpExternalShipments()[0]['ОтгруженоJSON']) === '', 'ОтгруженоJSON');
+    msg = '';
+    try { h.commitUnshippedReturn(POSTING, [{ offerId: KIT, article: KIT, shipped: 36 }], 'tester', 'op-x'); } catch (e) { msg = String(e.message || e); }
+    check('Возврат: уехало столько же — возвращать нечего', msg.indexOf('возвращать нечего') >= 0, msg);
+    msg = '';
+    try { h.commitUnshippedReturn(POSTING, [{ offerId: 'NOPE', article: 'NOPE', shipped: 1 }], 'tester', 'op-x'); } catch (e) { msg = String(e.message || e); }
+    check('Возврат: позиция не из поставки — отказ', msg.indexOf('нет в поставке') >= 0, msg);
+    msg = '';
+    try { h.commitUnshippedReturn(POSTING, [{ offerId: KIT, article: KIT, shipped: 17.5 }], 'tester', 'op-x'); } catch (e) { msg = String(e.message || e); }
+    check('Возврат: дробное количество — отказ', msg.indexOf('целым числом') >= 0, msg);
+  }
+  {
+    const h = standWithWrittenOffSupply();
+    h.commitUnshippedReturn(POSTING, oneBox, 'tester', 'op-return-3');
+    let msg = '';
+    try { h.commitUnshippedReturn(POSTING, oneBox, 'tester', 'op-return-4'); } catch (e) { msg = String(e.message || e); }
+    check('Возврат: второй раз по той же поставке — отказ', msg.indexOf('уже проведён') >= 0, msg);
+    check('Возврат: второй раз ничего не добавил', h.stockOf('Миска серая').quantity === 82 && receipts(h).length === 3, 'qty=' + h.stockOf('Миска серая').quantity);
+  }
+  {
+    const h = standWithWrittenOffSupply({ status: 'new' });
+    let msg = '';
+    try { h.commitUnshippedReturn(POSTING, oneBox, 'tester', 'op-x'); } catch (e) { msg = String(e.message || e); }
+    check('Возврат: неоформленная поставка — отказ', msg.indexOf('не оформлена') >= 0, msg);
+  }
+  {
+    const h = standWithWrittenOffSupply({ noLink: true });
+    let msg = '';
+    try { h.commitUnshippedReturn(POSTING, oneBox, 'tester', 'op-x'); } catch (e) { msg = String(e.message || e); }
+    check('Возврат: оформлена, но без привязки к «Истории» — отказ', msg.indexOf('не привязана') >= 0, msg);
+  }
+
+  // ---- A plain article returns as itself ----
+  {
+    const h = standWithWrittenOffSupply();
+    h.commitUnshippedReturn(POSTING, [{ offerId: KIT, article: KIT, shipped: 36 }, { offerId: 'ART-PLAIN', article: 'ART-PLAIN', shipped: 4 }], 'tester', 'op-return-5');
+    const rec = receipts(h);
+    check('Возврат: обычный артикул возвращается сам, 6 шт по цене списания 7',
+      rec.length === 1 && rec[0]['Артикул'] === 'ART-PLAIN' && Number(rec[0]['Количество']) === 6 && rec[0]['Цена'] === 7,
+      rec.map(r => r['Артикул'] + ' ' + r['Количество'] + '@' + r['Цена']).join(', '));
+    check('Возврат: остаток обычного артикула 0 + 6', h.stockOf('ART-PLAIN').quantity === 6, 'получено ' + h.stockOf('ART-PLAIN').quantity);
+    check('Возврат: комплект, уехавший целиком, компоненты не получил', h.stockOf('Миска серая').quantity === 64, 'получено ' + h.stockOf('Миска серая').quantity);
+  }
+
+  // ---- The return must never become the «last factory price» (item 35) ----
+  {
+    const h = standWithWrittenOffSupply();
+    h.commitTransaction([{ article: 'Миска серая', quantity: 1, price: 111 }], 'Приход', 'Фабрика', '', 'tester', '2026-09-01T10:00:00Z', '');
+    // The return is dated «now», and it must be LATER than the factory receipt — otherwise the
+    // check would pass on the date alone and prove nothing about the «Корректировка» skip.
+    h.setNow('2026-09-20T10:00:00Z');
+    h.commitUnshippedReturn(POSTING, oneBox, 'tester', 'op-return-6');
+    const returnRow = receipts(h).filter(r => r['Артикул'] === 'Миска серая').pop();
+    check('Возврат: подготовка — возврат датирован позже фабричного прихода', String(returnRow['Дата']).indexOf('2026-09-20') === 0, String(returnRow['Дата']));
+    const last = h.context.getLastPurchasePrices();
+    check('Возврат: цена последнего поступления миски осталась фабричной (111), возврат пропущен',
+      last['Миска серая'] && last['Миска серая'].price === 111, JSON.stringify(last['Миска серая']));
+  }
+}
+
 // ================= clasp: what leaves for script.google.com =================
 // Since 12.09.2026 Code.gs is deployed by `clasp push` from the repository root. clasp pushes
 // every file under rootDir that .claspignore lets through, and the repository root also holds

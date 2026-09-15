@@ -418,6 +418,10 @@ function doPost(e) {
       case 'saveShipmentPeresort':
         result = saveShipmentPeresort(data.postingId, data.peresortJSON);
         break;
+      case 'commitUnshippedReturn':
+        assertAdmin(currentUser);
+        result = commitUnshippedReturn(data.postingId, data.shipped, currentUser.username, data.opId);
+        break;
       case 'saveShipmentShortageRecalc':
         assertAdmin(currentUser);
         result = saveShipmentShortageRecalc(data.postingId, data.recalcJSON, data.historyNotes, currentUser.username);
@@ -484,7 +488,7 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON'
 ];
 
 const OZON_STOCKS_HEADERS = [
@@ -6331,6 +6335,7 @@ function getExternalShipments() {
   const colClusterId = headers.indexOf('КластерID');
   const colIsVirtual = headers.indexOf('Виртуальная');
   const colOriginalSupply = headers.indexOf('ИсходнаяПоставка');
+  const colShippedJson = headers.indexOf('ОтгруженоJSON');
   
   if (postingIdIdx === -1) return [];
   
@@ -6376,7 +6381,8 @@ function getExternalShipments() {
       peresortJSON: getVal(peresortJsonIdx, false),
       clusterId: getVal(colClusterId, false).trim(),
       isVirtual: getVal(colIsVirtual, false).trim().toUpperCase() === 'ДА',
-      originalSupplyId: getVal(colOriginalSupply, false).trim()
+      originalSupplyId: getVal(colOriginalSupply, false).trim(),
+      shippedJSON: getVal(colShippedJson, false)
     });
   }
   return shipments;
@@ -6464,6 +6470,162 @@ function updateExternalShipmentStatus(postingId, status, transGroupInfo) {
     }
   }
   throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+
+// ===== Item 68, stage 2: a written-off supply that left the warehouse only in part =====
+//
+// The owner's case of 15.09.2026: supply 2000065651020 (order 127380557-1) was written off
+// as two boxes, one box actually went to Ozon, the other stayed on the shelf — and the
+// books no longer knew it. The write-off itself is one operation for all supplies of the
+// order (item 56) and cannot be cut per supply, so the unshipped part comes BACK as a
+// receipt: quantity = declared − shipped, price = the unit price of that very write-off
+// (a virtual kit returns as its components at the components' write-off prices). The
+// average cost therefore stays where it was. The receipt's «Объект» carries the word
+// «Корректировка» on purpose: getLastPurchasePrices skips such receipts, otherwise the
+// return would become the «last factory price» of the article (item 35).
+//
+// The Ozon cost journal (KAN) is not touched: it is fed by expenses only. Extra services of
+// the original write-off stay spread over the declared quantity — the owner corrects them
+// on the «Отгрузка» screen if he wants to.
+
+/** Unit prices of a supply's write-off, by article: the main rows and the kit components. */
+function unshippedReturnPricesFromWriteOff(txIds) {
+  const wanted = {};
+  for (let i = 0; i < txIds.length; i++) wanted[String(txIds[i])] = true;
+  const rows = getTransactions().rows;
+  const mainPrice = {};
+  const groupIds = {};
+  for (let i = 0; i < rows.length; i++) {
+    const tx = rows[i];
+    if (!wanted[String(tx.id)] || tx.type !== 'Расход' || tx.isComponent === true) continue;
+    mainPrice[String(tx.article)] = Number(tx.price) || 0;
+    if (tx.groupId) groupIds[String(tx.groupId)] = String(tx.article);
+  }
+  // Component rows carry the kit's groupId and their own write-off price.
+  const compPrice = {};
+  for (let i = 0; i < rows.length; i++) {
+    const tx = rows[i];
+    if (tx.isComponent !== true || tx.type !== 'Расход') continue;
+    const kit = groupIds[String(tx.groupId || '')];
+    if (!kit) continue;
+    if (!compPrice[kit]) compPrice[kit] = {};
+    compPrice[kit][String(tx.article)] = Number(tx.price) || 0;
+  }
+  return { mainPrice: mainPrice, compPrice: compPrice };
+}
+
+/**
+ * Returns the unshipped part of a written-off supply to «Мой склад».
+ * shipped: [{ offerId, article, shipped }] — what actually left, per position of the supply.
+ * Refused when the supply is not written off, when it was already returned, when a quantity
+ * is outside 0…declared, or when nothing is left to return. Nothing is written before all
+ * checks pass.
+ */
+function commitUnshippedReturn(postingId, shipped, username, opId) {
+  if (!postingId) throw new Error('PostingID is required');
+  if (!Array.isArray(shipped) || shipped.length === 0) throw new Error('Не передано, сколько уехало');
+
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const col = function(name) {
+    const idx = headers.indexOf(name);
+    if (idx === -1) throw new Error('Колонка «' + name + '» не найдена в листе «Внешние отгрузки»');
+    return idx;
+  };
+  const iPosting = col('PostingID');
+  const iStatus = col('Статус');
+  const iItems = col('ПозицииJSON');
+  const iTrans = col('TransGroupInfo');
+  const iOrderNo = col('Номер заявки');
+  const iShipped = col('ОтгруженоJSON');
+
+  const target = String(postingId).trim().toLowerCase();
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][iPosting]).trim().toLowerCase() === target) { rowIndex = i; break; }
+  }
+  if (rowIndex === -1) throw new Error('Поставка ' + postingId + ' не найдена');
+  const row = data[rowIndex];
+
+  if (String(row[iStatus] || '').trim() !== 'processed') {
+    throw new Error('Поставка ' + postingId + ' не оформлена: возвращать нечего');
+  }
+  if (String(row[iShipped] || '').trim() !== '') {
+    throw new Error('Возврат по поставке ' + postingId + ' уже проведён');
+  }
+  let txIds = [];
+  try { txIds = JSON.parse(String(row[iTrans] || '[]')); } catch (e) { txIds = []; }
+  if (!Array.isArray(txIds) || txIds.length === 0) {
+    throw new Error('Поставка ' + postingId + ' не привязана к списанию в «Истории»');
+  }
+
+  let declaredItems = [];
+  try { declaredItems = JSON.parse(String(row[iItems] || '[]')); } catch (e) { declaredItems = []; }
+  const declaredByOffer = {};
+  for (let i = 0; i < declaredItems.length; i++) {
+    const it = declaredItems[i] || {};
+    const offer = String(it.offerId || it.offer_id || '').trim();
+    if (offer) declaredByOffer[offer] = (declaredByOffer[offer] || 0) + (Number(it.quantity || it.qty) || 0);
+  }
+
+  // Every position of the supply is checked against what Ozon was told, not against the client.
+  const lines = [];
+  for (let i = 0; i < shipped.length; i++) {
+    const it = shipped[i] || {};
+    const offer = String(it.offerId || '').trim();
+    const article = String(it.article || '').trim();
+    const declared = declaredByOffer[offer];
+    if (!offer || declared === undefined) throw new Error('Позиции «' + (offer || '?') + '» нет в поставке ' + postingId);
+    if (!article) throw new Error('Не указан артикул для «' + offer + '»');
+    const qty = Number(it.shipped);
+    if (!Number.isInteger(qty) || qty < 0 || qty > declared) {
+      throw new Error('«' + article + '»: уехало должно быть целым числом от 0 до ' + declared + ', получено ' + it.shipped);
+    }
+    lines.push({ offerId: offer, article: article, declared: declared, shipped: qty });
+  }
+  const returning = lines.filter(function(l) { return l.declared > l.shipped; });
+  if (returning.length === 0) throw new Error('Уехало столько же, сколько заявлено — возвращать нечего');
+
+  const prices = unshippedReturnPricesFromWriteOff(txIds);
+  const stockRows = getStock();
+  const avgOf = {};
+  for (let i = 0; i < stockRows.length; i++) avgOf[String(stockRows[i].article)] = Number(stockRows[i].avgCost) || 0;
+
+  const receiptItems = [];
+  for (let i = 0; i < returning.length; i++) {
+    const line = returning[i];
+    const diff = line.declared - line.shipped;
+    const kit = getKitComponents(line.article);
+    if (kit.type === 'virtual' && kit.components && kit.components.length > 0) {
+      const byComp = prices.compPrice[line.article] || {};
+      for (let c = 0; c < kit.components.length; c++) {
+        const comp = kit.components[c];
+        const sku = String(comp.componentSku);
+        const price = byComp[sku] !== undefined ? byComp[sku] : (avgOf[sku] || 0);
+        receiptItems.push({ article: sku, quantity: diff * (Number(comp.quantity) || 1), price: price, status: 'ok' });
+      }
+    } else {
+      const price = prices.mainPrice[line.article] !== undefined ? prices.mainPrice[line.article] : (avgOf[line.article] || 0);
+      receiptItems.push({ article: line.article, quantity: diff, price: price, status: 'ok' });
+    }
+  }
+
+  const orderNo = String(row[iOrderNo] || '').trim();
+  const destination = 'Корректировка: возврат неотгруженного, поставка № ' + String(postingId).trim()
+    + (orderNo ? ' (заявка № ' + orderNo + ')' : '');
+  const commit = commitTransaction(receiptItems, 'Приход', destination, '', username, undefined, opId);
+  const returnTxIds = (commit.newTransactions || []).map(function(t) { return String(t.id); });
+
+  const record = {
+    lines: lines,
+    returnTxIds: returnTxIds,
+    returnedAt: new Date().toISOString(),
+    by: String(username || '')
+  };
+  sheet.getRange(rowIndex + 1, iShipped + 1).setValue(JSON.stringify(record));
+  SpreadsheetApp.flush();
+  return { success: true, returned: receiptItems, record: record, stock: commit.stock };
 }
 
 function saveExternalShipmentAcceptance(postingId, acceptedJSON) {
