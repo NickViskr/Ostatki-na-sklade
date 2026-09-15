@@ -153,3 +153,13 @@ describe('Item 44. Статусы воронки поставок', () => {
     expect(isFunnelVisibleStatus('SOME_NEW_OZON_STATUS')).toBe(true);
   });
 });
+
+describe('Блок алертов на вкладке «Склад» по умолчанию свёрнут (15.09.2026)', () => {
+  it('стартовое состояние isAlertsCollapsed — true, кнопка разворачивает', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const dash = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
+    expect(dash).toMatch(/const \[isAlertsCollapsed, setIsAlertsCollapsed\] = useState\(true\)/);
+    expect(dash).toContain('{!isAlertsCollapsed && (');
+  });
+});

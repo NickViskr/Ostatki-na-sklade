@@ -159,7 +159,7 @@ export const Dashboard: React.FC = React.memo(() => {
   const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
   const clusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
 
-  const [isAlertsCollapsed, setIsAlertsCollapsed] = useState(false);
+  const [isAlertsCollapsed, setIsAlertsCollapsed] = useState(true); // collapsed by default (owner request, 15.09.2026)
 
   const dismissAlert = (key: string) => {
     setDismissedAlerts((prev) => {
