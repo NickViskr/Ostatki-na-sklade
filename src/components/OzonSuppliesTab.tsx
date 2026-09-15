@@ -10,7 +10,7 @@ import {
   ChevronUp, 
   Calendar
 } from 'lucide-react';
-import { STATUS_DICT, getStatusDetails, getStatusLabel, isAcceptanceStage } from '../lib/ozonStatus';
+import { STATUS_DICT, getStatusDetails, getStatusLabel, isAcceptanceStage, isStockDeparted } from '../lib/ozonStatus';
 import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
 import { buildOzonGroups, useProcessOzonGroup, useProcessOzonGroups, OzonGroup } from '../lib/ozonGroups';
@@ -1248,9 +1248,15 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       toast.error('В заявке нет новых поставок');
       return;
     }
+    // Item 68 stage 1. The button sits on the order but marks ROWS: only the `new` ones.
+    // The owner read it as «the whole order» and held back — so the confirmation lists
+    // exactly which supplies will be marked and says the processed ones are untouched.
+    const listed = newPostings
+      .map(p => `${p.storageWarehouse || 'склад не указан'} (№ ${p.postingId})`)
+      .join(', ');
     askConfirmation(
-      "Игнорировать заявку Ozon?",
-      `Все новые поставки заявки № ${group.label} (${newPostings.length} шт.) будут помечены как проигнорированные.`,
+      "Игнорировать поставки заявки Ozon?",
+      `Будут помечены как проигнорированные только ещё не оформленные поставки заявки № ${group.label}: ${listed}. Оформленные поставки этой заявки не изменятся.`,
       async () => {
         const okBatch = await markExternalShipmentsBatch(newPostings.map(p => p.postingId), 'ignored');
         if (okBatch) {
@@ -1259,6 +1265,20 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       }
     );
   }, [askConfirmation, markExternalShipmentsBatch]);
+
+  // Item 68 stage 1. One supply of a multi-cluster order stayed in the warehouse while the
+  // others left: it is marked on its own row, and nothing else in the order is touched.
+  // Only a `new` supply that has NOT departed qualifies — a departed one must be written off.
+  const handleMarkPostingNotShipped = useCallback((s: ExternalShipment, groupLabel: string) => {
+    askConfirmation(
+      "Поставка не отгружена?",
+      `Поставка № ${s.postingId} (${s.storageWarehouse || 'склад не указан'}) заявки № ${groupLabel} будет помечена как не отгруженная: резерв под неё снимется, списания не будет. Остальные поставки заявки не изменятся.`,
+      async () => {
+        const ok = await markExternalShipment(s.postingId, 'ignored');
+        if (ok) toast.success(`Поставка № ${s.postingId} помечена как не отгруженная`);
+      }
+    );
+  }, [askConfirmation, markExternalShipment]);
 
   const handleLinkAsDuplicate = useCallback((group: OzonGroup) => {
     const newPostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(p => p.status === 'new');
@@ -1359,9 +1379,12 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   // Отменённые кластеры многокластерной заявки навсегда остаются в локальном статусе 'new',
   // потому что списывать по ним нечего. Считать их ожидающими оформления нельзя —
   // иначе полностью проведённая заявка вечно висит в списке из-за отменённых кластеров.
+  // Item 68 stage 4. OVERDUE is the same as CANCELLED here: the goods never left our
+  // warehouse, the netting has already dropped the reserve (PENDING_CLEARED_STATUSES), and
+  // «Оформить» would stay grey for ever — the order must not hang in «requires action».
   const isActionableItem = (i: any) =>
     i.status === 'new' &&
-    String(i.ozonStatus || '').trim().toUpperCase() !== 'CANCELLED';
+    !['CANCELLED', 'OVERDUE'].includes(String(i.ozonStatus || '').trim().toUpperCase());
 
   // Обработанные = заявки без единой поставки, требующей действий, либо полностью отменённые
   const processedGroupsCount = useMemo(
@@ -1853,6 +1876,27 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                         <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-100 text-indigo-700">
                                           Перерасчёт ✓
                                         </span>
+                                      )}
+                                      {/* Item 68 stage 1. The row's own state: without it the owner could not see
+                                          that «Игнорировать» had marked one supply and left the rest alone. */}
+                                      {s.status === 'processed' && (
+                                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-100">
+                                          Списана
+                                        </span>
+                                      )}
+                                      {s.status === 'ignored' && (
+                                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 text-slate-600">
+                                          Не отгружена
+                                        </span>
+                                      )}
+                                      {!group.isVirtual && s.status === 'new' && !isStockDeparted(s.ozonStatus) && isActionableItem(s) && (
+                                        <button
+                                          id={`btn-not-shipped-${s.postingId}`}
+                                          onClick={(e) => { e.stopPropagation(); handleMarkPostingNotShipped(s, group.label); }}
+                                          className="px-2.5 py-1 rounded-lg text-xs font-bold bg-white border border-slate-300 text-slate-600 hover:bg-slate-100 transition-all cursor-pointer"
+                                        >
+                                          Не отгружена
+                                        </button>
                                       )}
                                       {s.ozonStatusDate && (
                                         <span className="text-xs text-slate-400 font-bold whitespace-nowrap">
