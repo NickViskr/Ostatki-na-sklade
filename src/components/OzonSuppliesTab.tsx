@@ -1917,24 +1917,28 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                 }}
                                 className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/40 transition-colors"
                               >
-                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1">
-                                  <div>
+                                {/* Item 68 (owner's remark 15.09.2026): the badge block on the right grew a button
+                                    and, being unshrinkable, squeezed this grid below its minimum — the supply
+                                    number ran over the warehouse name. Every cell may now shrink and cuts with
+                                    an ellipsis, and the right block is capped at half the row and wraps. */}
+                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1 min-w-0">
+                                  <div className="min-w-0">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">№ Поставки</div>
-                                    <div className="text-sm font-bold text-slate-800 mt-0.5">{s.postingId}</div>
+                                    <div className="text-sm font-bold text-slate-800 mt-0.5 truncate" title={s.postingId}>{s.postingId}</div>
                                   </div>
-                                  <div>
+                                  <div className="min-w-0">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Склад хранения</div>
                                     <div className="text-sm font-bold text-indigo-700 mt-0.5 truncate" title={s.storageWarehouse}>
                                       {s.storageWarehouse || '—'}
                                     </div>
                                   </div>
-                                  <div>
+                                  <div className="min-w-0">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Пункт отгрузки</div>
                                     <div className="text-sm font-semibold text-slate-600 mt-0.5 truncate" title={s.dropOffWarehouse}>
                                       {s.dropOffWarehouse || '—'}
                                     </div>
                                   </div>
-                                  <div>
+                                  <div className="min-w-0">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Таймслот</div>
                                     <div className="text-sm font-semibold text-slate-600 mt-0.5 truncate" title={s.timeslot}>
                                       {s.timeslot || '—'}
@@ -1942,10 +1946,10 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                   </div>
                                 </div>
                                 
-                                <div className="flex items-center gap-4 shrink-0 justify-between lg:justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-50">
-                                  <div className="text-left lg:text-right">
+                                <div className="flex items-center gap-4 min-w-0 lg:max-w-[50%] justify-between lg:justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-50">
+                                  <div className="text-left lg:text-right min-w-0">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Статус Ozon</div>
-                                    <div className="flex flex-wrap items-center gap-2">
+                                    <div className="flex flex-wrap items-center lg:justify-end gap-2">
                                       <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${statusDetails.badgeClass}`}>
                                         {statusDetails.label}
                                       </span>

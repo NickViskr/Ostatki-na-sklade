@@ -154,11 +154,27 @@ describe('подключение этапа 2 к экрану, хранилищ�
     expect(tab).toMatch(/disabled=\{isProcessing \|\| invalid\.length > 0 \|\| returning\.length === 0\}/);
   });
 
-  it('хранилище зовёт commitUnshippedReturn с ключом операции и перечитывает склад и поставки', () => {
+  it('хранилище зовёт commitUnshippedReturn с ключом операции и обновляет экран ИЗ ОТВЕТА, без перечитывания базы', () => {
+    // Owner's remark 15.09.2026: 20 s of waiting. Three re-reads after the answer cost ~12 s of it.
     expect(store).toMatch(/fetchGas\('commitUnshippedReturn', \{ data: \{ postingId, shipped, opId: newOperationId\(\) \} \}\)/);
     const body = store.slice(store.indexOf('commitUnshippedReturn: async'), store.indexOf('saveShipmentShortageRecalc: async'));
-    expect(body).toContain('await get().fetchStock();');
-    expect(body).toContain('await get().fetchExternalShipments();');
+    expect(body).not.toContain('fetchStock()');
+    expect(body).not.toContain('fetchExternalShipments()');
+    expect(body).toMatch(/s\.postingId === postingId \? \{ \.\.\.s, shippedJSON: recordJSON \} : s/);
+    expect(body).toMatch(/data\.newTransactions/);
+    expect(body).toMatch(/normalizeStock\(data\.stock\)/);
+  });
+
+  it('прокси знает действие: сбрасывает ровно то, что возврат меняет, а не весь кэш', () => {
+    const server = fs.readFileSync(path.join(process.cwd(), 'server.ts'), 'utf8');
+    expect(server).toMatch(/commitUnshippedReturn: \['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments'\]/);
+  });
+
+  it('строка поставки: сетка сжимаема, номер обрезается многоточием, блок бейджей ограничен половиной', () => {
+    expect(tab).toContain('<div className="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1 min-w-0">');
+    expect(tab).toMatch(/<div className="text-sm font-bold text-slate-800 mt-0\.5 truncate" title=\{s\.postingId\}>\{s\.postingId\}<\/div>/);
+    expect(tab).toContain('flex items-center gap-4 min-w-0 lg:max-w-[50%] justify-between lg:justify-end');
+    expect(tab).not.toContain('flex items-center gap-4 shrink-0 justify-between lg:justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-50');
   });
 
   it('Code.gs: колонка «ОтгруженоJSON» в заголовках, действие только для администратора, приход помечен «Корректировка»', () => {

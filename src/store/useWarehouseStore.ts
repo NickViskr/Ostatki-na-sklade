@@ -1502,12 +1502,22 @@ export const useWarehouseStore = create<WarehouseState>()(
       // One operation id per attempt: a repeated send of the same attempt is not a second return.
       const res = await get().fetchGas('commitUnshippedReturn', { data: { postingId, shipped, opId: newOperationId() } });
       if (res.status === 'success') {
-        if (res.data && Array.isArray(res.data.stock)) {
-          set({ stock: normalizeStock(res.data.stock) });
-        }
-        // The receipt rows live in «История» and the row carries «ОтгруженоJSON» now: both re-read.
-        await get().fetchStock();
-        await get().fetchExternalShipments();
+        // Everything the screen needs comes back in the answer: the stock, the receipt rows and
+        // the row's record. Re-reading the base here cost ~12 s live (15.09.2026) — not done.
+        const data = res.data || {};
+        const recordJSON = data.record ? JSON.stringify(data.record) : '';
+        set((state) => {
+          const uniqueMap = new Map<string, Transaction>();
+          state.transactions.forEach((tx) => uniqueMap.set(tx.id, tx));
+          (Array.isArray(data.newTransactions) ? data.newTransactions : []).forEach((tx: Transaction) => uniqueMap.set(tx.id, tx));
+          return {
+            stock: Array.isArray(data.stock) ? normalizeStock(data.stock) : state.stock,
+            transactions: Array.from(uniqueMap.values()),
+            externalShipments: state.externalShipments.map(s =>
+              s.postingId === postingId ? { ...s, shippedJSON: recordJSON } : s
+            )
+          };
+        });
         toast.success('Неотгруженное возвращено на склад');
         return true;
       }

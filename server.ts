@@ -263,7 +263,9 @@ async function startServer() {
     // Item 47, stage 3: stamping the exported rows touches nothing any other read returns,
     // so the list is deliberately empty. It must still be present here: an action missing
     // from this map wipes the whole cache.
-    markOzonCostExported: []
+    markOzonCostExported: [],
+    // Item 68 stage 2: a return moves stock, adds history rows and marks the supply row.
+    commitUnshippedReturn: ['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments']
   };
 
   function invalidateCacheFor(writeAction: string): void {

@@ -6625,7 +6625,10 @@ function commitUnshippedReturn(postingId, shipped, username, opId) {
   };
   sheet.getRange(rowIndex + 1, iShipped + 1).setValue(JSON.stringify(record));
   SpreadsheetApp.flush();
-  return { success: true, returned: receiptItems, record: record, stock: commit.stock };
+  // The client patches its state from this answer — stock, the receipt rows, the row's record —
+  // instead of re-reading the whole base: measured live 15.09.2026, the three re-reads after a
+  // successful return cost ~12 s on top of the ~7 s of the return itself.
+  return { success: true, returned: receiptItems, record: record, stock: commit.stock, newTransactions: commit.newTransactions || [] };
 }
 
 function saveExternalShipmentAcceptance(postingId, acceptedJSON) {

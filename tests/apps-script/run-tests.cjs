@@ -3066,6 +3066,9 @@ function speedHarness(articles) {
     check('Возврат: id проводок в строке — это id приходов из «Истории»',
       record && rec.every(r => record.returnTxIds.indexOf(String(r['ID'])) >= 0), 'ids');
     check('Возврат: ответ несёт список возвращённого', Array.isArray(res.returned) && res.returned.length === 3, 'returned=' + (res.returned && res.returned.length));
+    check('Возврат: ответ несёт сами проводки прихода — экран обновляется без перечитывания базы',
+      Array.isArray(res.newTransactions) && res.newTransactions.length === 3 && res.newTransactions.every(t => t.type === 'Приход' && Number(t.quantity) === 18),
+      'newTransactions=' + (res.newTransactions && res.newTransactions.length));
   }
 
   // ---- The price of the write-off wins over today's average ----
