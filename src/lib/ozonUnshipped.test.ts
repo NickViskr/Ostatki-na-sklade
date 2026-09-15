@@ -168,3 +168,49 @@ describe('подключение этапа 2 к экрану, хранилищ�
     expect(gas).toContain("shippedJSON: getVal(colShippedJson, false)");
   });
 });
+
+// ---- Stage 3: the alert on the dashboard, built from the same facts.
+describe('пункт 68, этап 3: алерт «Отгружено меньше, чем списано»', () => {
+  it('боевой случай даёт один оранжевый алерт с цифрами и призывом оформить возврат', async () => {
+    const { buildOzonAlerts } = await import('./ozonAlerts');
+    const alerts = buildOzonAlerts([original, virtual], skus).filter(a => a.type === 'short_shipment');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      key: '2000065651020:short_shipment',
+      postingId: '2000065651020',
+      orderNumber: '127380557-1',
+      cabinet: 'MaxiStore',
+      severity: 'orange',
+      title: 'Отгружено меньше, чем списано'
+    });
+    expect(alerts[0].description).toBe('Поставка № 2000065651020 (заявка № 127380557-1): BowlGrayMini_01: уехало 18 из 36 — оформить возврат на склад');
+  });
+
+  it('после возврата алерт гаснет, красный «Отказано в приёмке» по той же строке остаётся', async () => {
+    const { buildOzonAlerts } = await import('./ozonAlerts');
+    const returned = row({ ...original, shippedJSON: JSON.stringify({ lines: [], returnTxIds: [], returnedAt: '', by: '' }) });
+    const alerts = buildOzonAlerts([returned, virtual], skus);
+    expect(alerts.some(a => a.type === 'short_shipment')).toBe(false);
+    expect(alerts.some(a => a.type === 'rejected' && a.postingId === '2000065651020')).toBe(true);
+  });
+
+  it('оранжевый идёт сразу после красных, до фиолетовых и янтарных', async () => {
+    const { buildOzonAlerts } = await import('./ozonAlerts');
+    // An amber alert of another supply must land AFTER the orange one — without it the
+    // order check passed with the orange alert placed last (a mutation showed it, 15.09.2026).
+    const withShortage = row({
+      postingId: 'S2', status: 'processed', ozonStatus: 'COMPLETED',
+      itemsJSON: JSON.stringify([{ offerId: 'Полка', quantity: 10 }]),
+      acceptedJSON: JSON.stringify([{ offerId: 'Полка', accepted: 7 }])
+    });
+    const alerts = buildOzonAlerts([withShortage, original, virtual], skus);
+    const order = alerts.map(a => a.severity);
+    expect(order).toEqual(['red', 'orange', 'amber']);
+  });
+
+  it('кнопка «Открыть» ведёт на вкладку «Поставки Озон» (тип не в списке исключений дашборда)', () => {
+    const dash = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
+    expect(dash).toMatch(/setActiveTab\(alert\.type === 'supply_needed' \|\| alert\.type === 'factory_order' \? 'ozonStocks' : 'ozon'\)/);
+    expect(dash).toContain("alert.severity === 'orange'");
+  });
+});

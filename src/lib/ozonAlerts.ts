@@ -1,8 +1,9 @@
 import { ExternalShipment, SKUItem } from '../types';
 import { detectPeresort } from './ozonPeresort';
+import { findShortShipments } from './ozonUnshipped';
 import { OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
 
-export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit' | 'supply_needed' | 'factory_order' | 'reserve_shortage';
+export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit' | 'supply_needed' | 'factory_order' | 'reserve_shortage' | 'short_shipment';
 
 export interface OzonAlert {
   key: string;            // `${postingId}:${type}` — уникальный ключ для скрытия
@@ -198,7 +199,29 @@ export function buildOzonAlerts(shipments: ExternalShipment[], skus: SKUItem[]):
     }
   }
 
-  return [...redAlerts, ...violetAlerts, ...amberAlerts];
+  // Item 68 stage 3. Ozon's own virtual supply says fewer pieces arrived than were written
+  // off, and the return has not been posted yet: the shelf holds goods the books lost.
+  // Orange: it is money, not a status — nothing in Ozon needs doing, the warehouse does.
+  const orangeAlerts: OzonAlert[] = findShortShipments(shipments, skus).map(short => {
+    const s = short.supply;
+    const orderRef = s.orderNumber || s.orderId || '';
+    const lines = short.lines
+      .filter(l => l.declared > l.shipped)
+      .map(l => `${l.article}: уехало ${l.shipped} из ${l.declared}`)
+      .join(', ');
+    return {
+      key: `${s.postingId}:short_shipment`,
+      postingId: s.postingId,
+      orderNumber: s.orderNumber,
+      cabinet: s.cabinet,
+      type: 'short_shipment',
+      severity: 'orange',
+      title: 'Отгружено меньше, чем списано',
+      description: `Поставка № ${s.postingId}${orderRef ? ` (заявка № ${orderRef})` : ''}: ${lines} — оформить возврат на склад`
+    };
+  });
+
+  return [...redAlerts, ...orangeAlerts, ...violetAlerts, ...amberAlerts];
 }
 
 export function buildCoverageAlerts(
