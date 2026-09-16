@@ -212,3 +212,17 @@ export function buildDestinationOptions(
   }
   return Array.from(seen).sort((a, b) => a.localeCompare(b, 'ru'));
 }
+
+/**
+ * The type shown in «История» for one row. A stock correction made in the «Списание» menu is
+ * stored as an ordinary receipt or expense of the difference, with the tag
+ * «[Корректировка остатка]» in its destination; the owner asked (16.09.2026) to see such rows
+ * as «Приход-корректировка» / «Расход-корректировка» instead of a bare «Приход» / «Расход».
+ * Display only: the stored type stays «Приход» / «Расход», which everything else keys on.
+ */
+export const STOCK_CORRECTION_TAG = 'Корректировка остатка';
+
+export function historyTypeLabel(row: { type: string; destination?: string | null }): string {
+  const isCorrection = parseDestination(row.destination).tags.includes(STOCK_CORRECTION_TAG);
+  return isCorrection ? row.type + '-корректировка' : row.type;
+}

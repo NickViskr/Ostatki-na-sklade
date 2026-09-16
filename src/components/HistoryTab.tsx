@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
-import { buildDestinationOptions, destinationMain, formatCurrency, parseAppDate, parseDestination } from '../lib/utils';
+import { buildDestinationOptions, destinationMain, formatCurrency, historyTypeLabel, parseAppDate, parseDestination } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -255,7 +255,7 @@ export const HistoryTab: React.FC = React.memo(() => {
                 <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold ${
                   t.type === 'Приход' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
                 }`}>
-                  {t.type}
+                  {historyTypeLabel(t)}
                 </span>
                 <span className="font-mono text-slate-800 font-bold">{t.article}</span>
               </span>
@@ -339,7 +339,7 @@ export const HistoryTab: React.FC = React.memo(() => {
   const handleExportCSV = useCallback(() => {
     const csvRows = ['id,date,type,article,quantity,price,total,destination,user'];
     for (const t of filteredHistory) {
-      csvRows.push([t.id, t.date, t.type, t.article, t.quantity, t.price, t.total, t.destination, t.user || ''].join(','));
+      csvRows.push([t.id, t.date, historyTypeLabel(t), t.article, t.quantity, t.price, t.total, t.destination, t.user || ''].join(','));
     }
     const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -636,7 +636,7 @@ export const HistoryTab: React.FC = React.memo(() => {
                       <span className={`flex items-center justify-center gap-1 w-fit px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                         t.type === 'Приход' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
                       }`}>
-                        {t.type}
+                        {historyTypeLabel(t)}
                       </span>
                     </td>
                     <td className={`px-3 py-3 ${t.isComponent ? 'pl-10' : ''}`}>
