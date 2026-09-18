@@ -332,7 +332,7 @@ describe('рекомендации пересчитываются сразу п�
   it('журнал перечитывается сразу после сообщения «Заявка создана», ДО достройки поставки', () => {
     const toastAt = modal.indexOf("toast.success('Заявка создана в Ozon. Номер: ' + orderId);");
     const refetchAt = modal.indexOf('fetchOzonSupplyRequests();');
-    const finalizeAt = modal.indexOf('await finalizeSupply(orderId, verdictData);');
+    const finalizeAt = modal.indexOf('await finalizeSupply(orderId);');
     expect(toastAt).toBeGreaterThan(-1);
     expect(refetchAt).toBeGreaterThan(toastAt);
     expect(finalizeAt).toBeGreaterThan(refetchAt);

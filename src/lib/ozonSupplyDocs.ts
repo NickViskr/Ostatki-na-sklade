@@ -98,3 +98,40 @@ export function parseSupplyDocs(docsJSON?: string | null): SupplyDocsRecord | nu
     ok: parsed.ok === true
   };
 }
+
+/** The journal row fields the tab needs to find the record of an order. */
+export interface DocsJournalRow {
+  orderId: string;
+  date: string;
+  docsJSON?: string;
+}
+
+export interface OrderDocsStatus {
+  /** The order was created through the app: the journal «Заявки Ozon» has its row. */
+  inJournal: boolean;
+  record: SupplyDocsRecord | null;
+  kind: 'ok' | 'issues' | 'none';
+  /** Warnings, problems and missing labels of the record, in that order. */
+  issues: string[];
+}
+
+/**
+ * Item 74b. Documents status of one order for the «Поставки Ozon» tab. A duplicate-bound
+ * order may have several journal rows; the record of the latest row wins. Orders that never
+ * went through the wizard have no journal row and get no indicator at all.
+ */
+export function orderDocsStatus(rows: DocsJournalRow[], orderId: string): OrderDocsStatus {
+  const id = String(orderId || '').trim();
+  const mine = id ? rows.filter((r) => String(r.orderId || '').trim() === id) : [];
+  if (mine.length === 0) return { inJournal: false, record: null, kind: 'none', issues: [] };
+
+  let latest = mine[0];
+  for (const r of mine) {
+    if (String(r.date || '') > String(latest.date || '')) latest = r;
+  }
+  const record = parseSupplyDocs(latest.docsJSON);
+  if (!record) return { inJournal: true, record: null, kind: 'none', issues: [] };
+
+  const issues = record.warnings.concat(record.problems, record.missingLabels.map((m) => 'Нет этикетки ШК: ' + m));
+  return { inJournal: true, record, kind: record.ok ? 'ok' : 'issues', issues };
+}

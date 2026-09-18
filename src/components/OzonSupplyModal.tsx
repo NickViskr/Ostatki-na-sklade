@@ -1,5 +1,4 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { buildCargoPlan, buildBoxesPayload } from '../lib/ozonCargo';
 import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -654,89 +653,52 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   /**
    * Автоматическая достройка заявки после её создания: грузоместа, этикетки,
    * файлы состава и папка документов на Google Диске. Дополнительных кнопок нет.
-   * Раскладка считается по составу, который подтвердил пользователь, то есть по
-   * accepted из вердикта Ozon, а не по исходному плану.
+   * Item 74b. Всё делает прокси по номеру заявки (/api/ozon/supply/docs): состав берёт
+   * из Ozon, папку на Диск складывает сам и пишет итог в журнал «Заявки Ozon». Браузер
+   * только ждёт ответа — обрыв этого ожидания (18.09.2026, заявка 129260922-1) больше
+   * ничего не теряет: те же документы собираются кнопкой на вкладке «Поставки Ozon».
    */
-  const finalizeSupply = async (orderId: string, verdictData: any) => {
-    const clustersOut: any[] = [];
-    const zones: Record<string, string> = {};
-    const articleSet: Record<string, boolean> = {};
+  const finalizeSupply = async (orderId: string) => {
+    setProgressText('Создаю грузоместа, этикетки и папку на Google Диске…');
 
-    for (const c of (verdictData?.clusters || [])) {
-      const accepted = Array.isArray(c?.accepted) ? c.accepted : [];
-      const items = accepted.map((it: any) => ({
-        offerId: String(it?.offerId || ''),
-        barcode: String(it?.barcode || ''),
-        quantity: Number(it?.quantity) || 0
-      }));
-      for (const it of accepted) {
-        const bc = String(it?.barcode || '');
-        if (bc) zones[bc] = String(it?.placementZone || '');
-      }
-      const plan = buildCargoPlan(items, skus);
-      for (const b of plan.boxes) articleSet[b.article] = true;
-      clustersOut.push({
-        clusterId: String(c?.clusterId || ''),
-        clusterName: String(c?.clusterName || ''),
-        boxes: buildBoxesPayload(plan)
-      });
-    }
-
-    setProgressText('Создаю грузоместа и этикетки в Ozon…');
-
+    const fallback = 'Соберите их кнопкой «Собрать документы» на вкладке «Поставки Ozon».';
     let fin: any;
     try {
-      fin = await fetchWithTimeout('/api/ozon/supply/finalize', proxyBody({
-        cabinet,
-        orderId,
-        clusters: clustersOut,
-        zones
-      }), FINALIZE_TIMEOUT_SEC);
+      fin = await fetchWithTimeout('/api/ozon/supply/docs', proxyBody({ cabinet, orderId }), FINALIZE_TIMEOUT_SEC);
     } catch (e: any) {
-      const reason = e?.name === 'AbortError' ? 'Ozon не ответил вовремя' : (e?.message || 'ошибка сети');
-      toast.error('Заявка создана, но грузоместа не отправлены: ' + reason + '. Заполните их в Ozon Seller.');
+      const reason = e?.name === 'AbortError' ? 'ответ не пришёл вовремя' : (e?.message || 'ошибка сети');
+      toast.error('Заявка создана, но документы не подтверждены: ' + reason + '. ' + fallback, { duration: 15000 });
       return;
     }
 
     if (fin?.status !== 'success') {
-      toast.error('Заявка создана, но грузоместа не отправлены: ' + (fin?.message || 'ошибка прокси') + '. Заполните их в Ozon Seller.');
+      toast.error('Заявка создана, но документы не собраны: ' + (fin?.message || 'ошибка прокси') + '. ' + fallback, { duration: 15000 });
       return;
     }
 
-    const warnings: string[] = Array.isArray(fin.data?.warnings) ? fin.data.warnings : [];
-
-    setProgressText('Складываю файлы на Google Диск…');
-
-    try {
-      const gas = await fetchGas('saveSupplyDocsToDrive', {
-        data: {
-          folderName: String(fin.data?.folderName || ''),
-          files: Array.isArray(fin.data?.files) ? fin.data.files : [],
-          articles: Object.keys(articleSet)
-        }
-      });
-      const res = gas?.data || gas;
-      const problems: string[] = Array.isArray(res?.problems) ? res.problems : [];
-      const missing: string[] = Array.isArray(res?.missingLabels) ? res.missingLabels : [];
-
-      toast.success('Папка «' + String(res?.folderName || '') + '» собрана на Google Диске');
-
-      // Предупреждения показываем ПОСЛЕ успеха и держим дольше: иначе зелёный тост
-      // накрывает их сверху и пользователь ничего не замечает
-      const allWarnings: string[] = warnings.concat(problems);
-      if (missing.length > 0) {
-        allWarnings.push('Нет этикеток ШК для: ' + missing.join(', ') + '. Положите их в папку-библиотеку на Google Диске.');
-      }
-      allWarnings.forEach((w, i) => {
-        setTimeout(() => toast.error(w, { duration: 15000 }), 400 * (i + 1));
-      });
-    } catch (e: any) {
-      for (const w of warnings) toast.error(w, { duration: 15000 });
-      toast.error('Файлы не сложены на Диск: ' + (e?.message || 'ошибка') + '. Скачайте их из Ozon Seller вручную.', { duration: 15000 });
+    const d = fin.data || {};
+    const issues: string[] = ([] as string[]).concat(
+      Array.isArray(d.warnings) ? d.warnings : [],
+      Array.isArray(d.problems) ? d.problems : []
+    );
+    const missing: string[] = Array.isArray(d.missingLabels) ? d.missingLabels : [];
+    if (missing.length > 0) {
+      issues.push('Нет этикеток ШК для: ' + missing.join(', ') + '. Положите их в папку-библиотеку на Google Диске.');
     }
+
+    if (d.ok === true) {
+      toast.success('Папка «' + String(d.folderName || '') + '» собрана на Google Диске');
+    } else {
+      toast.error('Документы собраны с замечаниями — см. вкладку «Поставки Ozon»', { duration: 15000 });
+    }
+    // Предупреждения показываем ПОСЛЕ итога и держим дольше: иначе зелёный тост
+    // накрывает их сверху и пользователь ничего не замечает
+    issues.forEach((w, i) => {
+      setTimeout(() => toast.error(w, { duration: 15000 }), 400 * (i + 1));
+    });
   };
 
-  const sendOrder = async (useDraftId: string, clusterIds: string[], verdictData: any) => {
+  const sendOrder = async (useDraftId: string, clusterIds: string[]) => {
     let result: any;
     try {
       result = await fetchWithTimeout('/api/ozon/supply/create', proxyBody({
@@ -794,7 +756,9 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     // cargo/labels/Drive stage — and the coverage recomputes under the open window while
     // the supply is being finished. Not awaited: finishing must not wait for the reading.
     fetchOzonSupplyRequests();
-    await finalizeSupply(orderId, verdictData);
+    await finalizeSupply(orderId);
+    // The journal row now carries the documents record: re-read it for the tab's indicator.
+    fetchOzonSupplyRequests();
     setProgressText('');
     onCreated();
     onClose();
@@ -943,7 +907,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
       setSending(false);
       return;
     }
-    await sendOrder(draftId, clusterIds, verdict);
+    await sendOrder(draftId, clusterIds);
   };
 
   // Первое нажатие только СЧИТАЕТ черновик — надпись обязана это говорить, иначе человек

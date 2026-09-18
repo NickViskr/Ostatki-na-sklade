@@ -105,6 +105,8 @@ export interface OzonSupplyRequestRow {
   itemsJSON: string;
   who: string;
   status: string;
+  /** Item 74. Outcome of the documents build (JSON of SupplyDocsRecord); empty until built. */
+  docsJSON?: string;
 }
 
 /** Одна зачтённая позиция — для расшифровки в интерфейсе. */

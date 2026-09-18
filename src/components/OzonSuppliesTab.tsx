@@ -18,6 +18,7 @@ import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
 import { detectPeresort } from '../lib/ozonPeresort';
 import { buildUnshippedLines, parseShippedRecord, UnshippedLine } from '../lib/ozonUnshipped';
 import { formatCurrency } from '../lib/utils';
+import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
 
 
@@ -1325,6 +1326,13 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const markExternalShipmentsBatch = useWarehouseStore((state) => state.markExternalShipmentsBatch);
   const saveShipmentAcceptance = useWarehouseStore((state) => state.saveShipmentAcceptance);
   const setPendingOzonPostingIds = useWarehouseStore((state) => state.setPendingOzonPostingIds);
+  // Item 74b. The journal «Заявки Ozon» carries the documents record of every order created
+  // through the wizard; the proxy rebuilds the documents by order id on request.
+  const ozonSupplyRequests = useWarehouseStore((state) => state.ozonSupplyRequests);
+  const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
+  const sessionToken = useWarehouseStore((state) => state.sessionToken);
+  const devMode = useWarehouseStore((state) => state.devMode);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
   const setOpType = useUIStore((state) => state.setOpType);
   const setUploadDestination = useUIStore((state) => state.setUploadDestination);
   const askConfirmation = useUIStore((state) => state.askConfirmation);
@@ -1343,6 +1351,8 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [selectedAcceptanceShipment, setSelectedAcceptanceShipment] = useState<ExternalShipment | null>(null);
   const [selectedPeresortShipment, setSelectedPeresortShipment] = useState<ExternalShipment | null>(null);
   const [selectedUnshippedShipment, setSelectedUnshippedShipment] = useState<ExternalShipment | null>(null);
+  // Item 74b. OrderID whose documents are being rebuilt right now (one at a time).
+  const [docsBuildingOrderId, setDocsBuildingOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     setIsLoading(true);
@@ -1350,6 +1360,60 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       setIsLoading(false);
     });
   }, [fetchExternalShipments]);
+
+  useEffect(() => {
+    fetchOzonSupplyRequests();
+  }, [fetchOzonSupplyRequests]);
+
+  const DOCS_BUILD_TIMEOUT_SEC = 180;
+
+  // Item 74b. Rebuild cargoes, labels, composition files and the Drive folder of an order
+  // that already exists in Ozon. Recreating the cargoes gives them new numbers, so the user
+  // confirms first. The outcome lands in the journal, which is re-read for the indicator.
+  const handleBuildDocs = (group: OzonGroup) => {
+    const orderId = String(group.items[0]?.orderId || '').trim();
+    if (!orderId) {
+      toast.error('У заявки нет номера Ozon — документы собрать нельзя');
+      return;
+    }
+    askConfirmation(
+      'Собрать документы заявки?',
+      `Для заявки № ${group.label} будут заново созданы грузоместа в Ozon (прежние номера грузомест и напечатанные по ним этикетки перестанут действовать), получены новые этикетки и файлы состава, и собрана папка «Озон ${group.label}» на Google Диске. Это займёт до пары минут.`,
+      async () => {
+        setDocsBuildingOrderId(orderId);
+        const role = String(currentUser?.role || '').toLowerCase();
+        const sendDevMode = devMode && (role === 'admin' || role === 'администратор');
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), DOCS_BUILD_TIMEOUT_SEC * 1000);
+        try {
+          const res = await fetch('/api/ozon/supply/docs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionToken, cabinet: group.cabinet, orderId, ...(sendDevMode ? { devMode: true } : {}) }),
+            signal: controller.signal
+          });
+          const fin: any = await res.json();
+          if (fin?.status !== 'success') {
+            toast.error('Документы не собраны: ' + (fin?.message || 'ошибка прокси'), { duration: 15000 });
+            return;
+          }
+          const d = fin.data || {};
+          if (d.ok === true) {
+            toast.success('Папка «' + String(d.folderName || '') + '» собрана на Google Диске');
+          } else {
+            toast.error('Документы собраны с замечаниями — они перечислены у заявки', { duration: 15000 });
+          }
+        } catch (e: any) {
+          const reason = e?.name === 'AbortError' ? 'ответ не пришёл вовремя' : (e?.message || 'ошибка сети');
+          toast.error('Документы не подтверждены: ' + reason + '. Обновите вкладку — итог записан в журнал, если сборка дошла до конца.', { duration: 15000 });
+        } finally {
+          clearTimeout(timer);
+          setDocsBuildingOrderId(null);
+          fetchOzonSupplyRequests();
+        }
+      }
+    );
+  };
 
   const toggleGroup = (groupId: string) => {
     setExpandedGroups(prev => {
@@ -1793,11 +1857,54 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                           Похожа на ручную — проверьте
                         </span>
                       )}
+                      {!group.isVirtual && (() => {
+                        // Item 74b. Only orders created through the wizard have a journal row.
+                        const st = orderDocsStatus(ozonSupplyRequests || [], String(group.items[0]?.orderId || ''));
+                        if (!st.inJournal) return null;
+                        if (st.kind === 'ok') {
+                          return (
+                            <a
+                              href={st.record?.folderUrl || undefined}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              title={'Папка «' + String(st.record?.folderName || '') + '» на Google Диске'}
+                              className="text-xs font-semibold px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full border border-emerald-100 hover:bg-emerald-100"
+                            >
+                              Документы собраны
+                            </a>
+                          );
+                        }
+                        if (st.kind === 'issues') {
+                          return (
+                            <span
+                              title={st.issues.join('\n')}
+                              className="text-xs font-semibold px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full border border-amber-100"
+                            >
+                              Документы с замечаниями ({st.issues.length})
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="text-xs font-semibold px-2.5 py-1 bg-red-50 text-red-700 rounded-full border border-red-100">
+                            Документы не собраны
+                          </span>
+                        );
+                      })()}
                     </div>
                     <div className="text-sm text-slate-500 font-medium flex items-center gap-1.5">
                       <Calendar size={14} className="text-slate-400" />
                       Дата отгрузки: {group.shipmentDate}
                     </div>
+                    {!group.isVirtual && (() => {
+                      const st = orderDocsStatus(ozonSupplyRequests || [], String(group.items[0]?.orderId || ''));
+                      if (st.kind !== 'issues') return null;
+                      return (
+                        <ul className="text-xs text-amber-700 list-disc pl-5 space-y-0.5">
+                          {st.issues.map((w, i) => <li key={i}>{w}</li>)}
+                        </ul>
+                      );
+                    })()}
                   </div>
                   
                   <div className="flex items-center justify-between sm:justify-end gap-6 border-t sm:border-t-0 pt-3 sm:pt-0 border-slate-100">
@@ -1817,6 +1924,23 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                         </button>
                       </div>
                     )}
+                    {!group.isVirtual && !group.needsExpense && group.items.some((i: any) => isActionableItem(i)) && (() => {
+                      // Item 74b. Until the goods leave for Ozon the documents can be rebuilt;
+                      // an order without a journal row was not created here and has no button.
+                      const st = orderDocsStatus(ozonSupplyRequests || [], String(group.items[0]?.orderId || ''));
+                      if (!st.inJournal || st.kind === 'ok') return null;
+                      const busy = docsBuildingOrderId === String(group.items[0]?.orderId || '');
+                      return (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); if (!busy) handleBuildDocs(group); }}
+                          disabled={busy || docsBuildingOrderId !== null}
+                          className="bg-white border border-emerald-500 text-emerald-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-emerald-50 transition-all cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                        >
+                          {busy && <Loader2 size={16} className="animate-spin" />}
+                          {busy ? 'Собираю…' : 'Собрать документы'}
+                        </button>
+                      );
+                    })()}
                     {group.items.some((i: any) => isActionableItem(i)) && !group.isVirtual && (
                       <div className="flex gap-2">
                         {group.matchResult?.verdict !== 'none' && (

@@ -2,8 +2,10 @@
 // (/v1/supply-order/bundle), not from a layout the browser once held.
 
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import { SKUItem } from '../types';
-import { layoutFromBundle, parseSupplyDocs } from './ozonSupplyDocs';
+import { layoutFromBundle, orderDocsStatus, parseSupplyDocs } from './ozonSupplyDocs';
 
 const sku = (name: string, pcsPerBox: number, ozonBarcode: string): SKUItem => ({
   sku: name, price: 0, minStock: 0, pcsPerBox, ozonBarcode, boxesPerPallet: 0, volumeLiters: 0, leadTimeDays: 0
@@ -78,5 +80,75 @@ describe('parseSupplyDocs', () => {
     expect(rec!.saved).toEqual(['Москва.xlsx']);
     expect(rec!.missingLabels).toEqual(['A.pdf']);
     expect(parseSupplyDocs(JSON.stringify({ ok: true }))!.ok).toBe(true);
+  });
+});
+
+describe('orderDocsStatus', () => {
+  const rec = (ok: boolean, extra: Partial<{ warnings: string[]; problems: string[]; missingLabels: string[] }> = {}) =>
+    JSON.stringify({ at: 'x', orderNumber: 'n', folderName: 'f', folderUrl: 'u', saved: [], cargoes: 2, warnings: [], problems: [], missingLabels: [], ok, ...extra });
+
+  it('an order without a journal row gets no indicator', () => {
+    const st = orderDocsStatus([{ orderId: '1', date: '2026-09-18T10:00:00.000Z', docsJSON: rec(true) }], '2');
+    expect(st).toEqual({ inJournal: false, record: null, kind: 'none', issues: [] });
+  });
+
+  it('a journal row without a record means «not built»', () => {
+    const st = orderDocsStatus([{ orderId: '1', date: '2026-09-18T10:00:00.000Z', docsJSON: '' }], '1');
+    expect(st.inJournal).toBe(true);
+    expect(st.kind).toBe('none');
+    expect(st.record).toBeNull();
+  });
+
+  it('ok record → ok; the latest row of a duplicate-bound order wins', () => {
+    const rows = [
+      { orderId: '1', date: '2026-09-18T10:00:00.000Z', docsJSON: rec(false, { problems: ['old'] }) },
+      { orderId: '1', date: '2026-09-18T12:00:00.000Z', docsJSON: rec(true) },
+      { orderId: '1', date: '2026-09-18T11:00:00.000Z', docsJSON: rec(false, { problems: ['mid'] }) }
+    ];
+    const st = orderDocsStatus(rows, '1');
+    expect(st.kind).toBe('ok');
+    expect(st.issues).toEqual([]);
+  });
+
+  it('a record with issues lists warnings, problems and missing labels in that order', () => {
+    const st = orderDocsStatus([{ orderId: ' 1 ', date: 'd', docsJSON: rec(false, { warnings: ['w'], problems: ['p'], missingLabels: ['A.pdf'] }) }], '1');
+    expect(st.kind).toBe('issues');
+    expect(st.issues).toEqual(['w', 'p', 'Нет этикетки ШК: A.pdf']);
+  });
+});
+
+// Item 74b. Wiring guards: the wizard and the tab go through the server-side build, and the
+// browser no longer holds a step of its own between Ozon and Drive.
+describe('подключение серверной сборки документов к экранам', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const modal = read('src/components/OzonSupplyModal.tsx');
+  const tab = read('src/components/OzonSuppliesTab.tsx');
+  const server = read('server.ts');
+
+  it('мастер после создания заявки вызывает /api/ozon/supply/docs и сам на Диск не ходит', () => {
+    expect(modal).toContain("fetchWithTimeout('/api/ozon/supply/docs'");
+    expect(modal).not.toContain('saveSupplyDocsToDrive');
+    expect(modal).not.toContain('supply/finalize');
+  });
+
+  it('вкладка читает журнал при открытии и рисует индикатор по orderDocsStatus', () => {
+    expect(tab).toContain("import { orderDocsStatus } from '../lib/ozonSupplyDocs';");
+    expect(tab).toMatch(/useEffect\(\(\) => \{\s*fetchOzonSupplyRequests\(\);\s*\}, \[fetchOzonSupplyRequests\]\);/);
+    expect(tab).toContain('Документы собраны');
+    expect(tab).toContain('Документы не собраны');
+    expect(tab).toContain('Документы с замечаниями');
+  });
+
+  it('кнопка «Собрать документы» спрашивает подтверждение о пересоздании грузомест и зовёт прокси', () => {
+    expect(tab).toContain('Собрать документы');
+    expect(tab).toMatch(/askConfirmation\(\s*'Собрать документы заявки\?'[\s\S]{0,400}заново созданы грузоместа/);
+    expect(tab).toContain("fetch('/api/ozon/supply/docs'");
+  });
+
+  it('прокси: finalize снят, документы собирает /api/ozon/supply/docs с записью в журнал', () => {
+    expect(server).not.toContain('/api/ozon/supply/finalize');
+    expect(server).toContain('app.post("/api/ozon/supply/docs"');
+    expect(server).toContain("callGasAction('saveSupplyDocsToDrive'");
+    expect(server).toContain("callGasAction('saveOzonSupplyDocs'");
   });
 });
