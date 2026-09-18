@@ -995,6 +995,50 @@ function buildSkuRow(headers, obj) {
   check('П86: новая строка журнала — docsJSON пуст', !!fresh && fresh.docsJSON === '', JSON.stringify(fresh));
 })();
 
+// ================= Item 49: «Коробка ФФ» in the SKU sheet =================
+// Whether an article needs a fulfilment-centre box. The column is appended by ensureColumns on
+// the first read; an empty cell (an article saved before the column) means «yes» — only an
+// explicit «нет» switches the box off. addSku/updateSku write «да»/«нет» from needsFfBox.
+(() => {
+  const H = freshHarness();
+  const ctx = H.context;
+  // A sheet of the old shape: nine columns, no «Коробка ФФ».
+  H.setSkuSheet(SKU_FULL_HEADERS, [
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ART-A', 'ШТ/КОР': 10 }),
+    buildSkuRow(SKU_FULL_HEADERS, { SKU: 'ART-B', 'ШТ/КОР': 24 })
+  ]);
+  const first = ctx.getSkus();
+  const dump = H.dumpSkuSheet();
+  check('П87: чтение старого листа дописывает колонку «Коробка ФФ»', dump.headers.indexOf('Коробка ФФ') === SKU_FULL_HEADERS.length, JSON.stringify(dump.headers));
+  check('П87: пустая ячейка = коробка нужна', first.every(r => r.needsFfBox === true), JSON.stringify(first));
+
+  ctx.updateSku({ sku: 'ART-B', pcsPerBox: 24, minStock: 0, needsFfBox: false }, 'ART-B');
+  const afterUpdate = ctx.getSkus();
+  const b = afterUpdate.find(r => r.sku === 'ART-B');
+  const a = afterUpdate.find(r => r.sku === 'ART-A');
+  check('П88: updateSku с needsFfBox=false пишет «нет» и читается как false', !!b && b.needsFfBox === false, JSON.stringify(b));
+  check('П88: соседний артикул не тронут', !!a && a.needsFfBox === true && a.pcsPerBox === 10, JSON.stringify(a));
+  const colIdx = H.dumpSkuSheet().headers.indexOf('Коробка ФФ');
+  const rowB = H.dumpSkuSheet().rows.find(r => r[0] === 'ART-B');
+  check('П88: в ячейке ровно «нет»', rowB[colIdx] === 'нет', JSON.stringify(rowB));
+
+  ctx.updateSku({ sku: 'ART-B', pcsPerBox: 24, minStock: 0, needsFfBox: true }, 'ART-B');
+  check('П89: обратное включение пишет «да»', ctx.getSkus().find(r => r.sku === 'ART-B').needsFfBox === true, JSON.stringify(H.dumpSkuSheet()));
+
+  ctx.addSku({ sku: 'ART-C', pcsPerBox: 5, minStock: 0, needsFfBox: false });
+  ctx.addSku({ sku: 'ART-D', pcsPerBox: 5, minStock: 0 });
+  const added = ctx.getSkus();
+  check('П90: addSku с needsFfBox=false — «нет»', added.find(r => r.sku === 'ART-C').needsFfBox === false, JSON.stringify(added));
+  check('П90: addSku без поля — коробка нужна', added.find(r => r.sku === 'ART-D').needsFfBox === true, JSON.stringify(added));
+
+  // Case and spaces in a hand-typed cell.
+  const d2 = H.dumpSkuSheet();
+  const rowD = d2.rows.findIndex(r => r[0] === 'ART-D');
+  d2.rows[rowD][colIdx] = ' НЕТ ';
+  H.getSkuSheet().__setData([d2.headers, ...d2.rows]);
+  check('П91: « НЕТ » руками в ячейке читается как нет', ctx.getSkus().find(r => r.sku === 'ART-D').needsFfBox === false, JSON.stringify(ctx.getSkus()));
+})();
+
 // ================= Item 56, stage 2: additional costs stated as a number, not dug out of the text =================
 // Several Ozon orders shipped as one batch are written as several expenses, and the destination
 // text of each one names the cost of the WHOLE batch. Parsing that text would charge the batch

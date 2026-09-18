@@ -65,6 +65,8 @@ export interface SKUItem {
   leadTimeDays: number;
   /** Название товара из Ozon: хранится в SKU Базе, чтобы пережить распродажу товара в ноль. */
   name?: string;
+  /** Item 49. Needs a fulfilment-centre box (service «короб» on an expense). Undefined = yes. */
+  needsFfBox?: boolean;
 }
 
 export interface User {

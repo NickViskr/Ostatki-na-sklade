@@ -18,6 +18,7 @@ import { formatCurrency, newOperationId } from "../lib/utils";
 import { batchDestinationNote, buildBatchWriteOffPlan } from "../lib/ozonBatchWriteOff";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { toast } from "sonner";
+import { countShipmentBoxes } from '../lib/shipmentBoxes';
 
 export const ConfirmModal: React.FC = () => {
   // Пункт 28, этап B: ключ операции рождается один раз при открытии окна
@@ -331,17 +332,11 @@ export const ConfirmModal: React.FC = () => {
 
   const { totalBoxes, totalPallets } = useMemo(() => {
     if (opType !== "Расход" || !finalItems) return { totalBoxes: 0, totalPallets: 0 };
-    let boxesSum = 0;
-    finalItems.forEach((item) => {
-      const skuData = skus.find((s) => s.sku === item.article);
-      const pcsPerBox = skuData ? skuData.pcsPerBox : 0;
-      const boxes = pcsPerBox > 0 ? Math.ceil(item.quantity / pcsPerBox) : 0;
-      boxesSum += boxes;
-    });
-    const calculatedPallets = boxesSum >= 10 && boxesPerPalletGlobal > 0
-      ? Math.ceil(boxesSum / boxesPerPalletGlobal)
+    const { boxes } = countShipmentBoxes(finalItems, skus);
+    const calculatedPallets = boxes >= 10 && boxesPerPalletGlobal > 0
+      ? Math.ceil(boxes / boxesPerPalletGlobal)
       : 0;
-    return { totalBoxes: boxesSum, totalPallets: calculatedPallets };
+    return { totalBoxes: boxes, totalPallets: calculatedPallets };
   }, [finalItems, skus, opType, boxesPerPalletGlobal]);
 
   const hasPrefilledRef = useRef(false);
@@ -352,16 +347,12 @@ export const ConfirmModal: React.FC = () => {
     if (!parsedItems || parsedItems.length === 0) return;
     if (skus.length === 0 || services.length === 0) return;
 
-    let boxesSum = 0;
-    parsedItems.forEach((item) => {
-      const skuData = skus.find((s) => s.sku === item.article);
-      const pcsPerBox = skuData ? skuData.pcsPerBox : 0;
-      const boxes = pcsPerBox > 0 ? Math.ceil(item.quantity / pcsPerBox) : 0;
-      boxesSum += boxes;
-    });
+    // Item 49. Pallets from the physical boxes; the service «короб» only for articles whose
+    // SKU card needs a fulfilment-centre box.
+    const { boxes, ffBoxes } = countShipmentBoxes(parsedItems, skus);
 
-    const calculatedPallets = boxesSum >= 10 && boxesPerPalletGlobal > 0
-      ? Math.ceil(boxesSum / boxesPerPalletGlobal)
+    const calculatedPallets = boxes >= 10 && boxesPerPalletGlobal > 0
+      ? Math.ceil(boxes / boxesPerPalletGlobal)
       : 0;
 
     const active = services.filter((s) => s.isActive);
@@ -372,7 +363,7 @@ export const ConfirmModal: React.FC = () => {
       if (nameLower.includes("паллет")) {
         newSelected[service.id] = calculatedPallets;
       } else if (nameLower.includes("короб")) {
-        newSelected[service.id] = boxesSum;
+        newSelected[service.id] = ffBoxes;
       } else if (nameLower.includes("забор")) {
         newSelected[service.id] = 1;
       }

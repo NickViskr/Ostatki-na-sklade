@@ -113,6 +113,18 @@ export const SkuModal: React.FC = () => {
             />
           </div>
 
+          {/* Item 49. Off = the fulfilment-centre box is not charged for this article on an expense. */}
+          <label className="flex items-center gap-3 px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={skuForm.needsFfBox !== false}
+              onChange={(e) => setSkuForm({ ...skuForm, needsFfBox: e.target.checked })}
+              className="w-5 h-5 accent-indigo-600"
+            />
+            <span className="text-sm font-bold text-slate-600">Нужна коробка от ФФ</span>
+            <span className="text-xs text-slate-400">— считается в услугах при расходе</span>
+          </label>
+
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-500 uppercase">ШК товара (Ozon)</label>

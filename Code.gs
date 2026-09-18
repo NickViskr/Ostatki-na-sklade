@@ -1257,7 +1257,7 @@ function getSkus() {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) return [];
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon', 'Коробка ФФ']);
   
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return [];
@@ -1274,6 +1274,10 @@ function getSkus() {
   // Запасного номера колонки тут быть не может: «Название Ozon» дописывается в конец листа,
   // и её позиция зависит от того, сколько колонок уже было в конкретной базе.
   const nameIdx = headers.indexOf('Название Ozon');
+  // Item 49. «Коробка ФФ»: does the article need a fulfilment-centre box, charged as the
+  // service «короб» on an expense. Only an explicit «нет» switches it off — an empty cell of
+  // an article created before the column existed keeps the old behaviour (box charged).
+  const ffBoxIdx = headers.indexOf('Коробка ФФ');
   
   const rows = data.slice(1);
   
@@ -1289,9 +1293,15 @@ function getSkus() {
       boxesPerPallet: bppIdx !== -1 && bppIdx < row.length ? Number(row[bppIdx]) || 0 : 0,
       volumeLiters: volIdx !== -1 && volIdx < row.length ? Number(row[volIdx]) || 0 : 0,
       leadTimeDays: leadIdx !== -1 && leadIdx < row.length ? Number(row[leadIdx]) || 0 : 0,
-      name: nameIdx !== -1 && nameIdx < row.length ? String(row[nameIdx] || '') : ''
+      name: nameIdx !== -1 && nameIdx < row.length ? String(row[nameIdx] || '') : '',
+      needsFfBox: !(ffBoxIdx !== -1 && ffBoxIdx < row.length && String(row[ffBoxIdx] || '').trim().toLowerCase() === 'нет')
     };
   });
+}
+
+/** Item 49. The cell of «Коробка ФФ» for a saved SKU: «да» by default, «нет» only when the box is switched off. */
+function ffBoxCell(skuData) {
+  return skuData.needsFfBox === false ? 'нет' : 'да';
 }
 
 function addSku(skuData) {
@@ -1299,7 +1309,7 @@ function addSku(skuData) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден. Выполните инициализацию.');
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon', 'Коробка ФФ']);
   
   const data = sheet.getDataRange().getValues();
   const headers = data[0].map(h => String(h).trim());
@@ -1311,6 +1321,7 @@ function addSku(skuData) {
   const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
   const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
   const leadIdx = headers.indexOf('Срок поставки (дни)') !== -1 ? headers.indexOf('Срок поставки (дни)') : 7;
+  const ffBoxIdx = headers.indexOf('Коробка ФФ');
 
   for (let i = 1; i < data.length; i++) {
     const existingOzon = ozonIdx !== -1 && ozonIdx < data[i].length ? String(data[i][ozonIdx]) : '';
@@ -1334,6 +1345,7 @@ function addSku(skuData) {
   if (bppIdx !== -1) newRow[bppIdx] = skuData.boxesPerPallet || 0;
   if (volIdx !== -1) newRow[volIdx] = skuData.volumeLiters || 0;
   if (leadIdx !== -1) newRow[leadIdx] = skuData.leadTimeDays || 0;
+  if (ffBoxIdx !== -1) newRow[ffBoxIdx] = ffBoxCell(skuData);
   
   sheet.appendRow(newRow);
   
@@ -1345,7 +1357,7 @@ function updateSku(skuData, oldSku) {
   const sheet = ss.getSheetByName('SKU');
   if (!sheet) throw new Error('Лист SKU не найден.');
   
-  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon']);
+  ensureColumns(sheet, ['SKU', 'ШТ/КОР', 'Мин. остаток', 'ШК Ozon', 'Баркод WB', 'КОР/ПАЛ', 'Литраж (л)', 'Срок поставки (дни)', 'Название Ozon', 'Коробка ФФ']);
   
   const data = sheet.getDataRange().getValues();
   const headers = data[0].map(h => String(h).trim());
@@ -1358,6 +1370,7 @@ function updateSku(skuData, oldSku) {
   const bppIdx = headers.indexOf('КОР/ПАЛ') !== -1 ? headers.indexOf('КОР/ПАЛ') : 5;
   const volIdx = headers.indexOf('Литраж (л)') !== -1 ? headers.indexOf('Литраж (л)') : 6;
   const leadIdx = headers.indexOf('Срок поставки (дни)') !== -1 ? headers.indexOf('Срок поставки (дни)') : 7;
+  const ffBoxIdx = headers.indexOf('Коробка ФФ');
   
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][skuIdx]) !== String(oldSku)) {
@@ -1387,6 +1400,7 @@ function updateSku(skuData, oldSku) {
       if (bppIdx !== -1) updatedRow[bppIdx] = skuData.boxesPerPallet || 0;
       if (volIdx !== -1) updatedRow[volIdx] = skuData.volumeLiters || 0;
       if (leadIdx !== -1) updatedRow[leadIdx] = skuData.leadTimeDays || 0;
+      if (ffBoxIdx !== -1) updatedRow[ffBoxIdx] = ffBoxCell(skuData);
       
       sheet.getRange(i + 1, 1, 1, updatedRow.length).setValues([updatedRow]);
       
