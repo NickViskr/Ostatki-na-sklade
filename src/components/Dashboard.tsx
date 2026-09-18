@@ -25,6 +25,7 @@ import { DashSettingsModal } from './DashSettingsModal';
 import { formatCurrency, calcCostDebt, hasCostDebt } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails, isFunnelVisibleStatus } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonAlert } from '../lib/ozonAlerts';
+import { buildFreeStockCsv } from '../lib/freeStockCsv';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 
@@ -602,21 +603,10 @@ export const Dashboard: React.FC = React.memo(() => {
 
   const exportToCSV = () => {
     if (sortedStock.length === 0) return;
-    
-    const headers = ['Артикул', 'Кол-во', 'Себест. (сред.)', 'Капитализация', 'Оборачивать (дни)'];
-    const csvContent = [
-      headers.join(';'),
-      ...sortedStock.map(t => 
-        [
-          t.article,
-          t.quantity,
-          t.avgCost.toFixed(2).replace('.', ','),
-          t.capitalization.toFixed(2).replace('.', ','),
-          t.turnover
-        ].join(';')
-      )
-    ].join('\n');
-    
+
+    // Only what is free for shipment: the shelf minus the reserve of the Ozon supply orders.
+    const csvContent = buildFreeStockCsv(sortedStock, pendingSupplies.byArticle);
+
     const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
