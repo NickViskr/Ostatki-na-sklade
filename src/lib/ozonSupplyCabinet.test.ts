@@ -111,6 +111,6 @@ describe('подключение правила магазина к экрана
 
   it('Прокси: пустой кабинет отвергается, а не подменяется первым', () => {
     expect(server).toContain('Не указан магазин: заявка на поставку принадлежит одному кабинету');
-    expect(server.match(/requireCabinet\(/g) || []).toHaveLength(4); // объявление + три эндпоинта заявки
+    expect(server.match(/requireCabinet\(/g) || []).toHaveLength(5); // объявление + три эндпоинта заявки + /supply/docs (item 74a)
   });
 });

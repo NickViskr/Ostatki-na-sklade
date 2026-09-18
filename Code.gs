@@ -449,6 +449,7 @@ function doPost(e) {
       case 'checkSupplyAvailability': result = checkSupplyAvailability(data); break;
       case 'saveOzonSupplyRequest': assertAdmin(currentUser); result = saveOzonSupplyRequest(data, currentUser.username); break;
       case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
+      case 'saveOzonSupplyDocs': assertAdmin(currentUser); result = saveOzonSupplyDocs(data); break;
       case 'getOzonCostExport': assertAdmin(currentUser); result = getOzonCostExport(); break;
       case 'markOzonCostExported': assertAdmin(currentUser); result = markOzonCostExported(data, currentUser.username); break;
       case 'saveSupplyDocsToDrive': assertAdmin(currentUser); result = saveSupplyDocsToDrive(data); break;
@@ -532,7 +533,7 @@ const OZON_COST_HEADERS = [
   'Остаток до', 'Себестоимость до', 'Отгружено', 'Себестоимость отгрузки', 'Себестоимость после',
   'OpID', 'Выгружено в КАН', 'Источник'
 ];
-const OZON_SUPPLY_REQUESTS_HEADERS = ['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус'];
+const OZON_SUPPLY_REQUESTS_HEADERS = ['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус', 'Документы'];
 const OZON_SETTINGS_DEFAULTS = [
   { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
   { key: 'minStockDays',        value: 7,  desc: 'Неснижаемый остаток, дней продаж' },
@@ -4983,6 +4984,8 @@ function markOzonCostExported(data, username) {
 function getOzonSupplyRequests() {
   const ss = getSpreadsheet();
   const sheet = getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  // Item 74a: «Документы» is appended to journals created before it existed.
+  ensureColumns(sheet, OZON_SUPPLY_REQUESTS_HEADERS);
   const values = sheet.getDataRange().getValues();
   if (values.length <= 1) return [];
   const headers = values[0].map(function(h) { return String(h).trim(); });
@@ -5002,10 +5005,47 @@ function getOzonSupplyRequests() {
       clusters: String(row[idx['Кластеры']] || ''),
       itemsJSON: String(row[idx['Состав']] || ''),
       who: String(row[idx['Кто']] || ''),
-      status: String(row[idx['Статус']] || '')
+      status: String(row[idx['Статус']] || ''),
+      docsJSON: idx['Документы'] >= 0 ? String(row[idx['Документы']] || '') : ''
     });
   }
   return rows;
+}
+
+/**
+ * Item 74a. The proxy has rebuilt the documents of an order (cargoes, labels, composition
+ * files, the Drive folder) and reports the outcome; it lands in the column «Документы» of
+ * the journal row with that OrderID, as one JSON text. Every row of the order gets it (a
+ * duplicate-bound order may have several). Nothing else in the row is touched.
+ *
+ * @param {Object} data { orderId, docsJSON }
+ * @returns {Object} { updated } — how many journal rows were written; 0 = no row for the order
+ */
+function saveOzonSupplyDocs(data) {
+  const orderId = String((data && data.orderId) || '').trim();
+  if (!orderId) throw new Error('Не передан номер заявки (orderId)');
+  const docsJSON = String((data && data.docsJSON) || '').trim();
+  if (!docsJSON) throw new Error('Не переданы сведения о документах (docsJSON)');
+
+  const ss = getSpreadsheet();
+  const sheet = getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  ensureColumns(sheet, OZON_SUPPLY_REQUESTS_HEADERS);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { updated: 0 };
+
+  const headers = readHeaderRow(sheet);
+  const cOrder = headers.indexOf('OrderID');
+  const cDocs = headers.indexOf('Документы');
+  if (cOrder < 0 || cDocs < 0) throw new Error('В листе «Заявки Ozon» нет колонок OrderID / Документы');
+
+  const orders = sheet.getRange(2, cOrder + 1, lastRow - 1, 1).getValues();
+  let updated = 0;
+  for (let r = 0; r < orders.length; r++) {
+    if (String(orders[r][0] || '').trim() !== orderId) continue;
+    sheet.getRange(r + 2, cDocs + 1).setValue(docsJSON);
+    updated++;
+  }
+  return { updated: updated };
 }
 
 

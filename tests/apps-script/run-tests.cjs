@@ -939,6 +939,62 @@ function buildSkuRow(headers, obj) {
   check('П82: новая текущая неделя — 0.21 дня', after['2026-09-21'] && after['2026-09-21'].days === 0.21, `получено: ${JSON.stringify(after['2026-09-21'])}`);
 })();
 
+// ================= Item 74a: the journal «Заявки Ozon» keeps the outcome of the document build =================
+// The proxy rebuilds cargoes, labels and the Drive folder by order id and reports the outcome
+// here; the tab of 74b reads it back as docsJSON. A journal created before the column existed
+// gets it appended on first read or write.
+(() => {
+  const H = freshHarness();
+  H.setNow('2026-09-18T14:00:00Z');
+  const ctx = H.context;
+  // A journal of the old shape: ten columns, no «Документы».
+  const ss = ctx.SpreadsheetApp.getActiveSpreadsheet();
+  const oldHeaders = ['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус'];
+  const sheet = ss.insertSheet('Заявки Ozon');
+  sheet.__setData([
+    oldHeaders,
+    ['SUP-1', new Date('2026-09-14T10:00:00Z'), 'Mercurius', 'D1', '128602806', 'Хоругвино', '1', '[]', 'Николай', 'Создана'],
+    ['SUP-2', new Date('2026-09-18T13:26:00Z'), 'Mercurius', 'D2', '129260922', 'Хоругвино', '1,2', '[]', 'Николай', 'Создана'],
+    // Bound as a duplicate: a second journal row of the same order.
+    ['SUP-3', new Date('2026-09-18T13:30:00Z'), 'Mercurius', 'D2', '129260922', 'Хоругвино', '1,2', '[]', 'Николай', 'Создана']
+  ]);
+
+  const before = ctx.getOzonSupplyRequests();
+  check('П83: чтение старого журнала дописывает колонку «Документы» и отдаёт пустой docsJSON',
+    H.headerRowOf(sheet).indexOf('Документы') === 10 && before.length === 3 && before.every(r => r.docsJSON === ''),
+    `заголовки: ${JSON.stringify(H.headerRowOf(sheet))}, строки: ${JSON.stringify(before.map(r => r.docsJSON))}`);
+
+  const docs = JSON.stringify({ at: '2026-09-18T14:00:00.000Z', orderNumber: '129260922-1', folderUrl: 'https://drive/x', ok: true });
+  const res = ctx.saveOzonSupplyDocs({ orderId: '129260922', docsJSON: docs });
+  const after = ctx.getOzonSupplyRequests();
+  const byId = {};
+  for (const r of after) byId[r.id] = r;
+  check('П84: запись ложится в КАЖДУЮ строку своей заявки, чужая не тронута',
+    res.updated === 2 && byId['SUP-2'].docsJSON === docs && byId['SUP-3'].docsJSON === docs && byId['SUP-1'].docsJSON === '',
+    `updated=${res.updated}, SUP-2=${byId['SUP-2'] && byId['SUP-2'].docsJSON}, SUP-3=${byId['SUP-3'] && byId['SUP-3'].docsJSON}, SUP-1=${byId['SUP-1'] && byId['SUP-1'].docsJSON}`);
+  check('П84: остальные поля строки сохранены',
+    byId['SUP-2'].status === 'Создана' && byId['SUP-2'].clusters === '1,2' && byId['SUP-2'].who === 'Николай',
+    JSON.stringify(byId['SUP-2']));
+
+  const none = ctx.saveOzonSupplyDocs({ orderId: '999', docsJSON: docs });
+  check('П85: заявка без строки в журнале — updated 0, без ошибки', none.updated === 0, JSON.stringify(none));
+
+  let thrown = '';
+  try { ctx.saveOzonSupplyDocs({ orderId: '129260922', docsJSON: '' }); } catch (e) { thrown = String(e); }
+  check('П85: пустой docsJSON отвергается', thrown.indexOf('docsJSON') >= 0, thrown);
+
+  // A repeated build overwrites the record: the latest outcome is the one that counts.
+  const docs2 = JSON.stringify({ at: '2026-09-18T15:00:00.000Z', orderNumber: '129260922-1', ok: false, warnings: ['x'] });
+  ctx.saveOzonSupplyDocs({ orderId: '129260922', docsJSON: docs2 });
+  const again = ctx.getOzonSupplyRequests().find(r => r.id === 'SUP-2');
+  check('П86: повторная сборка перезаписывает запись', again.docsJSON === docs2, again.docsJSON);
+
+  // A row appended by the wizard after the column exists reads back with an empty record.
+  ctx.saveOzonSupplyRequest({ cabinet: 'Mercurius', draftId: 'D3', orderId: '130000000', dropOffName: 'X', clusters: '1', itemsJSON: '[]', status: 'Создана' }, 'Николай');
+  const fresh = ctx.getOzonSupplyRequests().find(r => r.orderId === '130000000');
+  check('П86: новая строка журнала — docsJSON пуст', !!fresh && fresh.docsJSON === '', JSON.stringify(fresh));
+})();
+
 // ================= Item 56, stage 2: additional costs stated as a number, not dug out of the text =================
 // Several Ozon orders shipped as one batch are written as several expenses, and the destination
 // text of each one names the cost of the WHOLE batch. Parsing that text would charge the batch
