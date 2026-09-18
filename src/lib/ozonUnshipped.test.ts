@@ -226,7 +226,8 @@ describe('пункт 68, этап 3: алерт «Отгружено меньш�
 
   it('кнопка «Открыть» ведёт на вкладку «Поставки Озон» (тип не в списке исключений дашборда)', () => {
     const dash = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
-    expect(dash).toMatch(/setActiveTab\(alert\.type === 'supply_needed' \|\| alert\.type === 'factory_order' \? 'ozonStocks' : 'ozon'\)/);
+    // Item 73 added 'demand_growth' to the stocks-tab list; 'short_shipment' is still not in it.
+    expect(dash).toMatch(/setActiveTab\(alert\.type === 'supply_needed' \|\| alert\.type === 'factory_order' \|\| alert\.type === 'demand_growth' \? 'ozonStocks' : 'ozon'\)/);
     expect(dash).toContain("alert.severity === 'orange'");
   });
 });

@@ -3,7 +3,7 @@ import { detectPeresort } from './ozonPeresort';
 import { findShortShipments } from './ozonUnshipped';
 import { OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
 
-export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit' | 'supply_needed' | 'factory_order' | 'reserve_shortage' | 'short_shipment';
+export type OzonAlertType = 'overdue' | 'rejected' | 'dispute' | 'shortage' | 'peresort_confirm' | 'peresort_commit' | 'supply_needed' | 'factory_order' | 'reserve_shortage' | 'short_shipment' | 'demand_growth';
 
 export interface OzonAlert {
   key: string;            // `${postingId}:${type}` — уникальный ключ для скрытия
@@ -235,11 +235,31 @@ export function buildCoverageAlerts(
 
   const factoryItems: { alert: OzonAlert; daysLeft: number }[] = [];
   const supplyItems: { alert: OzonAlert; minCoverageDays: number }[] = [];
+  // Item 73. «Спрос вырос»: the last 7 days beat the window by more than the threshold.
+  const growthItems: { alert: OzonAlert; growthPct: number }[] = [];
 
   for (const art of coverage.articles) {
     const artKey = String(art.article || '').trim().toLowerCase();
     const name = namesByArticle && namesByArticle[art.article] ? String(namesByArticle[art.article]).trim() : '';
     const namePart = name ? `${art.article} — ${name}` : art.article;
+
+    // АЛЕРТ «СПРОС ВЫРОС» (item 73)
+    if (art.demandGrowth && art.demandGrowth.applied) {
+      const g = art.demandGrowth;
+      const pct = Math.round(g.growthPct);
+      const description = `${namePart} · за 7 дней продано ${Math.round(g.recentQty)} шт (${g.recentPerDay.toFixed(2)} шт/д) против ${g.basePerDay.toFixed(2)} шт/д по окну · рекомендации по товару считаются по новой скорости`;
+      growthItems.push({
+        alert: {
+          key: `growth:${art.article}:${pct}`,
+          article: art.article,
+          type: 'demand_growth',
+          severity: 'orange',
+          title: `Спрос вырос: ${art.article} +${pct} %`,
+          description
+        },
+        growthPct: g.growthPct
+      });
+    }
 
     // АЛЕРТ «ПОРА ЗАКАЗАТЬ НА ФАБРИКЕ»
     // Пункт 35. Алерт зажигается только тогда, когда есть что дозаказать.
@@ -378,10 +398,12 @@ export function buildCoverageAlerts(
     }
   }
 
+  growthItems.sort((a, b) => b.growthPct - a.growthPct);
   factoryItems.sort((a, b) => a.daysLeft - b.daysLeft);
   supplyItems.sort((a, b) => a.minCoverageDays - b.minCoverageDays);
 
   return [
+    ...growthItems.map(item => item.alert),
     ...factoryItems.map(item => item.alert),
     ...supplyItems.map(item => item.alert)
   ];

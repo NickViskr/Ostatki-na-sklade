@@ -23,6 +23,7 @@ interface OzonSettingsData {
   minSalesForCorrection: number;
   maxSpeedGrowth: number;
   salesGrowthPct: number;
+  demandGrowthPct: number;
   excludedClusters: string;
   priorityClusters: string;
   maxBoxesPerCluster: number;
@@ -90,6 +91,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     minSalesForCorrection: 50,
     maxSpeedGrowth: 5,
     salesGrowthPct: 0,
+    demandGrowthPct: 30,
     excludedClusters: '',
     priorityClusters: '',
     maxBoxesPerCluster: 30,
@@ -325,6 +327,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               minSalesForCorrection: numSetting(res.data.minSalesForCorrection, 50),
               maxSpeedGrowth: numSetting(res.data.maxSpeedGrowth, 5),
               salesGrowthPct: numSetting(res.data.salesGrowthPct, 0),
+              demandGrowthPct: numSetting(res.data.demandGrowthPct, 30),
               excludedClusters: String(res.data.excludedClusters || ''),
               priorityClusters: String(res.data.priorityClusters || ''),
               // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.
@@ -372,6 +375,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         minSalesForCorrection: Math.max(0, parseFloat(String(form.minSalesForCorrection)) || 0),
         maxSpeedGrowth: Math.max(0, parseFloat(String(form.maxSpeedGrowth)) || 0),
         salesGrowthPct: Math.max(0, parseFloat(String(form.salesGrowthPct)) || 0),
+        demandGrowthPct: Math.max(0, parseFloat(String(form.demandGrowthPct)) || 0),
         excludedClusters: form.excludedClusters,
         priorityClusters: form.priorityClusters,
         maxBoxesPerCluster: Math.max(1, parseInt(String(form.maxBoxesPerCluster), 10) || 1),
@@ -586,6 +590,23 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   value={form.salesGrowthPct}
                   onChange={(e) =>
                     setForm({ ...form, salesGrowthPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Рост спроса, %
+                  <FieldHint position="bottom" text="Сигнал оперативного роста: продажи за последние 7 дней (текущая неделя по прошедшим дням плюс хвост прошлой недели) сравниваются со скоростью окна. Если рост больше этого процента и за 7 дней продано не меньше 10 шт, рекомендации по товару считаются по скорости последних 7 дней, а на «Складе» появляется предупреждение «Спрос вырос». 0 — сигнал выключен." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.demandGrowthPct}
+                  onChange={(e) =>
+                    setForm({ ...form, demandGrowthPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />

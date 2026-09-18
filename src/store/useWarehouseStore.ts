@@ -234,6 +234,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     minSalesForCorrection: 50,
     maxSpeedGrowth: 5,
     salesGrowthPct: 0,
+    demandGrowthPct: 30,
   },
   ozonSupplySettings: { maxBoxesPerCluster: 30, dropOffWarehouseId: '', dropOffWarehouseName: '', dropOffWarehouseType: '', directClusters: '' },
   ozonClusterRefs: [],
@@ -1721,6 +1722,7 @@ export const useWarehouseStore = create<WarehouseState>()(
             minSalesForCorrection: num(s.minSalesForCorrection, 50),
             maxSpeedGrowth: num(s.maxSpeedGrowth, 5),
             salesGrowthPct: num(s.salesGrowthPct, 0),
+            demandGrowthPct: num(s.demandGrowthPct, 30),
           },
           ozonSupplySettings: {
             // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.

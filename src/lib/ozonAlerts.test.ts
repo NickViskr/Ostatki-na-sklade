@@ -68,7 +68,8 @@ function makeCoverage(clusters: ClusterCoverageRow[]): OzonCoverageResult {
     freeMyStock: 0,
     clusters,
     factory: null,
-    speedCorrection: null
+    speedCorrection: null,
+    demandGrowth: null
   };
   return {
     speed: { perDayByArticle: {}, weeksUsed: 0 } as unknown as OzonCoverageResult['speed'],
@@ -162,5 +163,51 @@ describe('Блок алертов на вкладке «Склад» по умо
     const dash = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
     expect(dash).toMatch(/const \[isAlertsCollapsed, setIsAlertsCollapsed\] = useState\(true\)/);
     expect(dash).toContain('{!isAlertsCollapsed && (');
+  });
+});
+
+// Item 73. «Спрос вырос»: the last 7 days beat the speed window by more than the threshold.
+describe('Item 73. Алерт «Спрос вырос»', () => {
+  const growthCoverage = (applied: boolean, growthPct = 53.4) => {
+    const cov = makeCoverage([makeCluster({ clusterName: 'Москва', boxes: 2, unmetQty: 0 })]);
+    cov.articles[0].demandGrowth = {
+      recentQty: 63.95, recentPerDay: 9.136, currentWeekDays: 2.21, basePerDay: 5.958, growthPct, thresholdPct: 30, applied
+    };
+    return cov;
+  };
+
+  it('срабатывание — оранжевый алерт с артикулом и процентом, первый в списке', () => {
+    const alerts = buildCoverageAlerts(growthCoverage(true), settings, { 'ART-1': 'Миска' });
+    expect(alerts[0].type).toBe('demand_growth');
+    expect(alerts[0].severity).toBe('orange');
+    expect(alerts[0].title).toBe('Спрос вырос: ART-1 +53 %');
+    expect(alerts[0].article).toBe('ART-1');
+    expect(alerts[0].key).toBe('growth:ART-1:53');
+    expect(alerts[0].description).toContain('ART-1 — Миска');
+    expect(alerts[0].description).toContain('за 7 дней продано 64 шт (9.14 шт/д) против 5.96 шт/д по окну');
+    expect(alerts.filter(a => a.type === 'demand_growth')).toHaveLength(1);
+  });
+
+  it('ниже порога (applied = false) алерта нет, хотя разбор есть', () => {
+    const alerts = buildCoverageAlerts(growthCoverage(false, 20), settings, {});
+    expect(alerts.filter(a => a.type === 'demand_growth')).toEqual([]);
+  });
+
+  it('несколько товаров — сортировка по убыванию роста', () => {
+    const cov = growthCoverage(true, 40);
+    const second: ArticleCoverage = { ...cov.articles[0], article: 'ART-2', demandGrowth: { ...cov.articles[0].demandGrowth!, growthPct: 90 } };
+    cov.articles.push(second);
+    const alerts = buildCoverageAlerts(cov, settings, {}).filter(a => a.type === 'demand_growth');
+    expect(alerts.map(a => a.article)).toEqual(['ART-2', 'ART-1']);
+  });
+
+  it('кнопка «Открыть» ведёт в «Остатки Ozon», а таблица помечает скорость «спрос +N %»', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const dashboard = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
+    expect(dashboard).toMatch(/alert\.type === 'demand_growth' \? 'ozonStocks'/);
+    const tab = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    expect(tab).toContain('art.demandGrowth && art.demandGrowth.applied');
+    expect(tab).toContain('спрос +{Math.round(art.demandGrowth.growthPct)} %');
   });
 });

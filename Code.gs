@@ -546,6 +546,7 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'minSalesForCorrection', value: 50, desc: 'Минимум продаж за окно тренда для коррекции, шт' },
   { key: 'maxSpeedGrowth',      value: 5,  desc: 'Максимальный рост скорости при дефиците, раз' },
   { key: 'salesGrowthPct',      value: 0,  desc: 'Прирост объёма продаж, %: ручная надбавка к прогнозу заказа на фабрике' },
+  { key: 'demandGrowthPct',     value: 30, desc: 'Рост спроса, %: последние 7 дней против окна скорости; выше порога рекомендации считаются по большей скорости; 0 — сигнал выключен' },
   { key: 'stockHistoryRetentionWeeks', value: 15, desc: 'Срок хранения истории остатков Ozon, недель' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },

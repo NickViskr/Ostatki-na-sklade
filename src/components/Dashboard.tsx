@@ -779,7 +779,7 @@ export const Dashboard: React.FC = React.memo(() => {
                     <div className="flex items-center gap-2 shrink-0">
                       <button
                         type="button"
-                        onClick={() => setActiveTab(alert.type === 'supply_needed' || alert.type === 'factory_order' ? 'ozonStocks' : 'ozon')}
+                        onClick={() => setActiveTab(alert.type === 'supply_needed' || alert.type === 'factory_order' || alert.type === 'demand_growth' ? 'ozonStocks' : 'ozon')}
                         className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-white border border-slate-200 hover:border-slate-300 text-slate-700 hover:bg-slate-50 transition-all shadow-xs"
                       >
                         Открыть

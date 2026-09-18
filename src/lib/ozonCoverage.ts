@@ -275,6 +275,8 @@ export interface OzonCoverageSettings {
   maxSpeedGrowth?: number;
   /** Пункт 38. Прирост объёма продаж, %: ручная надбавка к прогнозной скорости в контуре заказа на фабрике. */
   salesGrowthPct?: number;
+  /** Item 73. «Рост спроса, %»: the last 7 days against the speed window; above it the larger speed is used. 0 — off. */
+  demandGrowthPct?: number;
 }
 
 export interface OzonClusterRef {
@@ -609,6 +611,8 @@ export interface ArticleCoverage {
   factory: FactorySignal | null;
   /** Пункт 42. Разбор коррекции скорости при дефиците. null — коррекция не применялась. */
   speedCorrection: SpeedCorrectionInfo | null;
+  /** Item 73. The last 7 days against the speed window. null — no base speed or no sales rows for the last 7 days. */
+  demandGrowth: DemandGrowthInfo | null;
 }
 
 /**
@@ -1000,6 +1004,113 @@ export function applyClusterDeficitSpeedCorrection(
   return out;
 }
 
+// ===== Item 73: demand growth over the last 7 days =====
+
+/** Item 73. Fewer pieces than this in the last 7 days is noise, not a signal. */
+export const DEMAND_GROWTH_MIN_QTY = 10;
+
+export interface DemandGrowthInfo {
+  /** Sold in the last 7 days, pcs: the current week by its elapsed days plus the matching tail of the previous full week. */
+  recentQty: number;
+  /** recentQty / 7, pcs/day. */
+  recentPerDay: number;
+  /** Elapsed days of the current week that entered the 7 days (0 — only the previous full week). */
+  currentWeekDays: number;
+  /** The window speed the 7 days are compared with, pcs/day (after the deficit corrections). */
+  basePerDay: number;
+  /** (recentPerDay / basePerDay − 1) × 100; negative when sales fell. */
+  growthPct: number;
+  thresholdPct: number;
+  /** The threshold was crossed and the speeds of the article and its clusters were raised to recentPerDay. */
+  applied: boolean;
+}
+
+export interface RecentSpeedResult {
+  currentWeekDays: number;
+  qtyByArticle: Record<string, number>;
+}
+
+/**
+ * Item 73. Sales of the last 7 days per article. The current week is a part-week of
+ * `currentWeekDays` days (item 71); the remaining 7 − currentWeekDays days are taken from
+ * the previous full week pro rata. Without a part-week row the last full week stands for
+ * the 7 days as a whole.
+ */
+export function buildRecentSpeed(
+  sales: OzonSalesRow[],
+  skus: SKUItem[],
+  now: Date,
+  offerIdToArticle?: Record<string, string>
+): RecentSpeedResult {
+  const current = getMskWeekMonday(now);
+  const previous = getLastFullWeeks(now, 1)[0] || '';
+  let currentWeekDays = 0;
+  for (const row of sales) {
+    if (String(row.week || '').trim() !== current) continue;
+    const days = Number(row.days) || 0;
+    if (days > 0 && days < 7 && days > currentWeekDays) currentWeekDays = days;
+  }
+  const previousShare = (7 - currentWeekDays) / 7;
+
+  const qtyByArticle: Record<string, number> = {};
+  for (const row of sales) {
+    const week = String(row.week || '').trim();
+    const days = Number(row.days) || 0;
+    let share = 0;
+    if (week === current && currentWeekDays > 0 && days < 7) share = 1;
+    else if (week === previous && days === 7) share = previousShare;
+    if (share <= 0) continue;
+    const qty = Number(row.qty) || 0;
+    if (qty === 0) continue;
+    const article = resolveSalesArticle(skus, row.offerId, offerIdToArticle);
+    qtyByArticle[article] = (qtyByArticle[article] || 0) + qty * share;
+  }
+  return { currentWeekDays, qtyByArticle };
+}
+
+/**
+ * Item 73. Compares the last 7 days with the window speed and, above the threshold, raises
+ * the speed of the article and of every cluster of it to the recent one (same factor for
+ * all clusters: the 7 days carry no reliable per-cluster split). Runs AFTER the deficit
+ * corrections, so a lifted speed is the base and is not lifted twice.
+ * The function CHANGES the passed speed object and returns the breakdown per article.
+ */
+export function applyDemandGrowth(
+  speed: SalesSpeedResult,
+  recent: RecentSpeedResult,
+  settings: OzonCoverageSettings
+): Record<string, DemandGrowthInfo> {
+  const out: Record<string, DemandGrowthInfo> = {};
+  const thresholdPct = Number(settings.demandGrowthPct) > 0 ? Number(settings.demandGrowthPct) : 0;
+  for (const article of Object.keys(recent.qtyByArticle)) {
+    const basePerDay = Number(speed.perDayByArticle[article]) || 0;
+    if (!(basePerDay > 0)) continue;
+    const recentQty = recent.qtyByArticle[article];
+    const recentPerDay = recentQty / 7;
+    // Rounded to 0.01 %: 91 / 7 against 10 a day is exactly +30 %, not +30.000000000000004.
+    const growthPct = Math.round((recentPerDay / basePerDay - 1) * 10000) / 100;
+    const applied = thresholdPct > 0 && recentQty >= DEMAND_GROWTH_MIN_QTY && growthPct > thresholdPct;
+    if (applied) {
+      const factor = recentPerDay / basePerDay;
+      speed.perDayByArticle[article] = recentPerDay;
+      const clusterSpeeds = speed.perDayByArticleCluster[article];
+      if (clusterSpeeds) {
+        for (const name of Object.keys(clusterSpeeds)) clusterSpeeds[name] = clusterSpeeds[name] * factor;
+      }
+    }
+    out[article] = {
+      recentQty,
+      recentPerDay,
+      currentWeekDays: recent.currentWeekDays,
+      basePerDay,
+      growthPct,
+      thresholdPct,
+      applied
+    };
+  }
+  return out;
+}
+
 // ===== Пункт 38: тренд продаж =====
 
 /**
@@ -1381,6 +1492,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, offerIdToArticle);
   // Item 72. Clusters that stand empty inside an article that is not: corrected one by one.
   const clusterSpeedCorrections = applyClusterDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, speedCorrections, offerIdToArticle);
+  // Item 73. The last 7 days against the window: above the threshold the larger speed wins.
+  const demandGrowth = applyDemandGrowth(speed, buildRecentSpeed(input.sales, input.skus, now, offerIdToArticle), input.settings);
   // Пункт 38. Тренд считается ПОСЛЕ коррекции скорости: сработавшая коррекция гасит тренд.
   const trends = buildSalesTrend(input.sales, input.skus, input.settings, now, speed, input.stocks, speedCorrections, offerIdToArticle);
   // Прогнозная скорость = факт × тренд × (1 + прирост, %). Используется ТОЛЬКО в контуре заказа
@@ -1574,7 +1687,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       freeMyStock,
       clusters: clusterRows,
       factory,
-      speedCorrection: speedCorrections[article] || null
+      speedCorrection: speedCorrections[article] || null,
+      demandGrowth: demandGrowth[article] || null
     });
   }
 

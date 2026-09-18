@@ -1538,6 +1538,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   ) : (
                                     fmtSpeed(art.perDay)
                                   )}
+                                  {art.demandGrowth && art.demandGrowth.applied && (
+                                    /* Item 73. The last 7 days beat the window: the speed shown IS the recent one. */
+                                    <span
+                                      className="block text-[10px] font-semibold text-orange-600 cursor-help"
+                                      title={`Спрос вырос: за 7 дней продано ${Math.round(art.demandGrowth.recentQty)} шт (${fmtSpeed(art.demandGrowth.recentPerDay)} шт/д) против ${fmtSpeed(art.demandGrowth.basePerDay)} шт/д по окну. Скорость и рекомендации взяты по последним 7 дням.`}
+                                    >
+                                      спрос +{Math.round(art.demandGrowth.growthPct)} %
+                                    </span>
+                                  )}
                                 </td>
                               )}
                               {isColVisible('trend') && (
