@@ -865,6 +865,80 @@ function buildSkuRow(headers, obj) {
     `получено: ${JSON.stringify(H4.dumpSalesSheet('Продажи Ozon'))}`);
 })();
 
+// ================= Item 71: the row of the current week carries its real length =================
+// The poll counts postings up to the moment it runs, so the current week's row is a part-week.
+// It used to be written with «Дней» = 7 like a completed week, which is why the client could not
+// include it: counting a part-week as a whole would understate the speed. Now «Дней» is the
+// number of days elapsed since Monday 00:00 МСК at the moment of the poll.
+(() => {
+  const H = freshHarness();
+  H.setNow('2026-09-16T02:07:00Z');           // среда 05:07 МСК; понедельник — 14.09
+  H.setOzonSettings({ salesRetentionWeeks: 78 });
+  H.setOzonSalesSheet([]);
+  H.setOzonSalesArchiveSheet([]);
+  H.saveOzonSales({
+    rows: [
+      { week: '2026-09-14', cabinet: 'Mercurius', offerId: 'ART', cluster: 'Екатеринбург', qty: 40 },
+      { week: '2026-09-07', cabinet: 'Mercurius', offerId: 'ART', cluster: 'Екатеринбург', qty: 70 },
+      { week: '2026-08-31', cabinet: 'Mercurius', offerId: 'ART', cluster: 'Екатеринбург', qty: 63 }
+    ],
+    okCabinets: ['Mercurius'], mode: 'recent', replacedWeeks: ['2026-09-14', '2026-09-07', '2026-08-31']
+  });
+  const rows = H.dumpSalesSheet('Продажи Ozon');
+  const byWeek = {};
+  for (const r of rows) byWeek[r.week] = r;
+  check('П79: строка текущей недели получает прошедшие дни (2 дня 5 ч 07 мин = 2.21)',
+    byWeek['2026-09-14'] && byWeek['2026-09-14'].days === 2.21, `получено: ${JSON.stringify(byWeek['2026-09-14'])}`);
+  check('П79: завершённые недели по-прежнему 7',
+    byWeek['2026-09-07'] && byWeek['2026-09-07'].days === 7 && byWeek['2026-08-31'] && byWeek['2026-08-31'].days === 7,
+    `получено: ${JSON.stringify(rows.map(r => [r.week, r.days]))}`);
+
+  // Monday just after midnight: a positive length, never zero.
+  const H2 = freshHarness();
+  H2.setNow('2026-09-13T21:05:00Z');          // понедельник 14.09 00:05 МСК
+  H2.setOzonSettings({ salesRetentionWeeks: 78 });
+  H2.setOzonSalesSheet([]);
+  H2.setOzonSalesArchiveSheet([]);
+  H2.saveOzonSales({
+    rows: [{ week: '2026-09-14', cabinet: 'Mercurius', offerId: 'ART', cluster: 'Екатеринбург', qty: 1 }],
+    okCabinets: ['Mercurius'], mode: 'recent', replacedWeeks: ['2026-09-14']
+  });
+  const mon = H2.dumpSalesSheet('Продажи Ozon')[0];
+  check('П80: понедельник 00:05 МСК — «Дней» = 0.01, не ноль', mon && mon.days === 0.01, `получено: ${JSON.stringify(mon)}`);
+
+  // Sunday 23:59: still the current week, still below 7.
+  const H3 = freshHarness();
+  H3.setNow('2026-09-20T20:59:00Z');          // воскресенье 20.09 23:59 МСК
+  H3.setOzonSettings({ salesRetentionWeeks: 78 });
+  H3.setOzonSalesSheet([]);
+  H3.setOzonSalesArchiveSheet([]);
+  H3.saveOzonSales({
+    rows: [{ week: '2026-09-14', cabinet: 'Mercurius', offerId: 'ART', cluster: 'Екатеринбург', qty: 1 }],
+    okCabinets: ['Mercurius'], mode: 'recent', replacedWeeks: ['2026-09-14']
+  });
+  const sun = H3.dumpSalesSheet('Продажи Ozon')[0];
+  check('П81: воскресенье 23:59 МСК — «Дней» = 6.99, не 7', sun && sun.days === 6.99, `получено: ${JSON.stringify(sun)}`);
+
+  // The next poll after the week has turned writes the same week as a completed one.
+  const H4 = freshHarness();
+  H4.setNow('2026-09-21T02:07:00Z');          // понедельник 21.09 05:07 МСК
+  H4.setOzonSettings({ salesRetentionWeeks: 78 });
+  H4.setOzonSalesSheet([{ week: '2026-09-14', offerId: 'ART', qty: 40, days: 6.2 }]);
+  H4.setOzonSalesArchiveSheet([]);
+  H4.saveOzonSales({
+    rows: [
+      { week: '2026-09-21', cabinet: 'Mercurius', offerId: 'ART', cluster: 'Екатеринбург', qty: 3 },
+      { week: '2026-09-14', cabinet: 'Mercurius', offerId: 'ART', cluster: 'Екатеринбург', qty: 75 }
+    ],
+    okCabinets: ['Mercurius'], mode: 'recent', replacedWeeks: ['2026-09-21', '2026-09-14', '2026-09-07']
+  });
+  const after = {};
+  for (const r of H4.dumpSalesSheet('Продажи Ozon')) after[r.week] = r;
+  check('П82: неделя, ставшая прошлой, перезаписана как полная (75 шт, 7 дней)',
+    after['2026-09-14'] && after['2026-09-14'].days === 7 && after['2026-09-14'].qty === 75, `получено: ${JSON.stringify(after['2026-09-14'])}`);
+  check('П82: новая текущая неделя — 0.21 дня', after['2026-09-21'] && after['2026-09-21'].days === 0.21, `получено: ${JSON.stringify(after['2026-09-21'])}`);
+})();
+
 // ================= Item 56, stage 2: additional costs stated as a number, not dug out of the text =================
 // Several Ozon orders shipped as one batch are written as several expenses, and the destination
 // text of each one names the cost of the WHOLE batch. Parsing that text would charge the batch

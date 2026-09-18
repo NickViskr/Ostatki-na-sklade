@@ -93,8 +93,12 @@ export function resolveSalesArticle(
 export interface SalesSpeedResult {
   /** ФАКТИЧЕСКИ использованные недели окна, по возрастанию: запрошенные минус отсутствующие в данных. */
   weeks: string[];
-  /** Длина окна в днях (= weeks.length * 7). */
+  /** Длина окна в днях (= weeks.length * 7 + currentWeekDays). */
   windowDays: number;
+  /** Item 71. Monday of the current week when its partial row entered the window; null otherwise. */
+  currentWeek: string | null;
+  /** Item 71. Elapsed days of the current week counted in the window (0 when it did not enter). */
+  currentWeekDays: number;
   /** Всего продано за окно, шт (все товары, все кластеры, включая «Без кластера»). */
   totalQty: number;
   /** Общая скорость продаж, шт/день. */
@@ -128,12 +132,22 @@ export interface SalesSpeedResult {
  * Знаменатель — не «сколько недель заказали», а сколько недель окна РЕАЛЬНО есть в данных
  * (неделя присутствует, если по ней пришла хотя бы одна строка с «Дней» = 7 у любого товара
  * и кластера). Иначе окно глубже недельной зоны молча занижало бы скорость.
+ *
+ * Item 71 (owner, 18.09.2026: «полные недели не позволяют отслеживать оперативно возросшие
+ * продажи»). The CURRENT week enters the window too, by its actual length: the poll writes
+ * its row with «Дней» = days elapsed since Monday МСК (a fraction, see `saveOzonSales`), so
+ * the window is `weeks × 7 + elapsed` days and the freshest sale counted is yesterday's, not
+ * last Sunday's. A current-week row still carrying «Дней» = 7 was written before that change
+ * and is left out — counting a part-week as a whole would understate the speed. Pass
+ * `currentWeek` (Monday of the week `now` falls in, МСК) to enable; without it the old
+ * full-weeks-only window stands, which is what the deficit correction and the trend keep.
  */
 export function buildSalesSpeed(
   sales: OzonSalesRow[],
   skus: SKUItem[],
   weeks: string[],
-  offerIdToArticle?: Record<string, string>
+  offerIdToArticle?: Record<string, string>,
+  currentWeek?: string
 ): SalesSpeedResult {
   const presentWeeks = new Set<string>();
   for (const row of sales) {
@@ -141,7 +155,21 @@ export function buildSalesSpeed(
   }
   const usedWeeks = weeks.filter(w => presentWeeks.has(w));
   const weekSet = new Set(usedWeeks);
-  const windowDays = usedWeeks.length * 7;
+
+  // Item 71. The partial row of the current week: every row of that week carries the same
+  // elapsed-days value (one poll writes them all), so the largest one seen is THE value.
+  const current = String(currentWeek || '').trim();
+  let currentWeekDays = 0;
+  if (current) {
+    for (const row of sales) {
+      if (String(row.week || '').trim() !== current) continue;
+      const days = Number(row.days) || 0;
+      if (days > 0 && days < 7 && days > currentWeekDays) currentWeekDays = days;
+    }
+  }
+  const isCurrentPartial = (row: OzonSalesRow): boolean =>
+    currentWeekDays > 0 && String(row.week || '').trim() === current && (Number(row.days) || 0) < 7;
+  const windowDays = usedWeeks.length * 7 + currentWeekDays;
 
   let totalQty = 0;
   const qtyByArticle: Record<string, number> = {};
@@ -149,9 +177,13 @@ export function buildSalesSpeed(
   const qtyByArticleCluster: Record<string, Record<string, number>> = {};
 
   for (const row of sales) {
-    if ((Number(row.days) || 0) !== 7) continue;
     const week = String(row.week || '').trim();
-    if (!weekSet.has(week)) continue;
+    if (isCurrentPartial(row)) {
+      // counted below like any week of the window
+    } else {
+      if ((Number(row.days) || 0) !== 7) continue;
+      if (!weekSet.has(week)) continue;
+    }
 
     const qty = Number(row.qty) || 0;
     if (qty === 0) continue;
@@ -198,6 +230,8 @@ export function buildSalesSpeed(
   return {
     weeks: usedWeeks,
     windowDays,
+    currentWeek: currentWeekDays > 0 ? current : null,
+    currentWeekDays,
     totalQty,
     totalPerDay: windowDays > 0 ? totalQty / windowDays : 0,
     qtyByArticle,
@@ -1198,7 +1232,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   // Пункт 39A. Карта строится ОДИН раз и передаётся во все три расчёта по продажам: получи
   // они разные карты, скорость, коррекция и тренд разошлись бы между собой по артикулам.
   const offerIdToArticle = buildOfferIdToArticle(input.stocks, input.skus);
-  const speed = buildSalesSpeed(input.sales, input.skus, weeks, offerIdToArticle);
+  // Item 71. The current week enters the speed window by its elapsed days.
+  const speed = buildSalesSpeed(input.sales, input.skus, weeks, offerIdToArticle, getMskWeekMonday(now));
   const stocksByArticle = buildClusterStocks(input.stocks, input.skus, input.settings.returnsToSalePct);
   const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, offerIdToArticle);
   // Пункт 38. Тренд считается ПОСЛЕ коррекции скорости: сработавшая коррекция гасит тренд.

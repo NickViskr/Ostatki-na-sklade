@@ -5757,6 +5757,25 @@ function updateOzonStockHistory(finalRows, headers) {
   }
 }
 
+/**
+ * Item 71. Monday of the МСК week that `nowMs` falls in ('yyyy-MM-dd') and the days elapsed
+ * in that week at `nowMs` — a fraction with two decimals, never below 0.01 so that a poll
+ * fired right after midnight on Monday still yields a positive length, never 7.
+ */
+function ozonSalesCurrentWeek(nowMs) {
+  const DAY = 24 * 60 * 60 * 1000;
+  const shifted = new Date(nowMs + 3 * 60 * 60 * 1000); // МСК as UTC
+  const diff = (shifted.getUTCDay() + 6) % 7;
+  const mondayMs = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - diff * DAY;
+  const elapsed = Math.round(((shifted.getTime() - mondayMs) / DAY) * 100) / 100;
+  return {
+    monday: Utilities.formatDate(new Date(mondayMs), 'UTC', 'yyyy-MM-dd'),
+    // capped below 7: at 23:59 on Sunday the week is still the current one, and the client
+    // tells a part-week from a whole one by «Дней» < 7
+    elapsedDays: Math.max(0.01, Math.min(6.99, elapsed))
+  };
+}
+
 function saveOzonSales(payload) {
   if (!payload || !payload.rows || !Array.isArray(payload.rows)) {
     throw new Error('Некорректный payload: список строк rows обязателен и должен быть массивом');
@@ -5861,6 +5880,13 @@ function saveOzonSales(payload) {
   const nowStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
   const newRows = [];
 
+  // Item 71. The row of the CURRENT week is not a week: the proxy counts postings up to the
+  // moment of the poll, so «Дней» carries the days elapsed since Monday 00:00 МСК at that
+  // moment (a fraction, two decimals, never below 0.01). The speed window on the client adds
+  // this row with exactly that length; a completed week gets 7 as before. Ozon weeks and the
+  // client's `getMskWeekMonday` are both МСК (UTC+3), hence the fixed three-hour shift.
+  const currentWeekInfo = ozonSalesCurrentWeek(Date.now());
+
   for (const item of payload.rows) {
     if (!item) continue;
     const itemWeek = String(item.week || '').trim();
@@ -5879,7 +5905,7 @@ function saveOzonSales(payload) {
     row[clusterIdx] = item.cluster || '';
     row[qtyIdx] = Number(item.qty || 0);
     row[updatedIdx] = nowStr;
-    row[daysIdx] = 7;
+    row[daysIdx] = itemWeek === currentWeekInfo.monday ? currentWeekInfo.elapsedDays : 7;
 
     newRows.push(row);
   }
