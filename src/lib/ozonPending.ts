@@ -1,5 +1,6 @@
 import { ExternalShipment, SKUItem } from '../types';
 import { resolveOzonArticle } from './ozonCoverage';
+import { isStockDeparted } from './ozonStatus';
 
 // ===== Локальный зачёт потребности после создания заявки (пункт 23) =====
 // Задача: количества из уже созданных заявок на поставку вычитаются из потребности сразу,
@@ -122,14 +123,24 @@ export interface PendingSupplyDetail {
   ozonStatus: string;
   /** Дата, от которой считается предохранитель. */
   since: string;
+  /**
+   * Item 70. Two meanings of one list. `reservesMyStock`: the pieces still lie on «Мой склад»
+   * and must not be handed to another cluster (row not yet written off). `countsForCluster`:
+   * the pieces are on their way to the cluster and are not yet in Ozon's own stock columns
+   * (status before acceptance at the hub). A written-off, not-yet-accepted supply is the
+   * second without the first; a not-yet-written-off supply Ozon has already accepted is the
+   * first without the second.
+   */
+  reservesMyStock: boolean;
+  countsForCluster: boolean;
 }
 
 export interface PendingSuppliesResult {
-  /** Зачёт по кластерам: артикул -> КластерID -> шт. */
+  /** Item 70. What is on its way to the cluster (`countsForCluster`): артикул -> КластерID -> шт. */
   byArticleCluster: Record<string, Record<string, number>>;
-  /** Зачёт по товару целиком, шт (включая позиции без кластера). */
+  /** Reserve of «Мой склад» (`reservesMyStock`) по товару целиком, шт (включая позиции без кластера). */
   byArticle: Record<string, number>;
-  /** Зачёт позиций без КластерID, шт — только в общие итоги. */
+  /** Reserve of positions without КластерID, шт — только в общие итоги. */
   unboundByArticle: Record<string, number>;
   /** Расшифровка всех зачтённых позиций. */
   details: PendingSupplyDetail[];
@@ -180,8 +191,9 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
   for (const row of shipments) {
     // Пункт 31. Виртуальная заявка Ozon в резерв не попадает вовсе
     if (isVirtualShipment(row)) continue;
-    // Списание проведено или поставка проигнорирована — резерв больше не нужен
-    if (isShipmentSettled(row.status)) continue;
+    const localStatus = String(row.status || '').trim().toLowerCase();
+    // Проигнорированная поставка никуда не едет: ни резерва, ни зачёта по кластеру.
+    if (localStatus === 'ignored') continue;
     const status = String(row.ozonStatus || '').trim();
     if (isPendingCleared(status)) continue;
     if (!isPendingActive(status)) {
@@ -189,6 +201,15 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
       const since = String(row.detectedAt || '').trim() || String(row.shipmentDate || '').trim();
       if (!isWithinSafetyWindow(since, now, safetyDays)) continue;
     }
+    // Item 70. Списание проведено — товар со склада ушёл, резерв больше не нужен; но пока
+    // Ozon не принял поставку на хабе, в кластер он ещё ЕДЕТ и в колонках Ozon его нет.
+    // The owner's case of 14.09.2026: the written-off order 127380557-1 sat READY_TO_SUPPLY
+    // in Moscow and St. Petersburg; the old code dropped it here, and the moment a new
+    // request outgrew Ozon's «В заявках» the max() of the two hid it — the clusters looked
+    // short and were recommended again a second after the supply was created.
+    const reservesMyStock = !isShipmentSettled(localStatus);
+    const countsForCluster = !isStockDeparted(status);
+    if (!reservesMyStock && !countsForCluster) continue;
 
     const clusterId = String(row.clusterId || '').trim();
     const items = parseArray(row.itemsJSON);
@@ -209,7 +230,9 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
         clusterId,
         qty,
         ozonStatus: status,
-        since: String(row.detectedAt || '').trim()
+        since: String(row.detectedAt || '').trim(),
+        reservesMyStock,
+        countsForCluster
       });
     }
   }
@@ -245,7 +268,10 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
         clusterId: String(item.clusterId || '').trim(),
         qty,
         ozonStatus: '',
-        since: String(req.date || '').trim()
+        since: String(req.date || '').trim(),
+        // Ozon does not know the request yet: the pieces lie on the shelf AND are on their way.
+        reservesMyStock: true,
+        countsForCluster: true
       });
     }
   }
@@ -255,11 +281,11 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
   const unboundByArticle: Record<string, number> = {};
 
   for (const d of details) {
-    byArticle[d.article] = (byArticle[d.article] || 0) + d.qty;
-    if (!d.clusterId) {
-      unboundByArticle[d.article] = (unboundByArticle[d.article] || 0) + d.qty;
-      continue;
+    if (d.reservesMyStock) {
+      byArticle[d.article] = (byArticle[d.article] || 0) + d.qty;
+      if (!d.clusterId) unboundByArticle[d.article] = (unboundByArticle[d.article] || 0) + d.qty;
     }
+    if (!d.countsForCluster || !d.clusterId) continue;
     if (!byArticleCluster[d.article]) byArticleCluster[d.article] = {};
     byArticleCluster[d.article][d.clusterId] = (byArticleCluster[d.article][d.clusterId] || 0) + d.qty;
   }

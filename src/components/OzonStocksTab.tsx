@@ -2240,7 +2240,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
               </button>
             </div>
             <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
-              Эти заявки уже созданы, поэтому их количества вычтены из потребности и зарезервированы на Моём складе. Зачёт снимется сам, когда заявка будет отменена, отклонена, просрочена или товар примет склад Ozon. Если статус получить не удалось, зачёт истечёт через 7 дней от даты в колонке «С какого числа».
+              Эти заявки уже созданы, поэтому их количества вычтены из потребности и зарезервированы на Моём складе. Зачёт снимется сам, когда заявка будет отменена, отклонена, просрочена или товар примет склад Ozon. Если статус получить не удалось, зачёт истечёт через 7 дней от даты в колонке «С какого числа». Строка «списана, едет» уже списана со склада: остаток она не резервирует, но в кластер ещё едет и из потребности вычтена. Строка «принята Ozon» уже в колонках Ozon: резерв держится до списания, в потребности не повторяется.
             </div>
             {pendingModalRows.length === 0 ? (
               <div className="text-[11px] text-slate-400">По этому товару активных заявок нет.</div>
@@ -2268,14 +2268,18 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                       </td>
                       <td className="py-2 pr-2 text-slate-500">{fmtDateFull(d.since)}</td>
                       <td className="py-2 pr-2 text-slate-500 font-mono">{d.orderId || '—'}</td>
-                      <td className="py-2 text-slate-400">{d.source === 'shipment' ? 'данные Ozon' : 'журнал заявок'}</td>
+                      <td className="py-2 text-slate-400">
+                        {d.source === 'shipment' ? 'данные Ozon' : 'журнал заявок'}
+                        {!d.reservesMyStock && <span className="ml-1 text-amber-600 font-semibold">списана, едет</span>}
+                        {!d.countsForCluster && <span className="ml-1 text-sky-600 font-semibold">принята Ozon</span>}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="font-bold text-slate-800">
-                    <td className="py-2 pr-2">Итого</td>
-                    <td className="py-2 pr-2 text-right">{fmtInt(pendingModalRows.reduce((s, d) => s + d.qty, 0))}</td>
+                    <td className="py-2 pr-2">Итого резерв склада</td>
+                    <td className="py-2 pr-2 text-right">{fmtInt(pendingModalRows.reduce((s, d) => s + (d.reservesMyStock ? d.qty : 0), 0))}</td>
                     <td colSpan={4}></td>
                   </tr>
                 </tfoot>
