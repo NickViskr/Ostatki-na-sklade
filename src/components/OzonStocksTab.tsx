@@ -1826,7 +1826,35 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       </div>
                                     </td>
                                     {isColVisible('sold') && <td className="p-2.5 text-right text-slate-700">{fmtInt(cls.qtySold)}</td>}
-                                    {isColVisible('speed') && <td className="p-2.5 text-right text-slate-700">{fmtSpeed(cls.perDay)}</td>}
+                                    {isColVisible('speed') && (
+                                      <td className="p-2.5 text-right text-slate-700">
+                                        {cls.speedCorrection ? (
+                                          /* Item 72. The cluster stood empty inside a stocked article: its speed
+                                             comes from its own best weeks, not from the last ones. */
+                                          <span className="relative inline-flex group cursor-help">
+                                            <span className="flex flex-col items-end">
+                                              <span className="inline-flex items-center gap-1">
+                                                <TrendingUp size={12} className="text-amber-500" />
+                                                <span className="text-amber-600">{fmtSpeed(cls.perDay)}</span>
+                                              </span>
+                                              <span className="block text-[10px] font-normal text-slate-400">коррекция</span>
+                                            </span>
+                                            <span className={`absolute right-0 ${tipUp} hidden group-hover:block z-30 w-72 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl`}>
+                                              <span className="block font-bold mb-1">Скорость кластера скорректирована: полка была пуста</span>
+                                              <span className="block">Было {fmtSpeed(cls.speedCorrection.base)} шт/д, стало {fmtSpeed(cls.speedCorrection.corrected)} шт/д.</span>
+                                              <span className="block mt-1">Остатка кластера хватало на {cls.speedCorrection.daysLeft.toFixed(1)} дн — меньше порога дефицита, поэтому скорость взята по лучшим неделям этого кластера.</span>
+                                              <span className="block mt-1">Лучшие недели окна: {cls.speedCorrection.bestWeeks.map((b: any) => `${b.week} — ${fmtInt(b.qty)} шт`).join('; ')}.</span>
+                                              <span className="block mt-1 text-slate-300">В окне {cls.speedCorrection.windowWeeks} нед: продано {fmtInt(cls.speedCorrection.windowQty)} шт, недель с продажами {cls.speedCorrection.weeksWithSales}.</span>
+                                              {cls.speedCorrection.capped && (
+                                                <span className="block mt-1 text-amber-300">Рост упёрся в предел: по лучшим неделям вышло бы {fmtSpeed(cls.speedCorrection.raw)} шт/д.</span>
+                                              )}
+                                            </span>
+                                          </span>
+                                        ) : (
+                                          fmtSpeed(cls.perDay)
+                                        )}
+                                      </td>
+                                    )}
                                     {isColVisible('trend') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                     {isColVisible('share') && <td className="p-2.5 text-right text-slate-600">{cls.sharePct > 0 ? `${cls.sharePct.toFixed(1)}%` : '—'}</td>}
                                     {isColVisible('available') && <td className={`p-2.5 text-right ${cls.available === 0 ? 'text-slate-300' : 'text-slate-800 font-medium'}`}>{fmtInt(cls.available)}</td>}

@@ -37,6 +37,7 @@ function makeCluster(over: { clusterName: string; boxes: number; unmetQty: numbe
     pendingQty: 0,
     requestedQty: 0,
     pendingEffective: 0,
+    speedCorrection: null,
     recommendation: {
       neededQty: over.boxes * 10 + over.unmetQty,
       wantQty: over.boxes * 10 + over.unmetQty,

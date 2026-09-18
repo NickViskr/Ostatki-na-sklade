@@ -579,6 +579,8 @@ export interface ClusterCoverageRow {
   /** Применённый к потребности зачёт = наибольшее из pendingQty и requestedQty, шт. */
   pendingEffective: number;
   recommendation: SupplyRecommendation | null;
+  /** Item 72. Deficit speed correction of this cluster. null — none. */
+  speedCorrection: ClusterSpeedCorrectionInfo | null;
 }
 
 export interface ArticleCoverage {
@@ -853,6 +855,147 @@ export function applyDeficitSpeedCorrection(
       daysLeft,
       bestWeeks: ranked
     };
+  }
+  return out;
+}
+
+/** Item 72. Breakdown of the deficit speed correction of one cluster of an article. */
+export interface ClusterSpeedCorrectionInfo {
+  clusterName: string;
+  /** Cluster speed before the correction, pcs/day. */
+  base: number;
+  /** Cluster speed after the correction, pcs/day. */
+  corrected: number;
+  /** Speed by the best weeks of the cluster before the growth cap, pcs/day. */
+  raw: number;
+  capped: boolean;
+  /** Sold in the cluster over the trend window, pcs. */
+  windowQty: number;
+  weeksWithSales: number;
+  windowWeeks: number;
+  /** Days the cluster's Ozon stock lasted at the old cluster speed. 0 when the base is 0. */
+  daysLeft: number;
+  bestWeeks: { week: string; qty: number }[];
+}
+
+/**
+ * Item 72. The deficit correction per CLUSTER, for articles the article-level correction
+ * (item 42) left alone. The article as a whole may hold weeks of stock while its fastest
+ * clusters stand empty: their speed over the last weeks is then the speed of an empty shelf,
+ * and the recommendation for them comes out too small (BowlGrayMini_01, 18.09.2026: ≈21 days
+ * of stock in total, six empty clusters, weekly sales 151 → 112 for lack of goods).
+ * A cluster whose Ozon stock (available + in transit) lasts less than deficitDays at its own
+ * speed gets the mean of its bestWeeks best weeks of the trend window, with the same guards:
+ * at least MIN_WEEKS_WITH_SALES weeks with sales and minSalesForCorrection pieces in the
+ * window, growth capped by maxSpeedGrowth, and only ever upwards. The article speed grows by
+ * the same difference, so the sum over clusters and the article stay consistent.
+ * The function CHANGES the passed speed object and returns article → cluster → breakdown.
+ */
+export function applyClusterDeficitSpeedCorrection(
+  speed: SalesSpeedResult,
+  stocks: OzonStockRow[],
+  sales: OzonSalesRow[],
+  skus: SKUItem[],
+  settings: OzonCoverageSettings,
+  now: Date,
+  articleCorrections: Record<string, SpeedCorrectionInfo>,
+  offerIdToArticle?: Record<string, string>
+): Record<string, Record<string, ClusterSpeedCorrectionInfo>> {
+  const out: Record<string, Record<string, ClusterSpeedCorrectionInfo>> = {};
+  const deficitDays = Number(settings.deficitDays);
+  if (!(deficitDays > 0)) return out;
+  const trendWeeks = Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 13;
+  const bestWeeksN = Number(settings.bestWeeks) > 0 ? Math.floor(Number(settings.bestWeeks)) : 4;
+  const minSales = Number(settings.minSalesForCorrection) >= 0 ? Number(settings.minSalesForCorrection) : 50;
+  const maxGrowth = Number(settings.maxSpeedGrowth);
+
+  // Ozon stock per article and cluster: available + in transit, as in the article-level pass.
+  const onHand: Record<string, Record<string, number>> = {};
+  for (const row of stocks) {
+    const cluster = String(row.clusterName || '').trim();
+    if (!cluster) continue;
+    const article = resolveOzonArticle(skus, row.offerId, row.sku);
+    if (!onHand[article]) onHand[article] = {};
+    onHand[article][cluster] = (onHand[article][cluster] || 0) + (Number(row.available) || 0) + (Number(row.transit) || 0);
+  }
+
+  const presentWeeks = new Set<string>();
+  for (const row of sales) {
+    if ((Number(row.days) || 0) === 7) presentWeeks.add(String(row.week || '').trim());
+  }
+  const window = getLastFullWeeks(now, trendWeeks).filter(w => presentWeeks.has(w));
+  if (window.length < MIN_WEEKS_WITH_SALES) return out;
+  const windowSet = new Set(window);
+
+  // Weekly series per article and cluster.
+  const byClusterWeek: Record<string, Record<string, Record<string, number>>> = {};
+  for (const row of sales) {
+    if ((Number(row.days) || 0) !== 7) continue;
+    const week = String(row.week || '').trim();
+    if (!windowSet.has(week)) continue;
+    const qty = Number(row.qty) || 0;
+    if (!(qty > 0)) continue;
+    const cluster = String(row.clusterName || '').trim();
+    if (!cluster) continue;
+    const article = resolveSalesArticle(skus, row.offerId, offerIdToArticle);
+    if (!byClusterWeek[article]) byClusterWeek[article] = {};
+    if (!byClusterWeek[article][cluster]) byClusterWeek[article][cluster] = {};
+    byClusterWeek[article][cluster][week] = (byClusterWeek[article][cluster][week] || 0) + qty;
+  }
+
+  const articles = new Set<string>([...Object.keys(speed.perDayByArticleCluster), ...Object.keys(byClusterWeek)]);
+  for (const article of articles) {
+    // The whole article was empty: item 42 has already lifted every cluster of it.
+    if (articleCorrections[article]) continue;
+    const clusterSpeeds = speed.perDayByArticleCluster[article] || {};
+    const series = byClusterWeek[article] || {};
+    const clusters = new Set<string>([...Object.keys(clusterSpeeds), ...Object.keys(series)]);
+    for (const cluster of clusters) {
+      const base = Number(clusterSpeeds[cluster]) || 0;
+      const stock = (onHand[article] && onHand[article][cluster]) || 0;
+      let daysLeft = 0;
+      if (base > 0) {
+        daysLeft = stock / base;
+        if (daysLeft >= deficitDays) continue;
+      } else if (stock > 0) {
+        continue; // no speed with stock on the shelf is no demand, not a deficit
+      }
+
+      const weekQty = series[cluster] || {};
+      const values = window.map(w => weekQty[w] || 0);
+      const weeksWithSales = values.filter(v => v > 0).length;
+      if (weeksWithSales < MIN_WEEKS_WITH_SALES) continue;
+      const windowQty = values.reduce((sum, v) => sum + v, 0);
+      if (windowQty < minSales) continue;
+
+      const ranked = window.map(w => ({ week: w, qty: weekQty[w] || 0 }))
+        .sort((a, b) => b.qty - a.qty)
+        .slice(0, bestWeeksN);
+      if (!ranked.length) continue;
+      const raw = ranked.reduce((sum, r) => sum + r.qty, 0) / ranked.length / 7;
+      if (!(raw > base)) continue;
+
+      const capApplies = base > 0 && maxGrowth >= 1;
+      const corrected = capApplies ? Math.min(raw, base * maxGrowth) : raw;
+
+      if (!speed.perDayByArticleCluster[article]) speed.perDayByArticleCluster[article] = {};
+      speed.perDayByArticleCluster[article][cluster] = corrected;
+      speed.perDayByArticle[article] = (Number(speed.perDayByArticle[article]) || 0) + (corrected - base);
+
+      if (!out[article]) out[article] = {};
+      out[article][cluster] = {
+        clusterName: cluster,
+        base,
+        corrected,
+        raw,
+        capped: capApplies && corrected < raw,
+        windowQty,
+        weeksWithSales,
+        windowWeeks: window.length,
+        daysLeft,
+        bestWeeks: ranked
+      };
+    }
   }
   return out;
 }
@@ -1236,6 +1379,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const speed = buildSalesSpeed(input.sales, input.skus, weeks, offerIdToArticle, getMskWeekMonday(now));
   const stocksByArticle = buildClusterStocks(input.stocks, input.skus, input.settings.returnsToSalePct);
   const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, offerIdToArticle);
+  // Item 72. Clusters that stand empty inside an article that is not: corrected one by one.
+  const clusterSpeedCorrections = applyClusterDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, speedCorrections, offerIdToArticle);
   // Пункт 38. Тренд считается ПОСЛЕ коррекции скорости: сработавшая коррекция гасит тренд.
   const trends = buildSalesTrend(input.sales, input.skus, input.settings, now, speed, input.stocks, speedCorrections, offerIdToArticle);
   // Прогнозная скорость = факт × тренд × (1 + прирост, %). Используется ТОЛЬКО в контуре заказа
@@ -1285,8 +1430,11 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
 
     const articleClusterQty = speed.qtyByArticleCluster[article] || {};
     const articleClusterPerDay = speed.perDayByArticleCluster[article] || {};
-    for (const clusterName of Object.keys(articleClusterQty)) {
-      const qty = articleClusterQty[clusterName];
+    // Item 72. A cluster corrected by its trend window may have no sales in the speed
+    // window at all: it is still a cluster with a speed.
+    const clusterNames = new Set<string>([...Object.keys(articleClusterQty), ...Object.keys(articleClusterPerDay)]);
+    for (const clusterName of clusterNames) {
+      const qty = articleClusterQty[clusterName] || 0;
       const id = nameToId[clusterName] || '';
       if (!id) {
         unboundQtySold += qty;
@@ -1355,7 +1503,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
         pendingQty,
         requestedQty,
         pendingEffective,
-        recommendation
+        recommendation,
+        speedCorrection: (clusterSpeedCorrections[article] && clusterSpeedCorrections[article][clusterNamesById[clusterId] || '']) || null
       });
     }
     clusterRows.sort((a, b) => b.qtySold - a.qtySold);
