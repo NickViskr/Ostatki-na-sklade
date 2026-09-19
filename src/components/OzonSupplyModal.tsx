@@ -6,6 +6,7 @@ import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClu
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
 import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, resolveAddLine, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
+import { defaultManualQty } from '../lib/ozonManualSupply';
 import type { DraftFailure } from '../lib/ozonDraftErrors';
 import { DRAFT_RETRY_DELAY_SEC, draftRetryExhaustedMessage, draftRetryNotice, isDraftRateLimited, shouldAutoRetryDraft } from '../lib/ozonDraftErrors';
 
@@ -1266,7 +1267,12 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
                   <select
                     value={addForm.article}
                     disabled={!addForm.clusterId}
-                    onChange={(e) => setAddForm({ ...addForm, article: e.target.value, qty: '' })}
+                    onChange={(e) => {
+                      // Item 75. One box by default; the owner may overwrite it.
+                      const article = e.target.value;
+                      const qty = article ? defaultManualQty(pcsPerBoxMap[article] || 0, capForRow(article, '')) : '';
+                      setAddForm({ ...addForm, article, qty });
+                    }}
                     className="flex-1 min-w-[9rem] px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-400 disabled:bg-slate-100 disabled:text-slate-400"
                   >
                     <option value="">Товар…</option>

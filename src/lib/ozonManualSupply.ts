@@ -261,3 +261,16 @@ export function manualClusterList<T extends { clusterId: string; clusterName: st
 
   return sortClustersBySalesShare(out, shareByClusterId);
 }
+
+/**
+ * Item 75. The quantity the «Добавить позицию» form prefills once an article is chosen:
+ * one box («ШТ/КОР»), or the free stock when it is below a box (a number the form would
+ * reject is no help). An article without a box norm keeps the field empty ('').
+ */
+export function defaultManualQty(pcsPerBox: number, freeStock: number): string {
+  const box = Math.floor(Number(pcsPerBox) || 0);
+  if (box <= 0) return '';
+  const free = Math.floor(Number(freeStock) || 0);
+  const qty = Math.min(box, Math.max(0, free));
+  return qty > 0 ? String(qty) : '';
+}

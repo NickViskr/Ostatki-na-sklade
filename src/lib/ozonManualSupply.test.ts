@@ -5,6 +5,7 @@ import {
   assignedForArticle,
   buildManualPlan,
   clampManualQty,
+  defaultManualQty,
   manualKey,
   pickedCabinetSets,
   pickedClusterIds,
@@ -351,5 +352,35 @@ describe('ручной выбор на экране остатков', () => {
     // из рекомендаций полный список кластеров оставался на экране.
     expect(stocks).toMatch(/onCreated=\{\(\) => \{\s*\n\s*setSelectedSupply\(\{\}\);[\s\S]{0,400}exitManualMode\(\);/);
     expect(stocks).toContain('onCreated={() => { exitManualMode(); setManualSummaryOpen(false); }}');
+  });
+});
+
+// Item 75. Choosing an article in «Добавить позицию» prefills one box.
+describe('defaultManualQty', () => {
+  it('one box when the free stock covers it', () => {
+    expect(defaultManualQty(24, 100)).toBe('24');
+    expect(defaultManualQty(24, 24)).toBe('24');
+  });
+
+  it('below a box the free stock is prefilled, never a number the form would reject', () => {
+    expect(defaultManualQty(24, 7)).toBe('7');
+  });
+
+  it('no box norm or nothing free — the field stays empty', () => {
+    expect(defaultManualQty(0, 100)).toBe('');
+    expect(defaultManualQty(24, 0)).toBe('');
+    expect(defaultManualQty(24, -3)).toBe('');
+  });
+
+  it('fractions are cut down, not rounded up — on the box norm and on the free stock alike', () => {
+    expect(defaultManualQty(24.9, 100)).toBe('24');
+    expect(defaultManualQty(24, 10.9)).toBe('10');
+  });
+
+  it('the wizard prefills through defaultManualQty with the SKU norm and the free cap, clearing on no article', () => {
+    const modal = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonSupplyModal.tsx'), 'utf8');
+    expect(modal).toContain("import { defaultManualQty } from '../lib/ozonManualSupply';");
+    expect(modal).toMatch(/const qty = article \? defaultManualQty\(pcsPerBoxMap\[article\] \|\| 0, capForRow\(article, ''\)\) : '';\s*setAddForm\(\{ \.\.\.addForm, article, qty \}\);/);
+    expect(modal).not.toContain("setAddForm({ ...addForm, article: e.target.value, qty: '' })");
   });
 });
