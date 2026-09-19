@@ -16,7 +16,7 @@ import { toast } from 'sonner';
 import { buildOzonGroups, useProcessOzonGroup, useProcessOzonGroups, OzonGroup } from '../lib/ozonGroups';
 import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
 import { detectPeresort } from '../lib/ozonPeresort';
-import { buildUnshippedLines, parseShippedRecord, UnshippedLine } from '../lib/ozonUnshipped';
+import { buildUnshippedLines, canReturnToNew, parseShippedRecord, returnGroupToNewMessage, returnRowToNewMessage, returnToNewPlan, UnshippedLine } from '../lib/ozonUnshipped';
 import { formatCurrency } from '../lib/utils';
 import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -1522,18 +1522,34 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     );
   }, [askConfirmation, markExternalShipmentsBatch]);
 
+  // Item 69. The group button names its rows and skips a row whose return is already posted.
   const handleReturnGroupToNew = useCallback((group: OzonGroup) => {
-    const donePostings: ExternalShipment[] = (group.items as ExternalShipment[]).filter(
-      p => p.status === 'processed' || p.status === 'ignored'
-    );
-    if (donePostings.length === 0) return;
+    const plan = returnToNewPlan(group.items as ExternalShipment[]);
+    if (plan.rows.length === 0) {
+      toast.error('Возвращать нечего: у оформленных поставок уже проведён возврат неотгруженного');
+      return;
+    }
     askConfirmation(
       "Вернуть заявку в новые?",
-      `Все поставки заявки № ${group.label} (${donePostings.length} шт.) снова станут новыми — их можно будет оформить или игнорировать заново. Убедитесь, что связанная отгрузка удалена из Истории, иначе при повторном оформлении получится дубль расхода.`,
+      returnGroupToNewMessage(plan, group.label),
       async () => {
-        const okBatch = await markExternalShipmentsBatch(donePostings.map(p => p.postingId), 'new');
+        const okBatch = await markExternalShipmentsBatch(plan.rows.map(p => p.postingId), 'new');
         if (okBatch) {
-          toast.success(`Заявка № ${group.label} возвращена в новые`);
+          toast.success(`Заявка № ${group.label}: возвращено в новые ${plan.rows.length} поставок`);
+        }
+      }
+    );
+  }, [askConfirmation, markExternalShipmentsBatch]);
+
+  // Item 69. One row back to `new`, the rest of the order untouched.
+  const handleReturnRowToNew = useCallback((s: ExternalShipment, orderLabel: string) => {
+    askConfirmation(
+      "Вернуть поставку в новые?",
+      returnRowToNewMessage(s, orderLabel),
+      async () => {
+        const ok = await markExternalShipmentsBatch([s.postingId], 'new');
+        if (ok) {
+          toast.success(`Поставка № ${s.postingId} возвращена в новые`);
         }
       }
     );
@@ -1968,7 +1984,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                       </div>
                     )}
                     {!group.items.some((i: any) => isActionableItem(i)) &&
-                      group.items.some((i) => i.status === 'processed' || i.status === 'ignored') && (
+                      (group.items as ExternalShipment[]).some(canReturnToNew) && (
                       <button
                         onClick={(e) => { e.stopPropagation(); handleReturnGroupToNew(group); }}
                         className="bg-white border border-amber-400 text-amber-600 px-4 py-2 rounded-xl font-bold text-sm hover:bg-amber-50 transition-all cursor-pointer"
@@ -2190,6 +2206,16 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                         <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 text-slate-600">
                                           Не отгружена
                                         </span>
+                                      )}
+                                      {/* Item 69. Per-row return to `new`; hidden once the unshipped return is posted. */}
+                                      {!group.isVirtual && canReturnToNew(s) && (
+                                        <button
+                                          id={`btn-return-new-${s.postingId}`}
+                                          onClick={(e) => { e.stopPropagation(); handleReturnRowToNew(s, group.label); }}
+                                          className="px-2.5 py-1 rounded-lg text-xs font-bold bg-white border border-slate-300 text-slate-600 hover:bg-slate-100 transition-all cursor-pointer"
+                                        >
+                                          Вернуть в новые
+                                        </button>
                                       )}
                                       {!group.isVirtual && s.status === 'new' && !isStockDeparted(s.ozonStatus) && isActionableItem(s) && (
                                         <button

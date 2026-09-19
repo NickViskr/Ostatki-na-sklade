@@ -131,3 +131,58 @@ export function findShortShipments(all: ExternalShipment[], skus: SKUItem[]): Sh
   }
   return out;
 }
+
+// ===== Item 69: «Вернуть в новые» per supply row =====
+//
+// The group button used to flip EVERY processed or ignored row of an order back to `new` at
+// once and said nothing about which ones — on a mixed order (nine written off, one ignored) a
+// second «Оформить» would double the expense. Now each row can be returned on its own, and a
+// row whose unshipped return is already posted (item 68) is never returned: the return went
+// into the books as a receipt, and re-posting the supply without deleting BOTH entries would
+// break the stock. The group button keeps working but names its rows and skips those.
+
+export interface ReturnToNewPlan {
+  /** Rows that can go back to `new`. */
+  rows: ExternalShipment[];
+  /** Processed or ignored rows kept out because their return is on record. */
+  blocked: ExternalShipment[];
+}
+
+export const canReturnToNew = (s: ExternalShipment): boolean =>
+  (s.status === 'processed' || s.status === 'ignored') && !parseShippedRecord(s.shippedJSON);
+
+export function returnToNewPlan(items: ExternalShipment[]): ReturnToNewPlan {
+  const rows: ExternalShipment[] = [];
+  const blocked: ExternalShipment[] = [];
+  for (const s of items || []) {
+    if (s.status !== 'processed' && s.status !== 'ignored') continue;
+    if (parseShippedRecord(s.shippedJSON)) blocked.push(s);
+    else rows.push(s);
+  }
+  return { rows, blocked };
+}
+
+const rowLabel = (s: ExternalShipment): string => `${s.storageWarehouse || 'склад не указан'} (№ ${s.postingId})`;
+
+/** Confirmation text for one row: names it and, for a written-off row, the write-off to delete first. */
+export function returnRowToNewMessage(s: ExternalShipment, orderLabel: string): string {
+  const head = `Поставка ${rowLabel(s)} заявки № ${orderLabel} снова станет новой — её можно будет оформить или игнорировать заново.`;
+  if (s.status === 'processed') {
+    return `${head} Она была списана: сначала удалите её отгрузку из Истории, иначе при повторном оформлении получится дубль расхода.`;
+  }
+  return `${head} Остальные поставки заявки не изменятся.`;
+}
+
+/** Confirmation text for the group button: lists the rows and says which stay put. */
+export function returnGroupToNewMessage(plan: ReturnToNewPlan, orderLabel: string): string {
+  const listed = plan.rows.map(rowLabel).join(', ');
+  const written = plan.rows.filter((s) => s.status === 'processed').length;
+  let text = `Снова станут новыми поставки заявки № ${orderLabel}: ${listed}.`;
+  if (written > 0) {
+    text += ` Из них списано: ${written} — сначала удалите их отгрузки из Истории, иначе при повторном оформлении получится дубль расхода.`;
+  }
+  if (plan.blocked.length > 0) {
+    text += ` Не вернутся (возврат неотгруженного уже проведён): ${plan.blocked.map(rowLabel).join(', ')}.`;
+  }
+  return text;
+}
