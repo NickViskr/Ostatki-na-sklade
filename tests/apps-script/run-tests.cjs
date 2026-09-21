@@ -3323,6 +3323,187 @@ function speedHarness(articles) {
   }
 }
 
+// ================= Item 78a: KAN daily rows and warehouse snapshots =================
+// A fake KAN MCP server answers list_shops (one Ozon shop, one WB shop), ping, and
+// get_shop_analytics in its two shapes: the period summary (product_id → sku_article) and the
+// daily rows (product_id + date + metrics), paginated through next_offset.
+function fakeKan(opts) {
+  const o = Object.assign({ latest: '2026-09-20', products: [{ id: 1, article: 'ART1' }, { id: 2, article: 'ART2' }], pageSize: 1000 }, opts || {});
+  return function (url, options) {
+    const body = JSON.parse(options.payload);
+    const name = body.params.name;
+    const args = body.params.arguments || {};
+    const answer = (obj) => ({ code: 200, body: { jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: JSON.stringify(obj) }], isError: false } } });
+    if (name === 'ping') return answer({ ok: true, date_context: { latest_complete_date: o.latest } });
+    if (name === 'list_shops') return answer({ shops: [{ id: 2771, marketplace: 'ozon' }, { id: 3257, marketplace: 'wb' }, { id: 1765, marketplace: 'ozon' }] });
+    if (name === 'get_shop_analytics') {
+      if (args.period_summary) {
+        return answer({ items: o.products.map(p => ({ product_id: p.id, sku_article: p.article, ordered_units: 1 })), next_offset: null });
+      }
+      const days = [];
+      for (let d = args.date__gte; d <= args.date__lte; d = new Date(Date.parse(d + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10)) days.push(d);
+      const all = [];
+      days.forEach(d => o.products.forEach(p => all.push({
+        product_id: p.id, date: d, stocks_cost_price: 100 * p.id, stocks_fbo_cnt: 10 * p.id, balance_delivering_cost: 5,
+        balance_returning_cost: 1, cost_price: 20, gross_profit: 8, delivered_cnt: 2, ordered_units: 3
+      })));
+      const offset = Number(args.offset) || 0;
+      const page = all.slice(offset, offset + o.pageSize);
+      const next = offset + o.pageSize < all.length ? offset + o.pageSize : null;
+      return answer({ items: page, next_offset: next });
+    }
+    return { code: 500, body: 'unknown tool ' + name };
+  };
+}
+
+(function test78aToken() {
+  const h = freshHarness();
+  h.clearScriptProperties();
+  h.setFetchHandler(fakeKan());
+  let err = '';
+  try { h.kanCall('ping', {}); } catch (e) { err = String(e.message || e); }
+  check('78a: без свойства kan_mcpToken вызов KAN падает с понятным сообщением', /kan_mcpToken/.test(err), err);
+  check('78a: без токена запрос в сеть не уходит', h.fetchLog.length === 0, 'запросов: ' + h.fetchLog.length);
+
+  h.setScriptProperty('kan_mcpToken', 'secret-token');
+  const r = h.kanCall('ping', {});
+  check('78a: ответ KAN распакован из result.content[0].text', r.ok === true && r.date_context.latest_complete_date === '2026-09-20');
+  const sent = h.fetchLog[0];
+  check('78a: запрос — JSON-RPC tools/call на адрес KAN с Bearer-токеном',
+    sent.url === 'https://kultura-analitiki.ru/mcp/' && sent.body.method === 'tools/call' && sent.body.params.name === 'ping'
+      && sent.options.headers.Authorization === 'Bearer secret-token' && sent.options.muteHttpExceptions === true,
+    JSON.stringify({ url: sent.url, method: sent.body.method, auth: sent.options.headers.Authorization }));
+
+  h.setFetchHandler(() => ({ code: 401, body: { detail: 'Invalid or missing MCP credentials.' } }));
+  err = '';
+  try { h.kanCall('ping', {}); } catch (e) { err = String(e.message || e); }
+  check('78a: HTTP 401 → сообщение про токен, а не про JSON', /токен/.test(err) && /401/.test(err), err);
+
+  h.setFetchHandler(() => ({ code: 200, body: { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'Rate limit exceeded' }], isError: true } } }));
+  err = '';
+  try { h.kanCall('ping', {}); } catch (e) { err = String(e.message || e); }
+  check('78a: isError от инструмента → ошибка с текстом инструмента', /отказал/.test(err) && /Rate limit/.test(err), err);
+
+  h.setFetchHandler(() => ({ code: 200, body: { jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'bad params' } } }));
+  err = '';
+  try { h.kanCall('ping', {}); } catch (e) { err = String(e.message || e); }
+  check('78a: JSON-RPC error → ошибка с его сообщением', /bad params/.test(err), err);
+})();
+
+(function test78aBackfill() {
+  const h = freshHarness();
+  h.setNow('2026-09-21T02:00:00Z'); // 05:00 МСК
+  h.setScriptProperty('kan_mcpToken', 't');
+  h.setFetchHandler(fakeKan({ latest: '2026-09-20', pageSize: 100 }));
+  const r = h.kanPullDaily();
+  check('78a: первый запуск тянет 120 дней до latest_complete_date', r.from === '2026-05-24' && r.to === '2026-09-20', r.from + '..' + r.to);
+  check('78a: получено 120 дней × 2 товара = 240 строк', r.fetched === 240, 'строк: ' + r.fetched);
+  const dump = h.dumpRegistrySheet('KAN дни');
+  check('78a: лист «KAN дни» создан с заголовками', JSON.stringify(dump[0]) === JSON.stringify(h.KAN_DAYS_HEADERS), JSON.stringify(dump[0]));
+  check('78a: в листе 240 строк данных', dump.length === 241, 'строк: ' + (dump.length - 1));
+  const row = dump[1];
+  check('78a: строка — дата, артикул из сводки, ProductID и метрики по порядку заголовков',
+    row[0] === '2026-05-24' && row[1] === 'ART1' && row[2] === 1 && row[3] === 100 && row[4] === 10 && row[5] === 5 && row[6] === 1
+      && row[7] === 20 && row[8] === 8 && row[9] === 2 && row[10] === 3 && /^2026-09-21 05:00/.test(String(row[11])),
+    JSON.stringify(row));
+  const analyticsCalls = h.fetchLog.filter(c => c.body.params.name === 'get_shop_analytics');
+  const dailyCalls = analyticsCalls.filter(c => !c.body.params.arguments.period_summary);
+  check('78a: дневная выборка пролистана по next_offset (240 строк по 100 = 3 страницы)', dailyCalls.length === 3, 'страниц: ' + dailyCalls.length);
+  check('78a: в KAN уходят только магазины Ozon (2771, 1765), без WB 3257',
+    analyticsCalls.every(c => JSON.stringify(c.body.params.arguments.shop_id) === JSON.stringify([2771, 1765])),
+    JSON.stringify(analyticsCalls[0].body.params.arguments.shop_id));
+  check('78a: дневная выборка просит именно восемь метрик капитала и продаж',
+    JSON.stringify(dailyCalls[0].body.params.arguments.metrics) === JSON.stringify(['stocks_cost_price', 'stocks_fbo_cnt', 'balance_delivering_cost', 'balance_returning_cost', 'cost_price', 'gross_profit', 'delivered_cnt', 'ordered_units']),
+    JSON.stringify(dailyCalls[0].body.params.arguments.metrics));
+  check('78a: дневная выборка группируется по дню и товару',
+    dailyCalls[0].body.params.arguments.date_group_by === 'day' && dailyCalls[0].body.params.arguments.product_group_by === 'product');
+
+  // Second run the same day: nothing new, no analytics call, no duplicate rows.
+  h.setFetchHandler(fakeKan({ latest: '2026-09-20' }));
+  const r2 = h.kanPullDaily();
+  const calls2 = h.fetchLog.filter(c => c.body.params.name === 'get_shop_analytics');
+  check('78a: повтор в тот же день ничего не тянет и не дублирует', r2.fetched === 0 && calls2.length === 0 && h.dumpRegistrySheet('KAN дни').length === 241,
+    'fetched ' + r2.fetched + ', analytics calls ' + calls2.length);
+
+  // Next day: exactly one new day.
+  h.setNow('2026-09-22T02:00:00Z');
+  h.setFetchHandler(fakeKan({ latest: '2026-09-21' }));
+  const r3 = h.kanPullDaily();
+  check('78a: на следующий день тянется ровно один день (2 строки)', r3.from === '2026-09-21' && r3.to === '2026-09-21' && r3.fetched === 2, JSON.stringify(r3));
+})();
+
+(function test78aRetention() {
+  const h = freshHarness();
+  h.setNow('2026-09-21T02:00:00Z');
+  h.setScriptProperty('kan_mcpToken', 't');
+  const H = h.KAN_DAYS_HEADERS;
+  const old = ['2025-07-01', 'ART1', 1, 1, 1, 1, 1, 1, 1, 1, 1, 'x']; // 447 days back → beyond 400
+  const edge = ['2025-08-17', 'ART1', 1, 1, 1, 1, 1, 1, 1, 1, 1, 'x']; // exactly 400 days back → kept
+  const fresh = ['2026-09-19', 'ART1', 1, 1, 1, 1, 1, 1, 1, 1, 1, 'x'];
+  h.setRegistrySheet('KAN дни', [H.slice(), old, edge, fresh]);
+  h.setFetchHandler(fakeKan({ latest: '2026-09-20' }));
+  const r = h.kanPullDaily();
+  const dump = h.dumpRegistrySheet('KAN дни');
+  const days = dump.slice(1).map(x => x[0]);
+  check('78a: старт от дня после последнего в листе', r.from === '2026-09-20' && r.fetched === 2, JSON.stringify(r));
+  check('78a: строки старше 400 дней удалены, день ровно на границе, свежие и новые остались', !days.includes('2025-07-01') && days.includes('2025-08-17') && days.includes('2026-09-19') && days.filter(d => d === '2026-09-20').length === 2, JSON.stringify(days));
+  check('78a: заголовок после перезаписи на месте', JSON.stringify(dump[0]) === JSON.stringify(H));
+})();
+
+(function test78aSnapshot() {
+  const h = freshHarness();
+  h.setNow('2026-09-21T02:00:00Z');
+  h.setStockSheet([{ article: 'ART1', quantity: 10, avgCost: 123.456, capitalization: 1234.56 }, { article: 'ART2', quantity: 0, avgCost: 50, capitalization: 0 }]);
+  const r = h.snapshotStock();
+  const dump = h.dumpRegistrySheet('Снимки склада');
+  check('78a: снимок пишет по строке на артикул за сегодня', r.written === 2 && r.day === '2026-09-21' && dump.length === 3, JSON.stringify(r));
+  check('78a: капитал = остаток × средняя себестоимость, до копеек', dump[1][0] === '2026-09-21' && dump[1][1] === 'ART1' && dump[1][2] === 10 && dump[1][3] === 123.456 && dump[1][4] === 1234.56, JSON.stringify(dump[1]));
+  const r2 = h.snapshotStock();
+  check('78a: второй снимок в тот же день не пишется', r2.written === 0 && h.dumpRegistrySheet('Снимки склада').length === 3, JSON.stringify(r2));
+})();
+
+(function test78aDailyAndRead() {
+  const h = freshHarness();
+  h.setNow('2026-09-21T02:00:00Z');
+  h.setScriptProperty('kan_mcpToken', 't');
+  h.setStockSheet([{ article: 'ART1', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.setFetchHandler(fakeKan({ latest: '2026-09-20', products: [{ id: 1, article: 'ART1' }] }));
+  const r = h.kanTurnoverDaily();
+  check('78a: ночная задача делает снимок и тянет KAN', r.snapshot.written === 1 && r.kan.fetched === 120, JSON.stringify({ s: r.snapshot.written, k: r.kan.fetched }));
+
+  const d = h.getTurnoverData({ days: 7 });
+  check('78a: getTurnoverData отдаёт окно по дате включительно', d.cutoff === '2026-09-14' && d.kanRows.length === 7 && d.snapshots.length === 1, 'kan ' + d.kanRows.length + ', snap ' + d.snapshots.length);
+  check('78a: последний день KAN в ответе', d.latestKanDay === '2026-09-20', d.latestKanDay);
+  const k = d.kanRows[0];
+  check('78a: строка KAN — объект с полями капитала и продаж',
+    k.date === '2026-09-14' && k.article === 'ART1' && k.productId === 1 && k.stockCost === 100 && k.stockQty === 10 && k.deliveringCost === 5
+      && k.returningCost === 1 && k.costOfSales === 20 && k.grossProfit === 8 && k.boughtQty === 2 && k.orderedQty === 3, JSON.stringify(k));
+  const sn = d.snapshots[0];
+  check('78a: снимок — объект с остатком, себестоимостью и капиталом', sn.date === '2026-09-21' && sn.article === 'ART1' && sn.qty === 10 && sn.avgCost === 100 && sn.capital === 1000, JSON.stringify(sn));
+  const dAll = h.getTurnoverData({});
+  check('78a: без параметра — 90 дней', dAll.days === 90 && dAll.kanRows.length === 90, 'kan ' + dAll.kanRows.length);
+
+  // A KAN failure must not lose the snapshot already written.
+  const h2 = freshHarness();
+  h2.setNow('2026-09-21T02:00:00Z');
+  h2.setScriptProperty('kan_mcpToken', 't');
+  h2.setStockSheet([{ article: 'ART1', quantity: 1, avgCost: 1, capitalization: 1 }]);
+  h2.setFetchHandler(() => ({ code: 503, body: 'down' }));
+  let err = '';
+  try { h2.kanTurnoverDaily(); } catch (e) { err = String(e.message || e); }
+  check('78a: при падении KAN снимок склада уже записан, ошибка поднята', /503/.test(err) && h2.dumpRegistrySheet('Снимки склада').length === 2, err);
+})();
+
+(function test78aRouting() {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+  check('78a: getTurnoverData обслуживается как чтение без замка, до switch', /if \(action === 'getTurnoverData'\) \{[\s\S]*?getTurnoverData\(payload\.data \|\| \{\}\)/.test(src) && src.indexOf("action === 'getTurnoverData'") < src.indexOf("switch (action)"));
+  check('78a: runKanPullNow — только администратору', /case 'runKanPullNow': assertAdmin\(currentUser\); result = kanTurnoverDaily\(\); break;/.test(src));
+  check('78a: токен читается только из свойства скрипта, в файле его нет', /getProperty\(KAN_TOKEN_PROPERTY\)/.test(src) && !/Bearer [A-Za-z0-9_\-]{20,}/.test(src));
+  check('78a: пороги оборачиваемости в настройках Ozon: 90 / 45 / 20', /turnoverPeriodDays',\s*value: 90/.test(src) && /turnoverSlowDays',\s*value: 45/.test(src) && /turnoverFastDays',\s*value: 20/.test(src));
+  const proxy = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'server.ts'), 'utf8');
+  check('78a: прокси знает getTurnoverData как чтение с кэшем Ozon', /'getTurnoverData',/.test(proxy) && /'getOzonInitialData', 'getTurnoverData'\]\.includes\(action\)/.test(proxy));
+})();
+
 // ================= clasp: what leaves for script.google.com =================
 // Since 12.09.2026 Code.gs is deployed by `clasp push` from the repository root. clasp pushes
 // every file under rootDir that .claspignore lets through, and the repository root also holds

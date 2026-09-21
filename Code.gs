@@ -186,6 +186,12 @@ function doPost(e) {
     // reads has an assertAdmin of its own. getOzonSyncStatus stays out: the sidebar polls it on its
     // own schedule. getLastPurchasePrices stays out too: it still goes through the switch and takes
     // the lock, and moving it here would silently change that.
+    // Item 78a: a pure read of «KAN дни» and «Снимки склада» for the turnover tab.
+    if (action === 'getTurnoverData') {
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: getTurnoverData(payload.data || {}) }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     if (action === 'getOzonInitialData') {
       const ozonInitial = {
         stocks: getOzonStocks(),
@@ -453,6 +459,8 @@ function doPost(e) {
       case 'getOzonCostExport': assertAdmin(currentUser); result = getOzonCostExport(); break;
       case 'markOzonCostExported': assertAdmin(currentUser); result = markOzonCostExported(data, currentUser.username); break;
       case 'saveSupplyDocsToDrive': assertAdmin(currentUser); result = saveSupplyDocsToDrive(data); break;
+      // Item 78a: the manual «Обновить из KAN» button; the nightly trigger does the same.
+      case 'runKanPullNow': assertAdmin(currentUser); result = kanTurnoverDaily(); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -547,6 +555,9 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'maxSpeedGrowth',      value: 5,  desc: 'Максимальный рост скорости при дефиците, раз' },
   { key: 'salesGrowthPct',      value: 0,  desc: 'Прирост объёма продаж, %: ручная надбавка к прогнозу заказа на фабрике' },
   { key: 'demandGrowthPct',     value: 30, desc: 'Рост спроса, %: последние 7 дней против окна скорости; выше порога рекомендации считаются по большей скорости; 0 — сигнал выключен' },
+  { key: 'turnoverPeriodDays',  value: 90, desc: 'Оборачиваемость: период расчёта, дней' },
+  { key: 'turnoverSlowDays',    value: 45, desc: 'Оборачиваемость: медленный товар — один оборот дольше стольких дней' },
+  { key: 'turnoverFastDays',    value: 20, desc: 'Оборачиваемость: лидер — один оборот быстрее стольких дней' },
   { key: 'stockHistoryRetentionWeeks', value: 15, desc: 'Срок хранения истории остатков Ozon, недель' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
@@ -8298,3 +8309,253 @@ function setFactoryOrderReceived(data, username) {
 }
 
 
+
+// ─── Item 78a (2026-09-21): capital turnover — KAN daily rows and warehouse snapshots ─────
+//
+// KAN («Культура аналитики») has no REST API, only its MCP server: JSON-RPC over HTTPS at
+// KAN_MCP_URL, a Bearer token, no session — one POST per `tools/call`. The token lives in the
+// Script Property `kan_mcpToken` and never leaves Apps Script: the nightly trigger below calls
+// KAN with UrlFetchApp and writes what it gets into the sheet «KAN дни», one row per product
+// and day (stock cost, pieces, delivering/returning cost, cost of sales, gross profit, bought
+// and ordered pieces). Only the Ozon shops of the KAN account are asked for (owner 2026-09-21:
+// «в кан бери данные только по магазинам озон, показывай их как одно целое»).
+//
+// The same trigger snapshots «Остатки» into «Снимки склада» (article, pieces, average cost,
+// capital), so the warehouse side of the capital has a daily history too. The frontend reads
+// both through `getTurnoverData` and does the arithmetic (src/lib/turnover.ts).
+
+const KAN_MCP_URL = 'https://kultura-analitiki.ru/mcp/';
+const KAN_TOKEN_PROPERTY = 'kan_mcpToken';
+const KAN_DAYS_SHEET = 'KAN дни';
+const KAN_DAYS_HEADERS = [
+  'Дата', 'Артикул KAN', 'ProductID', 'Остаток ₽', 'Остаток FBO шт', 'В доставке ₽', 'Возвраты ₽',
+  'Себестоимость продаж ₽', 'Валовая прибыль ₽', 'Выкуплено шт', 'Заказано шт', 'Получено'
+];
+const KAN_DAILY_METRICS = [
+  'stocks_cost_price', 'stocks_fbo_cnt', 'balance_delivering_cost', 'balance_returning_cost',
+  'cost_price', 'gross_profit', 'delivered_cnt', 'ordered_units'
+];
+const KAN_BACKFILL_DAYS = 120;
+const KAN_DAYS_RETENTION = 400;
+const STOCK_SNAPSHOT_SHEET = 'Снимки склада';
+const STOCK_SNAPSHOT_HEADERS = ['Дата', 'Артикул', 'Остаток шт', 'Средняя себестоимость', 'Капитал ₽'];
+const STOCK_SNAPSHOT_RETENTION = 400;
+
+function kanToken() {
+  const token = String(PropertiesService.getScriptProperties().getProperty(KAN_TOKEN_PROPERTY) || '').trim();
+  if (!token) throw new Error('Токен KAN не задан: добавьте свойство скрипта ' + KAN_TOKEN_PROPERTY);
+  return token;
+}
+
+/** One `tools/call` to the KAN MCP server; returns the parsed JSON the tool answered with. */
+function kanCall(tool, args) {
+  const body = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: tool, arguments: args || {} } };
+  const response = UrlFetchApp.fetch(KAN_MCP_URL, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + kanToken(), Accept: 'application/json' },
+    payload: JSON.stringify(body),
+    muteHttpExceptions: true
+  });
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+  if (code === 401 || code === 403) throw new Error('KAN отверг токен (HTTP ' + code + '): проверьте свойство ' + KAN_TOKEN_PROPERTY);
+  if (code !== 200) throw new Error('KAN ответил HTTP ' + code + ' на ' + tool + ': ' + String(text).slice(0, 200));
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e) { throw new Error('KAN вернул не JSON на ' + tool); }
+  if (parsed.error) throw new Error('KAN ошибка на ' + tool + ': ' + (parsed.error.message || JSON.stringify(parsed.error)));
+  const content = parsed.result && parsed.result.content && parsed.result.content[0];
+  const inner = content && content.text ? content.text : '';
+  if (parsed.result && parsed.result.isError) throw new Error('KAN отказал на ' + tool + ': ' + String(inner).slice(0, 300));
+  try { return JSON.parse(inner); } catch (e) { throw new Error('KAN вернул нечитаемый ответ на ' + tool); }
+}
+
+/** Ids of the Ozon shops of the KAN account — Wildberries shops are left out. */
+function kanOzonShopIds() {
+  const shops = (kanCall('list_shops', {}).shops) || [];
+  return shops
+    .filter(function (s) { return String(s.marketplace || '').toLowerCase() === 'ozon'; })
+    .map(function (s) { return Number(s.id); })
+    .filter(function (id) { return id > 0; });
+}
+
+/** Pages through get_shop_analytics until next_offset is null; returns all item rows. */
+function kanFetchAllRows(args) {
+  const rows = [];
+  let offset = 0;
+  for (let page = 0; page < 50; page++) {
+    const res = kanCall('get_shop_analytics', Object.assign({}, args, { limit: 1000, offset: offset }));
+    (res.items || []).forEach(function (r) { rows.push(r); });
+    if (res.next_offset === null || res.next_offset === undefined) break;
+    offset = Number(res.next_offset);
+  }
+  return rows;
+}
+
+/**
+ * Daily rows per product for [dateFrom, dateTo], mapped to the KAN_DAYS_HEADERS order.
+ * The daily answer carries only product_id, so a period summary over the same range supplies
+ * the seller article (`sku_article`) for each product_id.
+ */
+function kanDailyRows(dateFrom, dateTo, shopIds, stamp) {
+  const summary = kanFetchAllRows({
+    shop_id: shopIds, date__gte: dateFrom, date__lte: dateTo,
+    period_summary: true, product_group_by: 'product', metrics: ['ordered_units']
+  });
+  const articleById = {};
+  summary.forEach(function (r) { articleById[String(r.product_id)] = String(r.sku_article || '').trim(); });
+
+  const daily = kanFetchAllRows({
+    shop_id: shopIds, date__gte: dateFrom, date__lte: dateTo,
+    date_group_by: 'day', product_group_by: 'product', metrics: KAN_DAILY_METRICS
+  });
+  const num = function (v) { const n = Number(v); return isNaN(n) ? 0 : n; };
+  return daily.map(function (r) {
+    return [
+      String(r.date || '').slice(0, 10), articleById[String(r.product_id)] || '', Number(r.product_id) || 0,
+      num(r.stocks_cost_price), num(r.stocks_fbo_cnt), num(r.balance_delivering_cost), num(r.balance_returning_cost),
+      num(r.cost_price), num(r.gross_profit), num(r.delivered_cnt), num(r.ordered_units), stamp
+    ];
+  });
+}
+
+function getKanDaysSheet() {
+  const sheet = getOrCreateSheet(getSpreadsheet(), KAN_DAYS_SHEET, KAN_DAYS_HEADERS);
+  ensureColumns(sheet, KAN_DAYS_HEADERS);
+  return sheet;
+}
+
+function getStockSnapshotSheet() {
+  const sheet = getOrCreateSheet(getSpreadsheet(), STOCK_SNAPSHOT_SHEET, STOCK_SNAPSHOT_HEADERS);
+  ensureColumns(sheet, STOCK_SNAPSHOT_HEADERS);
+  return sheet;
+}
+
+/** All data rows of a sheet as arrays (header dropped, blank rows dropped). */
+function sheetDataRows(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+  return sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues()
+    .filter(function (r) { return r.join('').trim() !== ''; });
+}
+
+/** ISO day of a sheet cell that may hold a Date or a string. */
+function sheetDayOf(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return String(v || '').slice(0, 10);
+}
+
+function todayMsk() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+function shiftDay(isoDay, days) {
+  const d = new Date(isoDay + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Drops rows older than `retentionDays` (by the first column) and rewrites the sheet. */
+function trimSheetByDay(sheet, headers, retentionDays) {
+  const rows = sheetDataRows(sheet);
+  const cutoff = shiftDay(todayMsk(), -retentionDays);
+  const kept = rows.filter(function (r) { return sheetDayOf(r[0]) >= cutoff; });
+  if (kept.length === rows.length) return 0;
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (kept.length > 0) sheet.getRange(2, 1, kept.length, headers.length).setValues(kept);
+  return rows.length - kept.length;
+}
+
+/**
+ * Pulls the KAN days the sheet does not have yet: from the day after the last stored one
+ * (or KAN_BACKFILL_DAYS back on the first run) up to KAN's latest complete date. A rerun on
+ * the same day fetches nothing, so the manual button cannot duplicate rows.
+ */
+function kanPullDaily() {
+  const sheet = getKanDaysSheet();
+  const existing = sheetDataRows(sheet);
+  let lastDay = '';
+  existing.forEach(function (r) { const d = sheetDayOf(r[0]); if (d > lastDay) lastDay = d; });
+
+  const ping = kanCall('ping', {});
+  const latest = String((ping.date_context && ping.date_context.latest_complete_date) || shiftDay(todayMsk(), -1)).slice(0, 10);
+  const from = lastDay ? shiftDay(lastDay, 1) : shiftDay(latest, -(KAN_BACKFILL_DAYS - 1));
+  if (from > latest) return { fetched: 0, from: from, to: latest, latest: latest };
+
+  const shopIds = kanOzonShopIds();
+  if (shopIds.length === 0) throw new Error('В KAN не найдено ни одного магазина Ozon');
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const rows = kanDailyRows(from, latest, shopIds, stamp);
+  if (rows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, KAN_DAYS_HEADERS.length).setValues(rows);
+  }
+  trimSheetByDay(sheet, KAN_DAYS_HEADERS, KAN_DAYS_RETENTION);
+  return { fetched: rows.length, from: from, to: latest, latest: latest, shops: shopIds };
+}
+
+/** Today's snapshot of «Остатки»; a second run on the same day writes nothing. */
+function snapshotStock() {
+  const sheet = getStockSnapshotSheet();
+  const today = todayMsk();
+  const existing = sheetDataRows(sheet);
+  if (existing.some(function (r) { return sheetDayOf(r[0]) === today; })) return { written: 0, day: today };
+
+  const stock = getStock();
+  const rows = stock.map(function (s) {
+    const qty = Number(s.quantity) || 0;
+    const avg = Number(s.avgCost) || 0;
+    return [today, String(s.article), qty, avg, Math.round(qty * avg * 100) / 100];
+  });
+  if (rows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, STOCK_SNAPSHOT_HEADERS.length).setValues(rows);
+  }
+  trimSheetByDay(sheet, STOCK_SNAPSHOT_HEADERS, STOCK_SNAPSHOT_RETENTION);
+  return { written: rows.length, day: today };
+}
+
+/** The nightly job: snapshot first (it needs no network), then KAN. */
+function kanTurnoverDaily() {
+  const snapshot = snapshotStock();
+  const kan = kanPullDaily();
+  Logger.log('kanTurnoverDaily: snapshot ' + snapshot.written + ' rows for ' + snapshot.day + ', KAN ' + kan.fetched + ' rows ' + kan.from + '..' + kan.to);
+  return { snapshot: snapshot, kan: kan };
+}
+
+/** Run once by the owner from the editor: daily at 05:00 script time, after the analytics of 04:00. */
+function setupKanTurnoverTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'kanTurnoverDaily'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('kanTurnoverDaily').timeBased().everyDays(1).atHour(5).create();
+}
+
+/**
+ * Read for the «Оборачиваемость» tab: KAN days and warehouse snapshots of the last `days`
+ * days (by the sheet day, inclusive), plus the last KAN day present. Rows come as objects.
+ */
+function getTurnoverData(data) {
+  const days = Math.max(1, Math.min(400, Number(data && data.days) || 90));
+  const cutoff = shiftDay(todayMsk(), -days);
+  const num = function (v) { const n = Number(v); return isNaN(n) ? 0 : n; };
+
+  const kanRows = sheetDataRows(getKanDaysSheet())
+    .map(function (r) {
+      return {
+        date: sheetDayOf(r[0]), article: String(r[1] || ''), productId: num(r[2]),
+        stockCost: num(r[3]), stockQty: num(r[4]), deliveringCost: num(r[5]), returningCost: num(r[6]),
+        costOfSales: num(r[7]), grossProfit: num(r[8]), boughtQty: num(r[9]), orderedQty: num(r[10])
+      };
+    })
+    .filter(function (r) { return r.date >= cutoff; });
+  let latestKanDay = '';
+  kanRows.forEach(function (r) { if (r.date > latestKanDay) latestKanDay = r.date; });
+
+  const snapshots = sheetDataRows(getStockSnapshotSheet())
+    .map(function (r) {
+      return { date: sheetDayOf(r[0]), article: String(r[1] || ''), qty: num(r[2]), avgCost: num(r[3]), capital: num(r[4]) };
+    })
+    .filter(function (r) { return r.date >= cutoff; });
+
+  return { days: days, cutoff: cutoff, latestKanDay: latestKanDay, kanRows: kanRows, snapshots: snapshots };
+}

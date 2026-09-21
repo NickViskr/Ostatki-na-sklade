@@ -139,6 +139,10 @@ function makeFakeSheet(headers, name) {
       if (idx <= 0 || idx >= data.length) return;
       data.splice(idx, 1);
     },
+    // Item 78a: trimSheetByDay rewrites a sheet from scratch — headers first, kept rows after.
+    clearContents() {
+      data = [[]];
+    },
     // сервисные методы стенда (не часть Apps Script API)
     __dump() { return data.map(r => r.slice()); },
     __setData(d) { data = d.map(r => r.slice()); },
@@ -167,9 +171,27 @@ let scriptProperties = {};
 const targetSpreadsheetId = 'fake-calendar-spreadsheet-id';
 let targetSheets = {};
 
+// ---------- Item 78a: UrlFetchApp — a programmable stand-in for the KAN MCP server ----------
+// A test installs a handler (url, options) => { code, body }; every call is logged so a test
+// can count requests and read the JSON-RPC bodies Code.gs sent.
+let fetchHandler = null;
+const fetchLog = [];
+function makeFetchResponse(code, body) {
+  const text = typeof body === 'string' ? body : JSON.stringify(body);
+  return { getResponseCode: () => code, getContentText: () => text };
+}
+
 // ---------- Сборка контекста vm ----------
 const sandbox = {
   console,
+  UrlFetchApp: {
+    fetch: (url, options) => {
+      fetchLog.push({ url, options, body: options && options.payload ? JSON.parse(options.payload) : null });
+      if (!fetchHandler) throw new Error('Стенд: UrlFetchApp.fetch вызван без обработчика');
+      const r = fetchHandler(url, options);
+      return makeFetchResponse(r.code === undefined ? 200 : r.code, r.body);
+    }
+  },
   Utilities: {
     formatDate: (date, tz, fmt) => formatDateImpl(date, tz, fmt),
     getUuid: () => 'uuid-' + (++uuidCounter)
@@ -249,6 +271,8 @@ this.OZON_STOCKS_HEADERS = OZON_STOCKS_HEADERS;
 this.OZON_SALES_HEADERS = OZON_SALES_HEADERS;
 this.OZON_COST_HEADERS = OZON_COST_HEADERS;
 this.EXTERNAL_SHIPMENTS_HEADERS = EXTERNAL_SHIPMENTS_HEADERS;
+this.KAN_DAYS_HEADERS = KAN_DAYS_HEADERS;
+this.STOCK_SNAPSHOT_HEADERS = STOCK_SNAPSHOT_HEADERS;
 `;
 vm.runInContext(src + exportLine, context, { filename: 'Code.gs' });
 
@@ -293,6 +317,31 @@ module.exports = {
   // ---- Стоимость остатков: свойства скрипта и таблица календаря ----
   targetSpreadsheetId,
   setScriptProperty(key, value) { scriptProperties[key] = String(value); },
+  // ---- Item 78a: KAN daily rows and warehouse snapshots ----
+  setFetchHandler(fn) { fetchHandler = fn; fetchLog.length = 0; },
+  fetchLog,
+  // A JSON-RPC answer shaped like the KAN MCP server's: result.content[0].text holds JSON.
+  mcpAnswer(obj) { return { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify(obj) }], isError: false } }; },
+  kanCall: (...args) => context.kanCall(...args),
+  kanPullDaily: (...args) => context.kanPullDaily(...args),
+  snapshotStock: (...args) => context.snapshotStock(...args),
+  kanTurnoverDaily: (...args) => context.kanTurnoverDaily(...args),
+  getTurnoverData: (...args) => context.getTurnoverData(...args),
+  KAN_DAYS_HEADERS: context.KAN_DAYS_HEADERS,
+  STOCK_SNAPSHOT_HEADERS: context.STOCK_SNAPSHOT_HEADERS,
+  getRegistrySheet(name) { return sheetRegistry[name] || null; },
+  dumpRegistrySheet(name) {
+    const sheet = sheetRegistry[name];
+    if (!sheet) return null;
+    const data = sheet.__dump();
+    return data.slice(0, sheet.getLastRow());
+  },
+  setRegistrySheet(name, rows) {
+    const sheet = makeFakeSheet(rows[0].slice(), name);
+    if (rows.length > 1) sheet.__setData(rows.map(r => r.slice()));
+    sheetRegistry[name] = sheet;
+    return sheet;
+  },
   clearScriptProperties() { scriptProperties = {}; },
   resetTargetSpreadsheet() { targetSheets = {}; },
   getTargetSheet(name) { return targetSheets[name] || null; },

@@ -311,7 +311,7 @@ async function startServer() {
     // when the action was introduced: getCacheTtlMs returns 0 for anything unknown, so the
     // composite was not cached at all and start-up got SLOWER, not faster — five cached
     // reads had been replaced by one uncached one.
-    if (['getOzonStocks', 'getOzonSales', 'getFactoryOrders', 'getOzonInitialData'].includes(action)) {
+    if (['getOzonStocks', 'getOzonSales', 'getFactoryOrders', 'getOzonInitialData', 'getTurnoverData'].includes(action)) {
       return CACHE_TTL_OZON_MS;
     }
     if (['getInitialData', 'getTransactions', 'getSkus', 'getArchivedItems', 'getStock', 'getExternalShipments', 'getOzonSupplyRequests', 'getLastPurchasePrices'].includes(action)) {
@@ -360,6 +360,8 @@ async function startServer() {
     'getOzonSettings', 'getOzonClusters', 'getOzonSyncStatus', 'getFactoryOrders', 'getGeminiKey', 'getOzonKeys',
     'getStock', 'getServiceRates', 'getOzonStocks', 'getOzonSales', 'checkSupplyAvailability',
     'getOzonInitialData',
+    // Item 78a: a pure read of «KAN дни» and «Снимки склада»; runKanPullNow stays a write.
+    'getTurnoverData',
     // Item 26 (2026-08-20): getLastPurchasePrices was missing here from the day it was added.
     // It is a pure read — it only calls getValues on the history sheet — but the dashboard fires
     // it on EVERY load, so on every load the proxy treated it as a write and, finding no entry in
