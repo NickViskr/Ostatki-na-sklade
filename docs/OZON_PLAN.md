@@ -320,7 +320,7 @@
 
 ## Очередь дальше — current state (replaced in place, never appended)
 
-Status on 2026-09-18 (evening). Full history of revisions, dated notes and defect
+Status on 2026-09-21. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
 - **Items:** 72 of 75 closed. OPEN: 53. Also 27
