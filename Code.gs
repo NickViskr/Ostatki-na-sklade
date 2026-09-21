@@ -8445,7 +8445,8 @@ function sheetDayOf(v) {
   return String(v || '').slice(0, 10);
 }
 
-function todayMsk() {
+/** Today in the script time zone (Asia/Yekaterinburg in the manifest; KAN dates are Moscow, two hours behind — the 05:00 trigger sees the same calendar day). */
+function todayScriptDay() {
   return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
 
@@ -8458,7 +8459,7 @@ function shiftDay(isoDay, days) {
 /** Drops rows older than `retentionDays` (by the first column) and rewrites the sheet. */
 function trimSheetByDay(sheet, headers, retentionDays) {
   const rows = sheetDataRows(sheet);
-  const cutoff = shiftDay(todayMsk(), -retentionDays);
+  const cutoff = shiftDay(todayScriptDay(), -retentionDays);
   const kept = rows.filter(function (r) { return sheetDayOf(r[0]) >= cutoff; });
   if (kept.length === rows.length) return 0;
   sheet.clearContents();
@@ -8479,7 +8480,7 @@ function kanPullDaily() {
   existing.forEach(function (r) { const d = sheetDayOf(r[0]); if (d > lastDay) lastDay = d; });
 
   const ping = kanCall('ping', {});
-  const latest = String((ping.date_context && ping.date_context.latest_complete_date) || shiftDay(todayMsk(), -1)).slice(0, 10);
+  const latest = String((ping.date_context && ping.date_context.latest_complete_date) || shiftDay(todayScriptDay(), -1)).slice(0, 10);
   const from = lastDay ? shiftDay(lastDay, 1) : shiftDay(latest, -(KAN_BACKFILL_DAYS - 1));
   if (from > latest) return { fetched: 0, from: from, to: latest, latest: latest };
 
@@ -8497,7 +8498,7 @@ function kanPullDaily() {
 /** Today's snapshot of «Остатки»; a second run on the same day writes nothing. */
 function snapshotStock() {
   const sheet = getStockSnapshotSheet();
-  const today = todayMsk();
+  const today = todayScriptDay();
   const existing = sheetDataRows(sheet);
   if (existing.some(function (r) { return sheetDayOf(r[0]) === today; })) return { written: 0, day: today };
 
@@ -8536,7 +8537,7 @@ function setupKanTurnoverTrigger() {
  */
 function getTurnoverData(data) {
   const days = Math.max(1, Math.min(400, Number(data && data.days) || 90));
-  const cutoff = shiftDay(todayMsk(), -days);
+  const cutoff = shiftDay(todayScriptDay(), -days);
   const num = function (v) { const n = Number(v); return isNaN(n) ? 0 : n; };
 
   const kanRows = sheetDataRows(getKanDaysSheet())
