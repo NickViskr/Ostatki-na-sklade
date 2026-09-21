@@ -119,17 +119,27 @@ export interface ShortShipment {
 export function findShortShipments(all: ExternalShipment[], skus: SKUItem[]): ShortShipment[] {
   const out: ShortShipment[] = [];
   for (const s of all || []) {
-    if (s.isVirtual === true || s.status !== 'processed') continue;
-    if (parseShippedRecord(s.shippedJSON)) continue;
-    // No separate «has a virtual supply» check: without one the lines start at «declared»
-    // and the totals below are equal — a mutation proved that check dead (15.09.2026).
-    const lines = buildUnshippedLines(s, all, skus);
-    const declaredTotal = lines.reduce((sum, l) => sum + l.declared, 0);
-    const shippedTotal = lines.reduce((sum, l) => sum + l.shipped, 0);
-    if (shippedTotal >= declaredTotal) continue;
-    out.push({ supply: s, lines, declaredTotal, shippedTotal });
+    const short = shortShipmentOf(s, all, skus);
+    if (short) out.push(short);
   }
   return out;
+}
+
+/**
+ * One supply's short shipment by Ozon's account, or null when Ozon has no evidence of one.
+ * Owner's remark 21.09.2026: the row-level «Отгружено меньше» button used to show on EVERY
+ * written-off supply and read as a status; now the header shows it only when this is true.
+ */
+export function shortShipmentOf(s: ExternalShipment, all: ExternalShipment[], skus: SKUItem[]): ShortShipment | null {
+  if (s.isVirtual === true || s.status !== 'processed') return null;
+  if (parseShippedRecord(s.shippedJSON)) return null;
+  // No separate «has a virtual supply» check: without one the lines start at «declared»
+  // and the totals below are equal — a mutation proved that check dead (15.09.2026).
+  const lines = buildUnshippedLines(s, all, skus);
+  const declaredTotal = lines.reduce((sum, l) => sum + l.declared, 0);
+  const shippedTotal = lines.reduce((sum, l) => sum + l.shipped, 0);
+  if (shippedTotal >= declaredTotal) return null;
+  return { supply: s, lines, declaredTotal, shippedTotal };
 }
 
 // ===== Item 69: «Вернуть в новые» per supply row =====

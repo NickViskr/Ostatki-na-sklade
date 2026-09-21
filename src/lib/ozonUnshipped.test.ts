@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { arrivedByVirtualSupply, buildUnshippedLines, findShortShipments, parseShippedRecord } from './ozonUnshipped';
+import { arrivedByVirtualSupply, buildUnshippedLines, findShortShipments, parseShippedRecord, shortShipmentOf } from './ozonUnshipped';
 import type { ExternalShipment, SKUItem } from '../types';
 
 // ============================================================================================
@@ -135,6 +135,27 @@ describe('findShortShipments (этап 3)', () => {
   });
 });
 
+// Owner's remark 21.09.2026 on order 129272007-1: the header button showed on every written-off row.
+describe('shortShipmentOf: per-row evidence for the header button', () => {
+  it('returns the short shipment for the live case and null for a correctly shipped row', () => {
+    const short = shortShipmentOf(original, [original, virtual], skus);
+    expect(short && short.shippedTotal).toBe(18);
+    expect(shortShipmentOf(original, [original], skus)).toBeNull();
+    const full = row({ ...virtual, itemsJSON: JSON.stringify([{ offerId: 'BowlGrayMini_01', quantity: 36 }]) });
+    expect(shortShipmentOf(original, [original, full], skus)).toBeNull();
+  });
+
+  it('null for a returned, a new and a virtual row', () => {
+    const returned = row({ ...original, shippedJSON: JSON.stringify({ lines: [], returnTxIds: [], returnedAt: '', by: '' }) });
+    expect(shortShipmentOf(returned, [returned, virtual], skus)).toBeNull();
+    expect(shortShipmentOf(row({ ...original, status: 'new' }), [original, virtual], skus)).toBeNull();
+    // A virtual row never qualifies even when another virtual row points at it with less.
+    const v1 = row({ ...virtual, status: 'processed' });
+    const v2 = row({ ...virtual, postingId: '2000066659800', originalSupplyId: '2000066659799', itemsJSON: JSON.stringify([{ offerId: 'BowlGrayMini_01', quantity: 6 }]) });
+    expect(shortShipmentOf(v1, [original, v1, v2], skus)).toBeNull();
+  });
+});
+
 // ---- Guards over the wiring: screen, store, Code.gs.
 describe('подключение этапа 2 к экрану, хранилищу и Code.gs', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
@@ -142,10 +163,15 @@ describe('подключение этапа 2 к экрану, хранилищ�
   const store = read('src/store/useWarehouseStore.ts');
   const gas = read('Code.gs');
 
-  it('кнопка «Отгружено меньше» — только у оформленной строки без записи возврата; с записью — бейдж', () => {
+  it('header: «Отгружено меньше» only when Ozon shows a short arrival; with a record — a badge; manual case in the panel', () => {
     expect(tab).toMatch(/\{s\.status === 'processed' && \(\(\) => \{\s*const record = parseShippedRecord\(s\.shippedJSON\);\s*if \(record\) \{/);
-    expect(tab).toContain('id={`btn-unshipped-${s.postingId}`}');
+    expect(tab).toMatch(/if \(!shortShipmentOf\(s, externalShipments \|\| \[\], skus\)\) return null;\s*return \(\s*<button\s*id=\{`btn-unshipped-\$\{s\.postingId\}`\}/);
     expect(tab).toMatch(/Возврат: \{returned\} шт/);
+    expect(tab).toMatch(/\{s\.status === 'processed' && !parseShippedRecord\(s\.shippedJSON\) && !shortShipmentOf\(s, externalShipments \|\| \[\], skus\) && \(\s*<button\s*id=\{`btn-unshipped-manual-\$\{s\.postingId\}`\}/);
+  });
+
+  it('the «Не отгружена» badge of an ignored row is red (owner, 21.09.2026)', () => {
+    expect(tab).toMatch(/\{s\.status === 'ignored' && \(\s*<span className="px-2\.5 py-1 rounded-lg text-xs font-bold bg-red-100 text-red-700">\s*Не отгружена/);
   });
 
   it('окно предзаполняется чистой функцией и отправляет ровно offerId/article/shipped', () => {

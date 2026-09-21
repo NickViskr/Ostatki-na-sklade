@@ -16,7 +16,7 @@ import { toast } from 'sonner';
 import { buildOzonGroups, useProcessOzonGroup, useProcessOzonGroups, OzonGroup } from '../lib/ozonGroups';
 import { computeShortageRecalc, parseRecalcJSON } from '../lib/ozonShortage';
 import { detectPeresort } from '../lib/ozonPeresort';
-import { buildUnshippedLines, canReturnToNew, parseShippedRecord, returnGroupToNewMessage, returnRowToNewMessage, returnToNewPlan, UnshippedLine } from '../lib/ozonUnshipped';
+import { buildUnshippedLines, canReturnToNew, parseShippedRecord, returnGroupToNewMessage, returnRowToNewMessage, returnToNewPlan, shortShipmentOf, UnshippedLine } from '../lib/ozonUnshipped';
 import { formatCurrency } from '../lib/utils';
 import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -2181,7 +2181,9 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           Списана
                                         </span>
                                       )}
-                                      {/* Item 68 stage 2. A written-off supply either has its return on record or can get one. */}
+                                      {/* Item 68 stage 2. A written-off supply either has its return on record or, when Ozon's
+                                          virtual supply shows it left short, a button to post one. A correctly shipped row
+                                          shows nothing here (owner, 21.09.2026); the manual case lives in the expanded panel. */}
                                       {s.status === 'processed' && (() => {
                                         const record = parseShippedRecord(s.shippedJSON);
                                         if (record) {
@@ -2192,6 +2194,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                             </span>
                                           );
                                         }
+                                        if (!shortShipmentOf(s, externalShipments || [], skus)) return null;
                                         return (
                                           <button
                                             id={`btn-unshipped-${s.postingId}`}
@@ -2203,7 +2206,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                         );
                                       })()}
                                       {s.status === 'ignored' && (
-                                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 text-slate-600">
+                                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-100 text-red-700">
                                           Не отгружена
                                         </span>
                                       )}
@@ -2284,6 +2287,17 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                         })()}
                                       </div>
                                       {renderItemsTable(s.itemsJSON, s.acceptedJSON, s.recalcJSON)}
+                                      {/* Item 68 stage 2, manual case: part of a written-off supply stayed on the shelf but Ozon
+                                          shows no virtual supply for it. Kept out of the header so it does not read as a status. */}
+                                      {s.status === 'processed' && !parseShippedRecord(s.shippedJSON) && !shortShipmentOf(s, externalShipments || [], skus) && (
+                                        <button
+                                          id={`btn-unshipped-manual-${s.postingId}`}
+                                          onClick={(e) => { e.stopPropagation(); setSelectedUnshippedShipment(s); }}
+                                          className="mt-3 text-xs font-bold text-amber-700 hover:underline cursor-pointer"
+                                        >
+                                          Отгружено меньше, чем списано? Оформить возврат неотгруженного
+                                        </button>
+                                      )}
                                     </div>
                                   </motion.div>
                                 )}
