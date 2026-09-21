@@ -2924,6 +2924,51 @@ ${wbDictStr}`;
     }
   });
 
+  // Item 78d (2026-09-21): the AI window of the «Оборачиваемость» tab. The browser sends the
+  // data snapshot it built (src/lib/turnoverPrompt.ts), the chat so far and the new question;
+  // the proxy adds the Gemini key (the same one the invoice parser uses) and returns plain text.
+  // No data is stored here: every request carries the whole context.
+  app.post("/api/turnover/ask", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+      const { system, snapshot, history, question, modelName } = req.body || {};
+      const q = String(question || "").trim();
+      if (!q) return res.status(400).json({ status: "error", message: "Пустой вопрос" });
+      if (String(snapshot || "").length > 400_000) return res.status(400).json({ status: "error", message: "Слишком большой снимок данных" });
+
+      const apiKey = await getApiKey();
+      if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the server and no custom key available.");
+      const ai = new GoogleGenAI({ apiKey });
+      const model = modelName || "gemini-flash-latest";
+
+      const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [
+        { role: "user", parts: [{ text: String(snapshot || "") }] },
+        { role: "model", parts: [{ text: "Данные получил. Задавайте вопрос." }] },
+      ];
+      for (const m of Array.isArray(history) ? history.slice(-10) : []) {
+        const text = String(m?.text || "").trim();
+        if (!text) continue;
+        contents.push({ role: m.role === "model" ? "model" : "user", parts: [{ text }] });
+      }
+      contents.push({ role: "user", parts: [{ text: q }] });
+
+      const result = await ai.models.generateContent({
+        model,
+        contents,
+        config: { systemInstruction: String(system || ""), temperature: 0.2 },
+      });
+      const answer = String((result as any).text || "").trim();
+      if (!answer) throw new Error("Модель вернула пустой ответ");
+      res.json({ status: "success", data: { answer, model } });
+    } catch (error: any) {
+      console.error("turnover/ask error:", error?.message || error);
+      res.status(500).json({ status: "error", message: error?.message || String(error) });
+    }
+  });
+
   // Метка версии прокси для диагностики развёртывания. Секретов не отдаёт.
   app.get("/api/version", (req, res) => {
     // Имя редакции Cloud Run подставляет сам в переменную окружения K_REVISION,

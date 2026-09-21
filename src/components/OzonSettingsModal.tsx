@@ -24,6 +24,9 @@ interface OzonSettingsData {
   maxSpeedGrowth: number;
   salesGrowthPct: number;
   demandGrowthPct: number;
+  turnoverPeriodDays: number;
+  turnoverSlowDays: number;
+  turnoverFastDays: number;
   excludedClusters: string;
   priorityClusters: string;
   maxBoxesPerCluster: number;
@@ -92,6 +95,9 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     maxSpeedGrowth: 5,
     salesGrowthPct: 0,
     demandGrowthPct: 30,
+    turnoverPeriodDays: 90,
+    turnoverSlowDays: 45,
+    turnoverFastDays: 20,
     excludedClusters: '',
     priorityClusters: '',
     maxBoxesPerCluster: 30,
@@ -328,6 +334,9 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               maxSpeedGrowth: numSetting(res.data.maxSpeedGrowth, 5),
               salesGrowthPct: numSetting(res.data.salesGrowthPct, 0),
               demandGrowthPct: numSetting(res.data.demandGrowthPct, 30),
+              turnoverPeriodDays: Math.max(1, numSetting(res.data.turnoverPeriodDays, 90)),
+              turnoverSlowDays: numSetting(res.data.turnoverSlowDays, 45),
+              turnoverFastDays: numSetting(res.data.turnoverFastDays, 20),
               excludedClusters: String(res.data.excludedClusters || ''),
               priorityClusters: String(res.data.priorityClusters || ''),
               // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.
@@ -376,6 +385,9 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         maxSpeedGrowth: Math.max(0, parseFloat(String(form.maxSpeedGrowth)) || 0),
         salesGrowthPct: Math.max(0, parseFloat(String(form.salesGrowthPct)) || 0),
         demandGrowthPct: Math.max(0, parseFloat(String(form.demandGrowthPct)) || 0),
+        turnoverPeriodDays: Math.max(1, parseInt(String(form.turnoverPeriodDays), 10) || 1),
+        turnoverSlowDays: Math.max(0, parseFloat(String(form.turnoverSlowDays)) || 0),
+        turnoverFastDays: Math.max(0, parseFloat(String(form.turnoverFastDays)) || 0),
         excludedClusters: form.excludedClusters,
         priorityClusters: form.priorityClusters,
         maxBoxesPerCluster: Math.max(1, parseInt(String(form.maxBoxesPerCluster), 10) || 1),
@@ -590,6 +602,57 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   value={form.salesGrowthPct}
                   onChange={(e) =>
                     setForm({ ...form, salesGrowthPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Оборачиваемость: период, дней
+                  <FieldHint position="bottom" text="Вкладка «Оборачиваемость»: за сколько последних дней считаются себестоимость продаж, валовая прибыль и средний капитал (склад + Ozon). Данные KAN хранятся 400 дней." />
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={form.turnoverPeriodDays}
+                  onChange={(e) =>
+                    setForm({ ...form, turnoverPeriodDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Оборачиваемость: медленный товар, дней на оборот
+                  <FieldHint position="bottom" text="Товар считается медленным (красный), если один оборот капитала занимает дольше этого числа дней или продаж за период нет вовсе." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={form.turnoverSlowDays}
+                  onChange={(e) =>
+                    setForm({ ...form, turnoverSlowDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Оборачиваемость: лидер, дней на оборот
+                  <FieldHint position="bottom" text="Товар считается лидером (зелёный), если один оборот капитала занимает меньше этого числа дней." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={form.turnoverFastDays}
+                  onChange={(e) =>
+                    setForm({ ...form, turnoverFastDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />

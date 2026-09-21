@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, FactoryOrder } from '../types';
+import { TurnoverData } from '../lib/turnoverData';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
 import { parseInvoiceWithGemini } from '../lib/gemini';
@@ -177,6 +178,11 @@ interface WarehouseState {
   exportKanCost: () => Promise<void>;
   ozonSales: OzonSalesRow[];
   fetchOzonSales: () => Promise<void>;
+  /** Item 78b: «KAN дни» and «Снимки склада» for the turnover tab, as served by getTurnoverData. */
+  turnoverData: TurnoverData | null;
+  fetchTurnoverData: (days: number) => Promise<void>;
+  /** Item 78a: the manual «Обновить из KAN» button; admin only on the server. */
+  runKanPullNow: () => Promise<boolean>;
   ozonSupplyRequests: OzonSupplyRequestRow[];
   fetchOzonSupplyRequests: () => Promise<void>;
   factoryOrders: FactoryOrder[];
@@ -218,6 +224,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonStocks: [],
   ozonStocksSyncIssues: [],
   ozonSales: [],
+  turnoverData: null,
   ozonSupplyRequests: [],
   factoryOrders: [],
   ozonSettings: {
@@ -235,6 +242,9 @@ export const useWarehouseStore = create<WarehouseState>()(
     maxSpeedGrowth: 5,
     salesGrowthPct: 0,
     demandGrowthPct: 30,
+    turnoverPeriodDays: 90,
+    turnoverSlowDays: 45,
+    turnoverFastDays: 20,
   },
   ozonSupplySettings: { maxBoxesPerCluster: 30, dropOffWarehouseId: '', dropOffWarehouseName: '', dropOffWarehouseType: '', directClusters: '' },
   ozonClusterRefs: [],
@@ -1723,6 +1733,10 @@ export const useWarehouseStore = create<WarehouseState>()(
             maxSpeedGrowth: num(s.maxSpeedGrowth, 5),
             salesGrowthPct: num(s.salesGrowthPct, 0),
             demandGrowthPct: num(s.demandGrowthPct, 30),
+            // Item 78b: capital turnover — period and the slow / fast thresholds in days per turn.
+            turnoverPeriodDays: Math.max(1, num(s.turnoverPeriodDays, 90)),
+            turnoverSlowDays: num(s.turnoverSlowDays, 45),
+            turnoverFastDays: num(s.turnoverFastDays, 20),
           },
           ozonSupplySettings: {
             // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.
@@ -1769,6 +1783,39 @@ export const useWarehouseStore = create<WarehouseState>()(
       }
     } catch (e) {
       console.error('getOzonStocks error:', e);
+    }
+  },
+
+  fetchTurnoverData: async (days) => {
+    if (!get().sessionToken) return;
+    try {
+      const result = await get().fetchGas('getTurnoverData', { data: { days } });
+      if (result.status === 'success' && result.data) {
+        set({ turnoverData: result.data as TurnoverData });
+      } else {
+        console.error('getTurnoverData failed:', result.message);
+      }
+    } catch (e) {
+      console.error('getTurnoverData error:', e);
+    }
+  },
+
+  runKanPullNow: async () => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('runKanPullNow');
+      if (result.status === 'success' && result.data) {
+        const d = result.data;
+        toast.success(`KAN: получено ${d.kan?.fetched ?? 0} строк (${d.kan?.from ?? '—'} … ${d.kan?.to ?? '—'}), снимок склада: ${d.snapshot?.written ?? 0} строк`);
+        return true;
+      }
+      toast.error(result.message || 'Не удалось обновить данные KAN');
+      return false;
+    } catch (e: any) {
+      toast.error(e?.message || 'Не удалось обновить данные KAN');
+      return false;
+    } finally {
+      set({ isProcessing: false });
     }
   },
 

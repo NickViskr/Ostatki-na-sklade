@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Package,
   Warehouse,
+  RefreshCw,
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
@@ -114,6 +115,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: 'history', label: 'История', icon: History },
     { id: 'skus', label: 'SKU База', icon: BookOpen },
     { id: 'directory', label: 'Справочник', icon: Book },
+    { id: 'turnover', label: 'Оборачиваемость', icon: RefreshCw },
     ...(isCurrentUserAdmin ? [
       { id: 'ozon', label: 'Поставки Озон', icon: Package },
       { id: 'ozonStocks', label: 'Остатки Озон', icon: Warehouse },

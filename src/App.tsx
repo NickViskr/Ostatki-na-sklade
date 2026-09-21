@@ -24,6 +24,7 @@ const DeletedItemsTab = React.lazy(() => import('./components/DeletedItemsTab').
 const DirectoryTab = React.lazy(() => import('./components/DirectoryTab').then(m => ({ default: m.DirectoryTab })));
 const OzonSuppliesTab = React.lazy(() => import('./components/OzonSuppliesTab').then(m => ({ default: m.OzonSuppliesTab })));
 const OzonStocksTab = React.lazy(() => import('./components/OzonStocksTab').then(m => ({ default: m.OzonStocksTab })));
+const TurnoverTab = React.lazy(() => import('./components/TurnoverTab').then(m => ({ default: m.TurnoverTab })));
 
 // Modals
 import { ConfirmModal } from './components/ConfirmModal';
@@ -124,6 +125,7 @@ export default function App() {
           {activeTab === 'settings' && isAdmin && <SettingsTab key="settings" />}
           {activeTab === 'ozon' && isAdmin && <OzonSuppliesTab key="ozon" />}
           {activeTab === 'ozonStocks' && isAdmin && <OzonStocksTab key="ozonStocks" />}
+          {activeTab === 'turnover' && <TurnoverTab key="turnover" />}
         </Suspense>
       </main>
 

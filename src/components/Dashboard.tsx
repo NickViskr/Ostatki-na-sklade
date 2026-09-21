@@ -29,6 +29,7 @@ import { buildFreeStockCsv } from '../lib/freeStockCsv';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { coverageDays, daysLying, lastReceiptByArticle, turnoverSortValue } from '../lib/turnoverDays';
+import { buildTurnover, shelfFromStock } from '../lib/turnover';
 
 // Колонки таблицы остатков, которые можно скрывать. «Артикул» скрыть нельзя — это опора строки.
 const DASH_TOGGLEABLE_COLS: { key: string; label: string }[] = [
@@ -38,6 +39,7 @@ const DASH_TOGGLEABLE_COLS: { key: string; label: string }[] = [
   { key: 'capitalization', label: 'Капитализация' },
   { key: 'storage', label: 'Хранение ₽/сут' },
   { key: 'turnover', label: 'Оборач. (дни)' },
+  { key: 'capitalTurn', label: 'Оборот капитала, дн.' },
 ];
 
 // По умолчанию скрыт учётный остаток: пользователю важнее свободный остаток за вычетом резерва.
@@ -61,6 +63,8 @@ export const Dashboard: React.FC = React.memo(() => {
   // Item 26 stage A1: these three reads are now part of the composite start-up call.
   // The store still exposes them individually — other screens refresh with them.
   const fetchOzonInitialData = useWarehouseStore((state) => state.fetchOzonInitialData);
+  const turnoverData = useWarehouseStore((state) => state.turnoverData);
+  const fetchTurnoverData = useWarehouseStore((state) => state.fetchTurnoverData);
   const ozonSupplyRequests = useWarehouseStore((state) => state.ozonSupplyRequests);
   const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
@@ -190,6 +194,23 @@ export const Dashboard: React.FC = React.memo(() => {
     // global lock, and folding it in would have changed that silently.
     fetchOzonInitialData();
   }, [isAdmin, fetchOzonInitialData, fetchLastPurchasePrices]);
+
+  // Item 78c: the «Оборот капитала, дн.» column reads the same KAN days as the turnover tab.
+  const turnoverPeriodDays = Math.max(1, Number(ozonSettings.turnoverPeriodDays) || 90);
+  useEffect(() => {
+    fetchTurnoverData(turnoverPeriodDays);
+  }, [fetchTurnoverData, turnoverPeriodDays]);
+  const capitalTurn = useMemo(() => {
+    const map: Record<string, { daysPerTurn: number | null; status: string; turns: number | null }> = {};
+    if (!turnoverData) return map;
+    const r = buildTurnover({
+      kanRows: turnoverData.kanRows, snapshots: turnoverData.snapshots, shelf: shelfFromStock(stock, kits), transactions, skus, kits,
+      settings: { periodDays: turnoverPeriodDays, slowDays: Number(ozonSettings.turnoverSlowDays) || 45, fastDays: Number(ozonSettings.turnoverFastDays) || 20 },
+      latestKanDay: turnoverData.latestKanDay,
+    });
+    for (const a of r.articles) map[a.article] = { daysPerTurn: a.daysPerTurn, status: a.status, turns: a.turns };
+    return map;
+  }, [turnoverData, stock, kits, transactions, skus, turnoverPeriodDays, ozonSettings.turnoverSlowDays, ozonSettings.turnoverFastDays]);
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
   // На главной кабинеты не разделяются — берутся все записи.
@@ -515,6 +536,10 @@ export const Dashboard: React.FC = React.memo(() => {
           aValue = turnoverSortValue(turnoverOf(a));
           bValue = turnoverSortValue(turnoverOf(b));
         }
+        if (sortConfig.key === 'capitalTurn') {
+          aValue = turnoverSortValue(capitalTurn[a.article]?.daysPerTurn ?? null);
+          bValue = turnoverSortValue(capitalTurn[b.article]?.daysPerTurn ?? null);
+        }
         if (sortConfig.key === 'storageCost') {
           const skuA = skus.find(s => s.sku === a.article);
           const litersA = skuA ? skuA.volumeLiters : 0;
@@ -540,7 +565,7 @@ export const Dashboard: React.FC = React.memo(() => {
       });
     }
     return sortableItems;
-  }, [filteredStock, sortConfig, skus, storageRatePerLiterDay, coverageByArticle]);
+  }, [filteredStock, sortConfig, skus, storageRatePerLiterDay, coverageByArticle, capitalTurn]);
 
   const storageTotals = useMemo(() => {
     let totalPerDay = 0;
@@ -1020,6 +1045,15 @@ export const Dashboard: React.FC = React.memo(() => {
                 </div>
               </th>
               )}
+              {isColVisible('capitalTurn') && (
+              <th className="px-6 py-4 font-semibold text-slate-600 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('capitalTurn')}>
+                <div className="flex items-center justify-center gap-1">
+                  Оборот капитала, дн.
+                  <span title={`Дней на один оборот капитала (склад + Ozon по себестоимости) за ${turnoverPeriodDays} дн. Подробности — вкладка «Оборачиваемость»`}><HelpCircle size={14} className="text-slate-400 group-hover:text-indigo-500" /></span>
+                  {getSortIcon('capitalTurn')}
+                </div>
+              </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -1034,6 +1068,7 @@ export const Dashboard: React.FC = React.memo(() => {
                   {isColVisible('capitalization') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-24 ml-auto"></div></td>}
                   {isColVisible('storage') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-20 ml-auto"></div></td>}
                   {isColVisible('turnover') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 mx-auto"></div></td>}
+                  {isColVisible('capitalTurn') && <td className="px-6 py-4"><div className="h-4 bg-slate-200 rounded w-16 mx-auto"></div></td>}
                 </tr>
               ))
             ) : sortedStock.length === 0 ? (
@@ -1175,6 +1210,23 @@ export const Dashboard: React.FC = React.memo(() => {
                         <span className="text-[10px] text-slate-400 block whitespace-nowrap" title="Полка · остаток на Ozon · скорость продаж Ozon">
                           {item.quantity} + Ozon {Math.round(cov?.totalEstimated || 0)} · {(cov?.perDay || 0).toFixed(1)} шт/дн
                         </span>
+                      </>
+                    );
+                  })()}
+                </td>
+                )}
+                {isColVisible('capitalTurn') && (
+                <td className="px-6 py-4 text-center">
+                  {(() => {
+                    const ct = capitalTurn[item.article];
+                    if (!ct) return <span className="text-[10px] text-slate-300">—</span>;
+                    if (ct.status === 'component') return <span className="text-[10px] text-amber-600 font-bold uppercase">компонент набора</span>;
+                    if (ct.daysPerTurn === null) return <span className="text-[10px] text-red-600 font-bold uppercase">нет продаж</span>;
+                    const color = ct.status === 'slow' ? 'text-red-600' : ct.status === 'fast' ? 'text-emerald-600' : 'text-slate-700';
+                    return (
+                      <>
+                        <span className={`text-sm font-bold ${color}`}>{ct.daysPerTurn} дн.</span>
+                        <span className="text-[10px] text-slate-400 block">{ct.turns} раза за период</span>
                       </>
                     );
                   })()}

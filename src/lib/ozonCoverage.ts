@@ -277,6 +277,12 @@ export interface OzonCoverageSettings {
   salesGrowthPct?: number;
   /** Item 73. «Рост спроса, %»: the last 7 days against the speed window; above it the larger speed is used. 0 — off. */
   demandGrowthPct?: number;
+  /** Item 78b. Capital turnover: the period in days. */
+  turnoverPeriodDays?: number;
+  /** Item 78b. Slow: one turn takes longer than this many days. */
+  turnoverSlowDays?: number;
+  /** Item 78b. Leader: one turn takes fewer than this many days. */
+  turnoverFastDays?: number;
 }
 
 export interface OzonClusterRef {
