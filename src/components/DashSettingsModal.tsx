@@ -8,8 +8,6 @@ export const DashSettingsModal: React.FC = () => {
   const setShowDashSettingsModal = useUIStore((state) => state.setShowDashSettingsModal);
   const dashSelectedSkus = useUIStore((state) => state.dashTableSelectedSkus);
   const setDashSelectedSkus = useUIStore((state) => state.setDashTableSelectedSkus);
-  const dashTurnoverDays = useUIStore((state) => state.dashTurnoverDays);
-  const setDashTurnoverDays = useUIStore((state) => state.setDashTurnoverDays);
   
   const skus = useWarehouseStore((state) => state.skus);
   const stock = useWarehouseStore((state) => state.stock);
@@ -58,17 +56,12 @@ export const DashSettingsModal: React.FC = () => {
           <div className="p-6 overflow-y-auto flex-1 space-y-6">
             <div>
               <label className="block text-sm font-bold text-slate-700 mb-2">
-                Период для расчета оборачиваемости (дней)
+                Период для расчёта оборачиваемости
               </label>
-              <input 
-                type="number" 
-                value={dashTurnoverDays}
-                onChange={(e) => setDashTurnoverDays(e.target.value === '' ? '' : Math.max(1, parseInt(e.target.value) || 1))}
-                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                min="1"
-              />
-              <p className="text-xs text-slate-500 mt-2">
-                Укажите количество дней, за которое система будет анализировать продажи для расчета оборачиваемости.
+              <p className="text-xs text-slate-500">
+                Оборачиваемость считается по скорости продаж Ozon: остаток на складе плюс остаток на Ozon,
+                делённые на продажи покупателям за окно из настроек Ozon («Полных недель для скорости продаж»,
+                вкладка «Остатки Озон»). Отдельный период здесь больше не задаётся.
               </p>
             </div>
 

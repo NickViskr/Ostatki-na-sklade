@@ -1,57 +1,53 @@
 /**
- * Item 77 (2026-09-21): the «Оборач. (дни)» column of the «Склад» table, computed in the
- * browser from the transaction journal instead of the nightly Code.gs figure.
+ * Item 77 (2026-09-21): the «Оборач. (дни)» column of the «Склад» table.
  *
- * Why the server figure was wrong for the owner's eyes: `recalculateDailyAnalytics` wrote
- * 0 for an article WITHOUT sales, so a product lying untouched for a year showed «0 дн.» —
- * the best value in the table. It also always used 120 days while the dashboard setting
- * «Период для расчёта оборачиваемости» only drove the summary card.
- *
- * Here «sale» means an expense («Расход») of the article, exactly as the summary card counts
- * it; an article without expenses in the window has NO turnover (null), and the screen says
- * «нет продаж» with the date of the last expense ever, so the owner sees how long it lies.
+ * Owner's case on the first version: «Органайзер_2_пол_прозр» arrived at the warehouse three
+ * days before, sells well on Ozon, yet showed «нет продаж» — because the speed was taken
+ * from the warehouse journal, where «Расход» is a SHIPMENT TO OZON, not a customer sale. A
+ * product not yet shipped had no expenses and looked dead. Decision 2026-09-21 (variant B):
+ * the speed is Ozon customer sales — the same `perDay` the supply planner uses (window from
+ * the Ozon settings, current week included, deficit correction, demand growth) — and the
+ * stock is EVERYTHING that still has to sell: the shelf (reserved part included) plus the
+ * estimated Ozon stock. An article without Ozon sales in the window has NO turnover (null);
+ * the screen says «нет продаж на Ozon» and how long it has lain since the last receipt.
  */
 import { Transaction } from '../types';
 import { parseAppDate } from './utils';
 
-export interface ArticleSales {
-  /** Pieces expensed inside the window. */
-  qty: number;
-  /** Date of the latest expense of the article regardless of the window, or null if none. */
-  lastDate: Date | null;
+export interface StockParts {
+  /** Pieces on the shelf of the own warehouse, the reserve under supply orders included. */
+  shelf: number;
+  /** Estimated Ozon stock (available + transit + resellable returns), all clusters. */
+  ozon: number;
 }
 
-/** Midnight `days` days before `now` — the same cut the summary card uses. */
-export function windowStart(days: number, now: Date = new Date()): Date {
-  const cutoff = new Date(now);
-  cutoff.setDate(cutoff.getDate() - days);
-  cutoff.setHours(0, 0, 0, 0);
-  return cutoff;
+/**
+ * Days until the whole stock is sold at the Ozon speed; null when there is no speed to
+ * divide by. An empty total with a speed gives 0: sold out, nothing lies anywhere.
+ */
+export function coverageDays(parts: StockParts, perDay: number): number | null {
+  if (!(perDay > 0)) return null;
+  const total = (Number(parts.shelf) || 0) + (Number(parts.ozon) || 0);
+  return Math.round(total / perDay);
 }
 
-/** Expensed pieces per article inside the window, plus the last expense date at any time. */
-export function salesByArticle(transactions: Transaction[], days: number, now: Date = new Date()): Map<string, ArticleSales> {
-  const cutoff = windowStart(days, now);
-  const out = new Map<string, ArticleSales>();
+/** Date of the latest «Приход» per article, so the screen can say how long a product lies. */
+export function lastReceiptByArticle(transactions: Transaction[]): Map<string, Date> {
+  const out = new Map<string, Date>();
   for (const t of transactions || []) {
-    if (t.type !== 'Расход') continue;
+    if (t.type !== 'Приход') continue;
     const d = parseAppDate(t.date);
     if (!d) continue;
-    const cur = out.get(t.article) || { qty: 0, lastDate: null };
-    if (d >= cutoff) cur.qty += Number(t.quantity) || 0;
-    if (!cur.lastDate || d > cur.lastDate) cur.lastDate = d;
-    out.set(t.article, cur);
+    const cur = out.get(t.article);
+    if (!cur || d > cur) out.set(t.article, d);
   }
   return out;
 }
 
-/**
- * Days to sell the current quantity at the window's speed; null when nothing sold in the
- * window (no speed to divide by). A zero shelf with sales gives 0: sold out, nothing lies.
- */
-export function turnoverDays(quantity: number, soldInWindow: number, days: number): number | null {
-  if (soldInWindow <= 0) return null;
-  return Math.round((quantity / soldInWindow) * days);
+/** Whole days between the receipt and now, never negative. */
+export function daysLying(receipt: Date, now: Date = new Date()): number {
+  const ms = now.getTime() - receipt.getTime();
+  return Math.max(0, Math.floor(ms / 86400000));
 }
 
 /** Sort key: null (no sales) is the slowest of all, so it lands last in ascending order. */

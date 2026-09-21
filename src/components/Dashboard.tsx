@@ -28,7 +28,7 @@ import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonA
 import { buildFreeStockCsv } from '../lib/freeStockCsv';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
-import { salesByArticle, turnoverDays, turnoverSortValue } from '../lib/turnoverDays';
+import { coverageDays, daysLying, lastReceiptByArticle, turnoverSortValue } from '../lib/turnoverDays';
 
 // Колонки таблицы остатков, которые можно скрывать. «Артикул» скрыть нельзя — это опора строки.
 const DASH_TOGGLEABLE_COLS: { key: string; label: string }[] = [
@@ -92,7 +92,6 @@ export const Dashboard: React.FC = React.memo(() => {
   const setLowStockThreshold = useUIStore((state) => state.setLowStockThreshold);
   
   const dashSelectedSkus = useUIStore((state) => state.dashSelectedSkus);
-  const dashTurnoverDays = useUIStore((state) => state.dashTurnoverDays);
   const setShowDashSettingsModal = useUIStore((state) => state.setShowDashSettingsModal);
   const setActiveTab = useUIStore((state) => state.setActiveTab);
   const setHistSelectedSkus = useUIStore((state) => state.setHistSelectedSkus);
@@ -175,7 +174,10 @@ export const Dashboard: React.FC = React.memo(() => {
   };
 
   useEffect(() => {
-    if (!isAdmin) return;
+    // Item 77 (2026-09-21): the «Оборач.» column needs Ozon stocks and sales for EVERY user, so
+    // the composite read is no longer admin-only (the server never gated it). The purchase
+    // prices stay admin-only, as before.
+    if (isAdmin) fetchLastPurchasePrices();
     // Item 26 (2026-08-20): this block used to be delayed by 1200 ms. The delay arrived with the
     // alerts feature and was never explained; measurement showed it simply postponed the LONGEST
     // request on the page. It now starts immediately.
@@ -186,7 +188,6 @@ export const Dashboard: React.FC = React.memo(() => {
     // «Остатки Озон» tab share one copy instead of fetching the same settings and clusters twice.
     // getLastPurchasePrices stays separate on purpose: it goes through the switch and takes the
     // global lock, and folding it in would have changed that silently.
-    fetchLastPurchasePrices();
     fetchOzonInitialData();
   }, [isAdmin, fetchOzonInitialData, fetchLastPurchasePrices]);
 
@@ -220,7 +221,6 @@ export const Dashboard: React.FC = React.memo(() => {
   }, [factoryOrders]);
 
   const ozonCoverage = useMemo<OzonCoverageResult | null>(() => {
-    if (!isAdmin) return null;
     if (!ozonStocks || ozonStocks.length === 0) return null;
     const myStockAvailability: Record<string, number> = {};
     for (const s of skus) {
@@ -237,7 +237,7 @@ export const Dashboard: React.FC = React.memo(() => {
       factoryOnOrder,
       kits,
     });
-  }, [isAdmin, ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
+  }, [ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
 
   const coverageAlerts = useMemo(() => {
     if (!isAdmin || !ozonCoverage) return [];
@@ -487,12 +487,20 @@ export const Dashboard: React.FC = React.memo(() => {
     });
   }, [augmentedStock, dashTableSelectedSkus, dashStockFilter, lowStockThreshold, dashSearch]);
 
-  // Item 77: one sales window for the summary card AND the «Оборач.» column, driven by the
-  // dashboard setting; the nightly Code.gs figure (120 days, 0 for «no sales») is not shown.
-  const turnoverWindowDays = Number(dashTurnoverDays) || 1;
-  const salesMap = useMemo(() => salesByArticle(transactions, turnoverWindowDays), [transactions, turnoverWindowDays]);
-  const turnoverOf = (item: { article: string; quantity: number }) =>
-    turnoverDays(item.quantity, salesMap.get(item.article)?.qty || 0, turnoverWindowDays);
+  // Item 77 (variant B, owner 2026-09-21): «Оборач. (дни)» = (shelf + estimated Ozon stock) ÷ the
+  // Ozon customer-sales speed of the supply planner. The warehouse journal is NOT the speed:
+  // its «Расход» is a shipment to Ozon, and a product not yet shipped looked dead.
+  const coverageByArticle = useMemo(() => {
+    const map: Record<string, { perDay: number; totalEstimated: number }> = {};
+    for (const a of ozonCoverage?.articles || []) map[a.article] = a;
+    return map;
+  }, [ozonCoverage]);
+  const lastReceipt = useMemo(() => lastReceiptByArticle(transactions), [transactions]);
+  const turnoverOf = (item: { article: string; quantity: number }) => {
+    const cov = coverageByArticle[item.article];
+    return coverageDays({ shelf: item.quantity, ozon: cov?.totalEstimated || 0 }, cov?.perDay || 0);
+  };
+  const turnoverWindowDays = ozonCoverage?.speed.windowDays || 0;
 
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>({ key: 'article', direction: 'asc' });
 
@@ -532,7 +540,7 @@ export const Dashboard: React.FC = React.memo(() => {
       });
     }
     return sortableItems;
-  }, [filteredStock, sortConfig, skus, storageRatePerLiterDay, salesMap, turnoverWindowDays]);
+  }, [filteredStock, sortConfig, skus, storageRatePerLiterDay, coverageByArticle]);
 
   const storageTotals = useMemo(() => {
     let totalPerDay = 0;
@@ -581,15 +589,16 @@ export const Dashboard: React.FC = React.memo(() => {
   };
 
   const calculatedTurnover = useMemo(() => {
-    let totalSales = 0;
+    let totalPerDay = 0;
     let totalStock = 0;
-    filteredStock.forEach(s => {
-      totalStock += s.quantity;
-      totalSales += (salesMap.get(s.article)?.qty || 0);
+    filteredStock.forEach(item => {
+      const cov = coverageByArticle[item.article];
+      totalStock += item.quantity + (cov?.totalEstimated || 0);
+      totalPerDay += cov?.perDay || 0;
     });
-    if (totalSales === 0) return 0;
-    return Math.round((totalStock / totalSales) * turnoverWindowDays);
-  }, [filteredStock, salesMap, turnoverWindowDays]);
+    if (totalPerDay <= 0) return 0;
+    return Math.round(totalStock / totalPerDay);
+  }, [filteredStock, coverageByArticle]);
 
   const exportToCSV = () => {
     if (sortedStock.length === 0) return;
@@ -674,7 +683,7 @@ export const Dashboard: React.FC = React.memo(() => {
             <div className="text-2xl font-bold text-indigo-600 truncate">
               {calculatedTurnover} дн.
             </div>
-            <div className="text-[10px] text-slate-400 mt-2 italic truncate">За последние {dashTurnoverDays || 1} дн.</div>
+            <div className="text-[10px] text-slate-400 mt-2 italic truncate" title="Склад + Ozon, делённые на скорость продаж Ozon">{turnoverWindowDays > 0 ? `По продажам Ozon за ${turnoverWindowDays} дн.` : 'Продажи Ozon ещё не загружены'}</div>
           </div>
           <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm min-w-0">
             <div className="text-xs font-bold text-slate-400 uppercase mb-1 truncate" title="Стоимость хранения">Стоимость хранения</div>
@@ -1006,7 +1015,7 @@ export const Dashboard: React.FC = React.memo(() => {
               <th className="px-6 py-4 font-semibold text-slate-600 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('turnover')}>
                 <div className="flex items-center justify-center gap-1">
                   Оборач. (дни) 
-                  <span title={`За сколько дней разойдётся остаток при скорости расходов за последние ${turnoverWindowDays} дн. «Нет продаж» — расходов за период не было`}><HelpCircle size={14} className="text-slate-400 group-hover:text-indigo-500" /></span>
+                  <span title={`За сколько дней продастся всё: полка + остаток на Ozon, делённые на скорость продаж Ozon (окно ${turnoverWindowDays || '—'} дн.). «Нет продаж на Ozon» — продаж за окно не было`}><HelpCircle size={14} className="text-slate-400 group-hover:text-indigo-500" /></span>
                   {getSortIcon('turnover')}
                 </div>
               </th>
@@ -1142,16 +1151,17 @@ export const Dashboard: React.FC = React.memo(() => {
                 <td className="px-6 py-4 text-center">
                   {(() => {
                     const days = turnoverOf(item);
+                    const cov = coverageByArticle[item.article];
                     if (days === null) {
-                      const last = salesMap.get(item.article)?.lastDate;
+                      const receipt = lastReceipt.get(item.article);
                       return (
                         <>
                           <div className="w-full bg-red-100 h-2 rounded-full overflow-hidden max-w-[80px] mx-auto">
                             <div className="bg-red-400 h-full" style={{ width: '100%' }}></div>
                           </div>
-                          <span className="text-[10px] text-red-600 font-bold uppercase mt-1 block">нет продаж</span>
-                          <span className="text-[10px] text-slate-400 block" title="Последний расход">
-                            {last ? `посл. расход ${formatDateRu(last.toISOString())}` : 'расходов не было'}
+                          <span className="text-[10px] text-red-600 font-bold uppercase mt-1 block">нет продаж на Ozon</span>
+                          <span className="text-[10px] text-slate-400 block" title="Дней с последнего прихода на склад">
+                            {receipt ? `на складе ${daysLying(receipt)} дн.` : 'прихода не было'}
                           </span>
                         </>
                       );
@@ -1162,6 +1172,9 @@ export const Dashboard: React.FC = React.memo(() => {
                           <div className="bg-indigo-500 h-full" style={{ width: `${Math.min(days, 100)}%` }}></div>
                         </div>
                         <span className="text-[10px] text-slate-400 font-bold uppercase mt-1 block">{days} дн.</span>
+                        <span className="text-[10px] text-slate-400 block whitespace-nowrap" title="Полка · остаток на Ozon · скорость продаж Ozon">
+                          {item.quantity} + Ozon {Math.round(cov?.totalEstimated || 0)} · {(cov?.perDay || 0).toFixed(1)} шт/дн
+                        </span>
                       </>
                     );
                   })()}
