@@ -22,12 +22,13 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { DashSettingsModal } from './DashSettingsModal';
-import { formatCurrency, calcCostDebt, hasCostDebt } from '../lib/utils';
+import { formatCurrency, calcCostDebt, hasCostDebt, formatDateRu } from '../lib/utils';
 import { STATUS_FUNNEL_ORDER, getStatusDetails, isFunnelVisibleStatus } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonAlert } from '../lib/ozonAlerts';
 import { buildFreeStockCsv } from '../lib/freeStockCsv';
 import { buildOzonCoverage, resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
+import { salesByArticle, turnoverDays, turnoverSortValue } from '../lib/turnoverDays';
 
 // Колонки таблицы остатков, которые можно скрывать. «Артикул» скрыть нельзя — это опора строки.
 const DASH_TOGGLEABLE_COLS: { key: string; label: string }[] = [
@@ -486,6 +487,13 @@ export const Dashboard: React.FC = React.memo(() => {
     });
   }, [augmentedStock, dashTableSelectedSkus, dashStockFilter, lowStockThreshold, dashSearch]);
 
+  // Item 77: one sales window for the summary card AND the «Оборач.» column, driven by the
+  // dashboard setting; the nightly Code.gs figure (120 days, 0 for «no sales») is not shown.
+  const turnoverWindowDays = Number(dashTurnoverDays) || 1;
+  const salesMap = useMemo(() => salesByArticle(transactions, turnoverWindowDays), [transactions, turnoverWindowDays]);
+  const turnoverOf = (item: { article: string; quantity: number }) =>
+    turnoverDays(item.quantity, salesMap.get(item.article)?.qty || 0, turnoverWindowDays);
+
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>({ key: 'article', direction: 'asc' });
 
   const sortedStock = useMemo(() => {
@@ -495,6 +503,10 @@ export const Dashboard: React.FC = React.memo(() => {
         let aValue: any = a[sortConfig.key as keyof typeof a];
         let bValue: any = b[sortConfig.key as keyof typeof b];
 
+        if (sortConfig.key === 'turnover') {
+          aValue = turnoverSortValue(turnoverOf(a));
+          bValue = turnoverSortValue(turnoverOf(b));
+        }
         if (sortConfig.key === 'storageCost') {
           const skuA = skus.find(s => s.sku === a.article);
           const litersA = skuA ? skuA.volumeLiters : 0;
@@ -520,7 +532,7 @@ export const Dashboard: React.FC = React.memo(() => {
       });
     }
     return sortableItems;
-  }, [filteredStock, sortConfig, skus, storageRatePerLiterDay]);
+  }, [filteredStock, sortConfig, skus, storageRatePerLiterDay, salesMap, turnoverWindowDays]);
 
   const storageTotals = useMemo(() => {
     let totalPerDay = 0;
@@ -569,37 +581,15 @@ export const Dashboard: React.FC = React.memo(() => {
   };
 
   const calculatedTurnover = useMemo(() => {
-    const days = Number(dashTurnoverDays) || 1;
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - days);
-    cutoffDate.setHours(0, 0, 0, 0);
-    
     let totalSales = 0;
     let totalStock = 0;
-
-    // Pre-calculate sales per article to avoid O(N*M) complexity
-    const salesByArticle = new Map<string, number>();
-    for (const t of transactions) {
-      if (t.type === 'Расход') {
-        let tDate = new Date(t.date);
-        if (isNaN(tDate.getTime()) && t.date.includes('.')) {
-          const parts = t.date.split(',')[0].trim().split('.');
-          tDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00`);
-        }
-        if (tDate >= cutoffDate) {
-          salesByArticle.set(t.article, (salesByArticle.get(t.article) || 0) + t.quantity);
-        }
-      }
-    }
-
     filteredStock.forEach(s => {
       totalStock += s.quantity;
-      totalSales += (salesByArticle.get(s.article) || 0);
+      totalSales += (salesMap.get(s.article)?.qty || 0);
     });
-
     if (totalSales === 0) return 0;
-    return Math.round((totalStock / totalSales) * days);
-  }, [filteredStock, transactions, dashTurnoverDays]);
+    return Math.round((totalStock / totalSales) * turnoverWindowDays);
+  }, [filteredStock, salesMap, turnoverWindowDays]);
 
   const exportToCSV = () => {
     if (sortedStock.length === 0) return;
@@ -1016,7 +1006,7 @@ export const Dashboard: React.FC = React.memo(() => {
               <th className="px-6 py-4 font-semibold text-slate-600 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => requestSort('turnover')}>
                 <div className="flex items-center justify-center gap-1">
                   Оборач. (дни) 
-                  <span title="Примерное время до полного истощения запаса на основе последних отгрузок"><HelpCircle size={14} className="text-slate-400 group-hover:text-indigo-500" /></span>
+                  <span title={`За сколько дней разойдётся остаток при скорости расходов за последние ${turnoverWindowDays} дн. «Нет продаж» — расходов за период не было`}><HelpCircle size={14} className="text-slate-400 group-hover:text-indigo-500" /></span>
                   {getSortIcon('turnover')}
                 </div>
               </th>
@@ -1150,10 +1140,31 @@ export const Dashboard: React.FC = React.memo(() => {
                 )}
                 {isColVisible('turnover') && (
                 <td className="px-6 py-4 text-center">
-                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden max-w-[80px] mx-auto">
-                    <div className="bg-indigo-500 h-full" style={{ width: `${Math.min(item.turnover, 100)}%` }}></div>
-                  </div>
-                  <span className="text-[10px] text-slate-400 font-bold uppercase mt-1 block">{item.turnover} дн.</span>
+                  {(() => {
+                    const days = turnoverOf(item);
+                    if (days === null) {
+                      const last = salesMap.get(item.article)?.lastDate;
+                      return (
+                        <>
+                          <div className="w-full bg-red-100 h-2 rounded-full overflow-hidden max-w-[80px] mx-auto">
+                            <div className="bg-red-400 h-full" style={{ width: '100%' }}></div>
+                          </div>
+                          <span className="text-[10px] text-red-600 font-bold uppercase mt-1 block">нет продаж</span>
+                          <span className="text-[10px] text-slate-400 block" title="Последний расход">
+                            {last ? `посл. расход ${formatDateRu(last.toISOString())}` : 'расходов не было'}
+                          </span>
+                        </>
+                      );
+                    }
+                    return (
+                      <>
+                        <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden max-w-[80px] mx-auto">
+                          <div className="bg-indigo-500 h-full" style={{ width: `${Math.min(days, 100)}%` }}></div>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-bold uppercase mt-1 block">{days} дн.</span>
+                      </>
+                    );
+                  })()}
                 </td>
                 )}
               </tr>
