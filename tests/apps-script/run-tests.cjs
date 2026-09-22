@@ -3526,8 +3526,8 @@ function fakeKan(opts) {
   const ignore = fs.readFileSync(path.join(__dirname, '..', '..', '.claspignore'), 'utf8');
   const rules = ignore.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   check('clasp: всё под корнем закрыто правилом **/**', rules[0] === '**/**', 'первое правило: ' + rules[0]);
-  check('clasp: наружу выпущены ровно манифест и Code.gs',
-    JSON.stringify(rules.slice(1).sort()) === JSON.stringify(['!Code.gs', '!appsscript.json']), 'правила: ' + rules.slice(1).join(' '));
+  check('clasp: наружу выпущены ровно манифест и два файла скрипта',
+    JSON.stringify(rules.slice(1).sort()) === JSON.stringify(['!ChinaOrders.gs', '!Code.gs', '!appsscript.json']), 'правила: ' + rules.slice(1).join(' '));
   check('clasp: .clasp.json с идентификатором скрипта не уходит в публичный репозиторий',
     fs.readFileSync(path.join(__dirname, '..', '..', '.gitignore'), 'utf8').split('\n').includes('.clasp.json'), '.gitignore');
 }
@@ -3778,6 +3778,404 @@ function withShipment() {
       === 'Ozon [Упаковка: 500₽]',
     h.buildDestinationGs({ main: 'Ozon', packaging: 500, packagingUnit: 0, other: 0, otherUnit: 0, services: [], keptGroups: [] }, null, 40));
   check('80b: сборка текста возвращает исходную строку', h.buildDestinationGs(e, e) === d, h.buildDestinationGs(e, e));
+})();
+
+// ================= Item 81: module «Заказы в Китае» =================
+//
+// The fixtures are the two real batches the factory shipped: NV-0825-2 (order 28) and
+// NV-0716-3 (order 27), taken from the carrier's own files on 22.09.2026. Every expected
+// number below was worked out independently from the model, in Python, before the module
+// was run: the stand proves the code agrees with the model, not with itself.
+//
+// NV-0825-2: 3 lines, 2 markings, 60 boxes, 672,5 kg, goods 9 744 ¥, local delivery 700 ¥,
+//            freight 1 636,75 $ (672,5 × 2,3 + 90 packing).
+// NV-0716-3: 5 lines, 3 markings, 70 boxes on 3 pallets, two tail lines with no weight,
+//            1 001,5 kg, goods 13 050 ¥, local delivery 900 ¥, freight 2 438,45 $.
+
+function withChina() {
+  const h = freshHarness();
+  h.setChinaSpreadsheet();
+  h.setupChinaSpreadsheet();
+  return h;
+}
+
+function batch28Lines() {
+  return [
+    { marking: 'NV-99', name: '收纳盒', boxes: 30, pcsPerBox: 8, qty: 240, priceCny: 20.3, pallet: '1', palletWeightKg: 339 },
+    { marking: 'NV-99', name: '收纳盒', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3 },
+    { marking: 'NV-98', name: '收纳盒', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, pallet: '2', palletWeightKg: 333.5 }
+  ];
+}
+
+function batch28() {
+  return {
+    orderNo: '28', code: 'NV-0825-2', shippedAt: '2026-08-27', arrivedAt: '2026-09-17', status: 'Прибыла',
+    chinaDeliveryCny: 700, weightKg: 672.5, volumeM3: 4.92, ratePerKgUsd: 2.3, packingUsd: 90,
+    freightUsd: 1636.75, cargoRate: 7, rubRate: 12.4, lines: batch28Lines()
+  };
+}
+
+function batch27Lines() {
+  return [
+    { marking: 'NV-96', boxes: 16, pcsPerBox: 10, qty: 160, priceCny: 25, pallet: 'Паллета 1', palletWeightKg: 288.5 },
+    { marking: 'NV-97', boxes: 24, pcsPerBox: 4, qty: 96, priceCny: 52, pallet: 'Паллета 2', palletWeightKg: 456 },
+    { marking: 'NV-96', boxes: 4, pcsPerBox: 10, qty: 40, priceCny: 25 },
+    { marking: 'NV-95', boxes: 25, pcsPerBox: 6, qty: 150, priceCny: 19, pallet: 'Паллета 3', palletWeightKg: 257 },
+    { marking: 'NV-97', boxes: 1, pcsPerBox: 4, qty: 4, priceCny: 52 }
+  ];
+}
+
+function batch27() {
+  return {
+    orderNo: '27', code: 'NV-0716-3', shippedAt: '2026-07-17', arrivedAt: '2026-08-21', status: 'Прибыла',
+    chinaDeliveryCny: 900, weightKg: 1001.5, volumeM3: 7.41, ratePerKgUsd: 2.3, packingUsd: 135,
+    freightUsd: 2438.45, cargoRate: 7, rubRate: 12.4, lines: batch27Lines()
+  };
+}
+
+// ---- 81a: the spreadsheet of the module ----
+(function () {
+  const h = withChina();
+  const names = h.targetSheetNames();
+  check('81a: setup creates exactly the five sheets of the module',
+    JSON.stringify(names) === JSON.stringify(['Партии', 'Строки партий', 'Расходы партии', 'Платежи', 'Справочник']),
+    names.join(', '));
+
+  const batchHead = h.getTargetSheet('Партии').__dump()[0];
+  check('81a: the batches sheet carries its own header row',
+    JSON.stringify(batchHead) === JSON.stringify(h.CHINA_BATCH_HEADERS), JSON.stringify(batchHead));
+  const lineHead = h.getTargetSheet('Строки партий').__dump()[0];
+  check('81a: the lines sheet carries its own header row',
+    JSON.stringify(lineHead) === JSON.stringify(h.CHINA_LINE_HEADERS), JSON.stringify(lineHead));
+
+  check('81a: the directory is seeded with the carrier rate',
+    h.getChinaSettings().cargoRateCnyPerUsd === 7, JSON.stringify(h.getChinaSettings()));
+
+  // Idempotence: the module is set up on every entry into the tab.
+  h.setupChinaSpreadsheet();
+  h.setupChinaSpreadsheet();
+  check('81a: a repeated setup adds no sixth sheet', h.targetSheetNames().length === 5, h.targetSheetNames().join(', '));
+  check('81a: a repeated setup adds no second directory row',
+    h.dumpChinaSheet('Справочник').length === 1, JSON.stringify(h.dumpChinaSheet('Справочник')));
+
+  // Somebody clears the directory by hand: the rate must not silently become zero, or the
+  // freight of every batch would turn into nothing.
+  h.getTargetSheet('Справочник').deleteRow(2);
+  check('81a: an emptied directory still answers with the carrier rate',
+    h.getChinaSettings().cargoRateCnyPerUsd === 7, JSON.stringify(h.getChinaSettings()));
+})();
+
+(function () {
+  const h = freshHarness();
+  h.setChinaSpreadsheet();
+  h.setTargetSheet('Лист1', [[]]);
+  h.setupChinaSpreadsheet();
+  check('81a: the empty sheet of a brand new spreadsheet is thrown out',
+    h.targetSheetNames().indexOf('Лист1') === -1, h.targetSheetNames().join(', '));
+})();
+
+(function () {
+  const h = freshHarness();
+  h.setChinaSpreadsheet();
+  h.setTargetSheet('Лист1', [['чужие данные']]);
+  h.setupChinaSpreadsheet();
+  check('81a: a sheet with data is never deleted, whatever it is called',
+    h.getTargetSheet('Лист1') !== null, h.targetSheetNames().join(', '));
+})();
+
+(function () {
+  const h = freshHarness();
+  let msg = '';
+  try { h.getChinaBatches(); } catch (e) { msg = e.message; }
+  check('81a: without the script property the module says what is missing',
+    msg.indexOf('china_spreadsheetId') !== -1, msg);
+
+  h.setChinaSpreadsheet('no-such-spreadsheet');
+  msg = '';
+  try { h.getChinaBatches(); } catch (e) { msg = e.message; }
+  check('81a: an unreachable spreadsheet is reported, not swallowed',
+    msg.indexOf('недоступна') !== -1, msg);
+})();
+
+// ---- 81a: splitting an amount ----
+(function () {
+  const h = withChina();
+  const shares = h.chinaAllocate(17069.15, [264.44, 417.97, 66.11, 235.57, 17.42]);
+  let sum = 0;
+  shares.forEach(function (s) { sum = Math.round((sum + s) * 100) / 100; });
+  check('81a: the shares of an amount add up to it exactly', sum === 17069.15, sum + ' :: ' + shares.join(' '));
+
+  const withZero = h.chinaAllocate(100, [1, 0, 1]);
+  check('81a: a line with a zero base gets nothing',
+    withZero[1] === 0 && withZero[0] + withZero[2] === 100, withZero.join(' '));
+
+  const thirds = h.chinaAllocate(100, [1, 1, 1]);
+  check('81a: the rounding remainder lands on the largest base, never on a zero one',
+    JSON.stringify(thirds) === JSON.stringify([33.34, 33.33, 33.33]), thirds.join(' '));
+
+  // A negative number typed into a box or weight cell must not hand a line a negative share
+  // of the freight; it counts as no base at all.
+  const negative = h.chinaAllocate(100, [-5, 1, 1]);
+  check('81a: a negative base gets nothing instead of a negative share',
+    negative[0] === 0 && Math.round((negative[1] + negative[2]) * 100) / 100 === 100, negative.join(' '));
+
+  const nothing = h.chinaAllocate(500, [0, 0]);
+  check('81a: an amount with no base anywhere is not spread at all',
+    JSON.stringify(nothing) === JSON.stringify([0, 0]), nothing.join(' '));
+})();
+
+// ---- 81a: the weight of a line ----
+(function () {
+  const h = withChina();
+  const w = h.chinaLineWeights(batch28Lines(), 672.5);
+  check('81a: the estimated weights are normalised to the weight of the waybill',
+    Math.round(w.factor * 10000) / 10000 === 0.7987, String(w.factor));
+  const kg = w.weights.map(function (x) { return Math.round(x * 100) / 100; });
+  check('81a: batch 28 weighs 270,76 + 135,38 + 266,36 kg',
+    JSON.stringify(kg) === JSON.stringify([270.76, 135.38, 266.36]), kg.join(' '));
+  let sum = 0;
+  w.weights.forEach(function (x) { sum += x; });
+  check('81a: the normalised weights add up to the waybill', Math.round(sum * 100) / 100 === 672.5, String(sum));
+  check('81a: a weight taken from the pallets says so',
+    JSON.stringify(w.sources) === JSON.stringify(['паллета', 'паллета', 'паллета']), w.sources.join(' '));
+
+  // A marking nobody weighed falls back to the average kilograms per box of the batch.
+  const mixed = [
+    { marking: 'NV-99', boxes: 30, qty: 240, palletWeightKg: 339 },
+    { marking: 'NV-77', boxes: 10, qty: 80 }
+  ];
+  const wm = h.chinaLineWeights(mixed, 452);
+  check('81a: a marking nobody weighed takes the average of the batch',
+    wm.sources[1] === 'среднее по партии' && Math.round(wm.weights[1] * 100) / 100 === 113,
+    wm.sources.join(' ') + ' :: ' + wm.weights.join(' '));
+
+  // The file's own estimate can be visibly wrong; the weight of one box, typed by hand, wins.
+  const manual = batch28Lines();
+  manual[2].boxWeightKg = 10.93;
+  const wh = h.chinaLineWeights(manual, 672.5);
+  check('81a: a box weight typed by hand beats the estimate from the pallets',
+    wh.sources[2] === 'вручную' && wh.weights[2] < wh.weights[0],
+    wh.sources.join(' ') + ' :: ' + wh.weights.map(function (x) { return Math.round(x * 100) / 100; }).join(' '));
+
+  // Without a single weight the freight would be split over zeros and vanish from the cost.
+  const noWeight = h.chinaLineWeights([{ marking: 'A', boxes: 3, qty: 30 }, { marking: 'B', boxes: 1, qty: 10 }], 0);
+  check('81a: with no weight anywhere the boxes become the base',
+    JSON.stringify(noWeight.weights) === JSON.stringify([3, 1]) && noWeight.factor === null,
+    noWeight.weights.join(' ') + ' factor=' + noWeight.factor);
+  const noBoxes = h.chinaLineWeights([{ marking: 'A', qty: 30 }, { marking: 'B', qty: 10 }], 0);
+  check('81a: with no boxes either the pieces become the base',
+    JSON.stringify(noBoxes.weights) === JSON.stringify([30, 10]), noBoxes.weights.join(' '));
+})();
+
+// ---- 81a: the cost of a batch ----
+(function () {
+  const h = withChina();
+  const b = batch28();
+  const calc = h.chinaBatchCost(b, b.lines, 0, { cargoRateCnyPerUsd: 7 });
+
+  check('81a: goods of batch 28 are 9 744 ¥ (the file states 10 444 with the local delivery)',
+    calc.goodsCny === 9744, String(calc.goodsCny));
+  check('81a: the freight of batch 28 is 1 636,75 $ → 11 457,25 ¥',
+    calc.freightUsd === 1636.75 && calc.freightCny === 11457.25, calc.freightUsd + ' / ' + calc.freightCny);
+  check('81a: the cost of batch 28 is 271 575,49 ₽', calc.totalRub === 271575.49, String(calc.totalRub));
+  const units = calc.lines.map(function (l) { return l.unitRub; });
+  check('81a: a piece of batch 28 costs 504,61 / 504,61 / 749,30 ₽',
+    JSON.stringify(units) === JSON.stringify([504.61, 504.61, 749.30]), units.join(' '));
+  let sum = 0;
+  calc.lines.forEach(function (l) { sum = Math.round((sum + l.costRub) * 100) / 100; });
+  check('81a: the cost of the batch is the sum of its lines, to the kopeck', sum === calc.totalRub, sum + ' vs ' + calc.totalRub);
+
+  // The waybill total and the rate must tell the same story: 672,5 × 2,3 + 90 = 1 636,75.
+  const rebuilt = h.chinaBatchCost(
+    { chinaDeliveryCny: 700, weightKg: 672.5, ratePerKgUsd: 2.3, packingUsd: 90, cargoRate: 7, rubRate: 12.4 },
+    b.lines, 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: without the waybill total the freight is rebuilt from the rate and agrees with it',
+    rebuilt.freightUsd === 1636.75 && rebuilt.totalRub === calc.totalRub,
+    rebuilt.freightUsd + ' / ' + rebuilt.totalRub);
+
+  // When the carrier's own total and its rate disagree, the total on the waybill is the
+  // money that was actually billed and it wins.
+  const stated = h.chinaBatchCost(
+    { chinaDeliveryCny: 700, weightKg: 672.5, ratePerKgUsd: 2.3, packingUsd: 90, freightUsd: 1700, cargoRate: 7, rubRate: 12.4 },
+    b.lines, 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: the total on the waybill wins over the rate when the two disagree',
+    stated.freightUsd === 1700 && stated.freightCny === 11900, stated.freightUsd + ' / ' + stated.freightCny);
+
+  // A batch typed in without boxes still has to carry its Russian costs somewhere.
+  const noBoxes = h.chinaBatchCost(
+    { weightKg: 0, rubRate: 12.4 },
+    [{ marking: 'A', qty: 30, priceCny: 1 }, { marking: 'B', qty: 10, priceCny: 1 }], 400, { cargoRateCnyPerUsd: 7 });
+  check('81a: with no boxes at all the Russian costs are split by pieces',
+    noBoxes.lines[0].rubShare === 300 && noBoxes.lines[1].rubShare === 100,
+    noBoxes.lines[0].rubShare + ' / ' + noBoxes.lines[1].rubShare);
+
+  // The carrier rate comes from the directory when the batch does not carry its own.
+  const fromDirectory = h.chinaBatchCost(
+    { chinaDeliveryCny: 700, weightKg: 672.5, freightUsd: 1636.75, rubRate: 12.4 },
+    b.lines, 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: a batch with no rate of its own takes the one from the directory',
+    fromDirectory.cargoRate === 7 && fromDirectory.freightCny === 11457.25, String(fromDirectory.freightCny));
+})();
+
+(function () {
+  const h = withChina();
+  const b = batch27();
+  const calc = h.chinaBatchCost(b, b.lines, 9000, { cargoRateCnyPerUsd: 7 });
+
+  check('81a: goods of batch 27 are 13 050 ¥ (the file states 13 950 with the local delivery)',
+    calc.goodsCny === 13050, String(calc.goodsCny));
+  check('81a: the pallets of batch 27 normalise by 0,9166', calc.weightFactor === 0.9166, String(calc.weightFactor));
+  check('81a: the cost of batch 27 with 9 000 ₽ of unloading is 393 637,45 ₽',
+    calc.totalRub === 393637.45, String(calc.totalRub));
+
+  const rub = calc.lines.map(function (l) { return l.rubShare; });
+  check('81a: the Russian costs are split by boxes: 16/24/4/25/1 of 70',
+    JSON.stringify(rub) === JSON.stringify([2057.14, 3085.71, 514.29, 3214.29, 128.57]), rub.join(' '));
+  let sum = 0;
+  rub.forEach(function (x) { sum = Math.round((sum + x) * 100) / 100; });
+  check('81a: the Russian costs are spread whole, to the kopeck', sum === 9000, String(sum));
+
+  // The decisive difference between the two bases: line 4 is lighter than line 2 and still
+  // carries more of the unloading, because it arrived in more boxes.
+  check('81a: unloading follows the boxes, not the weight',
+    calc.lines[3].weightKg < calc.lines[1].weightKg && calc.lines[3].rubShare > calc.lines[1].rubShare,
+    calc.lines[3].weightKg + ' kg / ' + calc.lines[3].rubShare + ' ₽ against ' +
+    calc.lines[1].weightKg + ' kg / ' + calc.lines[1].rubShare + ' ₽');
+
+  // The freight, on the other hand, follows the weight.
+  check('81a: the freight follows the weight, not the boxes',
+    calc.lines[1].freightShareCny > calc.lines[3].freightShareCny,
+    calc.lines[1].freightShareCny + ' vs ' + calc.lines[3].freightShareCny);
+
+  const noCosts = h.chinaBatchCost(b, b.lines, 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: 9 000 ₽ of unloading raise the cost of the batch by exactly 9 000 ₽',
+    Math.round((calc.totalRub - noCosts.totalRub) * 100) / 100 === 9000,
+    calc.totalRub + ' - ' + noCosts.totalRub);
+})();
+
+// ---- 81a: the whole path through the sheets ----
+(function () {
+  const h = withChina();
+  const saved = h.saveChinaBatch(batch28(), 'Николай');
+  check('81a: a saved batch comes back from the sheet', saved.batches.length === 1, String(saved.batches.length));
+
+  const row = h.dumpChinaSheet('Партии')[0];
+  check('81a: the batch row holds the money the script computed',
+    row['Себестоимость партии ₽'] === 271575.49 && row['Перевозка ¥'] === 11457.25 && row['Товар ¥'] === 9744,
+    JSON.stringify(row));
+  check('81a: the batch row keeps who saved it and when',
+    String(row['Кто']) === 'Николай' && String(row['Обновлено']).indexOf('2026-01-05') === 0,
+    row['Кто'] + ' / ' + row['Обновлено']);
+
+  const lines = h.dumpChinaSheet('Строки партий');
+  check('81a: three lines are written, with their own ids', lines.length === 3 && lines[0]['ID'] === 'CB1-1', String(lines.length));
+  check('81a: a line row holds its piece of the freight and its cost per piece',
+    lines[2]['Перевозка ¥'] === 4538 && lines[2]['Себестоимость ₽/шт'] === 749.3, JSON.stringify(lines[2]));
+  let sum = 0;
+  lines.forEach(function (l) { sum = Math.round((sum + Number(l['Себестоимость ₽'])) * 100) / 100; });
+  check('81a: the batch total in the sheet is the sum of the line costs in the sheet',
+    sum === Number(row['Себестоимость партии ₽']), sum + ' vs ' + row['Себестоимость партии ₽']);
+
+  // An edit must replace the lines of the batch, not lay a second set beside them.
+  const again = batch28();
+  again.id = 'CB1';
+  again.lines = batch28Lines().slice(0, 2);
+  h.saveChinaBatch(again, 'Николай');
+  check('81a: an edited batch replaces its lines instead of doubling them',
+    h.dumpChinaSheet('Партии').length === 1 && h.dumpChinaSheet('Строки партий').length === 2,
+    h.dumpChinaSheet('Партии').length + ' / ' + h.dumpChinaSheet('Строки партий').length);
+
+  // A second batch must not disturb the first.
+  h.saveChinaBatch(batch27(), 'Николай');
+  const all = h.dumpChinaSheet('Строки партий');
+  check('81a: a second batch leaves the lines of the first alone',
+    all.filter(function (l) { return l['ПартияID'] === 'CB1'; }).length === 2 &&
+    all.filter(function (l) { return l['ПартияID'] === 'CB2'; }).length === 5, String(all.length));
+
+  // The module lives in its own spreadsheet: the warehouse database must stay untouched.
+  check('81a: nothing of the module is written into the warehouse database',
+    h.dumpStockSheet() === null && h.dumpTransSheet().length === 0,
+    JSON.stringify(h.dumpTransSheet()));
+})();
+
+// ---- 81a: the Russian costs of a batch ----
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch27(), 'Николай');
+  const before = Number(h.dumpChinaSheet('Партии')[0]['Себестоимость партии ₽']);
+
+  h.saveChinaBatchCost({ batchId: 'CB1', date: '2026-08-22', kind: 'Разгрузка', amountRub: 9000 }, 'Николай');
+  const after = Number(h.dumpChinaSheet('Партии')[0]['Себестоимость партии ₽']);
+  check('81a: an added cost is recomputed into the batch at once',
+    after === 393637.45 && Math.round((after - before) * 100) / 100 === 9000, before + ' → ' + after);
+  check('81a: the cost row is stored with its kind and its author',
+    h.dumpChinaSheet('Расходы партии')[0]['Тип'] === 'Разгрузка' &&
+    h.dumpChinaSheet('Расходы партии')[0]['ID'] === 'CC1',
+    JSON.stringify(h.dumpChinaSheet('Расходы партии')[0]));
+
+  const shares = h.dumpChinaSheet('Строки партий').map(function (l) { return Number(l['Расходы РФ ₽']); });
+  check('81a: the cost reaches the lines split by boxes',
+    JSON.stringify(shares) === JSON.stringify([2057.14, 3085.71, 514.29, 3214.29, 128.57]), shares.join(' '));
+
+  h.deleteChinaBatchCost({ id: 'CC1' }, 'Николай');
+  check('81a: a deleted cost is taken back out of the batch',
+    Number(h.dumpChinaSheet('Партии')[0]['Себестоимость партии ₽']) === before &&
+    h.dumpChinaSheet('Расходы партии').length === 0,
+    String(h.dumpChinaSheet('Партии')[0]['Себестоимость партии ₽']));
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28(), 'Николай');
+  h.saveChinaBatch(batch27(), 'Николай');
+  h.saveChinaBatchCost({ batchId: 'CB2', kind: 'Доставка до склада', amountRub: 5000 }, 'Николай');
+
+  h.deleteChinaBatch({ id: 'CB2' }, 'Николай');
+  check('81a: a deleted batch takes its lines and its costs with it',
+    h.dumpChinaSheet('Партии').length === 1 &&
+    h.dumpChinaSheet('Строки партий').filter(function (l) { return l['ПартияID'] === 'CB2'; }).length === 0 &&
+    h.dumpChinaSheet('Расходы партии').length === 0,
+    JSON.stringify(h.dumpChinaSheet('Партии').map(function (b) { return b['ID']; })));
+  check('81a: the batch that was not deleted keeps all of its lines',
+    h.dumpChinaSheet('Строки партий').length === 3, String(h.dumpChinaSheet('Строки партий').length));
+})();
+
+// ---- 81a: what the module refuses ----
+(function () {
+  const h = withChina();
+  function refuses(name, fn, fragment) {
+    let msg = '';
+    try { fn(); } catch (e) { msg = e.message; }
+    check(name, msg.indexOf(fragment) !== -1, msg || 'прошло без ошибки');
+  }
+
+  refuses('81a: a batch with no lines is refused', function () {
+    const b = batch28(); b.lines = []; h.saveChinaBatch(b, 'Николай');
+  }, 'нет ни одной строки');
+  refuses('81a: a line with no marking is refused', function () {
+    const b = batch28(); b.lines[0].marking = ''; h.saveChinaBatch(b, 'Николай');
+  }, 'не указана маркировка');
+  refuses('81a: a line with no quantity is refused', function () {
+    const b = batch28(); b.lines[1].qty = 0; h.saveChinaBatch(b, 'Николай');
+  }, 'количество должно быть больше нуля');
+  refuses('81a: an unknown status is refused', function () {
+    const b = batch28(); b.status = 'Прилетела'; h.saveChinaBatch(b, 'Николай');
+  }, 'Неизвестный статус');
+  refuses('81a: a date in another format is refused', function () {
+    const b = batch28(); b.shippedAt = '27.08.2026'; h.saveChinaBatch(b, 'Николай');
+  }, 'ГГГГ-ММ-ДД');
+  refuses('81a: a date with the right year and the wrong shape is refused', function () {
+    const bb = batch28(); bb.arrivedAt = '2026/09/17'; h.saveChinaBatch(bb, 'Николай');
+  }, 'ГГГГ-ММ-ДД');
+  refuses('81a: an edit of a batch that is not there is refused', function () {
+    const b = batch28(); b.id = 'CB404'; h.saveChinaBatch(b, 'Николай');
+  }, 'не найдена');
+  refuses('81a: a cost of an unknown kind is refused', function () {
+    h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Таможня', amountRub: 100 }, 'Николай');
+  }, 'Неизвестный тип расхода');
+  refuses('81a: a cost of zero is refused', function () {
+    h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Прочее', amountRub: 0 }, 'Николай');
+  }, 'больше нуля');
 })();
 
 // ================= Итог =================

@@ -465,6 +465,14 @@ function doPost(e) {
       case 'saveSupplyDocsToDrive': assertAdmin(currentUser); result = saveSupplyDocsToDrive(data); break;
       // Item 78a: the manual «Обновить из KAN» button; the nightly trigger does the same.
       case 'runKanPullNow': assertAdmin(currentUser); result = kanTurnoverDaily(); break;
+      // Item 81: module «Заказы в Китае». Everything it touches lives in its own spreadsheet
+      // (script property china_spreadsheetId) and in ChinaOrders.gs; admin only.
+      case 'setupChinaSpreadsheet': assertAdmin(currentUser); result = setupChinaSpreadsheet(); break;
+      case 'getChinaBatches': assertAdmin(currentUser); result = getChinaBatches(); break;
+      case 'saveChinaBatch': assertAdmin(currentUser); result = saveChinaBatch(data, currentUser.username); break;
+      case 'deleteChinaBatch': assertAdmin(currentUser); result = deleteChinaBatch(data, currentUser.username); break;
+      case 'saveChinaBatchCost': assertAdmin(currentUser); result = saveChinaBatchCost(data, currentUser.username); break;
+      case 'deleteChinaBatchCost': assertAdmin(currentUser); result = deleteChinaBatchCost(data, currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }

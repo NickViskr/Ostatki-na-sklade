@@ -234,6 +234,10 @@ const sandbox = {
           const sheet = makeFakeSheet([], name);
           targetSheets[name] = sheet;
           return sheet;
+        },
+        // Item 81: setupChinaSpreadsheet throws out the empty sheet Google leaves behind.
+        deleteSheet: (sheet) => {
+          Object.keys(targetSheets).forEach(k => { if (targetSheets[k] === sheet) delete targetSheets[k]; });
         }
       };
     },
@@ -275,6 +279,21 @@ this.KAN_DAYS_HEADERS = KAN_DAYS_HEADERS;
 this.STOCK_SNAPSHOT_HEADERS = STOCK_SNAPSHOT_HEADERS;
 `;
 vm.runInContext(src + exportLine, context, { filename: 'Code.gs' });
+
+// Item 81: the module «Заказы в Китае» lives in its own file. Apps Script keeps every file of
+// a project in ONE global scope, and so does the stand: the second file runs in the same
+// context right after Code.gs and sees its functions and constants.
+const CHINA_GS_PATH = path.join(__dirname, '..', '..', 'ChinaOrders.gs');
+const chinaSrc = fs.readFileSync(CHINA_GS_PATH, 'utf8');
+const chinaExportLine = `
+;this.CHINA_PROPERTY = CHINA_PROPERTY;
+this.CHINA_BATCH_HEADERS = CHINA_BATCH_HEADERS;
+this.CHINA_LINE_HEADERS = CHINA_LINE_HEADERS;
+this.CHINA_COST_HEADERS = CHINA_COST_HEADERS;
+this.CHINA_PAYMENT_HEADERS = CHINA_PAYMENT_HEADERS;
+this.CHINA_SETTINGS_HEADERS = CHINA_SETTINGS_HEADERS;
+`;
+vm.runInContext(chinaSrc + chinaExportLine, context, { filename: 'ChinaOrders.gs' });
 
 // ---------- Заглушки настроек и листа истории, подставляемые ПОСЛЕ загрузки файла ----------
 let ozonSettingsStore = { stockHistoryRetentionWeeks: 15 };
@@ -610,5 +629,39 @@ module.exports = {
                    cluster: String(r[3]), qty: Number(r[4]), days: Number(r[6]) }));
   },
   saveOzonSales: (...args) => context.saveOzonSales(...args),
+
+  // ---------- Item 81: module «Заказы в Китае» ----------
+  // The module works in a spreadsheet of its own, opened by the script property. The stand
+  // gives it the same foreign spreadsheet the payment calendar uses: the sheet names differ.
+  CHINA_PROPERTY: context.CHINA_PROPERTY,
+  CHINA_BATCH_HEADERS: context.CHINA_BATCH_HEADERS,
+  CHINA_LINE_HEADERS: context.CHINA_LINE_HEADERS,
+  CHINA_COST_HEADERS: context.CHINA_COST_HEADERS,
+  setChinaSpreadsheet(id) {
+    scriptProperties[context.CHINA_PROPERTY] = id === undefined ? targetSpreadsheetId : id;
+  },
+  targetSheetNames() { return Object.keys(targetSheets); },
+  // A sheet of the module as objects keyed by its header text: the assertions of item 81 are
+  // about «Себестоимость ₽», not about column 18.
+  dumpChinaSheet(name) {
+    const sheet = targetSheets[name];
+    if (!sheet) return null;
+    const data = sheet.__dump();
+    const headers = (data[0] || []).map(h => String(h).trim());
+    const last = sheet.getLastRow();
+    return data.slice(1, Math.max(last, 1))
+      .filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => { const o = {}; headers.forEach((h, i) => { if (h) o[h] = r[i]; }); return o; });
+  },
+  setupChinaSpreadsheet: (...args) => context.setupChinaSpreadsheet(...args),
+  getChinaBatches: (...args) => context.getChinaBatches(...args),
+  getChinaSettings: (...args) => context.getChinaSettings(...args),
+  saveChinaBatch: (...args) => context.saveChinaBatch(...args),
+  deleteChinaBatch: (...args) => context.deleteChinaBatch(...args),
+  saveChinaBatchCost: (...args) => context.saveChinaBatchCost(...args),
+  deleteChinaBatchCost: (...args) => context.deleteChinaBatchCost(...args),
+  chinaBatchCost: (...args) => context.chinaBatchCost(...args),
+  chinaAllocate: (...args) => context.chinaAllocate(...args),
+  chinaLineWeights: (...args) => context.chinaLineWeights(...args),
   vm
 };
