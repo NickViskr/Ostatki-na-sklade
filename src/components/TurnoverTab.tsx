@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, HelpCircle, RefreshCw, Search, Send, Settings } from 'lucide-react';
+import { Bot, Columns3, HelpCircle, RefreshCw, Search, Send, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
@@ -24,6 +24,21 @@ const STATUS_CLASS: Record<TurnoverStatus, string> = {
 };
 
 type Filter = 'all' | TurnoverStatus;
+
+// Owner 2026-09-22: this table has its own «Колонки» picker, independent of the one on «Склад».
+// The choice is remembered per user in the browser under its own key.
+const TURNOVER_COLS: { key: string; label: string; title: string }[] = [
+  { key: 'turns', label: 'Оборот, раз', title: 'Себестоимость продаж ÷ средний капитал за период' },
+  { key: 'daysPerTurn', label: 'Дн. на оборот', title: 'Период ÷ оборот' },
+  { key: 'gmroi', label: 'GMROI', title: 'Валовая прибыль ÷ средний капитал' },
+  { key: 'cover', label: 'Покрытие, дн.', title: '(склад + Ozon, шт) ÷ выкупов в день' },
+  { key: 'age', label: 'Возраст, дн.', title: 'Дней с последней продажи на Ozon; без продаж — с последнего прихода' },
+  { key: 'shelf', label: 'Склад', title: 'Остаток на складе × себестоимость (резерв входит)' },
+  { key: 'ozon', label: 'Ozon', title: 'Остаток на Ozon по себестоимости + в доставке + возвраты' },
+  { key: 'avgCapital', label: 'Средний капитал', title: 'Средний за период капитал: склад + Ozon' },
+  { key: 'sold', label: 'Продано', title: 'Выкуплено за период, шт' },
+];
+const TURNOVER_COLS_KEY = (user: string) => `turnoverCols_${user}`;
 
 interface ChatMessage { role: 'user' | 'model'; text: string }
 
@@ -61,6 +76,28 @@ export const TurnoverTab: React.FC = () => {
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const [hiddenCols, setHiddenCols] = useState<string[]>([]);
+  const [showColsMenu, setShowColsMenu] = useState(false);
+  useEffect(() => {
+    if (!currentUser?.username) return;
+    try {
+      const saved = localStorage.getItem(TURNOVER_COLS_KEY(currentUser.username));
+      setHiddenCols(saved ? JSON.parse(saved) : []);
+    } catch (e) {
+      setHiddenCols([]);
+    }
+  }, [currentUser?.username]);
+  const isColVisible = (key: string) => !hiddenCols.includes(key);
+  const toggleCol = (key: string) => {
+    setHiddenCols((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      if (currentUser?.username) {
+        try { localStorage.setItem(TURNOVER_COLS_KEY(currentUser.username), JSON.stringify(next)); } catch (e) {}
+      }
+      return next;
+    });
+  };
+  const visibleColsCount = 1 + TURNOVER_COLS.filter((c) => isColVisible(c.key)).length;
 
   useEffect(() => {
     if (!ozonRefsLoaded) fetchOzonInitialData();
@@ -190,26 +227,40 @@ export const TurnoverTab: React.FC = () => {
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Артикул"
                 className="pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
             </div>
+            <div className="relative">
+              <button type="button" id="btn-turnover-cols" onClick={() => setShowColsMenu((v) => !v)}
+                className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50 cursor-pointer">
+                <Columns3 size={14} /> Колонки
+              </button>
+              {showColsMenu && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setShowColsMenu(false)} />
+                  <div className="absolute right-0 top-full mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg p-2 w-60">
+                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 py-1">Показывать колонки</div>
+                    {TURNOVER_COLS.map((col) => (
+                      <label key={col.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer text-xs text-slate-700">
+                        <input type="checkbox" checked={isColVisible(col.key)} onChange={() => toggleCol(col.key)} className="accent-indigo-600" />
+                        {col.label}
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
                 <tr>
                   <th className="px-4 py-3 text-left">Артикул</th>
-                  <th className="px-3 py-3 text-right" title="Себестоимость продаж ÷ средний капитал за период">Оборот, раз</th>
-                  <th className="px-3 py-3 text-right" title="Период ÷ оборот">Дн. на оборот</th>
-                  <th className="px-3 py-3 text-right" title="Валовая прибыль ÷ средний капитал">GMROI</th>
-                  <th className="px-3 py-3 text-right" title="(склад + Ozon, шт) ÷ выкупов в день">Покрытие, дн.</th>
-                  <th className="px-3 py-3 text-right" title="Дней с последней продажи на Ozon; без продаж — с последнего прихода">Возраст, дн.</th>
-                  <th className="px-3 py-3 text-right" title="Остаток на складе × себестоимость (резерв входит)">Склад</th>
-                  <th className="px-3 py-3 text-right" title="Остаток на Ozon по себестоимости + в доставке + возвраты">Ozon</th>
-                  <th className="px-3 py-3 text-right">Средний капитал</th>
-                  <th className="px-3 py-3 text-right" title="Выкуплено за период, шт">Продано</th>
+                  {TURNOVER_COLS.filter((c) => isColVisible(c.key)).map((c) => (
+                    <th key={c.key} className="px-3 py-3 text-right" title={c.title}>{c.label}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {loading && !result && (
-                  <tr><td colSpan={10} className="px-4 py-8 text-center text-slate-400">Загрузка…</td></tr>
+                  <tr><td colSpan={visibleColsCount} className="px-4 py-8 text-center text-slate-400">Загрузка…</td></tr>
                 )}
                 {rows.map((a) => (
                   <tr key={a.article} className="border-t border-slate-100 hover:bg-slate-50" data-status={a.status}>
@@ -218,21 +269,21 @@ export const TurnoverTab: React.FC = () => {
                       <span className={`inline-block mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${STATUS_CLASS[a.status]}`}>{STATUS_LABEL[a.status]}</span>
                       {a.kitOf.length > 0 && <div className="text-[10px] text-slate-400 mt-1">в составе: {a.kitOf.join(', ')}</div>}
                     </td>
-                    <td className="px-3 py-2 text-right font-mono">{num(a.turns)}</td>
-                    <td className={`px-3 py-2 text-right font-mono font-bold ${a.status === 'slow' ? 'text-red-600' : a.status === 'fast' ? 'text-emerald-600' : 'text-slate-700'}`}>{num(a.daysPerTurn)}</td>
-                    <td className={`px-3 py-2 text-right font-mono ${GMROI_CLASS[gmroiTone(a.gmroiPct, gmroiGreen, gmroiRed)]}`}>{num(a.gmroiPct, ' %')}</td>
-                    <td className="px-3 py-2 text-right font-mono">{num(a.coverDays)}</td>
-                    <td className="px-3 py-2 text-right font-mono" title={a.lastSaleDay ? `последняя продажа ${formatDateRu(a.lastSaleDay)}` : a.lastReceiptDay ? `последний приход ${formatDateRu(a.lastReceiptDay)}` : ''}>{num(a.ageDays)}</td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap" title={`${a.shelfQty} шт`}>{money(a.shelfCapital)}<div className="text-[10px] text-slate-400">{a.shelfQty} шт</div></td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap" title={`остаток ${money(a.ozonStockCost)} · в доставке ${money(a.deliveringCost)} · возвраты ${money(a.returningCost)}`}>
+                    {isColVisible('turns') && <td className="px-3 py-2 text-right font-mono">{num(a.turns)}</td>}
+                    {isColVisible('daysPerTurn') && <td className={`px-3 py-2 text-right font-mono font-bold ${a.status === 'slow' ? 'text-red-600' : a.status === 'fast' ? 'text-emerald-600' : 'text-slate-700'}`}>{num(a.daysPerTurn)}</td>}
+                    {isColVisible('gmroi') && <td className={`px-3 py-2 text-right font-mono ${GMROI_CLASS[gmroiTone(a.gmroiPct, gmroiGreen, gmroiRed)]}`}>{num(a.gmroiPct, ' %')}</td>}
+                    {isColVisible('cover') && <td className="px-3 py-2 text-right font-mono">{num(a.coverDays)}</td>}
+                    {isColVisible('age') && <td className="px-3 py-2 text-right font-mono" title={a.lastSaleDay ? `последняя продажа ${formatDateRu(a.lastSaleDay)}` : a.lastReceiptDay ? `последний приход ${formatDateRu(a.lastReceiptDay)}` : ''}>{num(a.ageDays)}</td>}
+                    {isColVisible('shelf') && <td className="px-3 py-2 text-right whitespace-nowrap" title={`${a.shelfQty} шт`}>{money(a.shelfCapital)}<div className="text-[10px] text-slate-400">{a.shelfQty} шт</div></td>}
+                    {isColVisible('ozon') && <td className="px-3 py-2 text-right whitespace-nowrap" title={`остаток ${money(a.ozonStockCost)} · в доставке ${money(a.deliveringCost)} · возвраты ${money(a.returningCost)}`}>
                       {money(a.ozonStockCost + a.deliveringCost + a.returningCost)}<div className="text-[10px] text-slate-400">{a.ozonQty} шт</div>
-                    </td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap">{money(a.avgCapital)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{a.boughtQty}</td>
+                    </td>}
+                    {isColVisible('avgCapital') && <td className="px-3 py-2 text-right whitespace-nowrap">{money(a.avgCapital)}</td>}
+                    {isColVisible('sold') && <td className="px-3 py-2 text-right font-mono">{a.boughtQty}</td>}
                   </tr>
                 ))}
                 {result && rows.length === 0 && (
-                  <tr><td colSpan={10} className="px-4 py-8 text-center text-slate-400">Ничего не найдено</td></tr>
+                  <tr><td colSpan={visibleColsCount} className="px-4 py-8 text-center text-slate-400">Ничего не найдено</td></tr>
                 )}
               </tbody>
             </table>

@@ -288,6 +288,15 @@ describe('screen wiring (item 78c)', () => {
     expect(read('../App.tsx')).toMatch(/\{activeTab === 'turnover' && <TurnoverTab key="turnover" \/>\}/);
     expect(read('../store/useUIStore.ts')).toMatch(/\| 'turnover';/);
   });
+  it('the tab has its own «Колонки» picker under its own storage key, every cell behind isColVisible', () => {
+    const tab = read('../components/TurnoverTab.tsx');
+    expect(tab).toMatch(/turnoverCols_\$\{user\}/);
+    expect(tab).toMatch(/btn-turnover-cols/);
+    for (const key of ['turns', 'daysPerTurn', 'gmroi', 'cover', 'age', 'shelf', 'ozon', 'avgCapital', 'sold']) {
+      expect(tab).toContain(`isColVisible('${key}') &&`);
+    }
+    expect(read('../components/Dashboard.tsx')).toMatch(/dashCols_\$\{currentUser\.username\}/);
+  });
   it('GMROI colours: the tab colours the cell and the card by gmroiTone with the two settings', () => {
     const tab = read('../components/TurnoverTab.tsx');
     expect(tab).toMatch(/GMROI_CLASS\[gmroiTone\(a\.gmroiPct, gmroiGreen, gmroiRed\)\]/);
