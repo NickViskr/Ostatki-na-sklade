@@ -351,6 +351,7 @@ dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 - **Never exercised live (held by tests only):** the red Ozon refusal panel (item 62), the
   third auto-retry (item 65), a supply with a partial box (item 51), a direct supply refused
   by Ozon (item 58).
+- **Open tail from item 80 (money):** until Code.gs 182 every edit of an expense row re-added the whole extras amount of its shipment to that row. Rows of multi-article shipments edited from «История» before 22.09.2026 may therefore carry an inflated «Сумма»/«Цена», and the Ozon cost journal may have sent the inflated figure to KAN. Nobody has swept the history for them yet; the owner was offered the check on 22.09.2026 and has not asked for it.
 - **Known tails:** the docs build of a 13-cluster order took 141 s against the 180 s browser
   timeout (the journal record does not depend on the browser); the factory forecast
   multiplies the demand-growth speed by the trend of item 38 — possibly double counting;
