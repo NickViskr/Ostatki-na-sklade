@@ -170,3 +170,73 @@ export interface FactoryOrder {
   receivedAt: string;
 }
 
+
+/**
+ * Item 81, the module «Заказы в Китае». The shapes below mirror what `ChinaOrders.gs`
+ * returns; every money figure in them was computed by the script, never in the browser.
+ */
+export interface ChinaBatchLine {
+  id: string;
+  batchId: string;
+  /** The carrier's own marking (NV-99). It identifies goods inside ONE batch only. */
+  marking: string;
+  name: string;
+  boxes: number;
+  pcsPerBox: number;
+  qty: number;
+  priceCny: number;
+  sumCny: number;
+  pallet: string;
+  palletWeightKg: number;
+  /** Weight of one box, entered by hand; it beats the estimate taken from the pallets. */
+  boxWeightKg: number;
+  weightKg: number;
+  weightSource: string;
+  chinaShareCny: number;
+  freightShareCny: number;
+  rubShare: number;
+  costRub: number;
+  unitRub: number;
+  article: string;
+  /** Lines carrying the same marker are one product and are costed as one. */
+  group: string;
+}
+
+export interface ChinaBatchCost {
+  id: string;
+  batchId: string;
+  date: string;
+  kind: string;
+  amountRub: number;
+  comment: string;
+  user: string;
+}
+
+export interface ChinaBatch {
+  id: string;
+  orderNo: string;
+  code: string;
+  shippedAt: string;
+  arrivedAt: string;
+  status: string;
+  goodsCny: number;
+  chinaDeliveryCny: number;
+  weightKg: number;
+  volumeM3: number;
+  ratePerKgUsd: number;
+  packingUsd: number;
+  otherCargoUsd: number;
+  freightUsd: number;
+  cargoRate: number;
+  freightCny: number;
+  rubCosts: number;
+  rubRate: number;
+  totalRub: number;
+  /** How far the estimated weights had to be stretched to meet the waybill; null if unknown. */
+  weightFactor: number | null;
+  comment: string;
+  user: string;
+  updatedAt: string;
+  lines: ChinaBatchLine[];
+  costs: ChinaBatchCost[];
+}

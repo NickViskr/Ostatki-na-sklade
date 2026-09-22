@@ -269,7 +269,14 @@ async function startServer() {
     commitUnshippedReturn: ['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments'],
     // Item 79b: the documents record lands in the journal from /api/ozon/supply/docs, which
     // calls Apps Script directly and must clear the journal read itself (see that route).
-    saveOzonSupplyDocs: ['getOzonSupplyRequests']
+    saveOzonSupplyDocs: ['getOzonSupplyRequests'],
+    // Item 81: the module «Заказы в Китае». Its writes touch nothing but its own
+    // spreadsheet, so only its own read has to be dropped.
+    setupChinaSpreadsheet: ['getChinaBatches'],
+    saveChinaBatch: ['getChinaBatches'],
+    deleteChinaBatch: ['getChinaBatches'],
+    saveChinaBatchCost: ['getChinaBatches'],
+    deleteChinaBatchCost: ['getChinaBatches']
   };
 
   function invalidateCacheFor(writeAction: string): void {
@@ -374,7 +381,10 @@ async function startServer() {
     // Item 47, stage 3: a pure read of the cost journal. Deliberately NOT given a cache
     // lifetime below — the button stamps the rows it exported, so a cached answer would
     // offer the same rows twice.
-    'getOzonCostExport'
+    'getOzonCostExport',
+    // Item 81: a pure read of the module's own spreadsheet. Deliberately given no cache
+    // lifetime below — every write of the module answers with the whole state anyway.
+    'getChinaBatches'
   ];
 
   // API Endpoint to proxy GAS requests

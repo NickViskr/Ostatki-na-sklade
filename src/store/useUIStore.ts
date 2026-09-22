@@ -2,7 +2,7 @@ import React from 'react';
 import { create } from 'zustand';
 import { Transaction, SKUItem, ParsedItem, RecognitionHistoryItem } from '../types';
 
-type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'skus' | 'directory' | 'settings' | 'users' | 'deleted' | 'ozon' | 'ozonStocks' | 'turnover';
+type TabType = 'dashboard' | 'upload' | 'manual' | 'shipment' | 'history' | 'skus' | 'directory' | 'settings' | 'users' | 'deleted' | 'ozon' | 'ozonStocks' | 'turnover' | 'china';
 
 interface UIState {
   isSidebarCollapsed: boolean;

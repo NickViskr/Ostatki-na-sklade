@@ -246,7 +246,10 @@ function doPost(e) {
       'getOzonStocks',
       'getOzonSales',
       'getFactoryOrders',
-      'getOzonSyncStatus'
+      'getOzonSyncStatus',
+      // Item 81b: a pure read of the module's own spreadsheet. It writes nothing, and
+      // queueing it behind a commit would make the tab wait for the warehouse.
+      'getChinaBatches'
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();

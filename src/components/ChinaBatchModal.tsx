@@ -1,0 +1,203 @@
+import React, { useState } from 'react';
+import { X, Save, Loader2, Plus, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { useChinaStore } from '../store/useChinaStore';
+import { ChinaBatch } from '../types';
+import {
+  ChinaBatchForm, ChinaLineForm, CHINA_STATUSES, chinaBatchToForm, chinaFilledLines,
+  chinaFormCounts, chinaFormToPayload, emptyChinaBatchForm, emptyChinaLine, validateChinaBatchForm
+} from '../lib/chinaBatchForm';
+
+interface ChinaBatchModalProps {
+  /** The batch being edited, or null for a new one. */
+  batch: ChinaBatch | null;
+  onClose: () => void;
+}
+
+const field = 'w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200';
+const cell = 'px-2 py-1 border border-slate-200 rounded text-sm w-full';
+
+export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, onClose }) => {
+  const saveChinaBatch = useChinaStore((s) => s.saveChinaBatch);
+  const isSaving = useChinaStore((s) => s.isSaving);
+  const settings = useChinaStore((s) => s.settings);
+
+  const [form, setForm] = useState<ChinaBatchForm>(() => (batch ? chinaBatchToForm(batch) : emptyChinaBatchForm()));
+
+  const set = (patch: Partial<ChinaBatchForm>) => setForm((f) => ({ ...f, ...patch }));
+  const setLine = (index: number, patch: Partial<ChinaLineForm>) => setForm((f) => ({
+    ...f,
+    lines: f.lines.map((l, i) => (i === index ? { ...l, ...patch } : l))
+  }));
+  const addLine = () => setForm((f) => ({ ...f, lines: [...f.lines, emptyChinaLine()] }));
+  const removeLine = (index: number) => setForm((f) => ({
+    ...f,
+    lines: f.lines.length > 1 ? f.lines.filter((_, i) => i !== index) : f.lines
+  }));
+
+  const counts = chinaFormCounts(form.lines);
+  const cargoRateHint = settings.cargoRateCnyPerUsd;
+
+  const handleSave = async () => {
+    const errors = validateChinaBatchForm(form);
+    if (errors.length > 0) {
+      toast.error(errors[0]);
+      return;
+    }
+    const payload = chinaFormToPayload({ ...form, lines: chinaFilledLines(form.lines) });
+    const ok = await saveChinaBatch(payload);
+    if (ok) onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-6xl flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 shrink-0">
+          <h2 className="text-lg font-bold">{batch ? `Партия ${batch.code}` : 'Новая партия'}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
+        </div>
+
+        <div className="p-6 space-y-6 overflow-y-auto grow">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Код партии</span>
+              <input className={field} value={form.code} onChange={(e) => set({ code: e.target.value })} placeholder="NV-0825-2" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Номер заказа</span>
+              <input className={field} value={form.orderNo} onChange={(e) => set({ orderNo: e.target.value })} placeholder="28" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Дата отгрузки</span>
+              <input type="date" className={field} value={form.shippedAt} onChange={(e) => set({ shippedAt: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Дата прибытия</span>
+              <input type="date" className={field} value={form.arrivedAt} onChange={(e) => set({ arrivedAt: e.target.value })} />
+            </label>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Статус</span>
+              <select className={field} value={form.status} onChange={(e) => set({ status: e.target.value })}>
+                {CHINA_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Доставка по Китаю, ¥</span>
+              <input className={field} value={form.chinaDeliveryCny} onChange={(e) => set({ chinaDeliveryCny: e.target.value })} placeholder="700" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Вес накладной, кг</span>
+              <input className={field} value={form.weightKg} onChange={(e) => set({ weightKg: e.target.value })} placeholder="672,5" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Объём, м³</span>
+              <input className={field} value={form.volumeM3} onChange={(e) => set({ volumeM3: e.target.value })} placeholder="4,92" />
+            </label>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Ставка, $/кг</span>
+              <input className={field} value={form.ratePerKgUsd} onChange={(e) => set({ ratePerKgUsd: e.target.value })} placeholder="2,3" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Упаковка, $</span>
+              <input className={field} value={form.packingUsd} onChange={(e) => set({ packingUsd: e.target.value })} placeholder="90" />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Прочее карго, $</span>
+              <input className={field} value={form.otherCargoUsd} onChange={(e) => set({ otherCargoUsd: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Итого перевозка, $</span>
+              <input className={field} value={form.freightUsd} onChange={(e) => set({ freightUsd: e.target.value })} placeholder="1636,75" />
+              <span className="text-[11px] text-slate-400">Сумма из накладной. Пусто — посчитается по ставке.</span>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Курс ¥/$</span>
+              <input className={field} value={form.cargoRate} onChange={(e) => set({ cargoRate: e.target.value })} placeholder={cargoRateHint ? String(cargoRateHint) : '7'} />
+              <span className="text-[11px] text-slate-400">Пусто — возьмётся из справочника{cargoRateHint ? `: ${cargoRateHint}` : ''}.</span>
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Курс ₽/¥</span>
+              <input className={field} value={form.rubRate} onChange={(e) => set({ rubRate: e.target.value })} placeholder="12,4" />
+              <span className="text-[11px] text-slate-400">Курс, по которому куплены юани этой партии.</span>
+            </label>
+            <label className="block md:col-span-2">
+              <span className="text-xs font-bold text-slate-500 uppercase">Комментарий</span>
+              <input className={field} value={form.comment} onChange={(e) => set({ comment: e.target.value })} />
+            </label>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-bold">Товар в партии</h3>
+              <button onClick={addLine} className="flex items-center gap-1 text-sm text-indigo-600 font-bold hover:text-indigo-700">
+                <Plus size={16} /> Строка
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-[11px] uppercase text-slate-400 text-left">
+                    <th className="py-1 pr-2">Маркировка</th>
+                    <th className="py-1 pr-2">Название</th>
+                    <th className="py-1 pr-2">Коробок</th>
+                    <th className="py-1 pr-2">Шт/кор</th>
+                    <th className="py-1 pr-2">Количество</th>
+                    <th className="py-1 pr-2">Цена ¥</th>
+                    <th className="py-1 pr-2">Паллета</th>
+                    <th className="py-1 pr-2">Вес паллеты</th>
+                    <th className="py-1 pr-2">Вес коробки</th>
+                    <th className="py-1 pr-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {form.lines.map((line, i) => (
+                    <tr key={i} className="border-t border-slate-100">
+                      <td className="py-1 pr-2"><input className={cell} value={line.marking} onChange={(e) => setLine(i, { marking: e.target.value })} placeholder="NV-99" /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.name} onChange={(e) => setLine(i, { name: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.boxes} onChange={(e) => setLine(i, { boxes: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.pcsPerBox} onChange={(e) => setLine(i, { pcsPerBox: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.qty} onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.priceCny} onChange={(e) => setLine(i, { priceCny: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.pallet} onChange={(e) => setLine(i, { pallet: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.palletWeightKg} onChange={(e) => setLine(i, { palletWeightKg: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.boxWeightKg} onChange={(e) => setLine(i, { boxWeightKg: e.target.value })} /></td>
+                      <td className="py-1 pr-2 text-right">
+                        <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-red-500"><Trash2 size={16} /></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-sm text-slate-500 mt-2">
+              Итого: {counts.rows} строк, {counts.boxes} коробок, {counts.qty} шт.
+              Вес коробки заполняйте, если знаете его точно — он важнее оценки по паллетам.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 shrink-0">
+          <button onClick={onClose} className="px-4 py-2 text-sm font-bold text-slate-500 hover:text-slate-700">Отмена</button>
+          <button
+            data-testid="btn-save-china-batch"
+            onClick={handleSave}
+            disabled={isSaving}
+            className="flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white text-sm font-bold rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+            Сохранить и посчитать
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};

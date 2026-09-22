@@ -286,7 +286,7 @@ describe('screen wiring (item 78c)', () => {
   it('the tab is reachable by every user: sidebar entry, route without an admin gate, tab type', () => {
     expect(read('../components/Sidebar.tsx')).toMatch(/\{ id: 'turnover', label: 'Оборачиваемость', icon: RefreshCw \},\n\s*\.\.\.\(isCurrentUserAdmin/);
     expect(read('../App.tsx')).toMatch(/\{activeTab === 'turnover' && <TurnoverTab key="turnover" \/>\}/);
-    expect(read('../store/useUIStore.ts')).toMatch(/\| 'turnover';/);
+    expect(read('../store/useUIStore.ts')).toMatch(/\| 'turnover'/);
   });
   it('the tab has its own «Колонки» picker under its own storage key, every cell behind isColVisible', () => {
     const tab = read('../components/TurnoverTab.tsx');

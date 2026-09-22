@@ -16,6 +16,7 @@ import {
   Package,
   Warehouse,
   RefreshCw,
+  Ship,
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
@@ -119,6 +120,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     ...(isCurrentUserAdmin ? [
       { id: 'ozon', label: 'Поставки Озон', icon: Package },
       { id: 'ozonStocks', label: 'Остатки Озон', icon: Warehouse },
+      { id: 'china', label: 'Заказы в Китае', icon: Ship },
       { id: 'users', label: 'Пользователи', icon: Users },
       { id: 'deleted', label: 'Удаленное', icon: Trash2 },
       { id: 'settings', label: 'Настройки', icon: Settings2 }
