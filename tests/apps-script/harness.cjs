@@ -639,6 +639,7 @@ module.exports = {
   // The module works in a spreadsheet of its own, opened by the script property. The stand
   // gives it the same foreign spreadsheet the payment calendar uses: the sheet names differ.
   CHINA_PROPERTY: context.CHINA_PROPERTY,
+  CHINA_SPREADSHEET_ID: targetSpreadsheetId,
   CHINA_BATCH_HEADERS: context.CHINA_BATCH_HEADERS,
   CHINA_LINE_HEADERS: context.CHINA_LINE_HEADERS,
   CHINA_COST_HEADERS: context.CHINA_COST_HEADERS,
@@ -670,5 +671,6 @@ module.exports = {
   chinaBatchCost: (...args) => context.chinaBatchCost(...args),
   chinaAllocate: (...args) => context.chinaAllocate(...args),
   chinaLineWeights: (...args) => context.chinaLineWeights(...args),
+  chinaIdFromSetting: (...args) => context.chinaIdFromSetting(...args),
   vm
 };

@@ -71,8 +71,18 @@ const CHINA_COST_TYPES = ['Разгрузка', 'Доставка до скла�
 
 // ---------------------------------------------------------------- spreadsheet access
 
+// The owner sets the property by hand, and what lands there is as often the whole link as
+// the bare id — with a stray space or a newline from the clipboard. Both are accepted.
+function chinaIdFromSetting(raw) {
+  const value = String(raw === null || raw === undefined ? '' : raw).trim();
+  if (!value) return '';
+  const fromUrl = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (fromUrl) return fromUrl[1];
+  return value;
+}
+
 function chinaSpreadsheet() {
-  const id = PropertiesService.getScriptProperties().getProperty(CHINA_PROPERTY);
+  const id = chinaIdFromSetting(PropertiesService.getScriptProperties().getProperty(CHINA_PROPERTY));
   if (!id) {
     throw new Error('Таблица «Заказы в Китае» не настроена: в свойствах скрипта нет ' + CHINA_PROPERTY);
   }

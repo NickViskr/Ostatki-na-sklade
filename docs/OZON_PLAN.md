@@ -335,9 +335,10 @@ dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
   item 80 with the scrollable window and per-unit packaging; verified byte for byte on the main
   chunk). Previous: `sklad-00078-tpb` 22.09 16:36 (`055cf68`), `sklad-00077-px5` 22.09 13:09
   (`774a21b`), `sklad-00076-dd6` 22.09 11:59 (`59f1413`).
-- **Code.gs:** version 182 (2026-09-22 18:50 local, item 80 per-unit packaging; 181 — item 80
-  shipment extras; 180 — 78e GMROI thresholds), deployed by the owner with `clasp push` +
-  `clasp deploy -i`, verified with `clasp clone-script` + `cmp`.
+- **Code.gs:** version 183 (2026-09-22 20:40 local, item 81a: the script now holds TWO files,
+  `Code.gs` and `ChinaOrders.gs`, and `clasp push` reports three; 182 — item 80 per-unit
+  packaging; 181 — item 80 shipment extras; 180 — 78e GMROI thresholds), deployed by the
+  owner with `clasp push` + `clasp deploy -i`, verified with `clasp clone-script` + `cmp`.
   Script Property `kan_mcpToken` set 2026-09-22; trigger `kanTurnoverDaily` daily at 05:00 script
   time. Rollback point «before clasp»: version 171.
 - **Checks:** Apps Script stand 488 checks; frontend 755 tests in 33 files; `tsc --noEmit`

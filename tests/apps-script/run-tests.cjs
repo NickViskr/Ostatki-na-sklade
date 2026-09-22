@@ -3897,6 +3897,24 @@ function batch27() {
     msg.indexOf('недоступна') !== -1, msg);
 })();
 
+(function () {
+  const h = freshHarness();
+  const ID = '1z3Krw0pNmqXAFs8ZVBbhN7XFPJiPtC8QNofZ4rABCDA';
+  check('81a: a bare id is taken as it is', h.chinaIdFromSetting(ID) === ID, h.chinaIdFromSetting(ID));
+  check('81a: the id is pulled out of a full link',
+    h.chinaIdFromSetting('https://docs.google.com/spreadsheets/d/' + ID + '/edit?gid=0#gid=0') === ID,
+    h.chinaIdFromSetting('https://docs.google.com/spreadsheets/d/' + ID + '/edit?gid=0#gid=0'));
+  check('81a: spaces and line breaks around the id are ignored',
+    h.chinaIdFromSetting('  ' + ID + '\n') === ID, '[' + h.chinaIdFromSetting('  ' + ID + '\n') + ']');
+  check('81a: an empty property stays empty', h.chinaIdFromSetting('   ') === '', '[' + h.chinaIdFromSetting('   ') + ']');
+
+  // The link taken from the browser's address bar works end to end.
+  h.setChinaSpreadsheet('https://docs.google.com/spreadsheets/d/' + h.CHINA_SPREADSHEET_ID + '/edit#gid=0');
+  h.setupChinaSpreadsheet();
+  check('81a: the module sets itself up from a link pasted whole',
+    h.targetSheetNames().length === 5, h.targetSheetNames().join(', '));
+})();
+
 // ---- 81a: splitting an amount ----
 (function () {
   const h = withChina();
