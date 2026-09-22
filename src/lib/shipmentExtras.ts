@@ -23,13 +23,26 @@ export interface ShipmentExtras {
   main: string;
   /** Total RUB of «Упаковка» on the whole shipment, 0 when absent. */
   packaging: number;
-  /** The «Упаковка» tag as written, so an untouched amount keeps its per-piece wording. */
+  /** RUB per piece when the amount is charged per unit of goods, 0 when charged per batch. */
+  packagingUnit: number;
+  /** The «Упаковка» tag as written, so an untouched amount keeps its wording. */
   packagingText: string;
   other: number;
+  otherUnit: number;
   otherText: string;
   services: ExtrasServiceEntry[];
   /** Every tag that is none of the three above, grouped as it was written. */
   keptGroups: string[][];
+}
+
+/** How an amount is entered, the same two ways the confirmation window offers. */
+export type ExtrasMode = 'unit' | 'batch';
+
+/** RUB on the whole shipment for an amount entered per piece or for the batch. */
+export function amountTotal(mode: ExtrasMode, value: number, totalQty: number): number {
+  const v = Number(value) || 0;
+  if (v <= 0) return 0;
+  return mode === 'unit' ? round2(v * (Number(totalQty) || 0)) : round2(v);
 }
 
 const PACKAGING_LABEL = 'Упаковка';
@@ -53,6 +66,18 @@ const labelledAmount = (tag: string): number => {
   let last = 0;
   while ((m = re.exec(tag)) !== null) last = num(m[1]);
   return last;
+};
+
+/**
+ * The per-piece price of a labelled part, 0 when the amount was entered for the batch.
+ * «Упаковка: 40 шт. x 6₽ = 240₽» → 6; «Упаковка: 500₽» → 0.
+ */
+const labelledUnit = (tag: string): number => {
+  const amounts: number[] = [];
+  const re = /([\d.,]+)\s*₽/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(tag)) !== null) amounts.push(num(m[1]));
+  return amounts.length >= 2 ? amounts[0] : 0;
 };
 
 /** «Имя x4 (636₽), Другое (150₽)» → entries. A missing quantity counts as one item. */
@@ -98,8 +123,10 @@ export function parseShipmentExtras(destination?: string | null): ShipmentExtras
   const extras: ShipmentExtras = {
     main: main.trim(),
     packaging: 0,
+    packagingUnit: 0,
     packagingText: '',
     other: 0,
+    otherUnit: 0,
     otherText: '',
     services: [],
     keptGroups: []
@@ -110,9 +137,11 @@ export function parseShipmentExtras(destination?: string | null): ShipmentExtras
     for (const tag of group) {
       if (isTag(tag, PACKAGING_LABEL)) {
         extras.packaging = round2(extras.packaging + labelledAmount(tag));
+        extras.packagingUnit = labelledUnit(tag);
         extras.packagingText = tag;
       } else if (isTag(tag, OTHER_LABEL)) {
         extras.other = round2(extras.other + labelledAmount(tag));
+        extras.otherUnit = labelledUnit(tag);
         extras.otherText = tag;
       } else if (isServicesTag(tag)) {
         extras.services = extras.services.concat(parseServicesTag(tag));
@@ -134,20 +163,25 @@ export function extrasTotal(extras: ShipmentExtras): number {
 
 /**
  * The destination text back. An amount that was not changed keeps its original wording, so an
- * edit of the services alone leaves «Упаковка: 40 шт. x 6₽ = 240₽» exactly as it was; a
- * changed amount is written for the shipment as a whole, because a per-piece price that does
- * not divide evenly would be a number nobody entered.
+ * edit of the services alone leaves «Упаковка: 40 шт. x 6₽ = 240₽» exactly as it was. A changed
+ * amount is written the way it was entered: per piece — the shape the confirmation window
+ * writes, «40 шт. x 6₽ = 240₽» — or for the batch as a single sum.
  */
-export function buildDestination(extras: ShipmentExtras, original?: ShipmentExtras): string {
+export function buildDestination(extras: ShipmentExtras, original?: ShipmentExtras, totalQty: number = 0): string {
   const tags: string[] = [];
+
+  const amountTag = (label: string, total: number, unit: number): string =>
+    unit > 0 && totalQty > 0
+      ? label + ': ' + totalQty + ' шт. x ' + unit + '₽ = ' + total + '₽'
+      : label + ': ' + total + '₽';
 
   if (extras.packaging > 0) {
     const kept = original && original.packaging === extras.packaging && original.packagingText;
-    tags.push(kept ? original!.packagingText : PACKAGING_LABEL + ': ' + extras.packaging + '₽');
+    tags.push(kept ? original!.packagingText : amountTag(PACKAGING_LABEL, extras.packaging, extras.packagingUnit));
   }
   if (extras.other > 0) {
     const kept = original && original.other === extras.other && original.otherText;
-    tags.push(kept ? original!.otherText : OTHER_LABEL + ': ' + extras.other + '₽');
+    tags.push(kept ? original!.otherText : amountTag(OTHER_LABEL, extras.other, extras.otherUnit));
   }
   const services = extras.services.filter((s) => s.quantity > 0);
   if (services.length > 0) {

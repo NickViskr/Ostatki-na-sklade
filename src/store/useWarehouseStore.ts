@@ -121,8 +121,11 @@ interface WarehouseState {
   /** Item 80. Additional costs (packaging, «Прочее», services) of the whole shipment of a row. */
   updateShipmentExtras: (payload: {
     id: string;
-    packaging: number;
-    other: number;
+    /** 'unit' — рубли за единицу товара, 'batch' — сумма на всю партию. */
+    packagingMode: 'unit' | 'batch';
+    packagingValue: number;
+    otherMode: 'unit' | 'batch';
+    otherValue: number;
     services: { name: string; quantity: number; unitCost: number }[];
   }) => Promise<boolean>;
   handleProcessInvoice: (feedback?: any) => Promise<void>;

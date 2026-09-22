@@ -8713,6 +8713,19 @@ function parseServicesTagGs(tag) {
   return out;
 }
 
+/**
+ * The price of ONE piece in a labelled part, 0 when the amount was entered for the batch.
+ * «Упаковка: 40 шт. x 6₽ = 240₽» → 6; «Упаковка: 500₽» → 0. Mirrors labelledUnit of
+ * `src/lib/shipmentExtras.ts`.
+ */
+function parseLabelledUnit(tag) {
+  const amounts = [];
+  const re = /([\d.,]+)\s*₽/g;
+  let m;
+  while ((m = re.exec(String(tag))) !== null) amounts.push(parseNumber(m[1]));
+  return amounts.length >= 2 ? amounts[0] : 0;
+}
+
 function isExtrasTag(tag, label) {
   return String(tag).replace(/^\s+/, '').toLowerCase().indexOf(String(label).toLowerCase() + ':') === 0;
 }
@@ -8720,7 +8733,8 @@ function isExtrasTag(tag, label) {
 /** «Объект» taken apart: the object itself, the three amounts and every other tag kept as written. */
 function parseShipmentExtrasGs(destination) {
   const raw = String(destination || '');
-  const extras = { main: raw.trim(), packaging: 0, packagingText: '', other: 0, otherText: '', services: [], keptGroups: [] };
+  const extras = { main: raw.trim(), packaging: 0, packagingUnit: 0, packagingText: '',
+    other: 0, otherUnit: 0, otherText: '', services: [], keptGroups: [] };
 
   const groupRe = /\[([^\]]*)\]/g;
   let m, firstAt = -1;
@@ -8736,9 +8750,11 @@ function parseShipmentExtrasGs(destination) {
     group.forEach(function(tag) {
       if (isExtrasTag(tag, 'Упаковка')) {
         extras.packaging = roundToTwo(extras.packaging + parseLabelledAmount(tag, 'Упаковка'));
+        extras.packagingUnit = parseLabelledUnit(tag);
         extras.packagingText = tag;
       } else if (isExtrasTag(tag, 'Прочее')) {
         extras.other = roundToTwo(extras.other + parseLabelledAmount(tag, 'Прочее'));
+        extras.otherUnit = parseLabelledUnit(tag);
         extras.otherText = tag;
       } else if (isExtrasTag(tag, 'Услуги') || isExtrasTag(tag, 'Доп. услуги')) {
         extras.services = extras.services.concat(parseServicesTagGs(tag));
@@ -8760,15 +8776,21 @@ function extrasTotalGs(extras) {
 }
 
 /** «Объект» put back together. An amount nobody changed keeps the wording it was written with. */
-function buildDestinationGs(extras, original) {
+function buildDestinationGs(extras, original, totalQty) {
   const tags = [];
+  const pieces = Number(totalQty) || 0;
+  const amountTag = function(label, total, unit) {
+    return (Number(unit) > 0 && pieces > 0)
+      ? label + ': ' + pieces + ' шт. x ' + unit + '₽ = ' + total + '₽'
+      : label + ': ' + total + '₽';
+  };
   if (Number(extras.packaging) > 0) {
     const keep = original && original.packaging === extras.packaging && original.packagingText;
-    tags.push(keep ? original.packagingText : 'Упаковка: ' + extras.packaging + '₽');
+    tags.push(keep ? original.packagingText : amountTag('Упаковка', extras.packaging, extras.packagingUnit));
   }
   if (Number(extras.other) > 0) {
     const keep = original && original.other === extras.other && original.otherText;
-    tags.push(keep ? original.otherText : 'Прочее: ' + extras.other + '₽');
+    tags.push(keep ? original.otherText : amountTag('Прочее', extras.other, extras.otherUnit));
   }
   const services = (extras.services || []).filter(function(s) { return (Number(s.quantity) || 0) > 0; });
   if (services.length > 0) {
@@ -8789,7 +8811,10 @@ function buildDestinationGs(extras, original) {
 /**
  * Item 80. Rewrites the additional costs of the shipment the row `id` belongs to.
  *
- * @param {Object} data { id, packaging, other, services: [{ name, quantity, unitCost }] }
+ * @param {Object} data { id, packagingMode, packagingValue, otherMode, otherValue,
+ *                          services: [{ name, quantity, unitCost }] }
+ *   packagingMode / otherMode: 'unit' — рубли за единицу товара, как при оформлении поставки,
+ *   'batch' — сумма на всю партию. Итог считается ЗДЕСЬ, по количеству штук самой операции.
  * @returns {Object} { changedRows, oldTotal, newTotal, destination, stock, newTransactions }
  */
 function updateShipmentExtras(data, username) {
@@ -8812,11 +8837,28 @@ function updateShipmentExtras(data, username) {
       + 'и править услуги по одной заявке нельзя. Исправьте операцию целиком вручную.');
   }
 
+  const totalQty = shipmentPieces(rows);
+  if (totalQty <= 0) throw new Error('В операции нет позиций с количеством — пересчёт невозможен');
+
+  // An amount is entered either per unit of goods — the way a supply is priced, and the owner's
+  // default — or for the whole batch. The pieces of the shipment are known here and nowhere else
+  // for certain, so the total is worked out on this side.
+  const amountOf = function(mode, value) {
+    const v = roundToTwo(Number(value) || 0);
+    if (v <= 0) return 0;
+    return String(mode) === 'unit' ? roundToTwo(v * totalQty) : v;
+  };
+  const unitOf = function(mode, value) {
+    return String(mode) === 'unit' ? roundToTwo(Number(value) || 0) : 0;
+  };
+
   const edited = {
     main: original.main,
-    packaging: roundToTwo(Number((data && data.packaging) || 0)),
+    packaging: amountOf(data && data.packagingMode, data && data.packagingValue),
+    packagingUnit: unitOf(data && data.packagingMode, data && data.packagingValue),
     packagingText: original.packagingText,
-    other: roundToTwo(Number((data && data.other) || 0)),
+    other: amountOf(data && data.otherMode, data && data.otherValue),
+    otherUnit: unitOf(data && data.otherMode, data && data.otherValue),
     otherText: original.otherText,
     services: ((data && data.services) || []).map(function(s) {
       return {
@@ -8833,10 +8875,7 @@ function updateShipmentExtras(data, username) {
   // nothing else to consult, and a row written before that column existed is served as well.
   const oldTotal = extrasTotalGs(original);
   const newTotal = extrasTotalGs(edited);
-  const newDestination = buildDestinationGs(edited, original);
-
-  const totalQty = shipmentPieces(rows);
-  if (totalQty <= 0) throw new Error('В операции нет позиций с количеством — пересчёт невозможен');
+  const newDestination = buildDestinationGs(edited, original, totalQty);
 
   const ss = getSpreadsheet();
   const sheet = getTransactionSheet(ss);

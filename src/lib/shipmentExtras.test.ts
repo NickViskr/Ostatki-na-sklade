@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  amountTotal,
   buildDestination,
   extrasTotal,
   parseServicesTag,
@@ -24,6 +25,14 @@ describe('parseShipmentExtras', () => {
     expect(e.services).toEqual([{ name: 'Доставка по городу 1 короб', quantity: 4, unitCost: 159 }]);
     expect(e.keptGroups).toEqual([]);
     expect(extrasTotal(e)).toBe(876);
+  });
+
+  it('tells a price per piece from a sum charged for the batch', () => {
+    // The owner's rule (22.09.2026): packaging is counted per unit of goods, as in a supply.
+    expect(parseShipmentExtras(YANDEX).packagingUnit).toBe(6);
+    expect(parseShipmentExtras('Ozon [Упаковка: 500₽ | Прочее: 18 шт. x 3₽ = 54₽]')).toMatchObject({
+      packaging: 500, packagingUnit: 0, other: 54, otherUnit: 3
+    });
   });
 
   it('reads two services of one shipment and the whole-batch shape of an amount', () => {
@@ -76,6 +85,20 @@ describe('buildDestination', () => {
     );
   });
 
+  it('a changed amount entered per piece is written the way a supply writes it', () => {
+    const original = parseShipmentExtras(YANDEX);
+    // 40 pieces of the shipment at 8 ₽ each.
+    const perUnit = { ...original, packaging: 320, packagingUnit: 8 };
+    expect(buildDestination(perUnit, original, 40)).toBe(
+      'Яндекс [Упаковка: 40 шт. x 8₽ = 320₽ | Услуги: Доставка по городу 1 короб x4 (636₽)]'
+    );
+    // The same amount entered for the batch, and the same per-piece amount without a quantity
+    // to spread it over, are both written as one sum.
+    expect(buildDestination({ ...perUnit, packagingUnit: 0 }, original, 40))
+      .toContain('Упаковка: 320₽ |');
+    expect(buildDestination(perUnit, original, 0)).toContain('Упаковка: 320₽ |');
+  });
+
   it('removing everything leaves the object alone, and kept tags survive it', () => {
     const original = parseShipmentExtras(YANDEX);
     expect(buildDestination({ ...original, packaging: 0, services: [] }, original)).toBe('Яндекс');
@@ -84,6 +107,20 @@ describe('buildDestination', () => {
     // A service left at zero pieces is not written at all.
     expect(buildDestination({ ...batch, services: [{ name: 'Стикеровка', quantity: 0, unitCost: 50 }] }, batch))
       .toBe('Ozon FBO [Общая поставка: доля 5 из 10 шт.]');
+  });
+});
+
+describe('amountTotal', () => {
+  it('per piece multiplies by the pieces of the shipment, per batch takes the sum as it is', () => {
+    expect(amountTotal('unit', 6, 40)).toBe(240);
+    expect(amountTotal('batch', 6, 40)).toBe(6);
+    expect(amountTotal('unit', 6.05, 3)).toBe(18.15);
+  });
+
+  it('nothing entered is nothing charged, and per piece without pieces is zero', () => {
+    expect(amountTotal('unit', 0, 40)).toBe(0);
+    expect(amountTotal('batch', 0, 40)).toBe(0);
+    expect(amountTotal('unit', 6, 0)).toBe(0);
   });
 });
 
@@ -144,6 +181,21 @@ describe('подключение правки доп. расходов пост�
     expect(modal).toContain('id: editingTrans!.id');
     expect(modal).toContain('Доп. расходы поставки');
     expect(modal).toContain('btn-save-extras');
+  });
+
+  // Правка 22.09.2026 по замечаниям владельца: окно не прокручивалось, а упаковка считалась
+  // суммой на партию вместо цены за единицу товара.
+  it('окно не выходит за экран: шапка и кнопки закреплены, середина прокручивается', () => {
+    expect(modal).toContain('max-h-[90vh]');
+    expect(modal).toContain('overflow-y-auto grow');
+  });
+
+  it('упаковка и «Прочее» вводятся за единицу товара или на партию, как при оформлении поставки', () => {
+    expect(modal).toContain('<option value="unit">На единицу</option>');
+    expect(modal).toContain('<option value="batch">На партию</option>');
+    expect(modal).toContain('packagingMode: packaging.mode');
+    expect(modal).toContain('otherValue: Number(other.value) || 0');
+    expect(code).toContain("return String(mode) === 'unit' ? roundToTwo(v * totalQty) : v;");
   });
 
   it('заявка из общей поставки к правке не допускается ни на экране, ни на сервере', () => {

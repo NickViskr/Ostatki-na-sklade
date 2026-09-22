@@ -3593,8 +3593,8 @@ function withShipment() {
   const { h, rowA, rowB } = withShipment();
   const res = h.updateShipmentExtras({
     id: rowA.id,
-    packaging: 240,
-    other: 0,
+    packagingMode: 'unit', packagingValue: 6,
+    otherMode: 'unit', otherValue: 0,
     services: [{ name: 'Доставка по городу 1 короб', quantity: 6, unitCost: 159 }]
   }, 'tester');
 
@@ -3627,7 +3627,8 @@ function withShipment() {
 (function test80b2() {
   const { h, rowA } = withShipment();
   // Everything removed: the rows fall back to the bare cost of the goods and the tail goes.
-  const res = h.updateShipmentExtras({ id: rowA.id, packaging: 0, other: 0, services: [] }, 'tester');
+  const res = h.updateShipmentExtras({ id: rowA.id, packagingMode: 'unit', packagingValue: 0,
+    otherMode: 'unit', otherValue: 0, services: [] }, 'tester');
   check('80b: снятие всех расходов оставляет голый объект', res.destination === 'Яндекс', res.destination);
   const rows = h.getTransactions().rows.filter(t => t.type === 'Расход');
   const a2 = rows.find(t => t.article === 'A');
@@ -3661,7 +3662,7 @@ function withShipment() {
     'Расход', dest, '2026-09-21', 'tester', '2026-09-21T16:38:23.330Z', 'op-kit', 106);
   const kitRow = h.getTransactions().rows.find(t => t.type === 'Расход' && !t.isComponent);
   const res = h.updateShipmentExtras({
-    id: kitRow.id, packaging: 0, other: 0,
+    id: kitRow.id, packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 0,
     services: [{ name: 'Стоимость 1 короба ФФ', quantity: 2, unitCost: 106 }]
   }, 'tester');
   check('80b: у комплекта пересчитана одна строка — сама строка комплекта', res.changedRows === 1, String(res.changedRows));
@@ -3677,11 +3678,32 @@ function withShipment() {
     comps.every(c => c.destination === res.destination), comps.map(c => c.destination).join(' | '));
 })();
 
+(function test80b7() {
+  // Packaging is priced per unit of goods, the way a supply is priced (owner, 22.09.2026).
+  const { h, rowA } = withShipment();
+  const res = h.updateShipmentExtras({
+    id: rowA.id,
+    packagingMode: 'unit', packagingValue: 8,
+    otherMode: 'batch', otherValue: 100,
+    services: [{ name: 'Доставка по городу 1 короб', quantity: 4, unitCost: 159 }]
+  }, 'tester');
+  // 40 pieces x 8 ₽ = 320 ₽ packaging, 100 ₽ «Прочее» for the batch, 636 ₽ services = 1 056 ₽.
+  check('80c: упаковка на единицу умножается на количество поставки',
+    res.newTotal === 1056, String(res.newTotal));
+  check('80c: текст упаковки записан как при оформлении поставки',
+    res.destination === 'Яндекс [Упаковка: 40 шт. x 8₽ = 320₽ | Прочее: 100₽ | Услуги: Доставка по городу 1 короб x4 (636₽)]',
+    res.destination);
+  const rows = h.getTransactions().rows.filter(t => t.type === 'Расход');
+  // 1056 * 24 / 40 = 633,60 → 14 736 + 633,60 = 15 369,60
+  check('80c: деньги строк пересчитаны от новой суммы расходов',
+    rows.find(t => t.article === 'A').total === 15369.6, String(rows.find(t => t.article === 'A').total));
+})();
+
 (function test80b4() {
   const { h, rowA } = withShipment();
   let message = '';
   try {
-    h.updateShipmentExtras({ id: 'нет такой строки', packaging: 0, other: 0, services: [] }, 'tester');
+    h.updateShipmentExtras({ id: 'нет такой строки', packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 0, services: [] }, 'tester');
   } catch (e) { message = String(e.message || e); }
   check('80b: неизвестная строка истории отвергается', message.indexOf('не найдена') !== -1, message);
 
@@ -3689,7 +3711,7 @@ function withShipment() {
   message = '';
   if (receipt) {
     try {
-      h.updateShipmentExtras({ id: receipt.id, packaging: 0, other: 0, services: [] }, 'tester');
+      h.updateShipmentExtras({ id: receipt.id, packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 0, services: [] }, 'tester');
     } catch (e) { message = String(e.message || e); }
     check('80b: у прихода доп. расходов нет', message.indexOf('только у отгрузки') !== -1, message);
   }
@@ -3702,7 +3724,7 @@ function withShipment() {
   const batchRow = h.getTransactions().rows.find(t => String(t.destination).indexOf('Общая поставка') !== -1);
   message = '';
   try {
-    h.updateShipmentExtras({ id: batchRow.id, packaging: 0, other: 0, services: [] }, 'tester');
+    h.updateShipmentExtras({ id: batchRow.id, packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 0, services: [] }, 'tester');
   } catch (e) { message = String(e.message || e); }
   check('80b: заявка из общей поставки к правке услуг не допускается',
     message.indexOf('общей поставки') !== -1, message);
@@ -3725,7 +3747,7 @@ function withShipment() {
   const before = h.dumpOzonCost().length;
   const row = h.getTransactions().rows.find(t => t.type === 'Расход');
   const res = h.updateShipmentExtras({
-    id: row.id, packaging: 0, other: 0,
+    id: row.id, packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 0,
     services: [{ name: 'Стикеровка', quantity: 3, unitCost: 100 }]
   }, 'tester');
   check('80b: исправленная себестоимость дописана в журнал для КАН',
@@ -3744,6 +3766,17 @@ function withShipment() {
       && e.keptGroups.length === 1 && e.keptGroups[0][0] === 'Списание - Брак',
     JSON.stringify(e));
   check('80b: сумма расходов из текста считается как при записи', h.extrasTotalGs(e) === 1055, String(h.extrasTotalGs(e)));
+  // Сумма на партию — это цена партии, а не цена штуки: иначе пересборка текста превратила бы
+  // «Упаковка: 500₽» в «Упаковка: N шт. x 500₽».
+  check('80c: у суммы на партию цены за единицу нет',
+    e.packagingUnit === 0 && e.otherUnit === 0, `${e.packagingUnit}/${e.otherUnit}`);
+  const perUnit = h.parseShipmentExtrasGs('Ozon [Упаковка: 18 шт. x 37₽ = 666₽]');
+  check('80c: у записи на единицу цена штуки вытащена из текста',
+    perUnit.packaging === 666 && perUnit.packagingUnit === 37, `${perUnit.packaging}/${perUnit.packagingUnit}`);
+  check('80c: текст на партию пересобирается суммой, а не ценой штуки',
+    h.buildDestinationGs({ main: 'Ozon', packaging: 500, packagingUnit: 0, other: 0, otherUnit: 0, services: [], keptGroups: [] }, null, 40)
+      === 'Ozon [Упаковка: 500₽]',
+    h.buildDestinationGs({ main: 'Ozon', packaging: 500, packagingUnit: 0, other: 0, otherUnit: 0, services: [], keptGroups: [] }, null, 40));
   check('80b: сборка текста возвращает исходную строку', h.buildDestinationGs(e, e) === d, h.buildDestinationGs(e, e));
 })();
 

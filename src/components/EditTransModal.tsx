@@ -11,8 +11,10 @@ import { toast } from 'sonner';
 import { daysSinceReceipt, formatCurrency, RECEIPT_EDIT_WINDOW_DAYS } from '../lib/utils';
 import { resolveServiceCostAt } from '../lib/serviceRates';
 import {
+  amountTotal,
   buildDestination,
   extrasTotal,
+  ExtrasMode,
   ExtrasServiceEntry,
   parseShipmentExtras,
   rowMoneyAfterExtras
@@ -57,9 +59,18 @@ export const EditTransModal: React.FC = () => {
     );
   }, [transactions, editingTrans]);
 
+  // Пункт 80. Упаковка и «Прочее» вводятся так же, как при оформлении поставки: по умолчанию
+  // за единицу товара, при необходимости — суммой на всю партию.
+  const shipmentQty = shipmentRows.reduce(
+    (sum, t) => (t.isComponent ? sum : sum + (Number(t.quantity) || 0)),
+    0
+  );
+  const amountFieldOf = (total: number, unit: number): { mode: ExtrasMode; value: string } =>
+    unit > 0 ? { mode: 'unit', value: String(unit) } : { mode: 'batch', value: String(total || 0) };
+
   const [extrasOpen, setExtrasOpen] = useState(false);
-  const [packaging, setPackaging] = useState<string>(String(original.packaging || 0));
-  const [other, setOther] = useState<string>(String(original.other || 0));
+  const [packaging, setPackaging] = useState<{ mode: ExtrasMode; value: string }>({ mode: 'unit', value: '0' });
+  const [other, setOther] = useState<{ mode: ExtrasMode; value: string }>({ mode: 'unit', value: '0' });
   const [serviceQty, setServiceQty] = useState<Record<string, number>>({});
   const [extrasKey, setExtrasKey] = useState<string>('');
 
@@ -67,8 +78,8 @@ export const EditTransModal: React.FC = () => {
   const rowKey = String(editingTrans?.id || '');
   if (rowKey !== extrasKey) {
     setExtrasKey(rowKey);
-    setPackaging(String(original.packaging || 0));
-    setOther(String(original.other || 0));
+    setPackaging(amountFieldOf(original.packaging, original.packagingUnit));
+    setOther(amountFieldOf(original.other, original.otherUnit));
     const filled: Record<string, number> = {};
     for (const entry of original.services) filled[entry.name] = entry.quantity;
     setServiceQty(filled);
@@ -97,19 +108,23 @@ export const EditTransModal: React.FC = () => {
     });
   }, [services, serviceRates, original, editingTrans?.deliveryDate, editingTrans?.date]);
 
+  const packagingTotal = amountTotal(packaging.mode, Number(packaging.value) || 0, shipmentQty);
+  const otherTotal = amountTotal(other.mode, Number(other.value) || 0, shipmentQty);
   const editedExtras = useMemo(() => ({
     ...original,
-    packaging: Number(packaging) || 0,
-    other: Number(other) || 0,
+    packaging: packagingTotal,
+    packagingUnit: packaging.mode === 'unit' ? Number(packaging.value) || 0 : 0,
+    other: otherTotal,
+    otherUnit: other.mode === 'unit' ? Number(other.value) || 0 : 0,
     services: serviceLines
       .map<ExtrasServiceEntry>((l) => ({ name: l.name, quantity: serviceQty[l.name] || 0, unitCost: l.unitCost }))
       .filter((e) => e.quantity > 0)
-  }), [original, packaging, other, serviceLines, serviceQty]);
+  }), [original, packaging, other, packagingTotal, otherTotal, serviceLines, serviceQty]);
 
   const oldExtrasTotal = extrasTotal(original);
   const newExtrasTotal = extrasTotal(editedExtras);
   const extrasChanged = newExtrasTotal !== oldExtrasTotal
-    || buildDestination(editedExtras, original) !== buildDestination(original, original);
+    || buildDestination(editedExtras, original, shipmentQty) !== buildDestination(original, original, shipmentQty);
   const preview = useMemo(
     () => rowMoneyAfterExtras(shipmentRows, oldExtrasTotal, newExtrasTotal),
     [shipmentRows, oldExtrasTotal, newExtrasTotal]
@@ -118,8 +133,10 @@ export const EditTransModal: React.FC = () => {
   const handleSaveExtras = async () => {
     const ok = await updateShipmentExtras({
       id: editingTrans!.id,
-      packaging: Number(packaging) || 0,
-      other: Number(other) || 0,
+      packagingMode: packaging.mode,
+      packagingValue: Number(packaging.value) || 0,
+      otherMode: other.mode,
+      otherValue: Number(other.value) || 0,
       services: editedExtras.services
     });
     if (ok) setShowEditTransModal(false);
@@ -160,10 +177,13 @@ export const EditTransModal: React.FC = () => {
     <div 
       className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in"
     >
+      {/* Item 80. The window grew a block of its own and stopped fitting a laptop screen: the
+          buttons went off the bottom edge with nothing to scroll. The card is now a column that
+          never exceeds the viewport, and the middle part scrolls under a fixed header and footer. */}
       <div 
-        className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg overflow-hidden modal-enter"
+        className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg overflow-hidden modal-enter flex flex-col max-h-[90vh]"
       >
-        <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+        <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
           <h3 className="text-2xl font-bold">Редактировать операцию</h3>
           <button 
             onClick={() => setShowEditTransModal(false)}
@@ -173,7 +193,7 @@ export const EditTransModal: React.FC = () => {
           </button>
         </div>
 
-        <div className="p-8 space-y-6">
+        <div className="p-8 space-y-6 overflow-y-auto grow">
           {isReceiptLocked && (
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-6 py-4 text-sm text-amber-800">
               <span className="font-bold">Править этот приход уже нельзя.</span> Ему {receiptAgeDays} дн.,
@@ -261,28 +281,37 @@ export const EditTransModal: React.FC = () => {
               {extrasOpen && !isBatchOrder && (
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-xs font-bold text-slate-400 uppercase">Упаковка, ₽</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={packaging}
-                        onChange={(e) => setPackaging(e.target.value)}
-                        className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-bold text-slate-400 uppercase">Прочее, ₽</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={other}
-                        onChange={(e) => setOther(e.target.value)}
-                        className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
-                      />
-                    </div>
+                    {([
+                      { key: 'packaging', label: 'Упаковка', state: packaging, set: setPackaging, total: packagingTotal },
+                      { key: 'other', label: 'Прочее', state: other, set: setOther, total: otherTotal }
+                    ] as const).map((field) => (
+                      <div key={field.key} className="space-y-1">
+                        <div className="flex justify-between items-center gap-2">
+                          <label className="text-xs font-bold text-slate-400 uppercase">{field.label}, ₽</label>
+                          <select
+                            value={field.state.mode}
+                            onChange={(e) => field.set({ ...field.state, mode: e.target.value as ExtrasMode })}
+                            className="text-[10px] font-bold text-indigo-600 bg-indigo-50 rounded-lg px-2 py-1 outline-none cursor-pointer hover:bg-indigo-100 transition-colors"
+                          >
+                            <option value="unit">На единицу</option>
+                            <option value="batch">На партию</option>
+                          </select>
+                        </div>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={field.state.value}
+                          onChange={(e) => field.set({ ...field.state, value: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                        <div className="text-[10px] text-slate-400">
+                          {field.state.mode === 'unit'
+                            ? `${shipmentQty} шт. → ${formatCurrency(field.total)} ₽ на поставку`
+                            : 'сумма на всю поставку'}
+                        </div>
+                      </div>
+                    ))}
                   </div>
 
                   <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
@@ -386,7 +415,7 @@ export const EditTransModal: React.FC = () => {
           )}
         </div>
 
-        <div className="p-8 bg-slate-50 border-t border-slate-100 flex gap-4">
+        <div className="p-8 bg-slate-50 border-t border-slate-100 flex gap-4 shrink-0">
           <button 
             onClick={() => setShowEditTransModal(false)}
             className="flex-1 py-4 rounded-2xl font-bold text-slate-500 hover:bg-white transition-all border border-transparent hover:border-slate-200"
