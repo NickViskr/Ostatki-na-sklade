@@ -110,17 +110,25 @@ export interface OrderDocsStatus {
   /** The order was created through the app: the journal «Заявки Ozon» has its row. */
   inJournal: boolean;
   record: SupplyDocsRecord | null;
-  kind: 'ok' | 'issues' | 'none';
+  /** 'legacy': a row from before the server-side build existed — documents were made by hand. */
+  kind: 'ok' | 'issues' | 'none' | 'legacy';
   /** Warnings, problems and missing labels of the record, in that order. */
   issues: string[];
 }
+
+/**
+ * Item 79b. The day the server-side build (item 74a) went live. Journal rows dated before it
+ * never got a «Документы» record — their documents were collected by hand — so an empty cell
+ * on such a row is not «not built» and gets no indicator.
+ */
+export const SUPPLY_DOCS_SINCE = '2026-09-18';
 
 /**
  * Item 74b. Documents status of one order for the «Поставки Ozon» tab. A duplicate-bound
  * order may have several journal rows; the record of the latest row wins. Orders that never
  * went through the wizard have no journal row and get no indicator at all.
  */
-export function orderDocsStatus(rows: DocsJournalRow[], orderId: string): OrderDocsStatus {
+export function orderDocsStatus(rows: DocsJournalRow[], orderId: string, docsSince: string = SUPPLY_DOCS_SINCE): OrderDocsStatus {
   const id = String(orderId || '').trim();
   const mine = id ? rows.filter((r) => String(r.orderId || '').trim() === id) : [];
   if (mine.length === 0) return { inJournal: false, record: null, kind: 'none', issues: [] };
@@ -130,7 +138,13 @@ export function orderDocsStatus(rows: DocsJournalRow[], orderId: string): OrderD
     if (String(r.date || '') > String(latest.date || '')) latest = r;
   }
   const record = parseSupplyDocs(latest.docsJSON);
-  if (!record) return { inJournal: true, record: null, kind: 'none', issues: [] };
+  if (!record) {
+    // The journal date is an ISO string: compared as text with a YYYY-MM-DD threshold, any
+    // time on the threshold day sorts after it, so no day-slicing is needed.
+    const date = String(latest.date || '');
+    const legacy = date !== '' && date < docsSince;
+    return { inJournal: true, record: null, kind: legacy ? 'legacy' : 'none', issues: [] };
+  }
 
   const issues = record.warnings.concat(record.problems, record.missingLabels.map((m) => 'Нет этикетки ШК: ' + m));
   return { inJournal: true, record, kind: record.ok ? 'ok' : 'issues', issues };

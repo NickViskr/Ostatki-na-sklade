@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { SKUItem } from '../types';
-import { layoutFromBundle, orderDocsStatus, parseSupplyDocs } from './ozonSupplyDocs';
+import { layoutFromBundle, orderDocsStatus, parseSupplyDocs, SUPPLY_DOCS_SINCE } from './ozonSupplyDocs';
 
 const sku = (name: string, pcsPerBox: number, ozonBarcode: string): SKUItem => ({
   sku: name, price: 0, minStock: 0, pcsPerBox, ozonBarcode, boxesPerPallet: 0, volumeLiters: 0, leadTimeDays: 0
@@ -115,6 +115,33 @@ describe('orderDocsStatus', () => {
     expect(st.kind).toBe('issues');
     expect(st.issues).toEqual(['w', 'p', 'Нет этикетки ШК: A.pdf']);
   });
+
+  // Item 79b. The journal had 32 rows from before the server-side build (29.07–14.09.2026)
+  // with an empty «Документы» cell; the tab marked every one of them «not built».
+  it('a row without a record dated before the build went live is legacy, not «not built»', () => {
+    expect(SUPPLY_DOCS_SINCE).toBe('2026-09-18');
+    const before = orderDocsStatus([{ orderId: '1', date: '2026-09-17T23:59:59.000Z', docsJSON: '' }], '1');
+    expect(before).toEqual({ inJournal: true, record: null, kind: 'legacy', issues: [] });
+    const onDay = orderDocsStatus([{ orderId: '1', date: '2026-09-18T00:00:00.000Z', docsJSON: '' }], '1');
+    expect(onDay.kind).toBe('none');
+    // The threshold day itself, even written without a time, is already the build era.
+    expect(orderDocsStatus([{ orderId: '1', date: '2026-09-18', docsJSON: '' }], '1').kind).toBe('none');
+    const after = orderDocsStatus([{ orderId: '1', date: '2026-09-22T09:24:19.000Z', docsJSON: '' }], '1');
+    expect(after.kind).toBe('none');
+  });
+
+  it('legacy is decided by the latest row of the order and never by a row with a record', () => {
+    const rows = [
+      { orderId: '1', date: '2026-09-01T10:00:00.000Z', docsJSON: '' },
+      { orderId: '1', date: '2026-09-20T10:00:00.000Z', docsJSON: '' }
+    ];
+    expect(orderDocsStatus(rows, '1').kind).toBe('none');
+    expect(orderDocsStatus([{ orderId: '1', date: '2026-09-01T10:00:00.000Z', docsJSON: rec(true) }], '1').kind).toBe('ok');
+    // A row without a date cannot be legacy: an unreadable date must not hide a real gap.
+    expect(orderDocsStatus([{ orderId: '1', date: '', docsJSON: '' }], '1').kind).toBe('none');
+    // The threshold is a parameter: the tab passes nothing and gets the constant.
+    expect(orderDocsStatus([{ orderId: '1', date: '2026-09-20T10:00:00.000Z', docsJSON: '' }], '1', '2026-09-21').kind).toBe('legacy');
+  });
 });
 
 // Item 74b. Wiring guards: the wizard and the tab go through the server-side build, and the
@@ -150,5 +177,22 @@ describe('подключение серверной сборки докумен�
     expect(server).toContain('app.post("/api/ozon/supply/docs"');
     expect(server).toContain("callGasAction('saveSupplyDocsToDrive'");
     expect(server).toContain("callGasAction('saveOzonSupplyDocs'");
+  });
+
+  // Item 79b. The docs route writes the journal past /api/gas, so it must clear the cached
+  // journal read itself, and the tab must draw nothing for a legacy row.
+  it('proxy: the docs route clears the cached journal read right after the record is written', () => {
+    expect(server).toMatch(/saveOzonSupplyDocs: \['getOzonSupplyRequests'\]/);
+    expect(server).toMatch(/callGasAction\('saveOzonSupplyDocs'[^;]*;[\s\S]{0,600}?invalidateCacheFor\('saveOzonSupplyDocs'\);/);
+  });
+
+  // Item 79a. The order must reach «Поставки Озон» without the sync button.
+  it('wizard: after the documents are built it fires the Ozon poll itself, once the window closed', () => {
+    expect(modal).toContain('const checkOzonShipments = useWarehouseStore((state) => state.checkOzonShipments);');
+    expect(modal).toMatch(/await finalizeSupply\(orderId\);[\s\S]{0,900}?onClose\(\);\s*checkOzonShipments\(\);\s*\};/);
+  });
+
+  it('tab: a legacy row gets no documents badge', () => {
+    expect(tab).toMatch(/if \(st\.kind === 'legacy'\) return null;[\s\S]{0,200}if \(st\.kind === 'issues'\)/);
   });
 });

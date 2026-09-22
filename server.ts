@@ -266,7 +266,10 @@ async function startServer() {
     // from this map wipes the whole cache.
     markOzonCostExported: [],
     // Item 68 stage 2: a return moves stock, adds history rows and marks the supply row.
-    commitUnshippedReturn: ['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments']
+    commitUnshippedReturn: ['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments'],
+    // Item 79b: the documents record lands in the journal from /api/ozon/supply/docs, which
+    // calls Apps Script directly and must clear the journal read itself (see that route).
+    saveOzonSupplyDocs: ['getOzonSupplyRequests']
   };
 
   function invalidateCacheFor(writeAction: string): void {
@@ -2329,6 +2332,11 @@ async function startServer() {
       try {
         const j: any = await callGasAction('saveOzonSupplyDocs', token, devMode, { orderId, docsJSON: JSON.stringify(record) });
         journalUpdated = Number(j?.updated) || 0;
+        // Item 79b. callGasAction bypasses /api/gas, so the 30-second cache of the journal read
+        // kept serving the row without its record: a build finishing under 30 s after the row
+        // was written left the tab on «Документы не собраны» (22.09.2026, orders 129770193 and
+        // 2000067584248, built in 29 s and 24 s).
+        invalidateCacheFor('saveOzonSupplyDocs');
       } catch (e: any) {
         problems.push('Журнал «Заявки Ozon» не обновлён: ' + (e?.message || String(e)));
       }

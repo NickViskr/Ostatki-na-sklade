@@ -2,6 +2,8 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { X, Send, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
+import { useSettingsStore } from '../store/useSettingsStore';
+import { supplyBoxTotals } from '../lib/supplyBoxes';
 import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClusters, validateSelection } from '../lib/ozonDirectSupply';
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
@@ -58,6 +60,7 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   const currentUser = useWarehouseStore((state) => state.currentUser);
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const fetchOzonSupplyRequests = useWarehouseStore((state) => state.fetchOzonSupplyRequests);
+  const checkOzonShipments = useWarehouseStore((state) => state.checkOzonShipments);
   const ozonClusterRefs = useWarehouseStore((state) => state.ozonClusterRefs);
   const supplySettings = useWarehouseStore((state) => state.ozonSupplySettings);
   const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
@@ -284,6 +287,17 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     const clusters = new Set(activeRows.map((r) => r.clusterId));
     return { qty, rows: activeRows.length, clusters: clusters.size };
   }, [activeRows, qtyEdit]);
+
+  // Item 79c. Boxes by the «ШТ/КОР» norm and pallets by the «Справочник» figure, for the loader.
+  const boxesPerPalletGlobal = useSettingsStore((state) => state.boxesPerPalletGlobal);
+  const boxTotals = useMemo(
+    () => supplyBoxTotals(
+      activeRows.map((r) => ({ article: r.article, qty: getQty(r) })),
+      pcsPerBoxMap,
+      boxesPerPalletGlobal
+    ),
+    [activeRows, qtyEdit, pcsPerBoxMap, boxesPerPalletGlobal]
+  );
 
   /* ---- Item 45. Free stock on «Мой склад» ---------------------------------------
    * The owner's rule: a line may not ask for more than is actually free to ship, and the
@@ -760,9 +774,14 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     await finalizeSupply(orderId);
     // The journal row now carries the documents record: re-read it for the tab's indicator.
     fetchOzonSupplyRequests();
+    // Item 79a. The tab «Поставки Озон» lists «Внешние отгрузки», which only the Ozon poll
+    // fills; the same poll the tab's button runs goes off here by itself, after the window
+    // closes, so the new order shows up without a click. Not awaited: it polls every active
+    // order and takes a while, and the order exists in Ozon already.
     setProgressText('');
     onCreated();
     onClose();
+    checkOzonShipments();
   };
 
   /**
@@ -1328,7 +1347,15 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
               )}
 
               <div className="p-3 rounded-2xl border border-slate-200 bg-slate-50 text-xs font-bold text-slate-700">
-                Итого: {totals.rows} строк, {totals.clusters} кластеров, {totals.qty} шт
+                Итого: {totals.rows} строк, {totals.clusters} кластеров, {totals.qty} шт, {boxTotals.boxes} коробок,{' '}
+                {boxTotals.pallets === null
+                  ? <span className="text-amber-700">паллеты не посчитаны — задайте «Коробок на паллете» в Справочнике</span>
+                  : <>{boxTotals.pallets} паллет (по {boxesPerPalletGlobal} кор. на паллете)</>}
+                {boxTotals.noNormArticles.length > 0 && (
+                  <div className="mt-1 font-medium text-amber-700">
+                    Нет нормы «ШТ/КОР» — коробки не посчитаны для: {boxTotals.noNormArticles.join(', ')}
+                  </div>
+                )}
               </div>
             </>
           )}

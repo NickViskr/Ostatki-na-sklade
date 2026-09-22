@@ -1891,6 +1891,9 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                             </a>
                           );
                         }
+                        // Item 79b. Rows from before the server-side build carry no record on
+                        // purpose: their documents were collected by hand — no indicator.
+                        if (st.kind === 'legacy') return null;
                         if (st.kind === 'issues') {
                           return (
                             <span
