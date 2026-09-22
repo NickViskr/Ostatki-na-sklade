@@ -120,6 +120,9 @@ function setupChinaSpreadsheet() {
   dropEmptyDefaultSheet(ss, plan.map(function (p) { return p.name; }));
   nameChinaSpreadsheet(ss);
 
+  // The owner runs this from the script editor, where the only thing he sees is the log.
+  Logger.log('Заказы в Китае: таблица «' + (typeof ss.getName === 'function' ? ss.getName() : '') +
+    '», листов создано: ' + created.length + ', всего листов модуля: ' + plan.length);
   return { spreadsheetId: ss.getId(), sheets: plan.map(function (p) { return p.name; }), created: created };
 }
 
