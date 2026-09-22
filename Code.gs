@@ -8336,6 +8336,9 @@ const KAN_DAILY_METRICS = [
   'cost_price', 'gross_profit', 'delivered_cnt', 'ordered_units'
 ];
 const KAN_BACKFILL_DAYS = 120;
+// KAN refuses an analytics range longer than 90 days (live 2026-09-22: «Период аналитики
+// слишком большой», max_days 90), so a longer pull goes in 90-day slices.
+const KAN_MAX_RANGE_DAYS = 90;
 const KAN_DAYS_RETENTION = 400;
 const STOCK_SNAPSHOT_SHEET = 'Снимки склада';
 const STOCK_SNAPSHOT_HEADERS = ['Дата', 'Артикул', 'Остаток шт', 'Средняя себестоимость', 'Капитал ₽'];
@@ -8487,7 +8490,11 @@ function kanPullDaily() {
   const shopIds = kanOzonShopIds();
   if (shopIds.length === 0) throw new Error('В KAN не найдено ни одного магазина Ozon');
   const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
-  const rows = kanDailyRows(from, latest, shopIds, stamp);
+  const rows = [];
+  for (let sliceFrom = from; sliceFrom <= latest; sliceFrom = shiftDay(sliceFrom, KAN_MAX_RANGE_DAYS)) {
+    const sliceTo = shiftDay(sliceFrom, KAN_MAX_RANGE_DAYS - 1) < latest ? shiftDay(sliceFrom, KAN_MAX_RANGE_DAYS - 1) : latest;
+    kanDailyRows(sliceFrom, sliceTo, shopIds, stamp).forEach(function (r) { rows.push(r); });
+  }
   if (rows.length > 0) {
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, KAN_DAYS_HEADERS.length).setValues(rows);
   }

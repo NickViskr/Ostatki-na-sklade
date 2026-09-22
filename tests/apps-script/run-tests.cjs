@@ -3337,6 +3337,8 @@ function fakeKan(opts) {
     if (name === 'ping') return answer({ ok: true, date_context: { latest_complete_date: o.latest } });
     if (name === 'list_shops') return answer({ shops: [{ id: 2771, marketplace: 'ozon' }, { id: 3257, marketplace: 'wb' }, { id: 1765, marketplace: 'ozon' }] });
     if (name === 'get_shop_analytics') {
+      const span = Math.round((Date.parse(args.date__lte) - Date.parse(args.date__gte)) / 86400000) + 1;
+      if (span > 90) return { code: 200, body: { jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: JSON.stringify({ error: { code: 'invalid_params', message: 'Период аналитики слишком большой.', max_days: 90 } }) }], isError: true } } };
       if (args.period_summary) {
         return answer({ items: o.products.map(p => ({ product_id: p.id, sku_article: p.article, ordered_units: 1 })), next_offset: null });
       }
@@ -3415,6 +3417,14 @@ function fakeKan(opts) {
   check('78a: дневная выборка просит именно восемь метрик капитала и продаж',
     JSON.stringify(dailyCalls[0].body.params.arguments.metrics) === JSON.stringify(['stocks_cost_price', 'stocks_fbo_cnt', 'balance_delivering_cost', 'balance_returning_cost', 'cost_price', 'gross_profit', 'delivered_cnt', 'ordered_units']),
     JSON.stringify(dailyCalls[0].body.params.arguments.metrics));
+  const seen = new Set();
+  const ranges = dailyCalls.map(c => [c.body.params.arguments.date__gte, c.body.params.arguments.date__lte])
+    .filter(r => { const k = r.join('..'); if (seen.has(k)) return false; seen.add(k); return true; });
+  const spanOf = (r) => Math.round((Date.parse(r[1]) - Date.parse(r[0])) / 86400000) + 1;
+  check('78a: 120 дней бэкфилла режутся на куски не длиннее 90 дней (KAN max_days = 90), встык и без дыр',
+    ranges.every(r => spanOf(r) <= 90) && ranges[0][0] === '2026-05-24' && ranges[ranges.length - 1][1] === '2026-09-20'
+      && ranges.every((r, i) => i === 0 || Date.parse(r[0]) - Date.parse(ranges[i - 1][1]) === 86400000),
+    JSON.stringify(ranges));
   check('78a: дневная выборка группируется по дню и товару',
     dailyCalls[0].body.params.arguments.date_group_by === 'day' && dailyCalls[0].body.params.arguments.product_group_by === 'product');
 
