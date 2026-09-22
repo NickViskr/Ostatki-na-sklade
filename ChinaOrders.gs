@@ -49,7 +49,7 @@ const CHINA_LINE_HEADERS = [
   'Цена ¥', 'Сумма ¥', 'Паллета', 'Вес паллеты, кг', 'Вес коробки, кг',
   'Вес расчётный, кг', 'Источник веса',
   'Доставка Китай ¥', 'Перевозка ¥', 'Расходы РФ ₽',
-  'Себестоимость ₽', 'Себестоимость ₽/шт', 'Наш артикул'
+  'Себестоимость ₽', 'Себестоимость ₽/шт', 'Наш артикул', 'Один товар'
 ];
 
 const CHINA_COST_HEADERS = ['ID', 'ПартияID', 'Дата', 'Тип', 'Сумма ₽', 'Комментарий', 'Кто'];
@@ -250,7 +250,8 @@ function chinaLineFromRow(r) {
     rubShare: parseNumber(r['Расходы РФ ₽']),
     costRub: parseNumber(r['Себестоимость ₽']),
     unitRub: parseNumber(r['Себестоимость ₽/шт']),
-    article: String(r['Наш артикул'] || '').trim()
+    article: String(r['Наш артикул'] || '').trim(),
+    group: String(r['Один товар'] || '').trim()
   };
 }
 
@@ -306,10 +307,17 @@ function chinaAllocate(total, bases) {
 }
 
 // What makes two lines THE SAME GOODS (owner, 2026-09-22). The carrier splits one product
-// over several lines and pallets, and the same product can even travel under two markings
-// (the same box in two colours). Once our own article is written against a line, that
-// article is what identifies the goods; until then the carrier's marking has to do.
+// over several lines and pallets, so lines have to be grouped before anything is split
+// between them. Three keys, in order:
+//
+//   «Один товар»  the owner said so himself — the same box in two colours carries two
+//                  different articles of ours and nothing else could tie the lines together;
+//   «Наш артикул» once it is written against a line, it says what the goods are;
+//   the marking    the carrier's own, good only inside this batch, and all there is until
+//                  the articles are assigned.
 function chinaGroupKey(line) {
+  const group = String((line || {}).group || '').trim();
+  if (group) return 'G:' + group.toLowerCase();
   const article = String((line || {}).article || '').trim();
   if (article) return 'A:' + article.toLowerCase();
   return 'M:' + String((line || {}).marking || '').trim().toLowerCase();
@@ -561,7 +569,8 @@ function saveChinaBatch(data, username) {
       pallet: String(l.pallet || '').trim(),
       palletWeightKg: parseNumber(l.palletWeightKg),
       boxWeightKg: parseNumber(l.boxWeightKg),
-      article: String(l.article || '').trim()
+      article: String(l.article || '').trim(),
+      group: String(l.group || '').trim()
     };
   });
 
@@ -637,7 +646,8 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
       'Расходы РФ ₽': c.rubShare,
       'Себестоимость ₽': c.costRub,
       'Себестоимость ₽/шт': c.unitRub,
-      'Наш артикул': l.article
+      'Наш артикул': l.article,
+      'Один товар': l.group
     });
   });
 

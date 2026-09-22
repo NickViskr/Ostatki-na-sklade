@@ -4128,6 +4128,54 @@ function batch27() {
     own.targetSpreadsheetName() === 'Китай 2026', own.targetSpreadsheetName());
 })();
 
+(function () {
+  const h = withChina();
+  // The same box in two colours: two articles of ours, tied together by hand because
+  // nothing in the data could tell that they are one product (owner, 2026-09-22).
+  const lines = batch28Lines();
+  lines[0].article = 'BOX-WHITE'; lines[0].group = 'короб 8 шт';
+  lines[1].article = 'BOX-WHITE'; lines[1].group = 'короб 8 шт';
+  lines[2].article = 'BOX-GREY';  lines[2].group = 'короб 8 шт';
+  const calc = h.chinaBatchCost(batch28(), lines, 0, { cargoRateCnyPerUsd: 7 });
+
+  const units = calc.lines.map(function (l) { return l.unitRub; });
+  check('81a: two colours marked as one product cost the same per piece',
+    JSON.stringify(units) === JSON.stringify([565.78, 565.78, 565.78]), units.join(' '));
+  check('81a: marking two colours as one product weighs them the same per box',
+    calc.lines[2].weightKg === 168.13, String(calc.lines[2].weightKg));
+  check('81a: marking two colours as one product does not move the batch total',
+    calc.totalRub === 271575.49, String(calc.totalRub));
+
+  // The marker is stronger than the article: it exists exactly for lines whose articles differ.
+  const own = batch28Lines();
+  own[0].article = 'BOX-WHITE'; own[1].article = 'BOX-WHITE'; own[2].article = 'BOX-GREY';
+  const apart = h.chinaBatchCost(batch28(), own, 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: without the marker two articles are still costed apart',
+    apart.lines[0].unitRub !== apart.lines[2].unitRub,
+    apart.lines.map(function (l) { return l.unitRub; }).join(' '));
+})();
+
+(function () {
+  const h = withChina();
+  const b = batch28();
+  b.lines[0].article = 'BOX-WHITE'; b.lines[0].group = 'короб 8 шт';
+  b.lines[2].article = 'BOX-GREY';  b.lines[2].group = 'короб 8 шт';
+  h.saveChinaBatch(b, 'Николай');
+  const rows = h.dumpChinaSheet('Строки партий');
+  check('81a: the article and the same-product marker survive a round trip through the sheet',
+    rows[0]['Наш артикул'] === 'BOX-WHITE' && rows[2]['Один товар'] === 'короб 8 шт' &&
+    Number(rows[0]['Себестоимость ₽/шт']) === Number(rows[2]['Себестоимость ₽/шт']),
+    JSON.stringify(rows.map(function (r) { return r['Наш артикул'] + '/' + r['Один товар'] + '/' + r['Себестоимость ₽/шт']; })));
+
+  // A recalculation reads the lines back out of the sheet. The marker has to survive that
+  // trip too, or adding a cost would quietly take the levelling away.
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Разгрузка', amountRub: 6000 }, 'Николай');
+  const after = h.dumpChinaSheet('Строки партий');
+  check('81a: the levelling survives a recalculation after an added cost',
+    Number(after[0]['Себестоимость ₽/шт']) === Number(after[2]['Себестоимость ₽/шт']),
+    after.map(function (r) { return r['Себестоимость ₽/шт']; }).join(' '));
+})();
+
 // ---- 81a: the whole path through the sheets ----
 (function () {
   const h = withChina();
