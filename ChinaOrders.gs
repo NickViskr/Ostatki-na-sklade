@@ -108,6 +108,7 @@ function setupChinaSpreadsheet() {
 
   seedChinaSettings(ss);
   dropEmptyDefaultSheet(ss, plan.map(function (p) { return p.name; }));
+  nameChinaSpreadsheet(ss);
 
   return { spreadsheetId: ss.getId(), sheets: plan.map(function (p) { return p.name; }), created: created };
 }
@@ -138,6 +139,15 @@ function dropEmptyDefaultSheet(ss, ourNames) {
     try { ss.deleteSheet(sheets[i]); } catch (e) { /* a sheet that refuses to go is left alone */ }
     return;
   }
+}
+
+// A spreadsheet the owner made by hand arrives called «Новая таблица». Only that default name is
+// replaced: a name the owner chose himself is his.
+function nameChinaSpreadsheet(ss) {
+  if (typeof ss.rename !== 'function' || typeof ss.getName !== 'function') return;
+  const name = String(ss.getName() || '').trim();
+  if (name !== 'Новая таблица' && name !== 'Untitled spreadsheet' && name !== '') return;
+  try { ss.rename('Заказы в Китае'); } catch (e) { /* a rename we are not allowed to do is not a failure */ }
 }
 
 // ---------------------------------------------------------------- reading
@@ -295,10 +305,22 @@ function chinaAllocate(total, bases) {
   return out;
 }
 
-// Weight of every line, in kilograms, and where each number came from.
+// What makes two lines THE SAME GOODS (owner, 2026-09-22). The carrier splits one product
+// over several lines and pallets, and the same product can even travel under two markings
+// (the same box in two colours). Once our own article is written against a line, that
+// article is what identifies the goods; until then the carrier's marking has to do.
+function chinaGroupKey(line) {
+  const article = String((line || {}).article || '').trim();
+  if (article) return 'A:' + article.toLowerCase();
+  return 'M:' + String((line || {}).marking || '').trim().toLowerCase();
+}
+
+// Weight of every line, in kilograms, and where each number came from. Kilograms per box are
+// derived per GROUP, not per line: lines of one product weigh the same per box, whichever
+// pallet they were packed into and whichever marking the carrier gave them.
 function chinaLineWeights(lines, invoiceWeight) {
   const boxes = lines.map(function (l) { return Number(l.boxes) || 0; });
-  const marks = lines.map(function (l) { return String(l.marking || '').trim(); });
+  const marks = lines.map(chinaGroupKey);
 
   // Kilograms per box, from the pallets where a marking was actually weighed.
   const byMark = {};
@@ -355,6 +377,41 @@ function chinaBoxBases(lines) {
   return lines.map(function (l) { return Number(l.qty) || 0; });
 }
 
+// One product, one cost per piece (owner, 2026-09-22). The weights of a group are already
+// equal per box, so the lines of a group usually come out equal on their own; they can still
+// differ when the same goods were bought at two prices, or after a kopeck of rounding. The
+// group's money is kept whole: the levelled cost is spread back by pieces and the remainder
+// goes to the largest line, so the total of the batch does not move.
+function chinaLevelGroups(lines, computed) {
+  const groups = {};
+  lines.forEach(function (l, i) {
+    const key = chinaGroupKey(l);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(i);
+  });
+
+  Object.keys(groups).forEach(function (key) {
+    const idx = groups[key];
+    let total = 0, qty = 0, best = idx[0], bestQty = 0;
+    idx.forEach(function (i) {
+      total = roundToTwo(total + computed[i].costRub);
+      const q = Number(lines[i].qty) || 0;
+      qty += q;
+      if (q > bestQty) { bestQty = q; best = i; }
+    });
+    if (qty <= 0) return;
+    const unit = roundToTwo(total / qty);
+    let given = 0;
+    idx.forEach(function (i) {
+      computed[i].unitRub = unit;
+      if (i === best) return;
+      computed[i].costRub = roundToTwo(unit * (Number(lines[i].qty) || 0));
+      given = roundToTwo(given + computed[i].costRub);
+    });
+    computed[best].costRub = roundToTwo(total - given);
+  });
+}
+
 // The whole calculation of a batch. Takes plain objects, touches no sheet, and is the only
 // place where money is worked out.
 function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
@@ -384,12 +441,10 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
   const chinaShares = chinaAllocate(chinaCny, w.weights);
   const rubShares = chinaAllocate(rubCosts, chinaBoxBases(list));
 
-  let totalRub = 0;
   const out = list.map(function (l, i) {
     const cny = roundToTwo(goods[i] + freightShares[i] + chinaShares[i]);
     const costRub = roundToTwo(roundToTwo(cny * rubRate) + rubShares[i]);
     const qty = Number(l.qty) || 0;
-    totalRub = roundToTwo(totalRub + costRub);
     return {
       sumCny: goods[i],
       weightKg: roundToTwo(w.weights[i]),
@@ -402,6 +457,11 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
       unitRub: qty > 0 ? roundToTwo(costRub / qty) : 0
     };
   });
+
+  chinaLevelGroups(list, out);
+
+  let totalRub = 0;
+  out.forEach(function (l) { totalRub = roundToTwo(totalRub + l.costRub); });
 
   return {
     lines: out,

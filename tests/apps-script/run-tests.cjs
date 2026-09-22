@@ -4053,6 +4053,81 @@ function batch27() {
     calc.totalRub + ' - ' + noCosts.totalRub);
 })();
 
+// ---- 81a: one product, one cost ----
+//
+// Addition from the owner, 2026-09-22: the same goods split over several pallets must end
+// with ONE cost, and goods that differ only in colour must be levelled once our own article
+// has been written against them. Both are the same rule — the article, not the carrier's
+// marking, says what the goods are.
+(function () {
+  const h = withChina();
+  const lines = batch28Lines();
+  lines.forEach(function (l) { l.article = 'BOX'; });
+  const b = batch28();
+  const calc = h.chinaBatchCost(b, lines, 0, { cargoRateCnyPerUsd: 7 });
+
+  check('81a: two markings of one article weigh the same per box',
+    calc.lines[0].weightKg === 336.25 && calc.lines[1].weightKg === 168.13 && calc.lines[2].weightKg === 168.13,
+    calc.lines.map(function (l) { return l.weightKg; }).join(' '));
+  const units = calc.lines.map(function (l) { return l.unitRub; });
+  check('81a: one article costs the same per piece on every line',
+    JSON.stringify(units) === JSON.stringify([565.78, 565.78, 565.78]), units.join(' '));
+  check('81a: levelling does not move the cost of the batch',
+    calc.totalRub === 271575.49, String(calc.totalRub));
+  let sum = 0;
+  calc.lines.forEach(function (l) { sum = Math.round((sum + l.costRub) * 100) / 100; });
+  check('81a: the levelled lines still add up to the batch, to the kopeck',
+    sum === calc.totalRub, sum + ' vs ' + calc.totalRub);
+
+  // Without the article the carrier's marking still rules, and the estimate by pallets gives
+  // the two markings different weights — that is the case the levelling exists for.
+  const raw = h.chinaBatchCost(b, batch28Lines(), 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: without an article the two markings are costed apart',
+    raw.lines[0].unitRub === 504.61 && raw.lines[2].unitRub === 749.3,
+    raw.lines[0].unitRub + ' / ' + raw.lines[2].unitRub);
+})();
+
+(function () {
+  const h = withChina();
+  // Two articles of their own must NOT be levelled into one another.
+  const lines = batch28Lines();
+  lines[0].article = 'BOX-WHITE';
+  lines[1].article = 'BOX-WHITE';
+  lines[2].article = 'BOX-GREY';
+  const calc = h.chinaBatchCost(batch28(), lines, 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: two different articles keep two different costs',
+    calc.lines[0].unitRub === calc.lines[1].unitRub && calc.lines[0].unitRub !== calc.lines[2].unitRub,
+    calc.lines.map(function (l) { return l.unitRub; }).join(' '));
+
+  // The same article bought at two prices is levelled to one cost per piece.
+  const twoPrices = [
+    { marking: 'NV-96', boxes: 16, qty: 160, priceCny: 25, palletWeightKg: 288.5, article: 'BOX' },
+    { marking: 'NV-96', boxes: 4, qty: 40, priceCny: 30, article: 'BOX' }
+  ];
+  const mixed = h.chinaBatchCost({ weightKg: 360.6, freightUsd: 100, cargoRate: 7, rubRate: 12.4 },
+    twoPrices, 0, { cargoRateCnyPerUsd: 7 });
+  check('81a: one article bought at two prices ends with one cost per piece',
+    mixed.lines[0].unitRub === mixed.lines[1].unitRub, mixed.lines.map(function (l) { return l.unitRub; }).join(' '));
+  const groupTotal = Math.round((mixed.lines[0].costRub + mixed.lines[1].costRub) * 100) / 100;
+  check('81a: levelling two prices keeps the money of the group whole',
+    groupTotal === mixed.totalRub, groupTotal + ' vs ' + mixed.totalRub);
+})();
+
+(function () {
+  const h = freshHarness();
+  h.setChinaSpreadsheet();
+  h.setupChinaSpreadsheet();
+  check('81a: a spreadsheet left with the default name is named by the module',
+    h.targetSpreadsheetName() === 'Заказы в Китае', h.targetSpreadsheetName());
+
+  const own = freshHarness();
+  own.setChinaSpreadsheet();
+  own.setTargetSpreadsheetName('Китай 2026');
+  own.setupChinaSpreadsheet();
+  check('81a: a name the owner chose himself is left alone',
+    own.targetSpreadsheetName() === 'Китай 2026', own.targetSpreadsheetName());
+})();
+
 // ---- 81a: the whole path through the sheets ----
 (function () {
   const h = withChina();

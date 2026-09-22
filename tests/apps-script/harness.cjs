@@ -170,6 +170,9 @@ let lockRequests = 0;
 let scriptProperties = {};
 const targetSpreadsheetId = 'fake-calendar-spreadsheet-id';
 let targetSheets = {};
+// Item 81: the module names the spreadsheet of «Заказы в Китае» itself when the owner left it
+// with the default name Google gives a new file.
+let targetSpreadsheetName = 'Новая таблица';
 
 // ---------- Item 78a: UrlFetchApp — a programmable stand-in for the KAN MCP server ----------
 // A test installs a handler (url, options) => { code, body }; every call is logged so a test
@@ -228,6 +231,8 @@ const sandbox = {
       if (id !== targetSpreadsheetId) throw new Error('Requested entity was not found: ' + id);
       return {
         getId: () => targetSpreadsheetId,
+        getName: () => targetSpreadsheetName,
+        rename: (name) => { targetSpreadsheetName = name; },
         getSheetByName: (name) => targetSheets[name] || null,
         getSheets: () => Object.keys(targetSheets).map(k => targetSheets[k]),
         insertSheet: (name) => {
@@ -641,6 +646,8 @@ module.exports = {
     scriptProperties[context.CHINA_PROPERTY] = id === undefined ? targetSpreadsheetId : id;
   },
   targetSheetNames() { return Object.keys(targetSheets); },
+  targetSpreadsheetName() { return targetSpreadsheetName; },
+  setTargetSpreadsheetName(name) { targetSpreadsheetName = name; },
   // A sheet of the module as objects keyed by its header text: the assertions of item 81 are
   // about «Себестоимость ₽», not about column 18.
   dumpChinaSheet(name) {
