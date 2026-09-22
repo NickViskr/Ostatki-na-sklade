@@ -131,6 +131,14 @@ describe('buildTurnover: no sales, snapshots with their own cost, two cabinets',
     expect(r.portfolio.slowCapital).toBe(50);
     expect(r.portfolio.slowSharePct).toBe(100);
   });
+  it('an article with no capital anywhere and no sales is left out, not called slow', () => {
+    const rows = periodDays('2026-09-20', 10).map((d) => kan(d, 'B'));
+    const r = buildTurnover(base({ kanRows: rows, shelf: [{ article: 'B', quantity: 0, avgCost: 10 }] }));
+    expect(r.articles).toEqual([]);
+    expect(r.portfolio.counts.slow).toBe(0);
+    // one piece on the shelf is enough to keep it, even with no cost recorded yet
+    expect(buildTurnover(base({ kanRows: rows, shelf: [{ article: 'B', quantity: 1, avgCost: 0 }] })).articles.length).toBe(1);
+  });
   it('an article with capital but no receipt and no sale has no age', () => {
     const r = buildTurnover(base({ shelf: [{ article: 'B', quantity: 5, avgCost: 10 }] }));
     expect(r.articles[0].ageDays).toBeNull();
@@ -155,6 +163,15 @@ describe('buildTurnover: no sales, snapshots with their own cost, two cabinets',
     expect(a.costOfSales).toBe(40);
     expect(a.turns).toBe(1);
     expect(a.coverDays).toBe(Math.round(4 / (3 / 10)));
+  });
+  it('KAN\'s cost of sales comes with a minus sign (an expense) and is taken by modulus; gross profit keeps its sign', () => {
+    const rows = periodDays('2026-09-20', 10).map((d) => kan(d, 'A', { stockCost: 1000, costOfSales: -50, grossProfit: -10, boughtQty: 1 }));
+    const a = buildTurnover(base({ kanRows: rows })).articles[0];
+    expect(a.costOfSales).toBe(500);
+    expect(a.turns).toBe(0.5);
+    expect(a.daysPerTurn).toBe(20);
+    expect(a.grossProfit).toBe(-100);
+    expect(a.gmroiPct).toBe(-10);
   });
   it('the last sale day looks at ordered pieces too, not only bought', () => {
     const rows = [kan('2026-09-15', 'A', { boughtQty: 1 }), kan('2026-09-18', 'A', { orderedQty: 1 }), kan('2026-09-20', 'A', { stockCost: 1 })];

@@ -299,7 +299,9 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
     let ozonQty = 0, ozonStockCost = 0, deliveringCost = 0, returningCost = 0;
     for (const r of rows) {
       ozonSum += r.stockCost + r.deliveringCost + r.returningCost;
-      costOfSales += r.costOfSales;
+      // KAN reports the cost of sales as an expense, with a minus sign (live 2026-09-22:
+      // `cost_price: -4063.26`); gross profit keeps its sign, it can be negative for real.
+      costOfSales += Math.abs(r.costOfSales);
       grossProfit += r.grossProfit;
       boughtQty += r.boughtQty;
       orderedQty += r.orderedQty;
@@ -323,6 +325,10 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
     const lastReceiptDay = lastReceipt.get(article) || null;
     const ageBasis = lastSaleDay || lastReceiptDay;
     const ageDays = ageBasis ? Math.max(0, daysBetween(ageBasis, today)) : null;
+
+    // Nothing anywhere and nothing sold: an article KAN still lists but the business no longer
+    // holds (live 2026-09-22: six such rows). It is not «slow» — it is absent, and is left out.
+    if (avgCapital === 0 && shelfQty === 0 && ozonQty === 0 && costOfSales === 0) continue;
 
     const kitsOfThis = kitOf.get(article) || [];
     let status: TurnoverStatus;
