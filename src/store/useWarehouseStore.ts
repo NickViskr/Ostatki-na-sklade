@@ -10,7 +10,7 @@ import { OzonCoverageSettings, OzonClusterRef } from '../lib/ozonCoverage';
 import { BatchWriteOffGroup } from '../lib/ozonBatchWriteOff';
 import { buildKanCostCsv, collapseKanCostRows, KanCostRow, kanCostFileName } from '../lib/kanCostExport';
 import { toast } from 'sonner';
-import { newOperationId } from '../lib/utils';
+import { formatCurrency, newOperationId } from '../lib/utils';
 
 // Пункт 40. Капитализацию здесь обнулять НЕЛЬЗЯ: у артикула с нулевым остатком она несёт
 // «долг себестоимости» — стоимость списанного брака, которая ляжет на ближайший приход.
@@ -118,6 +118,13 @@ interface WarehouseState {
   handleDeleteTransaction: (id: string) => Promise<boolean>;
   handleDeleteMultipleTransactions: (ids: string[]) => Promise<boolean>;
   handleUpdateTransaction: (id: string, data: Transaction) => Promise<boolean>;
+  /** Item 80. Additional costs (packaging, «Прочее», services) of the whole shipment of a row. */
+  updateShipmentExtras: (payload: {
+    id: string;
+    packaging: number;
+    other: number;
+    services: { name: string; quantity: number; unitCost: number }[];
+  }) => Promise<boolean>;
   handleProcessInvoice: (feedback?: any) => Promise<void>;
   
   checkSession: () => Promise<void>;
@@ -848,6 +855,32 @@ export const useWarehouseStore = create<WarehouseState>()(
     } catch (e) {
       console.error(e);
       toast.error('Ошибка сети при удалении операций');
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  updateShipmentExtras: async (payload) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('updateShipmentExtras', { data: payload });
+      if (result.status !== 'success') {
+        toast.error(result.message || 'Не удалось изменить доп. расходы поставки');
+        return false;
+      }
+      const d = result.data || {};
+      if (Array.isArray(d.newTransactions)) set({ transactions: d.newTransactions });
+      if (Array.isArray(d.stock)) set({ stock: normalizeStock(d.stock) });
+      const money = `${formatCurrency(Number(d.oldTotal) || 0)} → ${formatCurrency(Number(d.newTotal) || 0)} ₽`;
+      toast.success(`Доп. расходы поставки изменены: ${money}, пересчитано строк: ${d.changedRows || 0}`);
+      if (Number(d.costRowsAppended) > 0) {
+        toast.success('Исправленная себестоимость дописана в журнал для КАН');
+      }
+      return true;
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети: ' + (e?.message || ''));
       return false;
     } finally {
       set({ isProcessing: false });

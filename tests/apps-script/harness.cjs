@@ -539,6 +539,12 @@ module.exports = {
   restoreTransaction: (...args) => context.restoreTransaction(...args),
   deleteMultipleTransactions: (...args) => context.deleteMultipleTransactions(...args),
   applyReplayCorrections: (...args) => context.applyReplayCorrections(...args),
+  // Item 80: the additional costs of a shipment, edited after the fact.
+  updateShipmentExtras: (...args) => context.updateShipmentExtras(...args),
+  shipmentRowsOfTransaction: (...args) => context.shipmentRowsOfTransaction(...args),
+  parseShipmentExtrasGs: (...args) => context.parseShipmentExtrasGs(...args),
+  buildDestinationGs: (...args) => context.buildDestinationGs(...args),
+  extrasTotalGs: (...args) => context.extrasTotalGs(...args),
   reissueOzonCostRows: (...args) => context.reissueOzonCostRows(...args),
   replayArticle: (...args) => context.replayArticle(...args),
   replayMatchesFacts: (...args) => context.replayMatchesFacts(...args),

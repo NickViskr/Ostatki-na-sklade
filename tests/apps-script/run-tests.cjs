@@ -3532,6 +3532,221 @@ function fakeKan(opts) {
     fs.readFileSync(path.join(__dirname, '..', '..', '.gitignore'), 'utf8').split('\n').includes('.clasp.json'), '.gitignore');
 }
 
+// ================= Item 80: additional costs of a shipment =================
+//
+// The fixture is the real shipment «Яндекс» of 22.09.2026 from «БД Склад»: 24 + 16 pieces,
+// 240 ₽ of packaging and 636 ₽ of services = 876 ₽, spread as 525,60 and 350,40.
+
+function withShipment() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setStockSheet([
+    { article: 'A', quantity: 100, avgCost: 614, capitalization: 61400 },
+    { article: 'B', quantity: 100, avgCost: 582.65, capitalization: 58265 }
+  ]);
+  h.setOzonCostSheet([]);
+  const dest = 'Яндекс [Упаковка: 40 шт. x 6₽ = 240₽ | Услуги: Доставка по городу 1 короб x4 (636₽)]';
+  h.commitTransaction([{ article: 'A', quantity: 24, price: 614 }, { article: 'B', quantity: 16, price: 582.65 }],
+    'Расход', dest, '2026-09-22', 'tester', '2026-09-22T11:05:47.756Z', 'op-ship', 876);
+  const rows = h.getTransactions().rows.filter(t => t.type === 'Расход');
+  return { h, dest, rowA: rows.find(t => t.article === 'A'), rowB: rows.find(t => t.article === 'B') };
+}
+
+(function test80a1() {
+  const { h, rowA, rowB } = withShipment();
+  check('80a: доли расходов разнесены по количеству при создании отгрузки',
+    rowA.total === 15261.6 && rowB.total === 9672.8 && rowA.price === 635.9 && rowB.price === 604.55,
+    `A ${rowA.total}/${rowA.price}, B ${rowB.total}/${rowB.price}`);
+
+  // The defect this fixes: re-saving a row without changing anything used to add the whole
+  // 876 ₽ of the shipment to it a second time (15 261,60 → 16 137,60).
+  h.updateTransaction(rowA.id, {
+    article: 'A', quantity: 24, price: rowA.price, writeOffCost: rowA.writeOffCost,
+    type: 'Расход', destination: rowA.destination, deliveryDate: '2026-09-22', date: rowA.date
+  }, 'tester');
+  const after = h.getTransactions().rows.filter(t => t.type === 'Расход');
+  const a2 = after.find(t => t.article === 'A');
+  const b2 = after.find(t => t.article === 'B');
+  check('80a: правка строки без изменений не двигает деньги отгрузки',
+    a2.total === 15261.6 && a2.price === 635.9, `A ${a2.total}/${a2.price}`);
+  check('80a: соседняя строка отгрузки правкой не затронута',
+    b2.total === 9672.8 && b2.price === 604.55, `B ${b2.total}/${b2.price}`);
+  check('80a: доля расходов строки осталась долей, а не всей суммой поставки',
+    a2.additionalCosts === 876, `ДопРасходы ${a2.additionalCosts}`);
+})();
+
+(function test80a2() {
+  const { h, rowA } = withShipment();
+  // Quantity changed by the edit: the shipment now carries 30 + 16 pieces and the same 876 ₽.
+  h.updateTransaction(rowA.id, {
+    article: 'A', quantity: 30, price: rowA.price, writeOffCost: rowA.writeOffCost,
+    type: 'Расход', destination: rowA.destination, deliveryDate: '2026-09-22', date: rowA.date
+  }, 'tester');
+  const a2 = h.getTransactions().rows.find(t => t.type === 'Расход' && t.article === 'A');
+  // 876 * 30 / 46 = 571,30; goods 30 * 614 = 18 420 → 18 991,30
+  check('80a: изменённое количество разносит расходы по новому итогу поставки',
+    a2.total === 18991.3, `A ${a2.total}`);
+})();
+
+(function test80b1() {
+  const { h, rowA, rowB } = withShipment();
+  const res = h.updateShipmentExtras({
+    id: rowA.id,
+    packaging: 240,
+    other: 0,
+    services: [{ name: 'Доставка по городу 1 короб', quantity: 6, unitCost: 159 }]
+  }, 'tester');
+
+  check('80b: новая сумма расходов посчитана от услуг и упаковки',
+    res.oldTotal === 876 && res.newTotal === 1194, `${res.oldTotal} → ${res.newTotal}`);
+  check('80b: текст объекта пересобран, упаковка сохранила исходную запись',
+    res.destination === 'Яндекс [Упаковка: 40 шт. x 6₽ = 240₽ | Услуги: Доставка по городу 1 короб x6 (954₽)]',
+    res.destination);
+
+  const rows = h.getTransactions().rows.filter(t => t.type === 'Расход');
+  const a2 = rows.find(t => t.article === 'A');
+  const b2 = rows.find(t => t.article === 'B');
+  // 1194 * 24 / 40 = 716,40 → 14 736 + 716,40 = 15 452,40; 1194 * 16 / 40 = 477,60 → 9 800
+  check('80b: обе строки поставки пересчитаны по количеству',
+    a2.total === 15452.4 && b2.total === 9800, `A ${a2.total}, B ${b2.total}`);
+  check('80b: цена строки пересчитана вместе с суммой',
+    a2.price === 643.85 && b2.price === 612.5, `A ${a2.price}, B ${b2.price}`);
+  check('80b: колонка ДопРасходы хранит новую сумму расходов поставки',
+    a2.additionalCosts === 1194 && b2.additionalCosts === 1194, `${a2.additionalCosts}/${b2.additionalCosts}`);
+  check('80b: себестоимость списания и количество не тронуты',
+    a2.writeOffCost === rowA.writeOffCost && a2.quantity === 24 && b2.writeOffCost === rowB.writeOffCost,
+    `${a2.writeOffCost}/${a2.quantity}`);
+  const stock = h.getStock();
+  check('80b: склад правкой услуг не двигается',
+    stock.find(s => s.article === 'A').quantity === 76 && stock.find(s => s.article === 'A').capitalization === 46664,
+    JSON.stringify(stock.find(s => s.article === 'A')));
+  check('80b: правка сообщает, сколько строк поставки изменилось', res.changedRows === 2, String(res.changedRows));
+})();
+
+(function test80b2() {
+  const { h, rowA } = withShipment();
+  // Everything removed: the rows fall back to the bare cost of the goods and the tail goes.
+  const res = h.updateShipmentExtras({ id: rowA.id, packaging: 0, other: 0, services: [] }, 'tester');
+  check('80b: снятие всех расходов оставляет голый объект', res.destination === 'Яндекс', res.destination);
+  const rows = h.getTransactions().rows.filter(t => t.type === 'Расход');
+  const a2 = rows.find(t => t.article === 'A');
+  const b2 = rows.find(t => t.article === 'B');
+  check('80b: без расходов строки равны себестоимости товара',
+    a2.total === 14736 && b2.total === 9322.4 && a2.price === 614 && b2.price === 582.65,
+    `A ${a2.total}/${a2.price}, B ${b2.total}/${b2.price}`);
+  // Empty, not a zero: parseTransactionRow reads an empty cell as null, and «0 ₽ расходов»
+  // must look the same as a shipment that never had any.
+  check('80b: пустая колонка ДопРасходы после снятия расходов',
+    a2.additionalCosts === null && b2.additionalCosts === null, `${a2.additionalCosts}/${b2.additionalCosts}`);
+})();
+
+(function test80b3() {
+  // A kit: the components carry no share, the whole amount sits on the kit row, and the new
+  // text reaches the component rows too — they show the same object in «История».
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setStockSheet([
+    { article: 'MISKA', quantity: 100, avgCost: 147.85, capitalization: 14785 },
+    { article: 'BOTTLE', quantity: 100, avgCost: 12.7, capitalization: 1270 }
+  ]);
+  h.setOzonCostSheet([]);
+  h.setKitSheet([
+    { kitSku: 'KIT', componentSku: 'MISKA', quantity: 1, kitType: 'virtual' },
+    { kitSku: 'KIT', componentSku: 'BOTTLE', quantity: 1, kitType: 'virtual' }
+  ]);
+  const dest = 'Ozon (MaxiStore) [Услуги: Стоимость 1 короба ФФ x1 (106₽)]';
+  h.commitTransaction([{ article: 'KIT', quantity: 18, price: 160.55 }],
+    'Расход', dest, '2026-09-21', 'tester', '2026-09-21T16:38:23.330Z', 'op-kit', 106);
+  const kitRow = h.getTransactions().rows.find(t => t.type === 'Расход' && !t.isComponent);
+  const res = h.updateShipmentExtras({
+    id: kitRow.id, packaging: 0, other: 0,
+    services: [{ name: 'Стоимость 1 короба ФФ', quantity: 2, unitCost: 106 }]
+  }, 'tester');
+  check('80b: у комплекта пересчитана одна строка — сама строка комплекта', res.changedRows === 1, String(res.changedRows));
+  const rows = h.getTransactions().rows.filter(t => t.type === 'Расход');
+  const kit2 = rows.find(t => !t.isComponent);
+  const comps = rows.filter(t => t.isComponent);
+  // Components 18 x 147,85 + 18 x 12,70 = 2 889,90; services 2 x 106 = 212 → 3 101,90.
+  check('80b: вся сумма услуг легла на строку комплекта',
+    kit2.total === 3101.9 && kit2.price === 172.33, `комплект ${kit2.total}/${kit2.price}`);
+  check('80b: строки комплектующих по деньгам не тронуты',
+    comps.every(c => Math.abs(c.total - c.quantity * c.price) < 0.005), comps.map(c => c.total).join('/'));
+  check('80b: новый текст объекта проставлен и у комплектующих',
+    comps.every(c => c.destination === res.destination), comps.map(c => c.destination).join(' | '));
+})();
+
+(function test80b4() {
+  const { h, rowA } = withShipment();
+  let message = '';
+  try {
+    h.updateShipmentExtras({ id: 'нет такой строки', packaging: 0, other: 0, services: [] }, 'tester');
+  } catch (e) { message = String(e.message || e); }
+  check('80b: неизвестная строка истории отвергается', message.indexOf('не найдена') !== -1, message);
+
+  const receipt = h.getTransactions().rows.find(t => t.type === 'Приход');
+  message = '';
+  if (receipt) {
+    try {
+      h.updateShipmentExtras({ id: receipt.id, packaging: 0, other: 0, services: [] }, 'tester');
+    } catch (e) { message = String(e.message || e); }
+    check('80b: у прихода доп. расходов нет', message.indexOf('только у отгрузки') !== -1, message);
+  }
+
+  // A batch write-off states the share of the whole batch in its text: editing one order of
+  // it would move money that belongs to the others.
+  h.commitTransaction([{ article: 'A', quantity: 5, price: 614 }], 'Расход',
+    'Ozon [Услуги: Стикеровка x1 (100₽)] [Общая поставка: заявки № 1, № 2; доля 5 из 10 шт.]',
+    '2026-09-22', 'tester', '2026-09-22T12:00:00.000Z', 'op-batch', 50);
+  const batchRow = h.getTransactions().rows.find(t => String(t.destination).indexOf('Общая поставка') !== -1);
+  message = '';
+  try {
+    h.updateShipmentExtras({ id: batchRow.id, packaging: 0, other: 0, services: [] }, 'tester');
+  } catch (e) { message = String(e.message || e); }
+  check('80b: заявка из общей поставки к правке услуг не допускается',
+    message.indexOf('общей поставки') !== -1, message);
+  check('80b: отвергнутая правка ничего не записала',
+    h.getTransactions().rows.find(t => t.id === batchRow.id).total === batchRow.total, 'сумма изменилась');
+})();
+
+(function test80b5() {
+  // Ozon: the cost that went to KAN included the services, so a correction is appended to the
+  // journal «Себестоимость Озон» with the day of the same supply.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setStockSheet([{ article: 'ART', quantity: 100, avgCost: 600, capitalization: 60000 }]);
+  h.setOzonCostSheet([]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART', available: 500, sku: '999' }]);
+  const dest = 'Ozon (MaxiStore) [Услуги: Стикеровка x1 (100₽)]';
+  h.commitTransaction([{ article: 'ART', quantity: 10, price: 600 }],
+    'Расход', dest, '2026-09-20', 'tester', '2026-09-19T10:00:00.000Z', 'op-ozon', 100);
+  const before = h.dumpOzonCost().length;
+  const row = h.getTransactions().rows.find(t => t.type === 'Расход');
+  const res = h.updateShipmentExtras({
+    id: row.id, packaging: 0, other: 0,
+    services: [{ name: 'Стикеровка', quantity: 3, unitCost: 100 }]
+  }, 'tester');
+  check('80b: исправленная себестоимость дописана в журнал для КАН',
+    res.costRowsAppended > 0 && h.dumpOzonCost().length > before,
+    `дописано ${res.costRowsAppended}, было строк ${before}, стало ${h.dumpOzonCost().length}`);
+})();
+
+(function test80b6() {
+  // The text is taken apart and put back together without losing anything.
+  const h = freshHarness();
+  const d = 'Ozon FBO [Упаковка: 500₽ | Прочее: 55₽ | Услуги: Стикеровка x10 (500₽)] [Списание - Брак]';
+  const e = h.parseShipmentExtrasGs(d);
+  check('80b: разбор текста находит все три суммы и хранит чужие пометки',
+    e.main === 'Ozon FBO' && e.packaging === 500 && e.other === 55
+      && e.services.length === 1 && e.services[0].quantity === 10 && e.services[0].unitCost === 50
+      && e.keptGroups.length === 1 && e.keptGroups[0][0] === 'Списание - Брак',
+    JSON.stringify(e));
+  check('80b: сумма расходов из текста считается как при записи', h.extrasTotalGs(e) === 1055, String(h.extrasTotalGs(e)));
+  check('80b: сборка текста возвращает исходную строку', h.buildDestinationGs(e, e) === d, h.buildDestinationGs(e, e));
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

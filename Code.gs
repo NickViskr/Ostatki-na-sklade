@@ -318,6 +318,10 @@ function doPost(e) {
       case 'updateTransaction':
         result = updateTransaction(payload.id, data, currentUser.username);
         break;
+      // Item 80: the additional costs of a shipment, edited from «История».
+      case 'updateShipmentExtras':
+        result = updateShipmentExtras(data, currentUser.username);
+        break;
       case 'getServices':
         result = getServices();
         break;
@@ -1767,8 +1771,29 @@ function updateTransaction(id, data, username) {
   // Количество из правки едет в удаление: приход вернётся на склад сразу же, и защита от
   // отрицательного остатка обязана судить по итогу, а не по середине операции.
   const replacementQty = String(data.type) === 'Приход' ? (Number(data.quantity) || 0) : null;
+
+  // Item 80. An expense that carries additional costs is one row of a shipment, and its price
+  // already holds this row's share of them. Re-committing it as if it stood alone charged the
+  // WHOLE amount of the shipment to it again, every time it was edited — the price came in with
+  // the share inside and the share was added once more on top. The share is taken off the price
+  // here and the pieces of the whole shipment are stated, so the row is rebuilt exactly as the
+  // shipment wrote it.
+  let editData = data;
+  let shipmentQty = 0;
+  if (String(data.type) === 'Расход' && Number(editedAdditional) > 0) {
+    const oldQty = shipmentPieces(shipmentRowsOfTransaction(id));
+    // The edit may change the quantity of this very row; the other rows of the shipment keep theirs.
+    const newQty = storedRow ? (oldQty - (Number(storedRow.quantity) || 0) + (Number(data.quantity) || 0)) : oldQty;
+    if (oldQty > 0 && newQty > 0) {
+      editData = {};
+      Object.keys(data).forEach(function(k) { editData[k] = data[k]; });
+      editData.price = roundToTwo((Number(data.price) || 0) - Number(editedAdditional) / oldQty);
+      shipmentQty = newQty;
+    }
+  }
+
   deleteTransaction(id, username, true, replacementQty);
-  const commitResult = commitTransaction(data, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional);
+  const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty);
 
   // Подэтап 4. ПЕРЕСЧЁТ. Приход изменился — значит изменилась средняя, по которой уезжали
   // все последующие отгрузки. Проигрываем историю артикула заново и дописываем в журнал
@@ -2207,7 +2232,7 @@ function findTransactionsByOpId(transSheet, opIdStr) {
   return found;
 }
 
-function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts) {
+function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride) {
   const items = Array.isArray(data) ? data : [data];
 
   // Item 56, stage 2. Additional costs of the operation, stated as a number by the caller.
@@ -2368,7 +2393,15 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
   }
   
   const newTransactions = [];
-  const shipmentTotalQty = items.reduce(function(s, it){ if (it.status && it.status !== 'ok') return s; return s + (Number(it.quantity) || 0); }, 0);
+  // Item 80. The pieces the additional costs are spread over. Normally that is what this call
+  // carries, but an EDIT re-commits one row of a shipment on its own — and the costs belong to
+  // the whole shipment, so updateTransaction states its total here. Without it the edited row
+  // took the whole amount: a no-op edit of the shipment «Яндекс» of 22.09.2026 turned 15 261,60
+  // into 16 137,60 ₽, the 876 ₽ of the shipment charged to one of its two rows a second time.
+  const overrideQty = Number(totalQtyOverride) || 0;
+  const shipmentTotalQty = overrideQty > 0
+    ? overrideQty
+    : items.reduce(function(s, it){ if (it.status && it.status !== 'ok') return s; return s + (Number(it.quantity) || 0); }, 0);
   
   // 27.08.2026: the missing articles are created BEFORE the loop, in one pass over the SKU
   // sheet, instead of once per position from inside it.
@@ -8568,4 +8601,303 @@ function getTurnoverData(data) {
     .filter(function (r) { return r.date >= cutoff; });
 
   return { days: days, cutoff: cutoff, latestKanDay: latestKanDay, kanRows: kanRows, snapshots: snapshots };
+}
+
+
+/**
+ * ==========================================================================================
+ * Item 80. ADDITIONAL COSTS OF A SHIPMENT, EDITED AFTER THE FACT.
+ * ==========================================================================================
+ *
+ * Packaging, «Прочее» and the services of a shipment live as text inside «Объект»
+ *   Яндекс [Упаковка: 40 шт. x 6₽ = 240₽ | Услуги: Доставка по городу 1 короб x4 (636₽)]
+ * and their sum sits in «ДопРасходы» of every row of the operation, spread over the rows by
+ * pieces. The owner asked (22.09.2026) to be able to change them from «История» on a shipment
+ * that has already left.
+ *
+ * Nothing about the goods moves: quantities, the write-off cost and the stock stay exactly as
+ * they were, because services are paid to contractors and have never touched the warehouse.
+ * Only the text, «ДопРасходы», «Цена» and «Сумма» of the shipment's rows are rewritten, and
+ * for a shipment to Ozon the corrected cost is appended to the journal «Себестоимость Озон».
+ *
+ * `src/lib/shipmentExtras.ts` is the same arithmetic on the browser side; the two are pinned
+ * by the same production example in both test suites.
+ */
+
+/** Rows of ONE operation: the same OpID, or — for rows written before OpID — the same moment. */
+function shipmentRowsOfTransaction(id) {
+  const ss = getSpreadsheet();
+  const sheet = getTransactionSheet(ss);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  const data = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const iId = headers.indexOf('ID');
+  const iOp = headers.indexOf('OpID');
+  if (iId === -1) return [];
+
+  let anchor = null;
+  for (let r = 1; r < data.length; r++) {
+    if (String(data[r][iId]).trim() === String(id).trim()) { anchor = { row: r, values: data[r] }; break; }
+  }
+  if (!anchor) return [];
+
+  const anchorOp = iOp === -1 ? '' : String(anchor.values[iOp] || '').trim();
+  const out = [];
+  for (let r = 1; r < data.length; r++) {
+    const row = data[r];
+    if (String(row[iId]).trim() === '') continue;
+    let mine;
+    if (anchorOp) {
+      mine = iOp !== -1 && String(row[iOp] || '').trim() === anchorOp;
+    } else {
+      // No OpID: the rows of one operation share the moment, the type and the object.
+      mine = String(sheetCellText(row, headers, 'Дата')) === String(sheetCellText(anchor.values, headers, 'Дата'))
+        && String(sheetCellText(row, headers, 'Тип')) === String(sheetCellText(anchor.values, headers, 'Тип'))
+        && String(sheetCellText(row, headers, 'Объект')) === String(sheetCellText(anchor.values, headers, 'Объект'));
+    }
+    if (!mine) continue;
+    out.push({
+      sheetRow: r + 1,
+      id: String(row[iId]).trim(),
+      type: String(sheetCellText(row, headers, 'Тип')),
+      article: String(sheetCellText(row, headers, 'Артикул')),
+      quantity: parseNumber(sheetCellText(row, headers, 'Количество')),
+      price: parseNumber(sheetCellText(row, headers, 'Цена')),
+      total: parseNumber(sheetCellText(row, headers, 'Сумма')),
+      destination: String(sheetCellText(row, headers, 'Объект')),
+      date: sheetCellText(row, headers, 'Дата'),
+      deliveryDate: sheetCellText(row, headers, 'Дата поставки'),
+      additionalCosts: parseNumber(sheetCellText(row, headers, 'ДопРасходы')),
+      isComponent: sheetCellText(row, headers, 'isComponent') === true
+        || String(sheetCellText(row, headers, 'isComponent')).toLowerCase() === 'true'
+    });
+  }
+  return out;
+}
+
+function sheetCellText(row, headers, name) {
+  const idx = headers.indexOf(name);
+  if (idx === -1) return '';
+  const v = row[idx];
+  if (v instanceof Date) {
+    try { return Utilities.formatDate(v, Session.getScriptTimeZone(), "yyyy-MM-dd'T'HH:mm:ss"); }
+    catch (e) { return String(v); }
+  }
+  return v === null || v === undefined ? '' : v;
+}
+
+/** Pieces the additional costs of a shipment are spread over: its rows less kit components. */
+function shipmentPieces(rows) {
+  return (rows || []).reduce(function(sum, r) {
+    return r.isComponent === true ? sum : sum + (Number(r.quantity) || 0);
+  }, 0);
+}
+
+function parseServicesTagGs(tag) {
+  const body = String(tag).replace(/^\s*(Доп\. услуги|Услуги)\s*:\s*/, '');
+  const out = [];
+  const re = /([^(,][^(]*)\(([\d.,]+)\s*₽\)/g;
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    const rawName = m[1].replace(/^,\s*/, '').trim();
+    const total = parseNumber(m[2]);
+    const qtyMatch = rawName.match(/^(.*?)\s+x(\d+)\s*$/i);
+    if (qtyMatch) {
+      const quantity = parseInt(qtyMatch[2], 10) || 1;
+      out.push({ name: qtyMatch[1].trim(), quantity: quantity, unitCost: quantity > 0 ? roundToTwo(total / quantity) : total });
+    } else {
+      out.push({ name: rawName, quantity: 1, unitCost: total });
+    }
+  }
+  return out;
+}
+
+function isExtrasTag(tag, label) {
+  return String(tag).replace(/^\s+/, '').toLowerCase().indexOf(String(label).toLowerCase() + ':') === 0;
+}
+
+/** «Объект» taken apart: the object itself, the three amounts and every other tag kept as written. */
+function parseShipmentExtrasGs(destination) {
+  const raw = String(destination || '');
+  const extras = { main: raw.trim(), packaging: 0, packagingText: '', other: 0, otherText: '', services: [], keptGroups: [] };
+
+  const groupRe = /\[([^\]]*)\]/g;
+  let m, firstAt = -1;
+  const groups = [];
+  while ((m = groupRe.exec(raw)) !== null) {
+    if (firstAt < 0) firstAt = m.index;
+    groups.push(m[1].split('|').map(function(t) { return t.trim(); }).filter(function(t) { return t !== ''; }));
+  }
+  if (firstAt >= 0) extras.main = raw.slice(0, firstAt).trim();
+
+  groups.forEach(function(group) {
+    const kept = [];
+    group.forEach(function(tag) {
+      if (isExtrasTag(tag, 'Упаковка')) {
+        extras.packaging = roundToTwo(extras.packaging + parseLabelledAmount(tag, 'Упаковка'));
+        extras.packagingText = tag;
+      } else if (isExtrasTag(tag, 'Прочее')) {
+        extras.other = roundToTwo(extras.other + parseLabelledAmount(tag, 'Прочее'));
+        extras.otherText = tag;
+      } else if (isExtrasTag(tag, 'Услуги') || isExtrasTag(tag, 'Доп. услуги')) {
+        extras.services = extras.services.concat(parseServicesTagGs(tag));
+      } else {
+        kept.push(tag);
+      }
+    });
+    if (kept.length > 0) extras.keptGroups.push(kept);
+  });
+
+  return extras;
+}
+
+function extrasTotalGs(extras) {
+  const services = (extras.services || []).reduce(function(sum, s) {
+    return sum + Math.round((Number(s.unitCost) || 0) * (Number(s.quantity) || 0));
+  }, 0);
+  return roundToTwo((Number(extras.packaging) || 0) + (Number(extras.other) || 0) + services);
+}
+
+/** «Объект» put back together. An amount nobody changed keeps the wording it was written with. */
+function buildDestinationGs(extras, original) {
+  const tags = [];
+  if (Number(extras.packaging) > 0) {
+    const keep = original && original.packaging === extras.packaging && original.packagingText;
+    tags.push(keep ? original.packagingText : 'Упаковка: ' + extras.packaging + '₽');
+  }
+  if (Number(extras.other) > 0) {
+    const keep = original && original.other === extras.other && original.otherText;
+    tags.push(keep ? original.otherText : 'Прочее: ' + extras.other + '₽');
+  }
+  const services = (extras.services || []).filter(function(s) { return (Number(s.quantity) || 0) > 0; });
+  if (services.length > 0) {
+    tags.push('Услуги: ' + services.map(function(s) {
+      return s.name + ' x' + s.quantity + ' (' + Math.round((Number(s.unitCost) || 0) * (Number(s.quantity) || 0)) + '₽)';
+    }).join(', '));
+  }
+
+  const parts = [];
+  if (tags.length > 0) parts.push('[' + tags.join(' | ') + ']');
+  (extras.keptGroups || []).forEach(function(group) { parts.push('[' + group.join(' | ') + ']'); });
+
+  const main = String(extras.main || '').trim();
+  if (parts.length === 0) return main;
+  return main ? main + ' ' + parts.join(' ') : parts.join(' ');
+}
+
+/**
+ * Item 80. Rewrites the additional costs of the shipment the row `id` belongs to.
+ *
+ * @param {Object} data { id, packaging, other, services: [{ name, quantity, unitCost }] }
+ * @returns {Object} { changedRows, oldTotal, newTotal, destination, stock, newTransactions }
+ */
+function updateShipmentExtras(data, username) {
+  const id = String((data && data.id) || '').trim();
+  if (!id) throw new Error('Не передан номер строки истории');
+
+  const rows = shipmentRowsOfTransaction(id);
+  if (rows.length === 0) throw new Error('Строка истории не найдена: ' + id);
+
+  const anchor = rows.filter(function(r) { return r.id === id; })[0] || rows[0];
+  if (String(anchor.type) !== 'Расход') {
+    throw new Error('Дополнительные расходы есть только у отгрузки: эта операция — «' + anchor.type + '»');
+  }
+
+  const original = parseShipmentExtrasGs(anchor.destination);
+  if (original.keptGroups.some(function(group) {
+    return group.some(function(tag) { return String(tag).toLowerCase().indexOf('общая поставка') === 0; });
+  })) {
+    throw new Error('Это заявка из общей поставки: её доля расходов посчитана от всей партии, '
+      + 'и править услуги по одной заявке нельзя. Исправьте операцию целиком вручную.');
+  }
+
+  const edited = {
+    main: original.main,
+    packaging: roundToTwo(Number((data && data.packaging) || 0)),
+    packagingText: original.packagingText,
+    other: roundToTwo(Number((data && data.other) || 0)),
+    otherText: original.otherText,
+    services: ((data && data.services) || []).map(function(s) {
+      return {
+        name: String((s && s.name) || '').trim(),
+        quantity: Math.max(0, Math.round(Number((s && s.quantity) || 0))),
+        unitCost: roundToTwo(Number((s && s.unitCost) || 0))
+      };
+    }).filter(function(s) { return s.name !== '' && s.quantity > 0; }),
+    keptGroups: original.keptGroups
+  };
+
+  // What comes off the rows is what the text says they were charged. For every shipment but a
+  // batch one — refused above — the column «ДопРасходы» holds exactly this number, so there is
+  // nothing else to consult, and a row written before that column existed is served as well.
+  const oldTotal = extrasTotalGs(original);
+  const newTotal = extrasTotalGs(edited);
+  const newDestination = buildDestinationGs(edited, original);
+
+  const totalQty = shipmentPieces(rows);
+  if (totalQty <= 0) throw new Error('В операции нет позиций с количеством — пересчёт невозможен');
+
+  const ss = getSpreadsheet();
+  const sheet = getTransactionSheet(ss);
+  const headers = readHeaderRow(sheet);
+  const cDest = headers.indexOf('Объект');
+  const cPrice = headers.indexOf('Цена');
+  const cTotal = headers.indexOf('Сумма');
+  const cAdd = headers.indexOf('ДопРасходы');
+  if (cDest === -1 || cPrice === -1 || cTotal === -1) {
+    throw new Error('В листе «История» не хватает колонок Объект, Цена или Сумма');
+  }
+
+  const changed = [];
+  rows.forEach(function(r) {
+    sheet.getRange(r.sheetRow, cDest + 1).setValue(newDestination);
+    if (r.isComponent === true) return;
+
+    const qty = Number(r.quantity) || 0;
+    if (qty <= 0) return;
+    const oldShare = oldTotal > 0 ? roundToTwo(oldTotal * qty / totalQty) : 0;
+    const newShare = newTotal > 0 ? roundToTwo(newTotal * qty / totalQty) : 0;
+    const rowTotal = roundToTwo((Number(r.total) || 0) - oldShare + newShare);
+    const rowPrice = roundToTwo(rowTotal / qty);
+
+    sheet.getRange(r.sheetRow, cPrice + 1).setValue(rowPrice);
+    sheet.getRange(r.sheetRow, cTotal + 1).setValue(rowTotal);
+    if (cAdd !== -1) sheet.getRange(r.sheetRow, cAdd + 1).setValue(newTotal > 0 ? newTotal : '');
+
+    if (Math.abs(rowPrice - (Number(r.price) || 0)) >= 0.005) {
+      changed.push({
+        id: r.id,
+        date: r.date,
+        kanDay: ozonCostDayFor(r.deliveryDate, r.date),
+        operationDay: String(r.date || '').slice(0, 10),
+        destination: newDestination,
+        article: r.article,
+        quantity: qty,
+        oldUnitCost: roundToTwo(Number(r.price) || 0),
+        newUnitCost: rowPrice
+      });
+    }
+  });
+  SpreadsheetApp.flush();
+
+  // A shipment to Ozon left with the full cost of the goods, services included, and that is
+  // what went to KAN. The corrected cost is appended to the journal with the day of the very
+  // same supply — the machinery of item 47 stage 4, reused as it is.
+  let appended = 0;
+  try {
+    appended = reissueOzonCostRows(changed, username).appended;
+  } catch (e) {
+    Logger.log('Себестоимость Озон не переписана после правки расходов: ' + e);
+  }
+
+  return {
+    changedRows: changed.length,
+    oldTotal: oldTotal,
+    newTotal: newTotal,
+    destination: newDestination,
+    costRowsAppended: appended,
+    stock: getStock(),
+    newTransactions: getTransactions().rows
+  };
 }
