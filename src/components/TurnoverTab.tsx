@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { formatCurrency, formatDateRu } from '../lib/utils';
-import { ArticleTurnover, buildTurnover, shelfFromStock, TurnoverStatus } from '../lib/turnover';
+import { ArticleTurnover, buildTurnover, gmroiTone, GmroiTone, shelfFromStock, TurnoverStatus } from '../lib/turnover';
 import { buildTurnoverSnapshot, TURNOVER_PRESETS, TURNOVER_SYSTEM_PROMPT } from '../lib/turnoverPrompt';
 import { OzonSettingsModal } from './OzonSettingsModal';
 
@@ -15,6 +15,7 @@ import { OzonSettingsModal } from './OzonSettingsModal';
  */
 
 const STATUS_LABEL: Record<TurnoverStatus, string> = { fast: 'лидер', normal: 'норма', slow: 'медленно', component: 'компонент набора' };
+const GMROI_CLASS: Record<GmroiTone, string> = { green: 'text-emerald-600 font-bold', yellow: 'text-amber-600 font-bold', red: 'text-red-600 font-bold', none: 'text-slate-400' };
 const STATUS_CLASS: Record<TurnoverStatus, string> = {
   fast: 'bg-emerald-100 text-emerald-700',
   normal: 'bg-slate-100 text-slate-600',
@@ -49,6 +50,8 @@ export const TurnoverTab: React.FC = () => {
   const periodDays = Math.max(1, Number(ozonSettings.turnoverPeriodDays) || 90);
   const slowDays = Number(ozonSettings.turnoverSlowDays) || 45;
   const fastDays = Number(ozonSettings.turnoverFastDays) || 20;
+  const gmroiGreen = Number(ozonSettings.gmroiGreenPct ?? 100);
+  const gmroiRed = Number(ozonSettings.gmroiRedPct ?? 30);
 
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<Filter>('all');
@@ -167,7 +170,7 @@ export const TurnoverTab: React.FC = () => {
           <Card title="Капитал сейчас" value={money(p.capitalNow)} note={`склад ${money(p.shelfCapital)} · Ozon ${money(p.ozonStockCost)} · в доставке ${money(p.deliveringCost)} · возвраты ${money(p.returningCost)}`} />
           <Card title="Средний капитал" value={money(p.avgCapital)} note={`склад ${money(p.avgWarehouseCapital)} · Ozon ${money(p.avgOzonCapital)}`} />
           <Card title="Оборачиваемость" value={p.turns === null ? '—' : `${p.turns} раза`} note={p.daysPerTurn === null ? 'продаж не было' : `один оборот ≈ ${p.daysPerTurn} дн.`} />
-          <Card title="GMROI" value={p.gmroiPct === null ? '—' : `${p.gmroiPct} %`} note={`валовая прибыль ${money(p.grossProfit)} / себестоимость продаж ${money(p.costOfSales)}`} />
+          <Card title="GMROI" value={p.gmroiPct === null ? '—' : `${p.gmroiPct} %`} note={`валовая прибыль ${money(p.grossProfit)} / себестоимость продаж ${money(p.costOfSales)} · зелёный от ${gmroiGreen} %, красный ниже ${gmroiRed} %`} gmroi={gmroiTone(p.gmroiPct, gmroiGreen, gmroiRed)} />
           <Card title="В медленных товарах" value={money(p.slowCapital)} note={`${p.slowSharePct} % капитала · ${p.counts.slow} шт.`} tone="red" />
           <Card title="Лидеры" value={`${p.counts.fast} шт.`} note={`капитал ${money(p.fastCapital)} · только Ozon: ${num(p.ozonOnlyTurns, ' раза')} (как в KAN)`} tone="green" />
         </div>
@@ -217,7 +220,7 @@ export const TurnoverTab: React.FC = () => {
                     </td>
                     <td className="px-3 py-2 text-right font-mono">{num(a.turns)}</td>
                     <td className={`px-3 py-2 text-right font-mono font-bold ${a.status === 'slow' ? 'text-red-600' : a.status === 'fast' ? 'text-emerald-600' : 'text-slate-700'}`}>{num(a.daysPerTurn)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{num(a.gmroiPct, ' %')}</td>
+                    <td className={`px-3 py-2 text-right font-mono ${GMROI_CLASS[gmroiTone(a.gmroiPct, gmroiGreen, gmroiRed)]}`}>{num(a.gmroiPct, ' %')}</td>
                     <td className="px-3 py-2 text-right font-mono">{num(a.coverDays)}</td>
                     <td className="px-3 py-2 text-right font-mono" title={a.lastSaleDay ? `последняя продажа ${formatDateRu(a.lastSaleDay)}` : a.lastReceiptDay ? `последний приход ${formatDateRu(a.lastReceiptDay)}` : ''}>{num(a.ageDays)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap" title={`${a.shelfQty} шт`}>{money(a.shelfCapital)}<div className="text-[10px] text-slate-400">{a.shelfQty} шт</div></td>
@@ -275,10 +278,10 @@ export const TurnoverTab: React.FC = () => {
   );
 };
 
-const Card: React.FC<{ title: string; value: string; note: string; tone?: 'red' | 'green' }> = ({ title, value, note, tone }) => (
+const Card: React.FC<{ title: string; value: string; note: string; tone?: 'red' | 'green'; gmroi?: GmroiTone }> = ({ title, value, note, tone, gmroi }) => (
   <div className={`p-4 rounded-2xl border ${tone === 'red' ? 'bg-red-50 border-red-100' : tone === 'green' ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-slate-200'}`}>
     <div className="text-xs font-bold text-slate-400 uppercase truncate" title={title}>{title}</div>
-    <div className={`text-xl font-bold mt-1 ${tone === 'red' ? 'text-red-700' : tone === 'green' ? 'text-emerald-700' : 'text-slate-800'}`}>{value}</div>
+    <div className={`text-xl font-bold mt-1 ${gmroi && gmroi !== 'none' ? GMROI_CLASS[gmroi] : tone === 'red' ? 'text-red-700' : tone === 'green' ? 'text-emerald-700' : 'text-slate-800'}`}>{value}</div>
     <div className="text-[11px] text-slate-500 mt-1" title={note}>{note}</div>
   </div>
 );

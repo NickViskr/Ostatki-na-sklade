@@ -142,6 +142,16 @@ export interface TurnoverInput {
 
 const DAY_MS = 86400000;
 
+export type GmroiTone = 'green' | 'yellow' | 'red' | 'none';
+
+/** Item 78e: the colour of a GMROI figure by the owner's two thresholds (green ≥, red <). */
+export function gmroiTone(pct: number | null, greenPct: number, redPct: number): GmroiTone {
+  if (pct === null) return 'none';
+  if (pct >= greenPct) return 'green';
+  if (pct < redPct) return 'red';
+  return 'yellow';
+}
+
 /**
  * The shelf as the «Склад» table shows it: physical articles as they are, a virtual kit as
  * the largest whole number of kits its components allow, priced at the components' sum.

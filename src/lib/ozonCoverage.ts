@@ -283,6 +283,10 @@ export interface OzonCoverageSettings {
   turnoverSlowDays?: number;
   /** Item 78b. Leader: one turn takes fewer than this many days. */
   turnoverFastDays?: number;
+  /** Item 78e. GMROI at or above this % is green. */
+  gmroiGreenPct?: number;
+  /** Item 78e. GMROI below this % is red; between the two — yellow. */
+  gmroiRedPct?: number;
 }
 
 export interface OzonClusterRef {

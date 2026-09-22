@@ -558,6 +558,8 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'turnoverPeriodDays',  value: 90, desc: 'Оборачиваемость: период расчёта, дней' },
   { key: 'turnoverSlowDays',    value: 45, desc: 'Оборачиваемость: медленный товар — один оборот дольше стольких дней' },
   { key: 'turnoverFastDays',    value: 20, desc: 'Оборачиваемость: лидер — один оборот быстрее стольких дней' },
+  { key: 'gmroiGreenPct',       value: 100, desc: 'GMROI, %: от этого значения и выше — зелёный' },
+  { key: 'gmroiRedPct',         value: 30, desc: 'GMROI, %: ниже этого значения — красный; между порогами — жёлтый' },
   { key: 'stockHistoryRetentionWeeks', value: 15, desc: 'Срок хранения истории остатков Ozon, недель' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },

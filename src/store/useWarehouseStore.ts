@@ -245,6 +245,8 @@ export const useWarehouseStore = create<WarehouseState>()(
     turnoverPeriodDays: 90,
     turnoverSlowDays: 45,
     turnoverFastDays: 20,
+    gmroiGreenPct: 100,
+    gmroiRedPct: 30,
   },
   ozonSupplySettings: { maxBoxesPerCluster: 30, dropOffWarehouseId: '', dropOffWarehouseName: '', dropOffWarehouseType: '', directClusters: '' },
   ozonClusterRefs: [],
@@ -1737,6 +1739,8 @@ export const useWarehouseStore = create<WarehouseState>()(
             turnoverPeriodDays: Math.max(1, num(s.turnoverPeriodDays, 90)),
             turnoverSlowDays: num(s.turnoverSlowDays, 45),
             turnoverFastDays: num(s.turnoverFastDays, 20),
+            gmroiGreenPct: num(s.gmroiGreenPct, 100),
+            gmroiRedPct: num(s.gmroiRedPct, 30),
           },
           ozonSupplySettings: {
             // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.

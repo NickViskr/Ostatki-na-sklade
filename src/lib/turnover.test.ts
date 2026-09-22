@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildTurnover, periodDays, shelfFromStock, shelfHistory, shiftDay, KanDayRow, SnapshotRow, TurnoverInput } from './turnover';
+import { buildTurnover, gmroiTone, periodDays, shelfFromStock, shelfHistory, shiftDay, KanDayRow, SnapshotRow, TurnoverInput } from './turnover';
 import { readFileSync } from 'fs';
 import { KitItem, SKUItem, Transaction } from '../types';
 
@@ -236,6 +236,17 @@ describe('buildTurnover: kits and components', () => {
   });
 });
 
+describe('gmroiTone (item 78e)', () => {
+  it('green at or above the green threshold, red below the red one, yellow between, none for null', () => {
+    expect(gmroiTone(100, 100, 30)).toBe('green');
+    expect(gmroiTone(99.9, 100, 30)).toBe('yellow');
+    expect(gmroiTone(30, 100, 30)).toBe('yellow');
+    expect(gmroiTone(29.9, 100, 30)).toBe('red');
+    expect(gmroiTone(-5, 100, 30)).toBe('red');
+    expect(gmroiTone(null, 100, 30)).toBe('none');
+  });
+});
+
 describe('shelfFromStock', () => {
   it('keeps physical articles, computes a virtual kit from its components at their summed cost', () => {
     const stock = [{ article: 'C1', quantity: 10, avgCost: 30 }, { article: 'C2', quantity: 4, avgCost: 50 }, { article: 'KIT', quantity: 99, avgCost: 1 }];
@@ -276,6 +287,15 @@ describe('screen wiring (item 78c)', () => {
     expect(read('../components/Sidebar.tsx')).toMatch(/\{ id: 'turnover', label: 'Оборачиваемость', icon: RefreshCw \},\n\s*\.\.\.\(isCurrentUserAdmin/);
     expect(read('../App.tsx')).toMatch(/\{activeTab === 'turnover' && <TurnoverTab key="turnover" \/>\}/);
     expect(read('../store/useUIStore.ts')).toMatch(/\| 'turnover';/);
+  });
+  it('GMROI colours: the tab colours the cell and the card by gmroiTone with the two settings', () => {
+    const tab = read('../components/TurnoverTab.tsx');
+    expect(tab).toMatch(/GMROI_CLASS\[gmroiTone\(a\.gmroiPct, gmroiGreen, gmroiRed\)\]/);
+    expect(tab).toMatch(/gmroi=\{gmroiTone\(p\.gmroiPct, gmroiGreen, gmroiRed\)\}/);
+    expect(read('../../Code.gs')).toMatch(/gmroiGreenPct',\s*value: 100/);
+    expect(read('../../Code.gs')).toMatch(/gmroiRedPct',\s*value: 30/);
+    expect(read('../store/useWarehouseStore.ts')).toMatch(/gmroiRedPct: num\(s\.gmroiRedPct, 30\)/);
+    expect(read('../components/OzonSettingsModal.tsx')).toMatch(/value=\{form\.gmroiGreenPct\}/);
   });
   it('the three settings travel end to end: Code.gs defaults, store parse, modal form', () => {
     expect(read('../../Code.gs')).toMatch(/turnoverPeriodDays',\s*value: 90/);

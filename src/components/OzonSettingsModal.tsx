@@ -27,6 +27,8 @@ interface OzonSettingsData {
   turnoverPeriodDays: number;
   turnoverSlowDays: number;
   turnoverFastDays: number;
+  gmroiGreenPct: number;
+  gmroiRedPct: number;
   excludedClusters: string;
   priorityClusters: string;
   maxBoxesPerCluster: number;
@@ -98,6 +100,8 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     turnoverPeriodDays: 90,
     turnoverSlowDays: 45,
     turnoverFastDays: 20,
+    gmroiGreenPct: 100,
+    gmroiRedPct: 30,
     excludedClusters: '',
     priorityClusters: '',
     maxBoxesPerCluster: 30,
@@ -337,6 +341,8 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               turnoverPeriodDays: Math.max(1, numSetting(res.data.turnoverPeriodDays, 90)),
               turnoverSlowDays: numSetting(res.data.turnoverSlowDays, 45),
               turnoverFastDays: numSetting(res.data.turnoverFastDays, 20),
+              gmroiGreenPct: numSetting(res.data.gmroiGreenPct, 100),
+              gmroiRedPct: numSetting(res.data.gmroiRedPct, 30),
               excludedClusters: String(res.data.excludedClusters || ''),
               priorityClusters: String(res.data.priorityClusters || ''),
               // Счётчик коробок на кластер, ноль бессмысленен — нижняя граница 1.
@@ -388,6 +394,8 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         turnoverPeriodDays: Math.max(1, parseInt(String(form.turnoverPeriodDays), 10) || 1),
         turnoverSlowDays: Math.max(0, parseFloat(String(form.turnoverSlowDays)) || 0),
         turnoverFastDays: Math.max(0, parseFloat(String(form.turnoverFastDays)) || 0),
+        gmroiGreenPct: parseFloat(String(form.gmroiGreenPct)) || 0,
+        gmroiRedPct: parseFloat(String(form.gmroiRedPct)) || 0,
         excludedClusters: form.excludedClusters,
         priorityClusters: form.priorityClusters,
         maxBoxesPerCluster: Math.max(1, parseInt(String(form.maxBoxesPerCluster), 10) || 1),
@@ -653,6 +661,38 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   value={form.turnoverFastDays}
                   onChange={(e) =>
                     setForm({ ...form, turnoverFastDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  GMROI: зелёный от, %
+                  <FieldHint position="bottom" text="Вкладка «Оборачиваемость»: GMROI (валовая прибыль ÷ средний капитал) от этого значения и выше подсвечивается зелёным." />
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  value={form.gmroiGreenPct}
+                  onChange={(e) =>
+                    setForm({ ...form, gmroiGreenPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  GMROI: красный ниже, %
+                  <FieldHint position="bottom" text="GMROI ниже этого значения подсвечивается красным; между красным и зелёным порогом — жёлтый. Отрицательный GMROI — товар продаётся в убыток." />
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  value={form.gmroiRedPct}
+                  onChange={(e) =>
+                    setForm({ ...form, gmroiRedPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />
