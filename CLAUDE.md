@@ -14,8 +14,10 @@ not translated back; files drift to English as they are edited.
 
 ## Secrets — the repository `NickViskr/Ostatki-na-sklade` is PUBLIC
 - No spreadsheet ids, tokens or passwords in `Code.gs` or any committed file. Foreign
-  spreadsheet ids and the KAN API token live in Script Properties
-  (`stock_summarySpreadsheetId` etc.).
+  spreadsheet ids and the KAN MCP token live in Script Properties
+  (`stock_summarySpreadsheetId`, `kan_mcpToken` etc.). KAN is reached ONLY from `Code.gs`
+  (`UrlFetchApp` → `https://kultura-analitiki.ru/mcp/`, JSON-RPC `tools/call`); the token never
+  passes through Cloud Run. It is the MCP token, not KAN's separate API token.
 - `.clasp.json` (script id) is git-ignored and exists only on the owner's Mac in `repo/`.
 - The «Пользователи» sheet holds a plaintext admin password — never copy it anywhere.
 - The assistant never types a password to authenticate, even with the owner's permission.
