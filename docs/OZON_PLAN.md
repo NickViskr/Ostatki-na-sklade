@@ -327,7 +327,7 @@ Status on 2026-09-21. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
 - **Items:** 74 of 78 closed. IN WORK: 78 (78a–78d deployed, awaiting the owner's check). OPEN: 53. Also 27 (optional) and 37 (deferred: not reproducible on production data).
-- **Live:** Cloud Run `sklad-00075-5cz` (build label 2026-09-22 12:05 МСК, commit `f71fd28`:
+- **Live:** Cloud Run `sklad-00075-5cz` (build label 2026-09-22 11:42 МСК, commit `f71fd28`:
   item 78 with the KAN cost-sign fix; verified byte for byte on the main chunk, `Dashboard` and
   `TurnoverTab`). Previous: `sklad-00074-jn5` 22.09 11:24 (item 78, `00039c5`), `sklad-00073-xx9`
   21.09 21:05 (item 77 rework, `a752423`), `sklad-00072-hmx` 21.09 20:46 (`a089864`).
