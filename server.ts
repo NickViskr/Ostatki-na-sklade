@@ -276,7 +276,9 @@ async function startServer() {
     saveChinaBatch: ['getChinaBatches'],
     deleteChinaBatch: ['getChinaBatches'],
     saveChinaBatchCost: ['getChinaBatches'],
-    deleteChinaBatchCost: ['getChinaBatches']
+    deleteChinaBatchCost: ['getChinaBatches'],
+    saveChinaPayment: ['getChinaBatches'],
+    deleteChinaPayment: ['getChinaBatches']
   };
 
   function invalidateCacheFor(writeAction: string): void {

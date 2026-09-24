@@ -4281,6 +4281,159 @@ function batch27() {
     h.dumpChinaSheet('Строки партий').length === 3, String(h.dumpChinaSheet('Строки партий').length));
 })();
 
+// ---- 81d: payments and the rate they set ----
+//
+// The owner buys yuan for rubles in cash and says so in a message; the report of the Chinese
+// side confirms how many yuan arrived and against WHICH ORDER they were put. Two of the three
+// figures are therefore always known, and the third follows.
+
+function batch28Payload(over) {
+  const b = batch28();
+  const out = { orderNo: '28', code: b.code, status: b.status, chinaDeliveryCny: 700, weightKg: 672.5,
+    ratePerKgUsd: 2.3, packingUsd: 90, freightUsd: 1636.75, cargoRate: 7, rubRate: 12.4, lines: batch28Lines() };
+  Object.keys(over || {}).forEach(function (k) { out[k] = over[k]; });
+  return out;
+}
+
+(function () {
+  const h = withChina();
+  check('81d: the rate stated in a message gives the yuan it bought',
+    JSON.stringify(h.chinaPaymentMoney(100000, 12.4, 0)) === JSON.stringify({ amountRub: 100000, rate: 12.4, amountCny: 8064.52 }),
+    JSON.stringify(h.chinaPaymentMoney(100000, 12.4, 0)));
+  check('81d: the yuan the report confirms give the rate',
+    JSON.stringify(h.chinaPaymentMoney(100000, 0, 8064.52)) === JSON.stringify({ amountRub: 100000, rate: 12.4, amountCny: 8064.52 }),
+    JSON.stringify(h.chinaPaymentMoney(100000, 0, 8064.52)));
+  check('81d: a rate and a sum that agree are both kept',
+    h.chinaPaymentMoney(100000, 12.4, 8064.52).rate === 12.4, JSON.stringify(h.chinaPaymentMoney(100000, 12.4, 8064.52)));
+
+  function refuses(name, fn, fragment) {
+    let msg = '';
+    try { fn(); } catch (e) { msg = e.message; }
+    check(name, msg.indexOf(fragment) !== -1, msg || 'прошло без ошибки');
+  }
+  refuses('81d: a rate and a sum that disagree are refused, not averaged',
+    function () { h.chinaPaymentMoney(100000, 12.4, 9000); }, 'не сходятся');
+  refuses('81d: a payment with neither a rate nor a sum in yuan is refused',
+    function () { h.chinaPaymentMoney(100000, 0, 0); }, 'Укажите курс');
+  refuses('81d: a payment of nothing is refused',
+    function () { h.chinaPaymentMoney(0, 12.4, 0); }, 'больше нуля');
+
+  check('81d: two tranches give the weighted rate of the order, not the last one',
+    h.chinaRateFromPayments([
+      { orderNo: '28', amountRub: 100000, amountCny: 8064.52 },
+      { orderNo: '28', amountRub: 50000, amountCny: 3846.15 },
+      { orderNo: '29', amountRub: 999999, amountCny: 1 }
+    ], '28') === 12.5937,
+    String(h.chinaRateFromPayments([
+      { orderNo: '28', amountRub: 100000, amountCny: 8064.52 },
+      { orderNo: '28', amountRub: 50000, amountCny: 3846.15 },
+      { orderNo: '29', amountRub: 999999, amountCny: 1 }
+    ], '28')));
+  check('81d: an order nobody paid for has no rate of its own',
+    h.chinaRateFromPayments([{ orderNo: '29', amountRub: 1000, amountCny: 100 }], '28') === 0 &&
+    h.chinaRateFromPayments([{ orderNo: '', amountRub: 1000, amountCny: 100 }], '') === 0, 'нет курса');
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({ paidCny: 10444, unpaidCny: 0 }), 'Николай');
+  let row = h.dumpChinaSheet('Партии')[0];
+  check('81d: with no payments the batch is costed at the rate typed by hand',
+    Number(row['Курс ₽/¥']) === 12.4 && row['Источник курса'] === 'вручную' &&
+    Number(row['Себестоимость партии ₽']) === 271575.49,
+    row['Курс ₽/¥'] + ' / ' + row['Источник курса'] + ' / ' + row['Себестоимость партии ₽']);
+  check('81d: what the report says about the order is kept beside the batch',
+    Number(row['Оплачено по отчёту ¥']) === 10444 && String(row['Долг по отчёту ¥']) === '',
+    row['Оплачено по отчёту ¥'] + ' / ' + row['Долг по отчёту ¥']);
+
+  h.saveChinaPayment({ date: '2026-08-27', amountRub: 100000, rate: 12.4, orderNo: '28', purpose: 'Товар', confirmed: true }, 'Николай');
+  const payment = h.dumpChinaSheet('Платежи')[0];
+  check('81d: the payment is stored with its yuan, its order and its confirmation',
+    payment['ID'] === 'CP1' && Number(payment['Куплено ¥']) === 8064.52 &&
+    payment['Номер заказа'] === '28' && payment['Подтверждено'] === 'да' && payment['Кто'] === 'Николай',
+    JSON.stringify(payment));
+
+  row = h.dumpChinaSheet('Партии')[0];
+  check('81d: a payment of the order takes over the rate of the batch',
+    row['Источник курса'] === 'оплаты' && Number(row['Курс ₽/¥']) === 12.4,
+    row['Источник курса'] + ' / ' + row['Курс ₽/¥']);
+
+  // The second tranche is bought at another rate, as cash always is.
+  h.saveChinaPayment({ date: '2026-09-01', amountRub: 50000, rate: 13, orderNo: '28', purpose: 'Товар' }, 'Николай');
+  row = h.dumpChinaSheet('Партии')[0];
+  check('81d: the second tranche moves the batch to the weighted rate 12,5937',
+    Number(row['Курс ₽/¥']) === 12.5937 && Number(row['Себестоимость партии ₽']) === 275817.77,
+    row['Курс ₽/¥'] + ' / ' + row['Себестоимость партии ₽']);
+
+  const lines = h.dumpChinaSheet('Строки партий');
+  let sum = 0;
+  lines.forEach(function (l) { sum = Math.round((sum + Number(l['Себестоимость ₽'])) * 100) / 100; });
+  check('81d: the lines of the batch follow the new rate to the kopeck',
+    sum === Number(row['Себестоимость партии ₽']), sum + ' vs ' + row['Себестоимость партии ₽']);
+
+  h.deleteChinaPayment({ id: 'CP2' }, 'Николай');
+  row = h.dumpChinaSheet('Партии')[0];
+  check('81d: deleting a tranche returns the batch to the rate of what is left',
+    Number(row['Курс ₽/¥']) === 12.4 && Number(row['Себестоимость партии ₽']) === 271575.49,
+    row['Курс ₽/¥'] + ' / ' + row['Себестоимость партии ₽']);
+
+  h.deleteChinaPayment({ id: 'CP1' }, 'Николай');
+  row = h.dumpChinaSheet('Партии')[0];
+  check('81d: with the last payment gone the rate typed by hand comes back',
+    row['Источник курса'] === 'вручную' && Number(row['Курс ₽/¥']) === 12.4 &&
+    h.dumpChinaSheet('Платежи').length === 0,
+    row['Источник курса'] + ' / ' + row['Курс ₽/¥']);
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.saveChinaBatch(batch28Payload({ orderNo: '27', code: 'NV-0716-3', lines: batch27Lines(),
+    chinaDeliveryCny: 900, weightKg: 1001.5, packingUsd: 135, freightUsd: 2438.45 }), 'Николай');
+  h.saveChinaPayment({ amountRub: 100000, rate: 12.4, orderNo: '28' }, 'Николай');
+
+  const before = h.dumpChinaSheet('Партии').map(function (b) { return b['Источник курса']; });
+  check('81d: a payment touches only the batches of its own order',
+    before[0] === 'оплаты' && before[1] === 'вручную', before.join(' / '));
+
+  // Moving the payment to the other order has to re-cost BOTH of them.
+  h.saveChinaPayment({ id: 'CP1', amountRub: 100000, rate: 11, orderNo: '27' }, 'Николай');
+  const after = h.dumpChinaSheet('Партии');
+  check('81d: a payment moved to another order re-costs the order it left',
+    after[0]['Источник курса'] === 'вручную' && Number(after[0]['Курс ₽/¥']) === 12.4,
+    after[0]['Источник курса'] + ' / ' + after[0]['Курс ₽/¥']);
+  check('81d: and re-costs the order it arrived at',
+    after[1]['Источник курса'] === 'оплаты' && Number(after[1]['Курс ₽/¥']) === 11,
+    after[1]['Источник курса'] + ' / ' + after[1]['Курс ₽/¥']);
+
+  let msg = '';
+  try { h.saveChinaPayment({ amountRub: 1000, rate: 12, purpose: 'Таможня' }, 'Николай'); } catch (e) { msg = e.message; }
+  check('81d: a purpose the module does not know is refused', msg.indexOf('Неизвестное назначение') !== -1, msg);
+  msg = '';
+  try { h.deleteChinaPayment({ id: 'CP404' }, 'Николай'); } catch (e) { msg = e.message; }
+  check('81d: deleting a payment that is not there is refused', msg.indexOf('не найдена') !== -1, msg);
+  msg = '';
+  try { h.saveChinaPayment({ id: 'CP404', amountRub: 1000, rate: 12 }, 'Николай'); } catch (e) { msg = e.message; }
+  check('81d: editing a payment that is not there is refused', msg.indexOf('не найдена') !== -1, msg);
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.saveChinaPayment({ amountRub: 100000, rate: 12.4, orderNo: '28' }, 'Николай');
+  const state = h.getChinaBatches();
+  check('81d: the module answers with its payments and hangs them on their batch',
+    state.payments.length === 1 && state.batches[0].payments.length === 1 &&
+    state.batches[0].payments[0].amountCny === 8064.52,
+    JSON.stringify(state.payments));
+  check('81d: a payment without an order hangs on no batch at all',
+    (function () {
+      h.saveChinaPayment({ amountRub: 5000, rate: 12.4 }, 'Николай');
+      const again = h.getChinaBatches();
+      return again.payments.length === 2 && again.batches[0].payments.length === 1;
+    })(), 'оплата без заказа');
+})();
+
 // ---- 81a: what the module refuses ----
 (function () {
   const h = withChina();

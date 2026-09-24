@@ -9,17 +9,18 @@
 
 import { create } from 'zustand';
 import { toast } from 'sonner';
-import { ChinaBatch } from '../types';
+import { ChinaBatch, ChinaPayment } from '../types';
 import { useWarehouseStore } from './useWarehouseStore';
 
 interface ChinaAnswer {
   status: string;
   message?: string;
-  data?: { batches?: ChinaBatch[]; settings?: Record<string, number | string> };
+  data?: { batches?: ChinaBatch[]; payments?: ChinaPayment[]; settings?: Record<string, number | string> };
 }
 
 interface ChinaState {
   batches: ChinaBatch[];
+  payments: ChinaPayment[];
   settings: Record<string, number | string>;
   isLoading: boolean;
   isSaving: boolean;
@@ -33,6 +34,8 @@ interface ChinaState {
   deleteChinaBatch: (id: string) => Promise<boolean>;
   saveChinaCost: (payload: Record<string, unknown>) => Promise<boolean>;
   deleteChinaCost: (id: string) => Promise<boolean>;
+  saveChinaPayment: (payload: Record<string, unknown>) => Promise<boolean>;
+  deleteChinaPayment: (id: string) => Promise<boolean>;
 }
 
 const callChina = async (action: string, data?: Record<string, unknown>): Promise<ChinaAnswer> => {
@@ -42,6 +45,7 @@ const callChina = async (action: string, data?: Record<string, unknown>): Promis
 
 export const useChinaStore = create<ChinaState>()((set, get) => ({
   batches: [],
+  payments: [],
   settings: {},
   isLoading: false,
   isSaving: false,
@@ -55,6 +59,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     if (result.status === 'success' && result.data) {
       set({
         batches: result.data.batches || [],
+        payments: result.data.payments || [],
         settings: result.data.settings || {},
         loaded: true,
         error: '',
@@ -87,8 +92,35 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       toast.error(result.message || 'Не удалось сохранить партию');
       return false;
     }
-    set({ batches: result.data.batches || [], settings: result.data.settings || get().settings, loaded: true, error: '' });
+    set({ batches: result.data.batches || [], payments: result.data.payments || get().payments,
+      settings: result.data.settings || get().settings, loaded: true, error: '' });
     toast.success('Партия сохранена, себестоимость пересчитана');
+    return true;
+  },
+
+  saveChinaPayment: async (payload) => {
+    set({ isSaving: true });
+    const result = await callChina('saveChinaPayment', payload);
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось сохранить оплату');
+      return false;
+    }
+    set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
+    toast.success('Оплата учтена, курс партий пересчитан');
+    return true;
+  },
+
+  deleteChinaPayment: async (id) => {
+    set({ isSaving: true });
+    const result = await callChina('deleteChinaPayment', { id });
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось удалить оплату');
+      return false;
+    }
+    set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
+    toast.success('Оплата удалена, курс партий пересчитан');
     return true;
   },
 

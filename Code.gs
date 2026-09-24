@@ -476,6 +476,8 @@ function doPost(e) {
       case 'deleteChinaBatch': assertAdmin(currentUser); result = deleteChinaBatch(data, currentUser.username); break;
       case 'saveChinaBatchCost': assertAdmin(currentUser); result = saveChinaBatchCost(data, currentUser.username); break;
       case 'deleteChinaBatchCost': assertAdmin(currentUser); result = deleteChinaBatchCost(data, currentUser.username); break;
+      case 'saveChinaPayment': assertAdmin(currentUser); result = saveChinaPayment(data, currentUser.username); break;
+      case 'deleteChinaPayment': assertAdmin(currentUser); result = deleteChinaPayment(data, currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }

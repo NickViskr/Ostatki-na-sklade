@@ -83,7 +83,7 @@ describe('a batch opened for editing', () => {
         weightKg: 270.76, weightSource: 'паллета', chinaShareCny: 281.83, freightShareCny: 4612.83,
         rubShare: 0, costRub: 121106.58, unitRub: 504.61, article: 'BOX', group: ''
       }],
-      costs: []
+      costs: [], payments: [], rubRateSource: 'вручную', paidCny: 0, unpaidCny: 0
     } as ChinaBatch;
     const form = chinaBatchToForm(batch);
     expect(form.weightKg).toBe('672.5');
@@ -238,7 +238,7 @@ describe('партия, собранная из файлов китайцев', 
         { id: 'CB7-2', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 0, boxWeightKg: 0, weightKg: 168, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт' },
         { id: 'CB7-3', batchId: 'CB7', marking: 'NV-98', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 333.5, boxWeightKg: 10.93, weightKg: 164, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-GREY', group: 'короб 8 шт' }
       ],
-      costs: []
+      costs: [], payments: [], rubRateSource: 'вручную', paidCny: 0, unpaidCny: 0
     } as ChinaBatch;
     const { form, notes } = chinaFormFromFiles(parsed, report, saved);
     expect(form.id).toBe('CB7');

@@ -672,5 +672,10 @@ module.exports = {
   chinaAllocate: (...args) => context.chinaAllocate(...args),
   chinaLineWeights: (...args) => context.chinaLineWeights(...args),
   chinaIdFromSetting: (...args) => context.chinaIdFromSetting(...args),
+  // ---------- Item 81d: payments and the rate they set ----------
+  saveChinaPayment: (...args) => context.saveChinaPayment(...args),
+  deleteChinaPayment: (...args) => context.deleteChinaPayment(...args),
+  chinaPaymentMoney: (...args) => context.chinaPaymentMoney(...args),
+  chinaRateFromPayments: (...args) => context.chinaRateFromPayments(...args),
   vm
 };

@@ -212,6 +212,23 @@ export interface ChinaBatchCost {
   user: string;
 }
 
+/** Item 81d: rubles the owner paid and the yuan they bought. */
+export interface ChinaPayment {
+  id: string;
+  date: string;
+  amountRub: number;
+  /** Rubles per yuan: stated by the owner, or worked out from the yuan the report confirmed. */
+  rate: number;
+  amountCny: number;
+  /** 'Товар' or 'Перевозка'. */
+  purpose: string;
+  /** The order the payment was put against; empty until the report says where it went. */
+  orderNo: string;
+  confirmed: boolean;
+  comment: string;
+  user: string;
+}
+
 export interface ChinaBatch {
   id: string;
   orderNo: string;
@@ -231,6 +248,11 @@ export interface ChinaBatch {
   freightCny: number;
   rubCosts: number;
   rubRate: number;
+  /** 'оплаты' when the rate came from the payments of the order, 'вручную' when typed in. */
+  rubRateSource: string;
+  /** What the report of the Chinese side says about the order, kept at import time. */
+  paidCny: number;
+  unpaidCny: number;
   totalRub: number;
   /** How far the estimated weights had to be stretched to meet the waybill; null if unknown. */
   weightFactor: number | null;
@@ -239,4 +261,6 @@ export interface ChinaBatch {
   updatedAt: string;
   lines: ChinaBatchLine[];
   costs: ChinaBatchCost[];
+  /** The payments put against this batch's order. */
+  payments: ChinaPayment[];
 }

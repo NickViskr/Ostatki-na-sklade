@@ -40,7 +40,8 @@ const CHINA_BATCH_HEADERS = [
   'ID', 'Номер заказа', 'Код партии', 'Дата отгрузки', 'Дата прибытия', 'Статус',
   'Товар ¥', 'Доставка по Китаю ¥', 'Вес накладной, кг', 'Объём, м³',
   'Ставка $/кг', 'Упаковка $', 'Прочее карго $', 'Перевозка $', 'Курс ¥/$', 'Перевозка ¥',
-  'Расходы РФ ₽', 'Курс ₽/¥', 'Себестоимость партии ₽', 'Коэффициент веса',
+  'Расходы РФ ₽', 'Курс ₽/¥', 'Источник курса', 'Себестоимость партии ₽', 'Коэффициент веса',
+  'Оплачено по отчёту ¥', 'Долг по отчёту ¥',
   'Комментарий', 'Кто', 'Обновлено'
 ];
 
@@ -54,9 +55,14 @@ const CHINA_LINE_HEADERS = [
 
 const CHINA_COST_HEADERS = ['ID', 'ПартияID', 'Дата', 'Тип', 'Сумма ₽', 'Комментарий', 'Кто'];
 
-// The wallet of stage 81d. The sheet is created now so the spreadsheet is complete, but
-// nothing reads or writes it yet.
-const CHINA_PAYMENT_HEADERS = ['ID', 'Дата', 'Сумма ₽', 'Курс ₽/¥', 'Куплено ¥', 'Назначение', 'Комментарий', 'Кто'];
+// Item 81d: what the owner paid, in rubles, and how many yuan it bought. The rate of a batch
+// is worked out from the payments put against its ORDER — the owner states the rate in his
+// message, or the report of the Chinese side confirms how many yuan arrived and the rate falls
+// out of the pair.
+const CHINA_PAYMENT_HEADERS = ['ID', 'Дата', 'Сумма ₽', 'Курс ₽/¥', 'Куплено ¥', 'Назначение',
+  'Номер заказа', 'Подтверждено', 'Комментарий', 'Кто'];
+
+const CHINA_PAYMENT_PURPOSES = ['Товар', 'Перевозка'];
 
 const CHINA_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
 
@@ -234,6 +240,9 @@ function chinaBatchFromRow(r) {
     freightCny: parseNumber(r['Перевозка ¥']),
     rubCosts: parseNumber(r['Расходы РФ ₽']),
     rubRate: parseNumber(r['Курс ₽/¥']),
+    rubRateSource: String(r['Источник курса'] || '').trim(),
+    paidCny: parseNumber(r['Оплачено по отчёту ¥']),
+    unpaidCny: parseNumber(r['Долг по отчёту ¥']),
     totalRub: parseNumber(r['Себестоимость партии ₽']),
     weightFactor: r['Коэффициент веса'] === '' ? null : parseNumber(r['Коэффициент веса']),
     comment: String(r['Комментарий'] || '').trim(),
@@ -280,16 +289,81 @@ function chinaCostFromRow(r) {
   };
 }
 
+function chinaPaymentFromRow(r) {
+  return {
+    id: String(r['ID'] || '').trim(),
+    date: chinaDateText(r['Дата'], 'Дата'),
+    amountRub: parseNumber(r['Сумма ₽']),
+    rate: parseNumber(r['Курс ₽/¥']),
+    amountCny: parseNumber(r['Куплено ¥']),
+    purpose: String(r['Назначение'] || '').trim(),
+    orderNo: String(r['Номер заказа'] || '').trim(),
+    confirmed: String(r['Подтверждено'] || '').trim() !== '',
+    comment: String(r['Комментарий'] || '').trim(),
+    user: String(r['Кто'] || '').trim()
+  };
+}
+
+/**
+ * The ₽/¥ rate of an order: all the rubles put against it, divided by all the yuan they
+ * bought. Two tranches at two rates give the weighted average by construction, which is what
+ * a 30 % deposit plus the balance actually costs.
+ */
+function chinaRateFromPayments(payments, orderNo) {
+  const wanted = String(orderNo || '').trim();
+  if (!wanted) return 0;
+  let rub = 0, cny = 0;
+  (payments || []).forEach(function (p) {
+    if (String(p.orderNo || '').trim() !== wanted) return;
+    rub += Number(p.amountRub) || 0;
+    cny += Number(p.amountCny) || 0;
+  });
+  if (rub <= 0 || cny <= 0) return 0;
+  return Math.round((rub / cny) * 10000) / 10000;
+}
+
+/**
+ * Two of the three figures of a payment are enough: the owner either states the rate in his
+ * message, or the report of the Chinese side confirms the yuan that arrived. Given both, they
+ * have to agree — a half-percent apart is a typo, and a typo in a rate is a wrong cost on
+ * every piece of the batch.
+ */
+function chinaPaymentMoney(amountRub, rate, amountCny) {
+  const rub = roundToTwo(Number(amountRub) || 0);
+  let rateValue = Number(rate) || 0;
+  let cny = roundToTwo(Number(amountCny) || 0);
+  if (rub <= 0) throw new Error('Сумма оплаты в рублях должна быть больше нуля');
+  if (rateValue <= 0 && cny <= 0) {
+    throw new Error('Укажите курс ₽/¥ или сумму в юанях, которую подтвердили китайцы');
+  }
+  if (rateValue > 0 && cny > 0) {
+    const implied = rub / cny;
+    if (Math.abs(implied - rateValue) / rateValue > 0.005) {
+      throw new Error('Курс и сумма в юанях не сходятся: ' + rub + ' ₽ за ' + cny +
+        ' ¥ — это ' + (Math.round(implied * 10000) / 10000) + ' ₽/¥, а указан ' + rateValue);
+    }
+  }
+  if (rateValue > 0 && cny <= 0) cny = roundToTwo(rub / rateValue);
+  if (cny > 0 && rateValue <= 0) rateValue = Math.round((rub / cny) * 10000) / 10000;
+  return { amountRub: rub, rate: rateValue, amountCny: cny };
+}
+
 function getChinaBatches() {
   const ss = chinaSpreadsheet();
   const batches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows.map(chinaBatchFromRow);
   const lines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows.map(chinaLineFromRow);
   const costs = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS).rows.map(chinaCostFromRow);
+  const payments = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS).rows.map(chinaPaymentFromRow);
   const byId = {};
-  batches.forEach(function (b) { b.lines = []; b.costs = []; byId[b.id] = b; });
+  batches.forEach(function (b) {
+    b.lines = [];
+    b.costs = [];
+    b.payments = payments.filter(function (p) { return p.orderNo && p.orderNo === b.orderNo; });
+    byId[b.id] = b;
+  });
   lines.forEach(function (l) { if (byId[l.batchId]) byId[l.batchId].lines.push(l); });
   costs.forEach(function (c) { if (byId[c.batchId]) byId[c.batchId].costs.push(c); });
-  return { batches: batches, settings: getChinaSettings() };
+  return { batches: batches, payments: payments, settings: getChinaSettings() };
 }
 
 // ---------------------------------------------------------------- costing (no sheets here)
@@ -568,6 +642,8 @@ function saveChinaBatch(data, username) {
     freightUsd: parseNumber(data.freightUsd),
     cargoRate: parseNumber(data.cargoRate),
     rubRate: parseNumber(data.rubRate),
+    paidCny: parseNumber(data.paidCny),
+    unpaidCny: parseNumber(data.unpaidCny),
     comment: String(data.comment || '').trim()
   };
 
@@ -592,9 +668,24 @@ function saveChinaBatch(data, username) {
   let rubTotal = 0;
   costs.forEach(function (c) { rubTotal = roundToTwo(rubTotal + c.amountRub); });
 
-  const calc = chinaBatchCost(batch, lines, rubTotal, getChinaSettings());
-  writeChinaBatch(ss, batchCtx, batch, lines, calc, username);
+  const rated = chinaWithPaymentRate(ss, batch);
+  const calc = chinaBatchCost(rated, lines, rubTotal, getChinaSettings());
+  writeChinaBatch(ss, batchCtx, rated, lines, calc, username);
   return getChinaBatches();
+}
+
+/**
+ * The rate a batch is costed at. Payments put against its order decide it; the rate typed by
+ * hand is what is left when there are none, and the sheet says which of the two it was.
+ */
+function chinaWithPaymentRate(ss, batch) {
+  const payments = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS).rows.map(chinaPaymentFromRow);
+  const fromPayments = chinaRateFromPayments(payments, batch.orderNo);
+  const out = {};
+  Object.keys(batch).forEach(function (k) { out[k] = batch[k]; });
+  out.rubRate = fromPayments > 0 ? fromPayments : (Number(batch.rubRate) || 0);
+  out.rubRateSource = fromPayments > 0 ? 'оплаты' : (out.rubRate > 0 ? 'вручную' : '');
+  return out;
 }
 
 function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
@@ -617,6 +708,9 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
     'Перевозка ¥': calc.freightCny,
     'Расходы РФ ₽': calc.rubCosts,
     'Курс ₽/¥': calc.rubRate,
+    'Источник курса': batch.rubRateSource || '',
+    'Оплачено по отчёту ¥': batch.paidCny || '',
+    'Долг по отчёту ¥': batch.unpaidCny || '',
     'Себестоимость партии ₽': calc.totalRub,
     'Коэффициент веса': calc.weightFactor === null ? '' : calc.weightFactor,
     'Комментарий': batch.comment,
@@ -683,8 +777,9 @@ function recalcChinaBatch(ss, batchId, username) {
   let rubTotal = 0;
   costs.forEach(function (c) { rubTotal = roundToTwo(rubTotal + c.amountRub); });
 
-  const calc = chinaBatchCost(batch, lines, rubTotal, getChinaSettings());
-  writeChinaBatch(ss, batchCtx, batch, lines, calc, username || batch.user);
+  const rated = chinaWithPaymentRate(ss, batch);
+  const calc = chinaBatchCost(rated, lines, rubTotal, getChinaSettings());
+  writeChinaBatch(ss, batchCtx, rated, lines, calc, username || batch.user);
   return calc;
 }
 
@@ -750,6 +845,79 @@ function saveChinaBatchCost(data, username) {
 
   recalcChinaBatch(ss, batchId, username);
   return getChinaBatches();
+}
+
+function saveChinaPayment(data, username) {
+  if (!data || typeof data !== 'object') throw new Error('Некорректные данные оплаты');
+  const purpose = String(data.purpose || '').trim() || CHINA_PAYMENT_PURPOSES[0];
+  if (CHINA_PAYMENT_PURPOSES.indexOf(purpose) === -1) {
+    throw new Error('Неизвестное назначение оплаты: ' + purpose);
+  }
+  const money = chinaPaymentMoney(parseNumber(data.amountRub), parseNumber(data.rate), parseNumber(data.amountCny));
+  const orderNo = String(data.orderNo || '').trim();
+
+  const ss = chinaSpreadsheet();
+  const ctx = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS);
+  const requested = String(data.id || '').trim();
+  let targetRow = 0, previousOrder = '';
+  ctx.rows.forEach(function (r) {
+    if (String(r['ID']).trim() === requested) {
+      targetRow = r.__row;
+      previousOrder = String(r['Номер заказа'] || '').trim();
+    }
+  });
+  if (requested && !targetRow) throw new Error('Оплата ' + requested + ' не найдена');
+
+  const row = chinaRowFrom(CHINA_PAYMENT_HEADERS, {
+    'ID': requested || chinaNextId(ctx.rows, 'CP'),
+    'Дата': chinaDateText(data.date, 'Дата') || getTodayDateString(),
+    'Сумма ₽': money.amountRub,
+    'Курс ₽/¥': money.rate,
+    'Куплено ¥': money.amountCny,
+    'Назначение': purpose,
+    'Номер заказа': orderNo,
+    'Подтверждено': data.confirmed ? 'да' : '',
+    'Комментарий': String(data.comment || '').trim(),
+    'Кто': username || ''
+  });
+  if (targetRow > 0) {
+    ctx.sheet.getRange(targetRow, 1, 1, CHINA_PAYMENT_HEADERS.length).setValues([row]);
+  } else {
+    ctx.sheet.appendRow(row);
+  }
+
+  // An edit can move a payment from one order to another, and BOTH change their rate.
+  recalcChinaOrders(ss, [orderNo, previousOrder], username);
+  return getChinaBatches();
+}
+
+function deleteChinaPayment(data, username) {
+  const id = String((data || {}).id || '').trim();
+  if (!id) throw new Error('Не указана оплата для удаления');
+  const ss = chinaSpreadsheet();
+  const ctx = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS);
+  let targetRow = 0, orderNo = '';
+  ctx.rows.forEach(function (r) {
+    if (String(r['ID']).trim() === id) { targetRow = r.__row; orderNo = String(r['Номер заказа'] || '').trim(); }
+  });
+  if (!targetRow) throw new Error('Оплата ' + id + ' не найдена');
+  ctx.sheet.deleteRow(targetRow);
+  recalcChinaOrders(ss, [orderNo], username);
+  return getChinaBatches();
+}
+
+/** Every batch of the given orders is costed again: their rate has just moved. */
+function recalcChinaOrders(ss, orderNumbers, username) {
+  const wanted = {};
+  (orderNumbers || []).forEach(function (n) {
+    const key = String(n || '').trim();
+    if (key) wanted[key] = true;
+  });
+  if (Object.keys(wanted).length === 0) return;
+  const batches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows.map(chinaBatchFromRow);
+  batches.forEach(function (b) {
+    if (wanted[String(b.orderNo || '').trim()]) recalcChinaBatch(ss, b.id, username);
+  });
 }
 
 function deleteChinaBatchCost(data, username) {

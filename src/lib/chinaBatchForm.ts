@@ -8,7 +8,7 @@
  */
 
 import { ChinaBatch, ChinaBatchLine } from '../types';
-import { ChinaParsedBatch, ChinaParsedReport, chinaFreightOf } from './chinaFileParse';
+import { ChinaParsedBatch, ChinaParsedReport, chinaFreightOf, chinaOrderOf } from './chinaFileParse';
 
 export interface ChinaLineForm {
   marking: string;
@@ -40,6 +40,9 @@ export interface ChinaBatchForm {
   freightUsd: string;
   cargoRate: string;
   rubRate: string;
+  /** Item 81d: what the report of the Chinese side says about the order. Not edited by hand. */
+  paidCny: string;
+  unpaidCny: string;
   comment: string;
   lines: ChinaLineForm[];
 }
@@ -67,8 +70,8 @@ export function emptyChinaBatchForm(): ChinaBatchForm {
   return {
     id: '', orderNo: '', code: '', shippedAt: '', arrivedAt: '', status: CHINA_STATUSES[0],
     chinaDeliveryCny: '', weightKg: '', volumeM3: '', ratePerKgUsd: '', packingUsd: '',
-    otherCargoUsd: '', freightUsd: '', cargoRate: '', rubRate: '', comment: '',
-    lines: [emptyChinaLine()]
+    otherCargoUsd: '', freightUsd: '', cargoRate: '', rubRate: '', paidCny: '', unpaidCny: '',
+    comment: '', lines: [emptyChinaLine()]
   };
 }
 
@@ -91,6 +94,8 @@ export function chinaBatchToForm(batch: ChinaBatch): ChinaBatchForm {
     freightUsd: text(batch.freightUsd),
     cargoRate: text(batch.cargoRate),
     rubRate: text(batch.rubRate),
+    paidCny: text(batch.paidCny),
+    unpaidCny: text(batch.unpaidCny),
     comment: batch.comment,
     lines: (batch.lines || []).map((l: ChinaBatchLine) => ({
       marking: l.marking,
@@ -126,6 +131,8 @@ export function chinaFormToPayload(form: ChinaBatchForm): Record<string, unknown
     freightUsd: chinaNumber(form.freightUsd),
     cargoRate: chinaNumber(form.cargoRate),
     rubRate: chinaNumber(form.rubRate),
+    paidCny: chinaNumber(form.paidCny),
+    unpaidCny: chinaNumber(form.unpaidCny),
     comment: form.comment.trim(),
     lines: form.lines.map((l) => ({
       marking: l.marking.trim(),
@@ -244,6 +251,11 @@ export function chinaFormFromFiles(
 ): ChinaImportResult {
   const notes: string[] = [];
   const freight = chinaFreightOf(report, parsed.code);
+  const orderNoFromReport = freight && freight.orderNo ? freight.orderNo : (existing ? existing.orderNo : '');
+  const order = chinaOrderOf(report, orderNoFromReport);
+  if (order) {
+    notes.push(`По отчёту заказ №${order.orderNo}: товар ${order.totalCny} ¥, оплачено ${order.receivedCny} ¥, долг ${order.unpaidCny} ¥`);
+  }
 
   const orderNo = freight && freight.orderNo ? freight.orderNo : (existing ? existing.orderNo : '');
   const arrivedAt = freight && freight.arrivedAt ? freight.arrivedAt : (existing ? existing.arrivedAt : '');
@@ -304,6 +316,8 @@ export function chinaFormFromFiles(
     freightUsd: parsed.freightUsd ? String(parsed.freightUsd) : '',
     cargoRate: cargoRate ? String(cargoRate) : '',
     rubRate: existing && existing.rubRate ? String(existing.rubRate) : '',
+    paidCny: order && order.receivedCny ? String(order.receivedCny) : (existing ? text(existing.paidCny) : ''),
+    unpaidCny: order && order.unpaidCny ? String(order.unpaidCny) : (existing ? text(existing.unpaidCny) : ''),
     comment: existing ? existing.comment : '',
     lines: lines.length > 0 ? lines : [emptyChinaLine()]
   };

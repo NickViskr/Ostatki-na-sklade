@@ -4,15 +4,18 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
+import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
+import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import {
   CHINA_COST_TYPES, ChinaBatchForm, chinaBatchToForm, chinaFormFromFiles, chinaFormToPayload,
   chinaGroupLabel, chinaLevelledGroups
 } from '../lib/chinaBatchForm';
 import { ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaBatchFile, parseChinaReportFile } from '../lib/chinaFileParse';
 import { chinaSheetsFromFile } from '../lib/chinaXlsx';
+import { chinaArticleOptions } from '../lib/chinaArticles';
 
 const money = (value: number, currency: string): string =>
   `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
@@ -39,6 +42,7 @@ export const ChinaOrdersTab: React.FC = () => {
   const saveChinaCost = useChinaStore((s) => s.saveChinaCost);
   const deleteChinaCost = useChinaStore((s) => s.deleteChinaCost);
   const setConfirmDialog = useUIStore((s) => s.setConfirmDialog);
+  const skus = useWarehouseStore((s) => s.skus);
 
   const [openId, setOpenId] = useState<string>('');
   const [editing, setEditing] = useState<ChinaBatch | null>(null);
@@ -219,6 +223,8 @@ export const ChinaOrdersTab: React.FC = () => {
         </div>
       )}
 
+      {loaded && !error && <ChinaPaymentsCard batches={batches} />}
+
       {loaded && batches.length === 0 && !error && (
         <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
           Партий пока нет. Нажмите «Новая партия» и внесите данные из файла китайцев.
@@ -261,12 +267,26 @@ export const ChinaOrdersTab: React.FC = () => {
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Доставка по Китаю</div>{money(batch.chinaDeliveryCny, '¥')}</div>
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Перевозка</div>{money(batch.freightUsd, '$')} → {money(batch.freightCny, '¥')}</div>
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Расходы РФ</div>{money(batch.rubCosts, '₽')}</div>
-                    <div><div className="text-xs text-slate-400 uppercase font-bold">Курс ₽/¥</div>{batch.rubRate || '—'}</div>
+                    <div>
+                      <div className="text-xs text-slate-400 uppercase font-bold">Курс ₽/¥</div>
+                      {batch.rubRate || '—'}
+                      {batch.rubRateSource && <span className="block text-[10px] text-slate-400">{batch.rubRateSource}</span>}
+                    </div>
                     <div>
                       <div className="text-xs text-slate-400 uppercase font-bold">Коэффициент веса</div>
                       {batch.weightFactor === null ? '—' : batch.weightFactor}
                     </div>
                   </div>
+
+                  {(batch.paidCny > 0 || batch.unpaidCny > 0) && (
+                    <p className="text-sm text-slate-500">
+                      По отчёту китайцев по заказу №{batch.orderNo || '—'}: оплачено {money(batch.paidCny, '¥')}
+                      {batch.unpaidCny > 0 && <>, долг {money(batch.unpaidCny, '¥')}</>}
+                      {batch.payments.length > 0
+                        ? <> · в базе оплат по этому заказу: {batch.payments.length}</>
+                        : <> · <span className="text-amber-600">оплаты не внесены, курс взят вручную</span></>}
+                    </p>
+                  )}
 
                   {batch.weightFactor !== null && (batch.weightFactor < 0.8 || batch.weightFactor > 1.25) && (
                     <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -317,12 +337,16 @@ export const ChinaOrdersTab: React.FC = () => {
                               <td className="py-2 pr-3">{money(line.costRub, '₽')}</td>
                               <td className="py-2 pr-3 font-bold">{money(line.unitRub, '₽')}</td>
                               <td className="py-2 pr-3">
-                                <input
-                                  className="px-2 py-1 border border-slate-200 rounded text-sm w-28"
+                                <select
+                                  className="px-2 py-1 border border-slate-200 rounded text-sm w-40"
                                   value={draft.article}
                                   onChange={(e) => setLabel(line, { article: e.target.value })}
-                                  placeholder="артикул"
-                                />
+                                >
+                                  <option value="">— выберите артикул —</option>
+                                  {chinaArticleOptions(skus, draft.article).map((a) => (
+                                    <option key={a} value={a}>{a}</option>
+                                  ))}
+                                </select>
                               </td>
                               <td className="py-2 pr-3">
                                 <input

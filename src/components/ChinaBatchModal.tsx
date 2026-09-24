@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { X, Save, Loader2, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
+import { useWarehouseStore } from '../store/useWarehouseStore';
+import { chinaArticleOptions } from '../lib/chinaArticles';
 import { ChinaBatch } from '../types';
 import {
   ChinaBatchForm, ChinaLineForm, CHINA_STATUSES, chinaBatchToForm, chinaFilledLines,
@@ -27,6 +29,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
   const saveChinaBatch = useChinaStore((s) => s.saveChinaBatch);
   const isSaving = useChinaStore((s) => s.isSaving);
   const settings = useChinaStore((s) => s.settings);
+  const skus = useWarehouseStore((s) => s.skus);
 
   const [form, setForm] = useState<ChinaBatchForm>(() => {
     if (initialForm) return initialForm;
@@ -180,6 +183,8 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                     <th className="py-1 pr-2">Паллета</th>
                     <th className="py-1 pr-2">Вес паллеты</th>
                     <th className="py-1 pr-2">Вес коробки</th>
+                    <th className="py-1 pr-2">Наш артикул</th>
+                    <th className="py-1 pr-2">Один товар</th>
                     <th className="py-1 pr-2"></th>
                   </tr>
                 </thead>
@@ -195,6 +200,20 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                       <td className="py-1 pr-2"><input className={cell} value={line.pallet} onChange={(e) => setLine(i, { pallet: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.palletWeightKg} onChange={(e) => setLine(i, { palletWeightKg: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.boxWeightKg} onChange={(e) => setLine(i, { boxWeightKg: e.target.value })} /></td>
+                      <td className="py-1 pr-2">
+                        <select
+                          data-testid="select-china-article"
+                          className={cell}
+                          value={line.article}
+                          onChange={(e) => setLine(i, { article: e.target.value })}
+                        >
+                          <option value="">— выберите артикул —</option>
+                          {chinaArticleOptions(skus, line.article).map((a) => (
+                            <option key={a} value={a}>{a}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.group} onChange={(e) => setLine(i, { group: e.target.value })} placeholder="одна метка" /></td>
                       <td className="py-1 pr-2 text-right">
                         <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-red-500"><Trash2 size={16} /></button>
                       </td>
@@ -206,6 +225,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
             <p className="text-sm text-slate-500 mt-2">
               Итого: {counts.rows} строк, {counts.boxes} коробок, {counts.qty} шт.
               Вес коробки заполняйте, если знаете его точно — он важнее оценки по паллетам.
+              Артикул выбирается из нашей базы SKU; одинаковым товарам разных цветов ставьте одну метку «Один товар».
             </p>
           </div>
         </div>
