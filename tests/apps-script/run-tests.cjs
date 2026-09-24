@@ -4887,11 +4887,11 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
   const lineHead = h.headerRowOf(h.getTargetSheet('Строки партий'));
   check('81e: on an old batch sheet the new columns are appended at the end',
     batchHead.slice(0, PRE_81E_BATCH_HEADERS.length).join('|') === PRE_81E_BATCH_HEADERS.join('|') &&
-    batchHead[batchHead.length - 1] === 'Доля перевозки товара в себестоимости, %',
-    batchHead.slice(-3).join(' | '));
+    batchHead[batchHead.length - 1] === 'Курс взят из партии',
+    batchHead.slice(-4).join(' | '));
   check('81e: same for the lines sheet',
     lineHead.slice(0, PRE_81E_LINE_HEADERS.length).join('|') === PRE_81E_LINE_HEADERS.join('|') &&
-    lineHead[lineHead.length - 1] === 'Вес 1 шт, кг',
+    lineHead[lineHead.length - 1] === 'Перевозка ₽',
     lineHead.slice(-3).join(' | '));
 
   const batch = h.getChinaBatches().batches[0];
@@ -4899,6 +4899,202 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
     batch.goodsKg === 847 && batch.tariffBasis === 'кг' && batch.receivedAt === '2026-09-23' &&
     batch.lines[0].goodsKg === 58.8,
     JSON.stringify({ goodsKg: batch.goodsKg, tariffBasis: batch.tariffBasis, receivedAt: batch.receivedAt }));
+})();
+
+// ---- 81e fixes: ruble equivalents, and the previous-batch fallback rate ----
+//
+// Owner, 2026-09-24 (after the live check of 81e): the ruble equivalent of every currency
+// figure is now returned and stored alongside it, and a batch with no rate of its own — no
+// payment against its order, no rate typed by hand — is costed at the rate of the PREVIOUS
+// batch, not at zero. Expected figures below were worked out in Python first (see the coder's
+// report), against the fixture of the original 81e block: NV-0923-4, rubRate 12.4.
+
+(function () {
+  const h = withChina();
+  check('81e fixes: the rate-borrowing date is shipping first, then acceptance, then arrival',
+    h.chinaRateDateOf({ shippedAt: '2026-01-01', receivedAt: '2026-02-01', arrivedAt: '2026-03-01' }) === '2026-01-01' &&
+    h.chinaRateDateOf({ receivedAt: '2026-02-01', arrivedAt: '2026-03-01' }) === '2026-02-01' &&
+    h.chinaRateDateOf({ arrivedAt: '2026-03-01' }) === '2026-03-01' &&
+    h.chinaRateDateOf({}) === '',
+    JSON.stringify([
+      h.chinaRateDateOf({ shippedAt: '2026-01-01', receivedAt: '2026-02-01', arrivedAt: '2026-03-01' }),
+      h.chinaRateDateOf({ receivedAt: '2026-02-01', arrivedAt: '2026-03-01' }),
+      h.chinaRateDateOf({ arrivedAt: '2026-03-01' }),
+      h.chinaRateDateOf({})
+    ]));
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(china923Payload({}), 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+
+  check('81e fixes: batch-level ruble equivalents of goods, China delivery and freight',
+    batch.goodsRub === 155248 && batch.chinaDeliveryRub === 12400 && batch.freightRub === 229659.78,
+    batch.goodsRub + ' / ' + batch.chinaDeliveryRub + ' / ' + batch.freightRub);
+
+  const goodsRubTargets = [9895.2, 27900.0, 46500.0, 3100.0, 32512.8, 1413.6, 33926.4];
+  const chinaShareRubTargets = [860.81, 2055.42, 3425.75, 228.41, 2828.44, 120.03, 2881.14];
+  const goodsRubs = batch.lines.map(function (l) { return l.goodsRub; });
+  const chinaShareRubs = batch.lines.map(function (l) { return l.chinaShareRub; });
+  check('81e fixes: each line\'s own goods-in-rubles and China-delivery-in-rubles are exactly round2(¥ × rate)',
+    JSON.stringify(goodsRubs) === JSON.stringify(goodsRubTargets) &&
+    JSON.stringify(chinaShareRubs) === JSON.stringify(chinaShareRubTargets),
+    goodsRubs.join(', ') + ' | ' + chinaShareRubs.join(', '));
+
+  const targets = [26699.31, 68024.17, 113373.7, 7558.3, 87726.4, 3757.08, 90168.83];
+  const sums = batch.lines.map(function (l) { return Math.round((l.goodsRub + l.chinaShareRub + l.freightShareRub) * 100) / 100; });
+  check('81e fixes: every line\'s three ruble components sum to round2(costCny × rate) exactly',
+    JSON.stringify(sums) === JSON.stringify(targets), sums.join(', '));
+
+  const sumOfLines = Math.round(batch.lines.reduce(function (s, l) { return s + l.costRub; }, 0) * 100) / 100;
+  check('81e fixes: the ruble columns are extra — costRub still sums to the batch total',
+    sumOfLines === batch.totalRub, sumOfLines + ' vs ' + batch.totalRub);
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(china923Payload({ rubRate: 0 }), 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+  check('81e fixes: with no rate at all the ruble columns are zero, not stale',
+    batch.goodsRub === 0 && batch.chinaDeliveryRub === 0 && batch.freightRub === 0 &&
+    batch.lines.every(function (l) { return l.goodsRub === 0 && l.chinaShareRub === 0 && l.freightShareRub === 0; }),
+    JSON.stringify({ goodsRub: batch.goodsRub, chinaDeliveryRub: batch.chinaDeliveryRub, freightRub: batch.freightRub }));
+})();
+
+(function () {
+  const h = withChina();
+
+  // The older batch: order 29, shipped 2026-08-27, paid for at 12.4 — an own rate.
+  // batch28Payload does not carry shippedAt/arrivedAt on its own, so both are given here.
+  h.saveChinaBatch(batch28Payload({ orderNo: '29', rubRate: 0, shippedAt: '2026-08-27', arrivedAt: '2026-09-17' }), 'Николай');
+  h.saveChinaPayment({ amountRub: 100000, rate: 12.4, orderNo: '29' }, 'Николай');
+  let state = h.getChinaBatches();
+  let older = state.batches.find(function (b) { return b.orderNo === '29'; });
+  check('81e fixes: the older batch is costed at its own payment rate',
+    older.rubRateSource === 'оплаты' && older.rubRate === 12.4, older.rubRateSource + ' / ' + older.rubRate);
+
+  // The newer batch: NV-0923-4, order 30, shipped 2026-09-23 — no payment, no typed rate.
+  h.saveChinaBatch(china923Payload({ rubRate: 0 }), 'Николай');
+  state = h.getChinaBatches();
+  let newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: a batch with no rate of its own borrows the rate of the previous batch',
+    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 12.4 && newer.rubRateFrom === older.code,
+    newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
+  check('81e fixes: costed at the borrowed rate exactly as if it had been typed by hand',
+    newer.totalRub === 397307.79, String(newer.totalRub));
+
+  // A payment on the newer's own order: its own rate wins over the borrowed one.
+  h.saveChinaPayment({ amountRub: 50000, rate: 13, orderNo: '30' }, 'Николай');
+  state = h.getChinaBatches();
+  newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  const newerPayment = state.payments.find(function (p) { return p.orderNo === '30'; });
+  check('81e fixes: a payment of the newer\'s own order beats the borrowed rate',
+    newer.rubRateSource === 'оплаты' && newer.rubRate === 13 && newer.rubRateFrom === '',
+    newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
+
+  // Drop the payment, then type a rate by hand: it also beats the borrowed rate.
+  h.deleteChinaPayment({ id: newerPayment.id }, 'Николай');
+  h.saveChinaBatch(china923Payload({ id: newer.id, rubRate: 15 }), 'Николай');
+  state = h.getChinaBatches();
+  newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: a rate typed by hand also beats the borrowed rate',
+    newer.rubRateSource === 'вручную' && newer.rubRate === 15 && newer.rubRateFrom === '',
+    newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
+
+  // Back to no rate of its own: the borrow kicks back in.
+  h.saveChinaBatch(china923Payload({ id: newer.id, rubRate: 0 }), 'Николай');
+  state = h.getChinaBatches();
+  newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: with the typed rate gone the batch borrows again',
+    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 12.4, newer.rubRateSource + ' / ' + newer.rubRate);
+
+  // Changing the older batch's payment re-costs the newer, its borrower.
+  const olderPayment = state.payments.find(function (p) { return p.orderNo === '29'; });
+  h.saveChinaPayment({ id: olderPayment.id, amountRub: 100000, rate: 14, orderNo: '29' }, 'Николай');
+  state = h.getChinaBatches();
+  newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: changing the source batch\'s payment re-costs its borrower',
+    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 14, newer.rubRateSource + ' / ' + newer.rubRate);
+
+  // Deleting the older batch leaves the newer with no source at all.
+  older = state.batches.find(function (b) { return b.orderNo === '29'; });
+  h.deleteChinaBatch({ id: older.id }, 'Николай');
+  state = h.getChinaBatches();
+  newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: deleting the source batch drops its borrower back to zero',
+    newer.rubRateSource === '' && newer.rubRate === 0 && newer.rubRateFrom === '',
+    newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
+})();
+
+// Coordinator review, 2026-09-24: a batch saved while NEITHER it nor anyone else had a rate
+// (rubRateSource '') must still pick up a rate once the source batch gets one — not only
+// batches that already read 'предыдущая партия'. Both start with nothing; a payment on the
+// OLDER batch's order must re-cost the newer as its borrower.
+(function () {
+  const h = withChina();
+
+  // Both batches saved with no rate anywhere: no payments yet, no typed rate on either.
+  h.saveChinaBatch(batch28Payload({ orderNo: '29', rubRate: 0, shippedAt: '2026-08-27', arrivedAt: '2026-09-17' }), 'Николай');
+  h.saveChinaBatch(china923Payload({ rubRate: 0 }), 'Николай');
+  let state = h.getChinaBatches();
+  let older = state.batches.find(function (b) { return b.orderNo === '29'; });
+  let newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: with no rate anywhere yet, both batches sit at zero with no source',
+    older.rubRateSource === '' && older.rubRate === 0 && newer.rubRateSource === '' && newer.rubRate === 0,
+    JSON.stringify({ older: [older.rubRateSource, older.rubRate], newer: [newer.rubRateSource, newer.rubRate] }));
+
+  // A payment on the OLDER batch's order gives it an own rate — the newer, which had NO
+  // source at all (not 'предыдущая партия'), must now be re-costed to borrow it.
+  h.saveChinaPayment({ amountRub: 100000, rate: 12.4, orderNo: '29' }, 'Николай');
+  state = h.getChinaBatches();
+  newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: a batch that had no source at all is re-costed once an older batch gets its own rate',
+    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 12.4,
+    newer.rubRateSource + ' / ' + newer.rubRate);
+})();
+
+// A borrowed rate is never used as a source itself — otherwise a chain could walk arbitrarily
+// far from the batch that actually has a rate. A, B and C, each dated a month after the last:
+// B borrows straight from A; C must ALSO reach A directly, not through B.
+(function () {
+  const h = withChina();
+  function chainPayload(over) {
+    return { orderNo: over.orderNo, code: over.code, status: 'Прибыла', shippedAt: over.shippedAt,
+      chinaDeliveryCny: 100, weightKg: 50, volumeM3: 1, ratePerKgUsd: 2, packingUsd: 0, otherCargoUsd: 0,
+      freightUsd: 100, cargoRate: 7, rubRate: over.rubRate || 0,
+      lines: [{ marking: 'X', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 10 }] };
+  }
+
+  h.saveChinaBatch(chainPayload({ orderNo: 'A', code: 'NV-A', shippedAt: '2026-07-01', rubRate: 10 }), 'Николай');
+  h.saveChinaBatch(chainPayload({ orderNo: 'B', code: 'NV-B', shippedAt: '2026-08-01', rubRate: 0 }), 'Николай');
+  h.saveChinaBatch(chainPayload({ orderNo: 'C', code: 'NV-C', shippedAt: '2026-09-01', rubRate: 0 }), 'Николай');
+
+  const state = h.getChinaBatches();
+  const b = state.batches.find(function (x) { return x.orderNo === 'B'; });
+  const c = state.batches.find(function (x) { return x.orderNo === 'C'; });
+  check('81e fixes: B borrows the rate straight from A',
+    b.rubRateSource === 'предыдущая партия' && b.rubRateFrom === 'NV-A' && b.rubRate === 10,
+    b.rubRateSource + ' / ' + b.rubRateFrom);
+  check('81e fixes: a borrowed rate is never lent again — C skips B and reaches A directly',
+    c.rubRateSource === 'предыдущая партия' && c.rubRateFrom === 'NV-A' && c.rubRate === 10,
+    c.rubRateSource + ' / ' + c.rubRateFrom);
+
+  // D is dated the SAME day as A: still «not after», so it counts.
+  h.saveChinaBatch(chainPayload({ orderNo: 'D', code: 'NV-D', shippedAt: '2026-07-01', rubRate: 0 }), 'Николай');
+  const d = h.getChinaBatches().batches.find(function (x) { return x.orderNo === 'D'; });
+  check('81e fixes: a source dated the same day as the borrower still counts as "not after"',
+    d.rubRateSource === 'предыдущая партия' && d.rubRateFrom === 'NV-A' && d.rubRate === 10,
+    d.rubRateSource + ' / ' + d.rubRateFrom);
+
+  // F is a second own-rate source, dated AFTER A. G has no date of its own at all, so it
+  // simply takes the latest dated source there is — F, not A.
+  h.saveChinaBatch(chainPayload({ orderNo: 'F', code: 'NV-F', shippedAt: '2026-10-01', rubRate: 20 }), 'Николай');
+  h.saveChinaBatch(chainPayload({ orderNo: 'G', code: 'NV-G', shippedAt: '', rubRate: 0 }), 'Николай');
+  const g = h.getChinaBatches().batches.find(function (x) { return x.orderNo === 'G'; });
+  check('81e fixes: a batch with no date of its own takes the latest dated source there is',
+    g.rubRateSource === 'предыдущая партия' && g.rubRateFrom === 'NV-F' && g.rubRate === 20,
+    g.rubRateSource + ' / ' + g.rubRateFrom);
 })();
 
 // ================= Итог =================

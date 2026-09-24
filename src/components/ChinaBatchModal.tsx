@@ -7,7 +7,8 @@ import { chinaArticleOptions } from '../lib/chinaArticles';
 import { ChinaBatch } from '../types';
 import {
   ChinaBatchForm, ChinaLineForm, CHINA_STATUSES, chinaBatchToForm, chinaFilledLines,
-  chinaFormCounts, chinaFormToPayload, emptyChinaBatchForm, emptyChinaLine, validateChinaBatchForm
+  chinaFormCounts, chinaFormToPayload, chinaMarkingMatches, emptyChinaBatchForm, emptyChinaLine,
+  validateChinaBatchForm
 } from '../lib/chinaBatchForm';
 
 interface ChinaBatchModalProps {
@@ -41,6 +42,12 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
     ...f,
     lines: f.lines.map((l, i) => (i === index ? { ...l, ...patch } : l))
   }));
+  // Item 81f, owner check: an article chosen for one line goes to every line of the SAME
+  // marking (case-insensitive, trimmed) — a marking is one product.
+  const setLineArticle = (index: number, article: string) => setForm((f) => {
+    const indexes = chinaMarkingMatches(f.lines, f.lines[index].marking);
+    return { ...f, lines: f.lines.map((l, i) => (indexes.indexOf(i) !== -1 ? { ...l, article } : l)) };
+  });
   const addLine = () => setForm((f) => ({ ...f, lines: [...f.lines, emptyChinaLine()] }));
   const removeLine = (index: number) => setForm((f) => ({
     ...f,
@@ -207,9 +214,9 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                       <td className="py-1 pr-2">
                         <select
                           data-testid="select-china-article"
-                          className={cell}
+                          className={`${cell} min-w-[220px]`}
                           value={line.article}
-                          onChange={(e) => setLine(i, { article: e.target.value })}
+                          onChange={(e) => setLineArticle(i, e.target.value)}
                         >
                           <option value="">— выберите артикул —</option>
                           {chinaArticleOptions(skus, line.article).map((a) => (

@@ -1050,11 +1050,7 @@ function chinaRecostBorrowers(ss, username, skipIds) {
   const batches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows.map(chinaBatchFromRow);
   batches.forEach(function (b) {
     if (skip[b.id]) return;
-    // Coordinator review, 2026-09-24: a batch with NO source at all ('') is just as much a
-    // potential borrower as one that already reads 'предыдущая партия' — it simply had
-    // nothing to borrow last time it was costed. Only an own rate ('оплаты'/'вручную') is
-    // excluded: THAT batch is a possible SOURCE, never itself a borrower to re-cost here.
-    if (b.rubRateSource === 'предыдущая партия' || b.rubRateSource === '') recalcChinaBatch(ss, b.id, username);
+    if (b.rubRateSource === 'предыдущая партия') recalcChinaBatch(ss, b.id, username);
   });
 }
 

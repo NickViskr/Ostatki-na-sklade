@@ -301,6 +301,27 @@ export function chinaArticleConflicts(lines: ChinaIdentity[]): string[] {
       'Одна маркировка — один товар, поэтому себестоимость у них общая; проверьте выбор артикула.');
 }
 
+/**
+ * Item 81f, owner check: «если я присваиваю артикул для маркировки короба, то короба с такой
+ * же маркировкой должны автоматически проставляться указанным артикулом товара» — an article
+ * belongs to the CARRIER'S marking, not to the one row it was typed on. Every index whose
+ * marking matches (case-insensitive, trimmed) the marking of `marking` gets it too, in the
+ * batch window and in the card's in-place editing alike.
+ */
+export function chinaMarkingMatches(lines: { marking: string }[], marking: string): number[] {
+  const wanted = String(marking || '').trim().toLowerCase();
+  if (!wanted) return [];
+  const out: number[] = [];
+  lines.forEach((l, i) => { if (String(l.marking || '').trim().toLowerCase() === wanted) out.push(i); });
+  return out;
+}
+
+/** Item 81f: 'предыдущая партия' names the batch the rate was borrowed from, so the owner sees
+ * at a glance that it is provisional rather than the order's own. */
+export function chinaRateSourceLabel(source: string, rubRateFrom: string): string {
+  return source === 'предыдущая партия' && rubRateFrom ? `курс из партии ${rubRateFrom}` : source;
+}
+
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** The same refusals the script makes, said before the round trip. */
@@ -530,4 +551,73 @@ export function chinaFormFromArrival(
   notes.push(`Партия ${existing.code} дополнена данными приёмки — будет обновлена, а не создана заново`);
 
   return { form, notes, warnings: parsed.warnings.slice() };
+}
+
+const normalizedMarkingSet = (lines: { marking: string }[]): Set<string> => {
+  const set = new Set<string>();
+  lines.forEach((l) => {
+    const m = String(l.marking || '').trim().toLowerCase();
+    if (m) set.add(m);
+  });
+  return set;
+};
+
+const sameMarkingSet = (a: Set<string>, b: Set<string>): boolean => {
+  if (a.size !== b.size) return false;
+  for (const m of a) if (!b.has(m)) return false;
+  return true;
+};
+
+/**
+ * Item 81e, flow c: which saved batch a final batch FILE belongs to. The owner's check of
+ * 2026-09-24 found the old, weaker rule (readFiles matched loosely, on a code that a time-zone
+ * bug had already corrupted) leave a draft behind AND create a second batch, losing the
+ * articles and box data typed against the first. The rule now runs in order and never guesses
+ * past a single candidate:
+ *   1. exactly the code the file states;
+ *   2. a 'Черновик' whose code equals that code without its trailing '-N' (an arrival file
+ *      names a draft by the receiving date, before the batch has shipped and got its own code);
+ *   3. failing both — an arrival file's date can read a day off — exactly one 'Черновик' whose
+ *      SET of markings is the very set the file's own lines carry.
+ * In every branch the SAME batch id is returned, so the caller updates it in place: no second
+ * batch is created and no draft is left orphaned once its data has moved into the batch.
+ */
+export function chinaMatchFinalBatch(code: string, lines: { marking: string }[], batches: ChinaBatch[]): ChinaBatch | null {
+  const wanted = code.trim().toLowerCase();
+  const exact = batches.find((b) => b.code.trim().toLowerCase() === wanted);
+  if (exact) return exact;
+
+  const drafts = batches.filter((b) => b.status === 'Черновик');
+  const draftCode = code.replace(/-\d+$/, '').trim().toLowerCase();
+  const byCode = drafts.find((b) => b.code.trim().toLowerCase() === draftCode);
+  if (byCode) return byCode;
+
+  const wantedMarkings = normalizedMarkingSet(lines);
+  const bySet = drafts.filter((b) => sameMarkingSet(normalizedMarkingSet(b.lines), wantedMarkings));
+  return bySet.length === 1 ? bySet[0] : null;
+}
+
+/**
+ * Item 81e, flows a and b: which saved batch an ARRIVAL file belongs to:
+ *   1. exactly `draftCode`;
+ *   2. exactly one batch whose code starts with `draftCode-` (it has shipped since and got its
+ *      real code);
+ *   3. failing both, exactly one batch with NO box data of its own (no line has factoryBoxKg or
+ *      boxLengthM — the arrival file is the only place that data comes from) whose SET of
+ *      markings is the arrival's.
+ * Same batch id in every branch, for the same reason as `chinaMatchFinalBatch`.
+ */
+export function chinaMatchArrivalBatch(draftCode: string, lines: { marking: string }[], batches: ChinaBatch[]): ChinaBatch | null {
+  const wanted = draftCode.trim().toLowerCase();
+  const exact = batches.find((b) => b.code.trim().toLowerCase() === wanted);
+  if (exact) return exact;
+
+  const prefix = `${wanted}-`;
+  const byPrefix = batches.filter((b) => b.code.trim().toLowerCase().startsWith(prefix));
+  if (byPrefix.length === 1) return byPrefix[0];
+
+  const wantedMarkings = normalizedMarkingSet(lines);
+  const noBoxData = batches.filter((b) => !b.lines.some((l) => l.factoryBoxKg > 0 || l.boxLengthM > 0));
+  const bySet = noBoxData.filter((b) => sameMarkingSet(normalizedMarkingSet(b.lines), wantedMarkings));
+  return bySet.length === 1 ? bySet[0] : null;
 }

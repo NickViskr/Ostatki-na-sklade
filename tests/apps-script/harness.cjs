@@ -685,5 +685,8 @@ module.exports = {
   // ---------- Item 81e: box data from the carrier's arrival file and packaging analytics ----------
   chinaLineBoxStats: (...args) => context.chinaLineBoxStats(...args),
   chinaPackagingStats: (...args) => context.chinaPackagingStats(...args),
+  // ---------- Owner, 2026-09-24: ruble equivalents and the borrowed-rate fallback ----------
+  chinaBorrowedRate: (...args) => context.chinaBorrowedRate(...args),
+  chinaRateDateOf: (...args) => context.chinaRateDateOf(...args),
   vm
 };

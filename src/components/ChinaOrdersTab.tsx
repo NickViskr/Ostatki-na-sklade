@@ -11,7 +11,8 @@ import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import {
   CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaFormFromArrival,
-  chinaFormFromFiles, chinaFormToPayload, chinaLevelledIndexes
+  chinaFormFromFiles, chinaFormToPayload, chinaLevelledIndexes, chinaMarkingMatches,
+  chinaMatchArrivalBatch, chinaMatchFinalBatch, chinaRateSourceLabel
 } from '../lib/chinaBatchForm';
 import {
   ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaArrivalFile,
@@ -22,6 +23,12 @@ import { chinaArticleOptions } from '../lib/chinaArticles';
 
 const money = (value: number, currency: string): string =>
   `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+
+/** Item 81f: «после стоимости в валюте указывай стоимость в рублях в скобках» — the rubles are
+ * the script's own figure, never computed here; when it is 0 or missing only the currency
+ * amount is shown, so old data without it renders exactly as before. */
+const moneyWithRub = (value: number, currency: string, rub?: number): string =>
+  rub ? `${money(value, currency)} (${money(rub, '₽')})` : money(value, currency);
 
 const statusColour = (status: string): string => {
   if (status === 'Прибыла') return 'bg-emerald-50 text-emerald-700';
@@ -70,6 +77,20 @@ export const ChinaOrdersTab: React.FC = () => {
   const setLabel = (line: ChinaBatchLine, patch: Partial<LabelDraft>) =>
     setLabels((prev) => ({ ...prev, [line.id]: { ...labelOf(line), ...patch } }));
 
+  // Item 81f, owner check: an article chosen for one line of a marking belongs to the whole
+  // marking — every line of that batch sharing it (case-insensitive, trimmed) gets it too.
+  const setArticleByMarking = (batch: ChinaBatch, line: ChinaBatchLine, article: string) => {
+    const indexes = chinaMarkingMatches(batch.lines, line.marking);
+    setLabels((prev) => {
+      const next = { ...prev };
+      indexes.forEach((i) => {
+        const l = batch.lines[i];
+        next[l.id] = { ...(prev[l.id] || { article: l.article, group: l.group }), article };
+      });
+      return next;
+    });
+  };
+
   const labelsChanged = (batch: ChinaBatch): boolean =>
     batch.lines.some((l) => {
       const draft = labels[l.id];
@@ -104,12 +125,6 @@ export const ChinaOrdersTab: React.FC = () => {
       batchId: batch.id, kind: costKind, amountRub: amount, comment: costComment.trim()
     });
     if (ok) { setCostAmount(''); setCostComment(''); }
-  };
-
-  /** A batch already saved with exactly this code, case-insensitively. */
-  const batchByCode = (code: string): ChinaBatch | null => {
-    const wanted = code.trim().toLowerCase();
-    return batches.find((b) => b.code.trim().toLowerCase() === wanted) || null;
   };
 
   // Item 81c: the owner picks the files the Chinese side sent — the batch file and, beside
@@ -163,18 +178,10 @@ export const ChinaOrdersTab: React.FC = () => {
     let result: { form: ChinaBatchForm; notes: string[]; warnings: string[] };
     if (foundBatches.length > 0) {
       const parsed = foundBatches[0];
-      // The batch's own code — or, failing that, a 'Черновик' left by an arrival file, named
-      // by the code without its last '-N' (NV-0923-4 → NV-0923).
-      const exact = batchByCode(parsed.code);
-      const draftCode = parsed.code.replace(/-\d+$/, '');
-      const draft = exact ? null : batches.find((b) => b.status === 'Черновик' && b.code.trim().toLowerCase() === draftCode.trim().toLowerCase()) || null;
-      result = chinaFormFromFiles(parsed, report, exact || draft);
+      result = chinaFormFromFiles(parsed, report, chinaMatchFinalBatch(parsed.code, parsed.lines, batches));
     } else {
       const parsed = foundArrivals[0];
-      const prefix = `${parsed.draftCode.trim().toLowerCase()}-`;
-      const matches = batches.filter((b) => b.code.trim().toLowerCase() === parsed.draftCode.trim().toLowerCase()
-        || b.code.trim().toLowerCase().startsWith(prefix));
-      result = chinaFormFromArrival(parsed, matches.length === 1 ? matches[0] : null);
+      result = chinaFormFromArrival(parsed, chinaMatchArrivalBatch(parsed.draftCode, parsed.lines, batches));
     }
     setImportForm(result.form);
     setImportNotes(result.notes.concat(problems));
@@ -299,14 +306,14 @@ export const ChinaOrdersTab: React.FC = () => {
               {isOpen && open && (
                 <div className="border-t border-slate-100 p-5 space-y-6">
                   <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 text-sm">
-                    <div><div className="text-xs text-slate-400 uppercase font-bold">Товар</div>{money(batch.goodsCny, '¥')}</div>
-                    <div><div className="text-xs text-slate-400 uppercase font-bold">Доставка по Китаю</div>{money(batch.chinaDeliveryCny, '¥')}</div>
-                    <div><div className="text-xs text-slate-400 uppercase font-bold">Перевозка</div>{money(batch.freightUsd, '$')} → {money(batch.freightCny, '¥')}</div>
+                    <div><div className="text-xs text-slate-400 uppercase font-bold">Товар</div>{moneyWithRub(batch.goodsCny, '¥', batch.goodsRub)}</div>
+                    <div><div className="text-xs text-slate-400 uppercase font-bold">Доставка по Китаю</div>{moneyWithRub(batch.chinaDeliveryCny, '¥', batch.chinaDeliveryRub)}</div>
+                    <div><div className="text-xs text-slate-400 uppercase font-bold">Перевозка</div>{moneyWithRub(batch.freightUsd, '$', batch.freightRub)}</div>
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Расходы РФ</div>{money(batch.rubCosts, '₽')}</div>
                     <div>
                       <div className="text-xs text-slate-400 uppercase font-bold">Курс ₽/¥</div>
                       {batch.rubRate || '—'}
-                      {batch.rubRateSource && <span className="block text-[10px] text-slate-400">{batch.rubRateSource}</span>}
+                      {batch.rubRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.rubRateSource, batch.rubRateFrom || '')}</span>}
                     </div>
                     <div>
                       <div className="text-xs text-slate-400 uppercase font-bold">Коэффициент веса</div>
@@ -396,7 +403,7 @@ export const ChinaOrdersTab: React.FC = () => {
                           {hasBoxData && <th className="py-2 pr-3">Кг/коробка</th>}
                           {hasBoxData && <th className="py-2 pr-3">Кг/шт</th>}
                           {hasBoxData && <th className="py-2 pr-3">Плотность</th>}
-                          <th className="py-2 pr-3">Перевозка ¥</th>
+                          <th className="py-2 pr-3">Перевозка</th>
                           <th className="py-2 pr-3">Расходы РФ ₽</th>
                           <th className="py-2 pr-3">Себестоимость ₽</th>
                           <th className="py-2 pr-3">₽ за штуку</th>
@@ -417,7 +424,7 @@ export const ChinaOrdersTab: React.FC = () => {
                               <td className="py-2 pr-3">{line.boxes}</td>
                               <td className="py-2 pr-3">{line.qty}</td>
                               <td className="py-2 pr-3">{line.priceCny}</td>
-                              <td className="py-2 pr-3">{money(line.sumCny, '¥')}</td>
+                              <td className="py-2 pr-3">{moneyWithRub(line.sumCny, '¥', line.goodsRub)}</td>
                               <td className="py-2 pr-3">
                                 {line.weightKg}
                                 <span className="block text-[10px] text-slate-400">{line.weightSource}</span>
@@ -430,15 +437,17 @@ export const ChinaOrdersTab: React.FC = () => {
                               {hasBoxData && <td className="py-2 pr-3">{line.factoryBoxKg || '—'}</td>}
                               {hasBoxData && <td className="py-2 pr-3">{line.kgPerPiece || '—'}</td>}
                               {hasBoxData && <td className="py-2 pr-3">{line.densityKgM3 ? money(line.densityKgM3, '') : '—'}</td>}
-                              <td className="py-2 pr-3">{money(line.freightShareCny, '¥')}</td>
+                              <td className="py-2 pr-3">
+                                {line.freightShareRub ? money(line.freightShareRub, '₽') : money(line.freightShareCny, '¥')}
+                              </td>
                               <td className="py-2 pr-3">{money(line.rubShare, '₽')}</td>
                               <td className="py-2 pr-3">{money(line.costRub, '₽')}</td>
                               <td className="py-2 pr-3 font-bold">{money(line.unitRub, '₽')}</td>
                               <td className="py-2 pr-3">
                                 <select
-                                  className="px-2 py-1 border border-slate-200 rounded text-sm w-40"
+                                  className="px-2 py-1 border border-slate-200 rounded text-sm min-w-[220px]"
                                   value={draft.article}
-                                  onChange={(e) => setLabel(line, { article: e.target.value })}
+                                  onChange={(e) => setArticleByMarking(batch, line, e.target.value)}
                                 >
                                   <option value="">— выберите артикул —</option>
                                   {chinaArticleOptions(skus, draft.article).map((a) => (

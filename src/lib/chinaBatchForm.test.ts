@@ -4,7 +4,8 @@ import path from 'path';
 import {
   chinaNumber, emptyChinaBatchForm, emptyChinaLine, chinaBatchToForm, chinaFormToPayload,
   chinaFormCounts, chinaGroupIds, chinaLevelledIndexes, chinaArticleConflicts, validateChinaBatchForm, chinaFilledLines,
-  chinaFormFromFiles, chinaFormFromArrival, ChinaBatchForm
+  chinaFormFromFiles, chinaFormFromArrival, ChinaBatchForm, chinaMatchFinalBatch, chinaMatchArrivalBatch,
+  chinaMarkingMatches, chinaRateSourceLabel
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
@@ -461,6 +462,39 @@ describe('подключение модуля «Заказы в Китае»', (
     expect(tab).toContain('batch.packagingShareFreight');
     expect(tab).toContain('batch.goodsFreightShareCost');
   });
+
+  it('item 81f: a picked file is matched to a saved batch by the pure, tested rule, not guessed inline', () => {
+    expect(tab).toContain('chinaMatchFinalBatch(parsed.code, parsed.lines, batches)');
+    expect(tab).toContain('chinaMatchArrivalBatch(parsed.draftCode, parsed.lines, batches)');
+  });
+
+  it('item 81f: an article chosen for one line is set on every line of its marking, in the window and the card', () => {
+    expect(tab).toContain('chinaMarkingMatches(batch.lines, line.marking)');
+    expect(modal).toContain('chinaMarkingMatches(f.lines, f.lines[index].marking)');
+    // The select of the card and the window actually CALL the marking-wide setter, not a
+    // one-line one — the helper alone proves nothing if nobody wires it to the control.
+    expect(tab).toContain('onChange={(e) => setArticleByMarking(batch, line, e.target.value)}');
+    expect(modal).toContain('onChange={(e) => setLineArticle(i, e.target.value)}');
+  });
+
+  it('item 81f: the article control is wide enough for a long article to be read whole', () => {
+    expect(tab).toContain('min-w-[220px]');
+    expect(modal).toContain('min-w-[220px]');
+  });
+
+  it('item 81f: every ¥ or $ figure the card shows is followed by its ₽, never computed here', () => {
+    expect(tab).not.toMatch(/goodsCny\s*\*/);
+    expect(tab).not.toMatch(/freightUsd\s*\*/);
+    expect(tab).toContain("moneyWithRub(batch.goodsCny, '¥', batch.goodsRub)");
+    expect(tab).toContain("moneyWithRub(batch.chinaDeliveryCny, '¥', batch.chinaDeliveryRub)");
+    expect(tab).toContain("moneyWithRub(batch.freightUsd, '$', batch.freightRub)");
+    // The ¥ conversion of the dollar freight no longer appears on the screen.
+    expect(tab).not.toContain("money(batch.freightCny, '¥')");
+    expect(tab).toContain('chinaRateSourceLabel(batch.rubRateSource');
+    // moneyWithRub itself shows the currency amount ALONE when the ruble figure is 0/absent —
+    // never a «(0,00 ₽)» tacked on to old data that has none of these fields yet.
+    expect(tab).toContain("rub ? `${money(value, currency)} (${money(rub, '₽')})` : money(value, currency);");
+  });
 });
 
 // Item 81e: the arrival file at the carrier's Yiwu warehouse, before a batch has shipped or
@@ -585,5 +619,133 @@ describe('item 81e: box measurements and the arrival date survive a save', () =>
     expect(form.goodsKg).toBe('');
     expect(form.lines[0].boxLengthM).toBe('');
     expect(form.lines[0].factoryBoxKg).toBe('');
+  });
+});
+
+/**
+ * Item 81f, root cause of the owner's check on 2026-09-24: with the time-zone bug of `chinaXlsx`
+ * still live, the final file's own code (and the draft code an arrival file computes) could be
+ * one day off, so `readFiles`' old, single-pass matching missed the draft it should have
+ * updated and created a second batch instead — losing everything already typed against the
+ * first. These two functions are the whole matching rule now, tried in order, never guessing
+ * past a single candidate.
+ */
+describe('item 81f: which saved batch a final batch file belongs to', () => {
+  it('an exact code wins even over a draft whose markings also match', () => {
+    const exact = makeBatch({ id: 'CB1', code: 'NV-0825-2', status: 'В пути', lines: [makeLine({ marking: 'NV-99' })] });
+    const draft = makeBatch({ id: 'CB2', code: 'NV-0825', status: 'Черновик', lines: [makeLine({ marking: 'NV-99' })] });
+    expect(chinaMatchFinalBatch('NV-0825-2', [{ marking: 'NV-99' }], [exact, draft])).toBe(exact);
+  });
+
+  it('a draft named by the code without its trailing -N', () => {
+    const draft = makeBatch({ id: 'CB2', code: 'NV-0923', status: 'Черновик', lines: [] });
+    const other = makeBatch({ id: 'CB3', code: 'NV-0401', status: 'Черновик', lines: [] });
+    expect(chinaMatchFinalBatch('NV-0923-4', [], [other, draft])).toBe(draft);
+  });
+
+  it('falls back to the set of markings when the code the file states does not point anywhere — the day-early bug', () => {
+    // The arrival file named its draft NV-0922 because of the time-zone bug; the final file's
+    // own code is NV-0923-4, so neither an exact match nor the code-stripped one finds it.
+    const draft = makeBatch({
+      id: 'CB2', code: 'NV-0922', status: 'Черновик',
+      lines: [makeLine({ marking: 'NV-101' }), makeLine({ marking: 'NV-102' })]
+    });
+    const unrelated = makeBatch({ id: 'CB3', code: 'NV-0401', status: 'Черновик', lines: [makeLine({ marking: 'NV-1' })] });
+    const finalLines = [{ marking: 'nv-102' }, { marking: ' NV-101 ' }];
+    expect(chinaMatchFinalBatch('NV-0923-4', finalLines, [unrelated, draft])).toBe(draft);
+  });
+
+  it('two equally matching drafts are ambiguous — no batch id is guessed', () => {
+    const a = makeBatch({ id: 'CB1', code: 'NV-A', status: 'Черновик', lines: [makeLine({ marking: 'NV-1' })] });
+    const b = makeBatch({ id: 'CB2', code: 'NV-B', status: 'Черновик', lines: [makeLine({ marking: 'NV-1' })] });
+    expect(chinaMatchFinalBatch('NV-0923-4', [{ marking: 'NV-1' }], [a, b])).toBeNull();
+  });
+
+  it('a batch already shipped (not a draft) never matches by its markings alone', () => {
+    const shipped = makeBatch({ id: 'CB1', code: 'NV-A', status: 'В пути', lines: [makeLine({ marking: 'NV-1' })] });
+    expect(chinaMatchFinalBatch('NV-0923-4', [{ marking: 'NV-1' }], [shipped])).toBeNull();
+  });
+
+  it('nothing at all matches on a first import', () => {
+    expect(chinaMatchFinalBatch('NV-0923-4', [{ marking: 'NV-1' }], [])).toBeNull();
+  });
+});
+
+describe('item 81f: which saved batch an arrival file belongs to', () => {
+  it('exactly the draft code', () => {
+    const draft = makeBatch({ id: 'CB1', code: 'NV-0923', status: 'Черновик', lines: [] });
+    expect(chinaMatchArrivalBatch('NV-0923', [], [draft])).toBe(draft);
+  });
+
+  it('the one batch shipped under draftCode-N', () => {
+    const shipped = makeBatch({ id: 'CB1', code: 'NV-0923-4', status: 'В пути', lines: [] });
+    const other = makeBatch({ id: 'CB2', code: 'NV-0401-1', status: 'В пути', lines: [] });
+    expect(chinaMatchArrivalBatch('NV-0923', [], [other, shipped])).toBe(shipped);
+  });
+
+  it('two batches shipped under the same prefix are ambiguous', () => {
+    const a = makeBatch({ id: 'CB1', code: 'NV-0923-4', status: 'В пути', lines: [] });
+    const b = makeBatch({ id: 'CB2', code: 'NV-0923-5', status: 'В пути', lines: [] });
+    expect(chinaMatchArrivalBatch('NV-0923', [], [a, b])).toBeNull();
+  });
+
+  it('falls back to the one batch with no box data whose markings are the arrival’s', () => {
+    const noBoxData = makeBatch({ id: 'CB1', code: 'NV-0401-1', status: 'В пути', lines: [makeLine({ marking: 'NV-101' })] });
+    const withBoxData = makeBatch({
+      id: 'CB2', code: 'NV-0917-1', status: 'В пути', lines: [makeLine({ marking: 'NV-999', boxLengthM: 0.3 })]
+    });
+    const arrivalLines = [{ marking: 'NV-101' }];
+    expect(chinaMatchArrivalBatch('NV-0922', arrivalLines, [noBoxData, withBoxData])).toBe(noBoxData);
+  });
+
+  it('a batch that already has box data of its own is never matched by markings alone', () => {
+    const withBoxData = makeBatch({
+      id: 'CB2', code: 'NV-0401-1', status: 'В пути', lines: [makeLine({ marking: 'NV-101', factoryBoxKg: 8.4 })]
+    });
+    expect(chinaMatchArrivalBatch('NV-0922', [{ marking: 'NV-101' }], [withBoxData])).toBeNull();
+  });
+
+  it('two batches with no box data and the same markings are ambiguous', () => {
+    const a = makeBatch({ id: 'CB1', code: 'NV-A', status: 'В пути', lines: [makeLine({ marking: 'NV-101' })] });
+    const b = makeBatch({ id: 'CB2', code: 'NV-B', status: 'В пути', lines: [makeLine({ marking: 'NV-101' })] });
+    expect(chinaMatchArrivalBatch('NV-0922', [{ marking: 'NV-101' }], [a, b])).toBeNull();
+  });
+
+  it('nothing at all matches on a first import', () => {
+    expect(chinaMatchArrivalBatch('NV-0923', [{ marking: 'NV-101' }], [])).toBeNull();
+  });
+});
+
+/**
+ * Item 81f, owner check: «если я присваиваю артикул для маркировки короба, то короба с такой же
+ * маркировкой должны автоматически проставляться указанным артикулом товара».
+ */
+describe('item 81f: an article follows its marking to every line', () => {
+  it('finds every line of the same marking, case-insensitive and trimmed', () => {
+    const lines = [{ marking: 'NV-99' }, { marking: ' nv-99 ' }, { marking: 'NV-98' }];
+    expect(chinaMarkingMatches(lines, 'NV-99')).toEqual([0, 1]);
+  });
+
+  it('an empty marking matches nothing — nobody’s article should spread to a blank row', () => {
+    expect(chinaMarkingMatches([{ marking: '' }, { marking: 'NV-1' }], '')).toEqual([]);
+  });
+
+  it('a marking with no other line of its own matches only itself', () => {
+    expect(chinaMarkingMatches([{ marking: 'NV-1' }, { marking: 'NV-2' }], 'NV-2')).toEqual([1]);
+  });
+});
+
+describe('item 81f: the source of the ₽/¥ rate, in words', () => {
+  it('names the batch a borrowed rate came from', () => {
+    expect(chinaRateSourceLabel('предыдущая партия', 'NV-0825-2')).toBe('курс из партии NV-0825-2');
+  });
+
+  it('leaves every other source as the script wrote it', () => {
+    expect(chinaRateSourceLabel('оплаты', '')).toBe('оплаты');
+    expect(chinaRateSourceLabel('вручную', '')).toBe('вручную');
+  });
+
+  it('with no source batch named, the label is left untranslated rather than saying "из партии "', () => {
+    expect(chinaRateSourceLabel('предыдущая партия', '')).toBe('предыдущая партия');
   });
 });

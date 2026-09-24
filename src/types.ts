@@ -200,6 +200,11 @@ export interface ChinaBatchLine {
   weightSource: string;
   chinaShareCny: number;
   freightShareCny: number;
+  /** Item 81f: the ¥/$ figures above converted to ₽ by the script, so the browser shows both
+   * without computing anything. Absent on data saved before item 81f. */
+  goodsRub?: number;
+  chinaShareRub?: number;
+  freightShareRub?: number;
   rubShare: number;
   costRub: number;
   unitRub: number;
@@ -252,6 +257,11 @@ export interface ChinaBatch {
   status: string;
   goodsCny: number;
   chinaDeliveryCny: number;
+  /** Item 81f: the three lines above converted to ₽ by the script — `freightRub` is 0 when no
+   * rate is known. Absent on data saved before item 81f. */
+  goodsRub?: number;
+  chinaDeliveryRub?: number;
+  freightRub?: number;
   weightKg: number;
   volumeM3: number;
   ratePerKgUsd: number;
@@ -264,8 +274,12 @@ export interface ChinaBatch {
   rubRate: number;
   /** The ₽/¥ rate the owner typed; the fallback when the order has no payments. */
   manualRate: number;
-  /** 'оплаты' when the rate came from the payments of the order, 'вручную' when typed in. */
+  /** 'оплаты' when the rate came from the payments of the order, 'вручную' when typed in,
+   * 'предыдущая партия' when borrowed from another batch of the same order — see `rubRateFrom`. */
   rubRateSource: string;
+  /** Item 81f: the code of the batch `rubRateSource: 'предыдущая партия'` borrowed its rate
+   * from; '' otherwise. Absent on data saved before item 81f. */
+  rubRateFrom?: string;
   /** What the report of the Chinese side says about the order, kept at import time. */
   paidCny: number;
   unpaidCny: number;
