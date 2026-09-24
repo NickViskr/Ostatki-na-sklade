@@ -5,7 +5,8 @@ import {
   chinaNumber, emptyChinaBatchForm, emptyChinaLine, chinaBatchToForm, chinaFormToPayload,
   chinaFormCounts, chinaGroupIds, chinaLevelledIndexes, chinaArticleConflicts, validateChinaBatchForm, chinaFilledLines,
   chinaFormFromFiles, chinaFormFromArrival, ChinaBatchForm, chinaMatchFinalBatch, chinaMatchArrivalBatch,
-  chinaMarkingMatches, chinaRateSourceLabel
+  chinaMarkingMatches, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor, chinaFreightPerKgLabel,
+  chinaTariffRateUnit
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
@@ -495,6 +496,62 @@ describe('подключение модуля «Заказы в Китае»', (
     // never a «(0,00 ₽)» tacked on to old data that has none of these fields yet.
     expect(tab).toContain("rub ? `${money(value, currency)} (${money(rub, '₽')})` : money(value, currency);");
   });
+
+  it('item 82: the payments sentence is worked out by the pure helper, not by payments.length alone', () => {
+    expect(tab).toContain("chinaRateStatusText(batch.rubRateSource, batch.rubRateFrom || '', batch.payments.length)");
+    expect(tab).not.toContain('оплаты не внесены, курс взят вручную');
+  });
+
+  it('item 82: the weight-factor figure is hidden by the same rule the packaging warning uses', () => {
+    expect(tab).toContain('chinaShowWeightFactor(batch.weightFactor, batch.lines)');
+  });
+
+  it('item 82: freight per kilogram is shown against the base the script names, in rubles too', () => {
+    expect(tab).toContain('chinaFreightPerKgLabel(batch.freightPerKgBase');
+    expect(tab).toContain("moneyWithRub(batch.freightPerKgUsd, '$', batch.freightPerKgRub)");
+  });
+
+  it('item 82, owner\'s follow-up: the carrier\'s own tariff is shown too, in its own unit', () => {
+    expect(tab).toContain('chinaTariffRateUnit(batch.tariffBasis)');
+    expect(tab).toContain("moneyWithRub(batch.ratePerKgUsd, `$/${chinaTariffRateUnit(batch.tariffBasis)}`, batch.tariffRub)");
+    expect(tab).toContain('тариф карго:');
+    expect(tab).toContain('реально {chinaFreightPerKgLabel');
+  });
+
+  it('item 82: the packaging-density cell keeps the box-to-pallet order and the arrow style', () => {
+    expect(tab).toContain('Плотность, кг/м³: в коробках фабрики → на паллетах');
+    expect(tab).toContain('{money(batch.goodsDensity, \'\')} → {money(batch.packedDensity, \'\')}');
+  });
+
+  it('item 82: deleting a batch tells the owner it goes to the trash, not that it is gone for good', () => {
+    expect(tab).not.toContain('Отменить это нельзя');
+    expect(tab).toContain('перемещена в корзину');
+    expect(tab).toContain('восстановить в разделе «Удалённое»');
+  });
+});
+
+// Item 82: the trash shows a China batch by its code alone, and restoring one refreshes the
+// China store — which the generic warehouse restore actions know nothing about.
+describe('item 82: a China batch in the trash', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const deleted = read('src/components/DeletedItemsTab.tsx');
+
+  it('has its own type name, icon and a code-only preview', () => {
+    expect(deleted).toContain("case 'ChinaBatch': return 'Партия из Китая';");
+    expect(deleted).toContain("case 'ChinaBatch': return <Container");
+    expect(deleted).toMatch(/if \(type === 'ChinaBatch'\) \{\s*return <span[^>]*>\{parsed\.code\}<\/span>;/);
+  });
+
+  it('never shows the lines of the archived batch, only the code', () => {
+    expect(deleted).not.toContain('parsed.lines');
+    expect(deleted).not.toContain('parsed.batch');
+  });
+
+  it('restoring one calls fetchChinaBatches, so the China tab needs no reload', () => {
+    expect(deleted).toContain('useChinaStore((state) => state.fetchChinaBatches)');
+    expect(deleted).toContain("i.type === 'ChinaBatch'");
+    expect(deleted).toContain('if (restoresChinaBatch) fetchChinaBatches();');
+  });
 });
 
 // Item 81e: the arrival file at the carrier's Yiwu warehouse, before a batch has shipped or
@@ -747,5 +804,120 @@ describe('item 81f: the source of the ₽/¥ rate, in words', () => {
 
   it('with no source batch named, the label is left untranslated rather than saying "из партии "', () => {
     expect(chinaRateSourceLabel('предыдущая партия', '')).toBe('предыдущая партия');
+  });
+});
+
+// Item 82: the sentence under the totals goes by rubRateSource, not by whether payments happen
+// to exist — the owner's 2026-09-24 check found a batch with NO rate at all reading «оплаты не
+// внесены, курс взят вручную», which is a lie: nothing was typed in either.
+describe('item 82: the ₽/¥-rate sentence under the totals', () => {
+  it('no rate at all: warns that nothing is figured in rubles yet', () => {
+    expect(chinaRateStatusText('', '', 0)).toBe(
+      'курс не задан — внесите оплату или впишите курс ₽/¥ в партии, до тех пор суммы в рублях не считаются'
+    );
+  });
+
+  it('an unrecognised source falls back to the same warning, not to a blank string', () => {
+    expect(chinaRateStatusText('чушь', '', 0)).toBe(
+      'курс не задан — внесите оплату или впишите курс ₽/¥ в партии, до тех пор суммы в рублях не считаются'
+    );
+  });
+
+  it('typed by hand', () => {
+    expect(chinaRateStatusText('вручную', '', 5)).toBe('курс вписан вручную');
+  });
+
+  it('borrowed from another batch: names it', () => {
+    expect(chinaRateStatusText('предыдущая партия', 'NV-0825-2', 0)).toBe('предварительный курс из партии NV-0825-2');
+  });
+
+  it('borrowed with no source named: the sentence still holds together', () => {
+    expect(chinaRateStatusText('предыдущая партия', '', 0)).toBe('предварительный курс из партии ');
+  });
+
+  it('from payments: states how many, whatever the count', () => {
+    expect(chinaRateStatusText('оплаты', '', 3)).toBe('в базе оплат по этому заказу: 3');
+  });
+
+  it('from payments, count of zero: still says so rather than warning about no rate', () => {
+    expect(chinaRateStatusText('оплаты', '', 0)).toBe('в базе оплат по этому заказу: 0');
+  });
+
+  it('rubRateFrom is ignored for every source but the borrowed one', () => {
+    expect(chinaRateStatusText('оплаты', 'NV-9', 1)).toBe('в базе оплат по этому заказу: 1');
+    expect(chinaRateStatusText('вручную', 'NV-9', 1)).toBe('курс вписан вручную');
+  });
+});
+
+// Item 82: «Коэффициент веса» restates the packaging block when every line was weighed at
+// arrival or by hand — hide the figure then.
+describe('item 82: when the weight-factor figure earns its place on the card', () => {
+  it('null factor: never shown', () => {
+    expect(chinaShowWeightFactor(null, [{ weightSource: 'паллеты' }])).toBe(false);
+  });
+
+  it('a factor of exactly 0 is not the same as null — still shown if the lines say so', () => {
+    expect(chinaShowWeightFactor(0, [{ weightSource: 'паллеты' }])).toBe(true);
+  });
+
+  it('every line weighed at arrival: hidden, it only restates the packaging block', () => {
+    expect(chinaShowWeightFactor(1.1, [{ weightSource: 'приёмка' }, { weightSource: 'приёмка' }])).toBe(false);
+  });
+
+  it('every line weighed by hand: hidden too', () => {
+    expect(chinaShowWeightFactor(1.1, [{ weightSource: 'вручную' }, { weightSource: 'вручную' }])).toBe(false);
+  });
+
+  it('a mix of приёмка and вручную: still hidden — both count as "known"', () => {
+    expect(chinaShowWeightFactor(1.1, [{ weightSource: 'приёмка' }, { weightSource: 'вручную' }])).toBe(false);
+  });
+
+  it('one line estimated from pallets among known ones: shown — that one line still guesses', () => {
+    expect(chinaShowWeightFactor(1.1, [{ weightSource: 'приёмка' }, { weightSource: 'паллеты' }])).toBe(true);
+  });
+
+  it('no lines at all: vacuously "every line known", so hidden — there is nothing to disagree', () => {
+    expect(chinaShowWeightFactor(1.1, [])).toBe(false);
+  });
+
+  it('every line estimated from pallets: shown', () => {
+    expect(chinaShowWeightFactor(1.1, [{ weightSource: 'паллеты' }, { weightSource: 'паллеты' }])).toBe(true);
+  });
+});
+
+// Item 82: freight per kilogram is billed either on the goods' own weight or on the waybill's —
+// the label must name which, or the figure reads as if it always meant the same kilogram.
+describe('item 82: the label of the per-kilogram freight figure', () => {
+  it('billed on the goods', () => {
+    expect(chinaFreightPerKgLabel('товара')).toBe('за 1 кг товара');
+  });
+
+  it('billed on the waybill', () => {
+    expect(chinaFreightPerKgLabel('накладной')).toBe('за 1 кг по накладной');
+  });
+
+  it('unknown base: no label rather than a wrong guess', () => {
+    expect(chinaFreightPerKgLabel('')).toBe('');
+  });
+
+  it('a value the script never sends is treated the same as unknown', () => {
+    expect(chinaFreightPerKgLabel('чушь')).toBe('');
+  });
+});
+
+// Item 82, owner's follow-up: the waybill's own carro tariff is a different figure from what
+// the batch actually paid per kilogram — «$/кг» normally, «$/м³» on a м³ tariff.
+describe('item 82: the unit of the carrier\'s own tariff', () => {
+  it('billed by weight: кг', () => {
+    expect(chinaTariffRateUnit('кг')).toBe('кг');
+  });
+
+  it('billed by volume: м³', () => {
+    expect(chinaTariffRateUnit('м³')).toBe('м³');
+  });
+
+  it('unknown or empty basis: defaults to кг, the usual case', () => {
+    expect(chinaTariffRateUnit('')).toBe('кг');
+    expect(chinaTariffRateUnit('чушь')).toBe('кг');
   });
 });

@@ -11,8 +11,9 @@ import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import {
   CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaFormFromArrival,
-  chinaFormFromFiles, chinaFormToPayload, chinaLevelledIndexes, chinaMarkingMatches,
-  chinaMatchArrivalBatch, chinaMatchFinalBatch, chinaRateSourceLabel
+  chinaFormFromFiles, chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes, chinaMarkingMatches,
+  chinaMatchArrivalBatch, chinaMatchFinalBatch, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor,
+  chinaTariffRateUnit
 } from '../lib/chinaBatchForm';
 import {
   ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaArrivalFile,
@@ -194,7 +195,7 @@ export const ChinaOrdersTab: React.FC = () => {
     setConfirmDialog({
       show: true,
       title: 'Удалить партию?',
-      message: `Партия ${batch.code} будет удалена вместе со строками товара и расходами. Отменить это нельзя.`,
+      message: `Партия ${batch.code} будет перемещена в корзину вместе со строками товара и расходами. Её можно восстановить в разделе «Удалённое».`,
       onConfirm: async () => {
         setConfirmDialog({ show: false, title: '', message: '', onConfirm: () => {} });
         await deleteChinaBatch(batch.id);
@@ -308,26 +309,43 @@ export const ChinaOrdersTab: React.FC = () => {
                   <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 text-sm">
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Товар</div>{moneyWithRub(batch.goodsCny, '¥', batch.goodsRub)}</div>
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Доставка по Китаю</div>{moneyWithRub(batch.chinaDeliveryCny, '¥', batch.chinaDeliveryRub)}</div>
-                    <div><div className="text-xs text-slate-400 uppercase font-bold">Перевозка</div>{moneyWithRub(batch.freightUsd, '$', batch.freightRub)}</div>
+                    <div>
+                      <div className="text-xs text-slate-400 uppercase font-bold">Перевозка</div>
+                      {moneyWithRub(batch.freightUsd, '$', batch.freightRub)}
+                      {!!batch.ratePerKgUsd && (
+                        <span className="block text-[10px] text-slate-400">
+                          тариф карго: {moneyWithRub(batch.ratePerKgUsd, `$/${chinaTariffRateUnit(batch.tariffBasis)}`, batch.tariffRub)}
+                        </span>
+                      )}
+                      {!!batch.freightPerKgUsd && (
+                        <span className="block text-[10px] text-slate-400">
+                          реально {chinaFreightPerKgLabel(batch.freightPerKgBase || '')}: {moneyWithRub(batch.freightPerKgUsd, '$', batch.freightPerKgRub)}
+                        </span>
+                      )}
+                    </div>
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Расходы РФ</div>{money(batch.rubCosts, '₽')}</div>
                     <div>
                       <div className="text-xs text-slate-400 uppercase font-bold">Курс ₽/¥</div>
                       {batch.rubRate || '—'}
                       {batch.rubRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.rubRateSource, batch.rubRateFrom || '')}</span>}
                     </div>
-                    <div>
-                      <div className="text-xs text-slate-400 uppercase font-bold">Коэффициент веса</div>
-                      {batch.weightFactor === null ? '—' : batch.weightFactor}
-                    </div>
+                    {chinaShowWeightFactor(batch.weightFactor, batch.lines) && (
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Коэффициент веса</div>
+                        {batch.weightFactor}
+                        <span className="block text-[10px] text-slate-400">во сколько раз вес по накладной больше суммы весов строк</span>
+                      </div>
+                    )}
                   </div>
 
                   {(batch.paidCny > 0 || batch.unpaidCny > 0) && (
                     <p className="text-sm text-slate-500">
                       По отчёту китайцев по заказу №{batch.orderNo || '—'}: оплачено {money(batch.paidCny, '¥')}
                       {batch.unpaidCny > 0 && <>, долг {money(batch.unpaidCny, '¥')}</>}
-                      {batch.payments.length > 0
-                        ? <> · в базе оплат по этому заказу: {batch.payments.length}</>
-                        : <> · <span className="text-amber-600">оплаты не внесены, курс взят вручную</span></>}
+                      {' · '}
+                      <span className={batch.rubRateSource ? 'text-slate-500' : 'text-amber-600'}>
+                        {chinaRateStatusText(batch.rubRateSource, batch.rubRateFrom || '', batch.payments.length)}
+                      </span>
                     </p>
                   )}
 
@@ -355,8 +373,8 @@ export const ChinaOrdersTab: React.FC = () => {
                         ) : '—'}
                       </div>
                       <div>
-                        <div className="text-xs text-slate-400 uppercase font-bold">Плотность товара / упаковано</div>
-                        {money(batch.goodsDensity, '')} / {money(batch.packedDensity, '')} кг/м³
+                        <div className="text-xs text-slate-400 uppercase font-bold">Плотность, кг/м³: в коробках фабрики → на паллетах</div>
+                        {money(batch.goodsDensity, '')} → {money(batch.packedDensity, '')}
                       </div>
                       <div>
                         <div className="text-xs text-slate-400 uppercase font-bold">Тариф считается по</div>

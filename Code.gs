@@ -387,11 +387,11 @@ function doPost(e) {
         break;
       case 'restoreArchivedItem':
         assertAdmin(currentUser);
-        result = restoreArchivedItem(payload.archiveId);
+        result = restoreArchivedItem(payload.archiveId, currentUser.username);
         break;
       case 'restoreMultipleArchivedItems':
         assertAdmin(currentUser);
-        result = restoreMultipleArchivedItems(payload.archiveIds);
+        result = restoreMultipleArchivedItems(payload.archiveIds, currentUser.username);
         break;
       case 'hardDeleteArchivedItems':
         assertAdmin(currentUser);
@@ -2924,7 +2924,7 @@ function getArchivedItems() {
   return rows;
 }
 
-function restoreArchivedItem(archiveId) {
+function restoreArchivedItem(archiveId, restoredBy) {
   const ss = getSpreadsheet();
   let sheet = ss.getSheetByName('Удаленное');
   if (!sheet) throw new Error('Нет листа "Удаленное"');
@@ -2970,8 +2970,17 @@ function restoreArchivedItem(archiveId) {
     }
   } else if (type === 'Transaction') {
     restoreTransaction(payload);
+  } else if (type === 'ChinaBatch') {
+    // Owner, 2026-09-24: the module «Заказы в Китае» lives in its OWN spreadsheet —
+    // restoreChinaBatch (ChinaOrders.gs) is the one place that knows how to write the batch
+    // back there. It throws (code already taken) without touching this archive row, and the
+    // deleteRow below is only reached when it did not.
+    if (typeof restoreChinaBatch !== 'function') {
+      throw new Error('Модуль «Заказы в Китае» недоступен: нет функции restoreChinaBatch');
+    }
+    restoreChinaBatch(payload, restoredBy);
   }
-  
+
   sheet.deleteRow(rowIndex);
   return { status: 'ok' };
 }
@@ -3278,15 +3287,15 @@ function deleteMultipleTransactions(ids, deletedBy) {
   return { stock: getStock(), transactions: getTransactions().rows };
 }
 
-function restoreMultipleArchivedItems(archiveIds) {
+function restoreMultipleArchivedItems(archiveIds, restoredBy) {
   if (!archiveIds || archiveIds.length === 0) return { stock: getStock(), archived: getArchivedItems(), transactions: getTransactions().rows };
-  
+
   const ss = getSpreadsheet();
   const spreadsheetId = ss.getId();
-  
+
   const archiveSheet = getSheetByNameRobust(ss, 'Удаленное');
   if (!archiveSheet) throw new Error('Список удаленных не найден.');
-  
+
   const archiveSheetId = archiveSheet.getSheetId();
   const archiveDataAll = archiveSheet.getDataRange().getValues();
 
@@ -3294,7 +3303,31 @@ function restoreMultipleArchivedItems(archiveIds) {
   let rowsToDeleteFromArchive = [];
   let transactionsToRestore = [];
   let duplicatesCount = 0;
-  
+  let chinaRestored = 0;
+  let chinaErrors = [];
+
+  // Owner, 2026-09-24: a 'ChinaBatch' has nothing in common with a transaction — restore it
+  // row by row through restoreChinaBatch (same path as the single-item restore) BEFORE the
+  // loop below, which assumes every remaining archive row IT touches IS a transaction. An id
+  // taken out of idsSet here never reaches that loop.
+  for (let i = 1; i < archiveDataAll.length; i++) {
+    const archiveId = String(archiveDataAll[i][0]);
+    if (!idsSet.has(archiveId) || String(archiveDataAll[i][1]) !== 'ChinaBatch') continue;
+    idsSet.delete(archiveId);
+    try {
+      if (typeof restoreChinaBatch !== 'function') {
+        throw new Error('Модуль «Заказы в Китае» недоступен: нет функции restoreChinaBatch');
+      }
+      restoreChinaBatch(JSON.parse(String(archiveDataAll[i][3])), restoredBy);
+      rowsToDeleteFromArchive.push(i);
+      chinaRestored++;
+    } catch (e) {
+      // Refused (code already taken) or malformed — the archive row for THIS one stays, same
+      // as the single-item path.
+      chinaErrors.push(errorMessage(e));
+    }
+  }
+
   // 1. Ищем строки в архиве
   for (let i = 1; i < archiveDataAll.length; i++) {
     const archiveId = String(archiveDataAll[i][0]);
@@ -3466,8 +3499,10 @@ function restoreMultipleArchivedItems(archiveIds) {
     stockSheet.getRange(1, 1, stockDataAll.length, Math.max(stockDataAll[0].length, 6)).setValues(stockDataAll);
   }
 
-  if (duplicatesCount > 0 || apiErrors > 0 || warnings.length > 0) {
+  if (duplicatesCount > 0 || apiErrors > 0 || warnings.length > 0 || chinaRestored > 0 || chinaErrors.length > 0) {
      restoreMsg = `Восстановлено: ${transactionsToRestore.length}. `;
+     if (chinaRestored > 0) restoreMsg += `Партий «Заказы в Китае» восстановлено: ${chinaRestored}. `;
+     if (chinaErrors.length > 0) restoreMsg += `Ошибки восстановления партий «Заказы в Китае»: ${chinaErrors.join('; ')}. `;
      if (duplicatesCount > 0) restoreMsg += `Пропущено дубликатов: ${duplicatesCount}. `;
      if (apiErrors > 0) restoreMsg += `Ошибок удаления из архива: ${apiErrors}. `;
      if (warnings.length > 0) restoreMsg += `Предупреждения: ${warnings.join('; ')}.`;

@@ -322,6 +322,46 @@ export function chinaRateSourceLabel(source: string, rubRateFrom: string): strin
   return source === 'предыдущая партия' && rubRateFrom ? `курс из партии ${rubRateFrom}` : source;
 }
 
+/**
+ * Item 82: the sentence under the totals about the ₽/¥ rate, keyed on `rubRateSource` alone —
+ * the old code showed «оплаты не внесены, курс взят вручную» whenever there were no payments,
+ * even for a batch with NO rate at all (`rubRateSource: ''`). Now a batch with payments always
+ * states their count, and every other source gets its own, honest sentence.
+ */
+export function chinaRateStatusText(rubRateSource: string, rubRateFrom: string, paymentsCount: number): string {
+  if (rubRateSource === 'вручную') return 'курс вписан вручную';
+  if (rubRateSource === 'предыдущая партия') return `предварительный курс из партии ${rubRateFrom}`;
+  if (rubRateSource === 'оплаты') return `в базе оплат по этому заказу: ${paymentsCount}`;
+  return 'курс не задан — внесите оплату или впишите курс ₽/¥ в партии, до тех пор суммы в рублях не считаются';
+}
+
+/**
+ * Item 82: «Коэффициент веса» is the waybill weight divided by the sum of the lines' weights.
+ * When every line was weighed at arrival or typed by hand, the figure only restates the
+ * packaging block that already sits below it — hide it then rather than show the same number
+ * twice under two different names.
+ */
+export function chinaShowWeightFactor(weightFactor: number | null, lines: { weightSource: string }[]): boolean {
+  if (weightFactor === null) return false;
+  return !lines.every((l) => l.weightSource === 'приёмка' || l.weightSource === 'вручную');
+}
+
+/** Item 82: which of the batch's own kilograms the carrier's per-kg freight price bills — the
+ * goods as weighed, or the waybill weight; '' when the script could not tell. */
+export function chinaFreightPerKgLabel(base: string): string {
+  if (base === 'товара') return 'за 1 кг товара';
+  if (base === 'накладной') return 'за 1 кг по накладной';
+  return '';
+}
+
+/** Item 82: the unit of the carrier's own carro tariff (`ratePerKgUsd`), as printed on the
+ * waybill — «кг» normally, «м³» when the batch is billed by volume. Not the same figure as
+ * `chinaFreightPerKgLabel`: this one is the carrier's stated rate, the other is what the batch
+ * actually ended up paying per kilogram once packaging is worked in. */
+export function chinaTariffRateUnit(tariffBasis: string): string {
+  return tariffBasis === 'м³' ? 'м³' : 'кг';
+}
+
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** The same refusals the script makes, said before the round trip. */

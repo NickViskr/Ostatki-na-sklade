@@ -3796,6 +3796,9 @@ function withChina() {
   const h = freshHarness();
   h.setChinaSpreadsheet();
   h.setupChinaSpreadsheet();
+  // Owner, 2026-09-24: deleteChinaBatch now archives to «Удаленное» in the MAIN database —
+  // present unconditionally so every existing deletion test still has somewhere to archive to.
+  h.ensureArchiveSheet();
   return h;
 }
 
@@ -4887,8 +4890,11 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
   const lineHead = h.headerRowOf(h.getTargetSheet('Строки партий'));
   check('81e: on an old batch sheet the new columns are appended at the end',
     batchHead.slice(0, PRE_81E_BATCH_HEADERS.length).join('|') === PRE_81E_BATCH_HEADERS.join('|') &&
-    batchHead[batchHead.length - 1] === 'Курс взят из партии',
-    batchHead.slice(-4).join(' | '));
+    // Owner, 2026-09-24: the ruble-equivalents block ends at «Курс взят из партии», followed
+    // by the freight-per-kilogram block this task adds — the sheet's own header order.
+    batchHead[batchHead.length - 5] === 'Курс взят из партии' &&
+    batchHead[batchHead.length - 1] === 'Тариф карго ₽',
+    batchHead.slice(-5).join(' | '));
   check('81e: same for the lines sheet',
     lineHead.slice(0, PRE_81E_LINE_HEADERS.length).join('|') === PRE_81E_LINE_HEADERS.join('|') &&
     lineHead[lineHead.length - 1] === 'Перевозка ₽',
@@ -5095,6 +5101,322 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
   check('81e fixes: a batch with no date of its own takes the latest dated source there is',
     g.rubRateSource === 'предыдущая партия' && g.rubRateFrom === 'NV-F' && g.rubRate === 20,
     g.rubRateSource + ' / ' + g.rubRateFrom);
+})();
+
+// ================= Owner, 2026-09-24: freight per kilogram, and the carrier's own tariff =================
+//
+// freightPerKgUsd/Rub are the REAL cost of moving the goods, per kilogram of GOODS when the
+// arrival file made that known, else per kilogram of the waybill's own total weight.
+// tariffRub is a different number entirely: the carrier's own quoted tariff (Ставка $/кг, off
+// the waybill) simply converted to rubles — what the carrier bills, not what it works out to.
+// NV-0923-4 (real batch, same fixture as item 81e): freightUsd 2645,85 / goodsKg 847 = 3,12 $;
+// at rubRate 12,4 the ₽ figure is freightRub 229 659,78 / 847 = 271,14 ₽. Its own tariff was
+// 2,55 $/кг: 2,55 × 7 (cargoRate) × 12,4 = 221,34 ₽.
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(china923Payload({}), 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+  check('freight/kg: real batch NV-0923-4, base is the goods weight from the arrival file',
+    batch.freightPerKgUsd === 3.12 && batch.freightPerKgRub === 271.14 && batch.freightPerKgBase === 'товара',
+    batch.freightPerKgUsd + ' / ' + batch.freightPerKgRub + ' / ' + batch.freightPerKgBase);
+  check('freight/kg: the carrier\'s own tariff sits next to it, in rubles',
+    batch.tariffRub === 221.34, String(batch.tariffRub));
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+  check('freight/kg: a batch with no box data falls back to the waybill weight',
+    batch.freightPerKgUsd === 2.43 && batch.freightPerKgRub === 211.26 && batch.freightPerKgBase === 'накладной',
+    batch.freightPerKgUsd + ' / ' + batch.freightPerKgRub + ' / ' + batch.freightPerKgBase);
+  check('freight/kg: the carrier\'s tariff, converted at the same rate',
+    batch.tariffRub === 199.64, String(batch.tariffRub)); // 2,3 × 7 × 12,4
+
+  h.saveChinaBatch(batch28Payload({ id: batch.id, rubRate: 0 }), 'Николай');
+  const noRate = h.getChinaBatches().batches[0];
+  check('freight/kg: without a rate the ruble figures are 0 but the dollar figure and base survive',
+    noRate.freightPerKgRub === 0 && noRate.freightPerKgUsd === 2.43 && noRate.freightPerKgBase === 'накладной' &&
+    noRate.tariffRub === 0,
+    noRate.freightPerKgUsd + ' / ' + noRate.freightPerKgRub + ' / ' + noRate.freightPerKgBase + ' / ' + noRate.tariffRub);
+})();
+
+(function () {
+  const h = withChina();
+  const batch = { weightKg: 0, volumeM3: 0, ratePerKgUsd: 0, packingUsd: 0, otherCargoUsd: 0,
+    freightUsd: 100, cargoRate: 7, rubRate: 12.4, chinaDeliveryCny: 0 };
+  const calc = h.chinaBatchCost(batch, [{ boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 1 }], 0, { cargoRateCnyPerUsd: 7 });
+  check('freight/kg: no base at all (no goods weight, no waybill weight) leaves both figures at 0 and the label empty',
+    calc.freightPerKgUsd === 0 && calc.freightPerKgRub === 0 && calc.freightPerKgBase === '',
+    calc.freightPerKgUsd + ' / ' + calc.freightPerKgRub + ' / ' + calc.freightPerKgBase);
+  check('freight/kg: a batch with no rate of its own at all has a zero tariff too — nothing to convert with',
+    calc.tariffRub === 0, String(calc.tariffRub));
+})();
+
+// ================= Owner, 2026-09-24: the trash of «Заказы в Китае» =================
+//
+// A deleted batch no longer vanishes: it is archived whole (its own row, lines and Russian-
+// side costs — payments stay where they are, they are per ORDER) to «Удаленное» in the MAIN
+// database, Type 'ChinaBatch', and the China spreadsheet loses the rows exactly as before. The
+// trash itself shows only the batch's own code (owner, 2026-09-24) — see `rec.data.code` below.
+
+// withChina() already ensures the archive sheet — kept as a separate name here only to mark
+// which tests below are specifically about the trash.
+function withChinaArchive() {
+  return withChina();
+}
+
+// 1) Archiving on delete: shape of DataJSON, and the China sheets are actually emptied.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Разгрузка', amountRub: 6000, comment: 'выгрузка' }, 'Николай');
+  const before = h.getChinaBatches().batches[0];
+
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+
+  check('trash: the China sheets no longer hold the batch, its lines or its costs',
+    h.getChinaBatches().batches.length === 0 &&
+    h.dumpChinaSheet('Строки партий').length === 0 &&
+    h.dumpChinaSheet('Расходы партии').length === 0,
+    String(h.getChinaBatches().batches.length));
+
+  const archive = h.dumpArchive();
+  check('trash: exactly one archive row, of Type ChinaBatch',
+    archive.length === 1 && archive[0].type === 'ChinaBatch', JSON.stringify(archive.map(function (a) { return a.type; })));
+
+  const rec = archive[0];
+  check('trash: the archive row carries the batch\'s own code — what lights up the trash list',
+    rec.data.code === 'NV-0825-2', rec.data.code);
+  check('trash: the batch object is the sheet\'s own header row, ID and cost both intact',
+    rec.data.batch['ID'] === 'CB1' && rec.data.batch['Код партии'] === 'NV-0825-2' &&
+    rec.data.batch['Себестоимость партии ₽'] === before.totalRub,
+    JSON.stringify(rec.data.batch));
+  check('trash: all three lines are archived, keyed by the sheet\'s own headers',
+    rec.data.lines.length === 3 && rec.data.lines[0]['ID'] === 'CB1-1' && rec.data.lines[0]['Маркировка'] === 'NV-99',
+    JSON.stringify(rec.data.lines.map(function (l) { return l['ID']; })));
+  check('trash: the Russian-side cost is archived too',
+    rec.data.costs.length === 1 && rec.data.costs[0]['Тип'] === 'Разгрузка' && rec.data.costs[0]['Сумма ₽'] === 6000,
+    JSON.stringify(rec.data.costs));
+  check('trash: payments are per ORDER, not archived with the batch — none of this JSON is a payment',
+    rec.data.payments === undefined, JSON.stringify(Object.keys(rec.data)));
+})();
+
+// 2) Restore: identical rows back, totals re-costed.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Разгрузка', amountRub: 6000 }, 'Николай');
+  const before = h.getChinaBatches().batches[0];
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+
+  const archiveId = h.dumpArchive()[0].archiveId;
+  const res = h.restoreArchivedItem(archiveId, 'Николай');
+  check('trash: restore reports ok', res.status === 'ok', JSON.stringify(res));
+  check('trash: the archive is emptied by a successful restore', h.dumpArchive().length === 0, String(h.dumpArchive().length));
+
+  const state = h.getChinaBatches();
+  check('trash: exactly one batch is back', state.batches.length === 1, String(state.batches.length));
+  const after = state.batches[0];
+  check('trash: the batch keeps its original ID and code',
+    after.id === 'CB1' && after.code === 'NV-0825-2', after.id + ' / ' + after.code);
+  check('trash: the total is re-costed, matching what it was before deletion',
+    after.totalRub === before.totalRub && after.totalRub > 0, after.totalRub + ' vs ' + before.totalRub);
+  check('trash: every line round-trips exactly, in its original order',
+    JSON.stringify(after.lines.map(function (l) { return { id: l.id, marking: l.marking, qty: l.qty, costRub: l.costRub }; })) ===
+    JSON.stringify(before.lines.map(function (l) { return { id: l.id, marking: l.marking, qty: l.qty, costRub: l.costRub }; })),
+    JSON.stringify(after.lines.map(function (l) { return l.id; })));
+  check('trash: the Russian-side cost is back and still costed into the total',
+    after.costs.length === 1 && after.costs[0].amountRub === 6000, JSON.stringify(after.costs));
+})();
+
+// 3) Restore when the original ID is taken by then: a fresh ID, lines AND costs re-keyed.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch(batch28Payload({}), 'Николай'); // CB1, NV-0825-2
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Разгрузка', amountRub: 1000 }, 'Николай'); // CC1
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+
+  // The id counter resets once CB1 is gone: an unrelated new batch is handed the very same id.
+  h.saveChinaBatch({ orderNo: '27', code: 'NV-0716-3', status: 'Прибыла', shippedAt: '2026-07-17',
+    chinaDeliveryCny: 900, weightKg: 1001.5, volumeM3: 7.41, ratePerKgUsd: 2.3, packingUsd: 135,
+    freightUsd: 2438.45, cargoRate: 7, rubRate: 12.4, lines: batch27Lines() }, 'Николай'); // CB1 again
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Прочее', amountRub: 500 }, 'Николай'); // CC1 again
+
+  const archiveId = h.dumpArchive().find(function (a) { return a.data.code === 'NV-0825-2'; }).archiveId;
+  const res = h.restoreArchivedItem(archiveId, 'Николай');
+  check('trash: restore succeeds even when its own id is taken', res.status === 'ok', JSON.stringify(res));
+
+  const state = h.getChinaBatches();
+  const restored = state.batches.find(function (b) { return b.code === 'NV-0825-2'; });
+  const stayed = state.batches.find(function (b) { return b.code === 'NV-0716-3'; });
+  check('trash: the id stays with the batch that is actually there; the restored one got a fresh id',
+    stayed.id === 'CB1' && restored.id !== 'CB1' && restored.id === 'CB2',
+    'stayed=' + stayed.id + ' restored=' + restored.id);
+  check('trash: its lines are re-keyed under the new id',
+    restored.lines.length === 3 && restored.lines.every(function (l) { return l.id.indexOf(restored.id + '-') === 0; }),
+    JSON.stringify(restored.lines.map(function (l) { return l.id; })));
+  check('trash: its cost is re-keyed too — the live batch already holds a cost of the same original id',
+    restored.costs.length === 1 && stayed.costs.length === 1 &&
+    restored.costs[0].id !== stayed.costs[0].id && restored.costs[0].id === 'CC2',
+    JSON.stringify({ restored: restored.costs.map(function (c) { return c.id; }), stayed: stayed.costs.map(function (c) { return c.id; }) }));
+  check('trash: both batches keep the totals they are supposed to have',
+    restored.totalRub > 0 && stayed.totalRub > 0, restored.totalRub + ' / ' + stayed.totalRub);
+})();
+
+// 3b) A cost id can collide on its OWN, even when the batch's own id is free: 'CC' is one
+// series shared by every batch, so a cost belonging to a DIFFERENT batch can take the exact id
+// an archived cost is trying to come back under.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch({ orderNo: '27', code: 'NV-0716-3', status: 'Прибыла', shippedAt: '2026-07-17',
+    chinaDeliveryCny: 900, weightKg: 1001.5, volumeM3: 7.41, ratePerKgUsd: 2.3, packingUsd: 135,
+    freightUsd: 2438.45, cargoRate: 7, rubRate: 12.4, lines: batch27Lines() }, 'Николай'); // CB1, stays put throughout
+  h.saveChinaBatch(batch28Payload({}), 'Николай'); // CB2, NV-0825-2, to be deleted and restored
+  h.saveChinaBatchCost({ batchId: 'CB2', kind: 'Разгрузка', amountRub: 1000 }, 'Николай'); // CC1
+  h.deleteChinaBatch({ id: 'CB2' }, 'Николай'); // CB2 and its CC1 both leave the live sheets
+
+  // CB1 (unrelated, never deleted) is given a cost of its own — the freed id CC1 is reused.
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Прочее', amountRub: 300 }, 'Николай'); // CC1 again
+
+  const archiveId = h.dumpArchive()[0].archiveId;
+  const res = h.restoreArchivedItem(archiveId, 'Николай');
+  check('trash: restore succeeds even when only a COST id, not the batch id, collides', res.status === 'ok', JSON.stringify(res));
+
+  const state = h.getChinaBatches();
+  const restored = state.batches.find(function (b) { return b.code === 'NV-0825-2'; });
+  const stayed = state.batches.find(function (b) { return b.code === 'NV-0716-3'; });
+  check('trash: the batch keeps its original id — nothing forced it to change',
+    restored.id === 'CB2', restored.id);
+  check('trash: its cost is NOT CC1 — that id belongs to the other batch\'s cost now',
+    restored.costs.length === 1 && stayed.costs.length === 1 &&
+    stayed.costs[0].id === 'CC1' && restored.costs[0].id !== 'CC1' && restored.costs[0].id === 'CC2',
+    JSON.stringify({ restored: restored.costs.map(function (c) { return c.id; }), stayed: stayed.costs.map(function (c) { return c.id; }) }));
+})();
+
+// 4) Restore refused when a batch of the same CODE exists now — the archive row stays.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch(batch28Payload({}), 'Николай'); // CB1, NV-0825-2
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+
+  // A batch of the SAME code exists again by the time somebody tries to restore it.
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+
+  const archiveId = h.dumpArchive()[0].archiveId;
+  let msg = '';
+  try { h.restoreArchivedItem(archiveId, 'Николай'); } catch (e) { msg = e.message; }
+  check('trash: restore is refused when a batch of the same code exists now',
+    msg.indexOf('NV-0825-2') !== -1 && msg.indexOf('существует') !== -1, msg);
+  check('trash: a refused restore leaves the archive row in place',
+    h.dumpArchive().length === 1, String(h.dumpArchive().length));
+  check('trash: a refused restore does not touch the live batch that IS there',
+    h.getChinaBatches().batches.length === 1, String(h.getChinaBatches().batches.length));
+})();
+
+// 5) Multiple restore, through restoreMultipleArchivedItems.
+(function () {
+  const h = withChinaArchive();
+  // restoreMultipleArchivedItems always touches the warehouse's own «Остатки» sheet, even when
+  // every id restored is a ChinaBatch and not a single transaction moves stock.
+  h.setStockSheet([]);
+  h.saveChinaBatch(batch28Payload({}), 'Николай'); // CB1
+  h.saveChinaBatch({ orderNo: '27', code: 'NV-0716-3', status: 'Прибыла', shippedAt: '2026-07-17',
+    chinaDeliveryCny: 900, weightKg: 1001.5, volumeM3: 7.41, ratePerKgUsd: 2.3, packingUsd: 135,
+    freightUsd: 2438.45, cargoRate: 7, rubRate: 12.4, lines: batch27Lines() }, 'Николай'); // CB2
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+  h.deleteChinaBatch({ id: 'CB2' }, 'Николай');
+  check('trash: two batches deleted, two archive rows', h.dumpArchive().length === 2, String(h.dumpArchive().length));
+
+  const ids = h.dumpArchive().map(function (a) { return a.archiveId; });
+  const res = h.restoreMultipleArchivedItems(ids, 'Николай');
+  // partial/message is expected here — it is how a restore REPORTS what happened, not an
+  // error flag; what matters is that no error text made it into the message.
+  check('trash: multiple restore reports success, no errors',
+    (res.message || '').indexOf('Ошиб') === -1, JSON.stringify(res.message || ''));
+  check('trash: both batches are back', h.getChinaBatches().batches.length === 2, String(h.getChinaBatches().batches.length));
+  check('trash: the archive is empty after a full multiple restore', h.dumpArchive().length === 0, String(h.dumpArchive().length));
+})();
+
+// 6) A multiple restore that mixes an ordinary transaction WITH a ChinaBatch — the transaction
+// loop below must never see the batch's row, and vice versa.
+(function () {
+  const h = withChinaArchive();
+  h.ensureTransSheet();
+  h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.commitTransaction([{ article: 'A', quantity: 2, price: 100 }], 'Приход', '', '', 'tester', null, 'op-mix', 0);
+  const trRow = h.getTransactions().rows[0];
+  h.deleteTransaction(trRow.id, 'tester');
+
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+
+  check('trash: one transaction archived, one batch archived', h.dumpArchive().length === 2, String(h.dumpArchive().length));
+  const ids = h.dumpArchive().map(function (a) { return a.archiveId; });
+  const res = h.restoreMultipleArchivedItems(ids, 'Николай');
+  check('trash: a mixed multiple restore brings back both kinds, untangled',
+    h.getChinaBatches().batches.length === 1 && h.getTransactions().rows.some(function (t) { return t.id === trRow.id; }),
+    JSON.stringify(res));
+  check('trash: the archive is empty after the mixed restore', h.dumpArchive().length === 0, String(h.dumpArchive().length));
+})();
+
+// 7) Hard delete from the trash — the existing generic path, proven for the new type too.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+  const archiveId = h.dumpArchive()[0].archiveId;
+  h.hardDeleteArchivedItems([archiveId]);
+  check('trash: hard delete removes the archive row of a ChinaBatch', h.dumpArchive().length === 0, String(h.dumpArchive().length));
+  check('trash: hard delete does not resurrect the batch', h.getChinaBatches().batches.length === 0,
+    String(h.getChinaBatches().batches.length));
+})();
+
+// 8) A borrower is re-costed after the source is deleted AND again after it is restored.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch(batch28Payload({ shippedAt: '2026-08-27' }), 'Николай'); // CB1, source: rate 12.4
+  h.saveChinaBatch({ orderNo: '99', code: 'NV-borrower', status: 'Черновик', shippedAt: '2026-09-01',
+    chinaDeliveryCny: 100, weightKg: 50, volumeM3: 1, ratePerKgUsd: 2, packingUsd: 0, otherCargoUsd: 0,
+    freightUsd: 100, cargoRate: 7, rubRate: 0,
+    lines: [{ marking: 'X', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 10 }] }, 'Николай'); // CB2, borrower
+
+  let borrower = h.getChinaBatches().batches.find(function (b) { return b.code === 'NV-borrower'; });
+  check('trash/borrower: before deletion the borrower borrows the source\'s rate',
+    borrower.rubRateSource === 'предыдущая партия' && borrower.rubRate === 12.4,
+    borrower.rubRateSource + ' ' + borrower.rubRate);
+
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+  borrower = h.getChinaBatches().batches.find(function (b) { return b.code === 'NV-borrower'; });
+  check('trash/borrower: once the source is deleted, the borrower has nothing left to borrow',
+    borrower.rubRateSource === '' && borrower.rubRate === 0, borrower.rubRateSource + ' ' + borrower.rubRate);
+
+  const archiveId = h.dumpArchive()[0].archiveId;
+  h.restoreArchivedItem(archiveId, 'Николай');
+  borrower = h.getChinaBatches().batches.find(function (b) { return b.code === 'NV-borrower'; });
+  check('trash/borrower: restoring the source gives the borrower its rate back',
+    borrower.rubRateSource === 'предыдущая партия' && borrower.rubRate === 12.4 && borrower.rubRateFrom === 'NV-0825-2',
+    borrower.rubRateSource + ' ' + borrower.rubRate + ' ' + borrower.rubRateFrom);
+})();
+
+// 9) An old-header live sheet — made by a version of the module before this task — still
+// restores fine: the missing columns are appended, same as every other write in this module.
+(function () {
+  const h = withChinaArchive();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.deleteChinaBatch({ id: 'CB1' }, 'Николай');
+  const archiveId = h.dumpArchive()[0].archiveId;
+
+  const oldHeaders = h.CHINA_BATCH_HEADERS.slice(0, h.CHINA_BATCH_HEADERS.length - 4);
+  h.setTargetSheet('Партии', [oldHeaders]);
+
+  const res = h.restoreArchivedItem(archiveId, 'Николай');
+  check('trash: an old-header live sheet still restores', res.status === 'ok', JSON.stringify(res));
+  const after = h.getChinaBatches().batches[0];
+  check('trash: the columns missing from the old header row are appended and filled in by the recost',
+    after.freightPerKgUsd === 2.43 && after.freightPerKgBase === 'накладной' && after.tariffRub === 199.64,
+    after.freightPerKgUsd + ' / ' + after.freightPerKgBase + ' / ' + after.tariffRub);
 })();
 
 // ================= Итог =================

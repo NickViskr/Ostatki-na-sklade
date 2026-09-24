@@ -59,7 +59,13 @@ const CHINA_BATCH_HEADERS = [
   'Доля упаковки в перевозке, %', 'Доля упаковки в себестоимости, %', 'Доля перевозки товара в себестоимости, %',
   // Owner, 2026-09-24: ruble equivalents of the three currency figures, and where a borrowed
   // rate came from — see chinaWithPaymentRate / chinaBorrowedRate.
-  'Товар ₽', 'Доставка по Китаю ₽', 'Перевозка ₽', 'Курс взят из партии'
+  'Товар ₽', 'Доставка по Китаю ₽', 'Перевозка ₽', 'Курс взят из партии',
+  // Owner, 2026-09-24: what one kilogram of freight cost — see the tail of chinaBatchCost.
+  'Перевозка за 1 кг $', 'Перевозка за 1 кг ₽', 'Перевозка за 1 кг считается от',
+  // Owner, 2026-09-24: the carrier's OWN tariff (Ставка $/кг, from the waybill) converted to
+  // rubles, next to the real per-kilogram cost above — the two are meant to be read side by
+  // side, one is what the carrier bills, the other what the goods actually cost.
+  'Тариф карго ₽'
 ];
 
 const CHINA_LINE_HEADERS = [
@@ -309,7 +315,15 @@ function chinaBatchFromRow(r) {
     goodsRub: parseNumber(r['Товар ₽']),
     chinaDeliveryRub: parseNumber(r['Доставка по Китаю ₽']),
     freightRub: parseNumber(r['Перевозка ₽']),
-    rubRateFrom: String(r['Курс взят из партии'] || '').trim()
+    rubRateFrom: String(r['Курс взят из партии'] || '').trim(),
+    // Owner, 2026-09-24: what one kilogram of freight cost — chinaBatchCost's own figure,
+    // read back plainly here same as the rest of the derived batch columns.
+    freightPerKgUsd: parseNumber(r['Перевозка за 1 кг $']),
+    freightPerKgRub: parseNumber(r['Перевозка за 1 кг ₽']),
+    freightPerKgBase: String(r['Перевозка за 1 кг считается от'] || '').trim(),
+    // Owner, 2026-09-24: the carrier's own tariff (Ставка $/кг) in rubles — same read-back
+    // pattern as everything else chinaBatchCost derives.
+    tariffRub: parseNumber(r['Тариф карго ₽'])
   };
 }
 
@@ -811,6 +825,20 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
   const packaging = chinaPackagingStats(b, list, boxStats,
     { freightUsd: freightUsd, freightCny: freightCny, cargoRate: cargoRate, rubRate: rubRate, totalRub: totalRub });
 
+  // Owner, 2026-09-24: freight per kilogram. The base is the weight of the GOODS when the
+  // carrier's arrival file made that number known (chinaPackagingStats.goodsKg); otherwise it
+  // falls back to the waybill's own total weight. No base at all (neither known) leaves both
+  // money figures at 0 and the label empty — there is nothing to divide by.
+  const freightBase = packaging.goodsKg > 0 ? packaging.goodsKg : (Number(b.weightKg) || 0);
+  const freightPerKgUsd = freightBase > 0 ? roundToTwo(freightUsd / freightBase) : 0;
+  const freightPerKgRub = freightBase > 0 ? roundToTwo(packaging.freightRub / freightBase) : 0;
+  const freightPerKgBase = freightBase <= 0 ? '' : (packaging.goodsKg > 0 ? 'товара' : 'накладной');
+
+  // Owner, 2026-09-24: the carrier's OWN tariff (Ставка $/кг, straight off the waybill) in
+  // rubles — meant to sit next to freightPerKgRub above so the owner can read the carrier's
+  // bill and the goods' real per-kilogram cost side by side.
+  const tariffRub = rubRate > 0 ? roundToTwo((Number(b.ratePerKgUsd) || 0) * cargoRate * rubRate) : 0;
+
   return {
     lines: out,
     goodsCny: goodsCny,
@@ -841,13 +869,25 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
     // comes straight from chinaPackagingStats — one source, no second formula.
     goodsRub: rubRate > 0 ? roundToTwo(goodsCny * rubRate) : 0,
     chinaDeliveryRub: rubRate > 0 ? roundToTwo(chinaCny * rubRate) : 0,
-    freightRub: packaging.freightRub
+    freightRub: packaging.freightRub,
+    // Owner, 2026-09-24: freight per kilogram of the batch — see the comment above.
+    freightPerKgUsd: freightPerKgUsd,
+    freightPerKgRub: freightPerKgRub,
+    freightPerKgBase: freightPerKgBase,
+    tariffRub: tariffRub
   };
 }
 
 // ---------------------------------------------------------------- writing
 
 function chinaNextId(rows, prefix) {
+  return chinaNextIds(rows, prefix, 1)[0];
+}
+
+// A batch of fresh ids at once — restoring a batch's Russian-side costs (restoreChinaBatch)
+// needs several new 'CC' ids in one go, and asking chinaNextId one at a time would hand out
+// the SAME id repeatedly since the rows it scans have not actually changed yet.
+function chinaNextIds(rows, prefix, count) {
   let max = 0;
   rows.forEach(function (r) {
     const id = String(r['ID'] || '').trim();
@@ -855,7 +895,9 @@ function chinaNextId(rows, prefix) {
     const n = parseInt(id.slice(prefix.length), 10);
     if (!isNaN(n) && n > max) max = n;
   });
-  return prefix + (max + 1);
+  const out = [];
+  for (let i = 1; i <= count; i++) out.push(prefix + (max + i));
+  return out;
 }
 
 function chinaStamp() {
@@ -1108,7 +1150,12 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
     'Товар ₽': calc.goodsRub,
     'Доставка по Китаю ₽': calc.chinaDeliveryRub,
     'Перевозка ₽': calc.freightRub,
-    'Курс взят из партии': batch.rubRateFrom || ''
+    'Курс взят из партии': batch.rubRateFrom || '',
+    // Owner, 2026-09-24: freight per kilogram, and the carrier's own tariff next to it.
+    'Перевозка за 1 кг $': calc.freightPerKgUsd,
+    'Перевозка за 1 кг ₽': calc.freightPerKgRub,
+    'Перевозка за 1 кг считается от': calc.freightPerKgBase,
+    'Тариф карго ₽': calc.tariffRub
   });
 
   let targetRow = 0;
@@ -1189,27 +1236,50 @@ function recalcChinaBatch(ss, batchId, username) {
   return calc;
 }
 
+// A sheet's row, keyed by header text, minus the __row bookkeeping field chinaReadSheet adds —
+// what actually goes into an archive DataJSON or is handed to chinaRowFrom for a fresh write.
+function chinaStripRow(r) {
+  const out = {};
+  Object.keys(r || {}).forEach(function (k) { if (k !== '__row') out[k] = r[k]; });
+  return out;
+}
+
 function deleteChinaBatch(data, username) {
   const id = String((data || {}).id || '').trim();
   if (!id) throw new Error('Не указана партия для удаления');
   const ss = chinaSpreadsheet();
 
   const batchCtx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
-  let targetRow = 0;
-  batchCtx.rows.forEach(function (r) { if (String(r['ID']).trim() === id) targetRow = r.__row; });
+  let targetRow = 0, batchRecord = null;
+  batchCtx.rows.forEach(function (r) { if (String(r['ID']).trim() === id) { targetRow = r.__row; batchRecord = r; } });
   if (!targetRow) throw new Error('Партия ' + id + ' не найдена');
-  batchCtx.sheet.deleteRow(targetRow);
 
   const lineCtx = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS);
+  const removedLines = lineCtx.rows.filter(function (r) { return String(r['ПартияID']).trim() === id; });
   const keptLines = lineCtx.rows
     .filter(function (r) { return String(r['ПартияID']).trim() !== id; })
     .map(function (r) { return chinaRowFrom(lineCtx.headers, r); });
-  chinaWriteSheet(lineCtx.sheet, lineCtx.headers, keptLines);
 
   const costCtx = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS);
+  const removedCosts = costCtx.rows.filter(function (r) { return String(r['ПартияID']).trim() === id; });
   const keptCosts = costCtx.rows
     .filter(function (r) { return String(r['ПартияID']).trim() !== id; })
     .map(function (r) { return chinaRowFrom(costCtx.headers, r); });
+
+  // Owner, 2026-09-24: a deleted batch goes to «Удаленное» in the MAIN database, not into the
+  // void — its own row, lines and Russian-side costs, keyed by the sheet's own headers so a
+  // restore can write them back exactly. Payments are per ORDER, not per batch, and stay where
+  // they are. archiveItem lives in Code.gs; the trash lights up with just `code`, one line per
+  // deleted batch, instead of the whole dump (owner, 2026-09-24).
+  archiveItem('ChinaBatch', {
+    code: String((batchRecord && batchRecord['Код партии']) || '').trim(),
+    batch: chinaStripRow(batchRecord),
+    lines: removedLines.map(chinaStripRow),
+    costs: removedCosts.map(chinaStripRow)
+  }, username);
+
+  batchCtx.sheet.deleteRow(targetRow);
+  chinaWriteSheet(lineCtx.sheet, lineCtx.headers, keptLines);
   chinaWriteSheet(costCtx.sheet, costCtx.headers, keptCosts);
 
   // The deleted batch may have been the source of a borrowed rate — its borrowers must not
@@ -1218,6 +1288,79 @@ function deleteChinaBatch(data, username) {
 
   Logger.log('Заказы в Китае: партия ' + id + ' удалена пользователем ' + (username || '—'));
   return getChinaBatches();
+}
+
+/**
+ * Owner, 2026-09-24: the other half of the trash — writes an archived 'ChinaBatch' back into
+ * the module's own spreadsheet. Called from Code.gs's restoreArchivedItem/
+ * restoreMultipleArchivedItems (the archive itself lives in the MAIN database, this module's
+ * spreadsheet does not).
+ *
+ * The batch's own ID survives the round trip untouched UNLESS a batch with that ID exists
+ * again by now (an id the counter has since reused) — then a fresh ID is handed out and the
+ * lines/costs are re-keyed under it, so nothing restored can collide with what is already
+ * there. A batch with the same CODE is refused outright: two batches of the same code is the
+ * exact ambiguity the archive exists to prevent, so the archive row is left in place for the
+ * owner to sort out by hand (the caller must not delete it when this throws).
+ */
+function restoreChinaBatch(payload, username) {
+  const ss = chinaSpreadsheet();
+  const p = payload || {};
+  const originalBatch = p.batch || {};
+  const code = String(originalBatch['Код партии'] || '').trim();
+  if (!code) throw new Error('В архиве повреждена запись партии «Заказы в Китае»: нет кода партии');
+
+  const batchCtx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
+  const codeTaken = batchCtx.rows.some(function (r) { return String(r['Код партии'] || '').trim() === code; });
+  if (codeTaken) {
+    throw new Error('Партия с кодом «' + code + '» уже существует — восстановление отменено');
+  }
+
+  const originalId = String(originalBatch['ID'] || '').trim();
+  const idTaken = originalId !== '' && batchCtx.rows.some(function (r) { return String(r['ID'] || '').trim() === originalId; });
+  const batchId = (originalId && !idTaken) ? originalId : chinaNextId(batchCtx.rows, 'CB');
+  const reKeyed = batchId !== originalId;
+
+  const batchRow = chinaRowFrom(batchCtx.headers, Object.assign({}, originalBatch, { 'ID': batchId }));
+  batchCtx.sheet.appendRow(batchRow);
+
+  // recalcChinaBatch below calls writeChinaBatch, which REWRITES the whole lines sheet under
+  // this batch id and re-derives every line's own id as batchId + '-' + (its position) — same
+  // as any ordinary save. So the id put here is only ever a placeholder; giving it the CORRECT
+  // final shape up front just avoids a pointless intermediate row.
+  const lines = Array.isArray(p.lines) ? p.lines : [];
+  const lineCtx = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS);
+  lines.forEach(function (l, i) {
+    const row = chinaRowFrom(lineCtx.headers, Object.assign({}, l, { 'ID': batchId + '-' + (i + 1), 'ПартияID': batchId }));
+    lineCtx.sheet.appendRow(row);
+  });
+
+  // Costs are NOT rewritten by recalcChinaBatch (only the batch row and its lines are), so
+  // their ids need to be got right HERE. The 'CC' series is global across every batch and
+  // independent of whether the BATCH id conflicted — a cost keeps its original id only when
+  // nothing else has taken it in the meantime; a fresh one is handed out otherwise, checked one
+  // cost at a time so two archived costs can never collide with EACH OTHER either.
+  const costs = Array.isArray(p.costs) ? p.costs : [];
+  const costCtx = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS);
+  const usedCostIds = {};
+  costCtx.rows.forEach(function (r) { usedCostIds[String(r['ID'] || '').trim()] = true; });
+  const knownCostRows = costCtx.rows.slice();
+  costs.forEach(function (c) {
+    const original = String(c['ID'] || '').trim();
+    const costId = (original && !usedCostIds[original]) ? original : chinaNextId(knownCostRows, 'CC');
+    usedCostIds[costId] = true;
+    knownCostRows.push({ 'ID': costId });
+    const row = chinaRowFrom(costCtx.headers, Object.assign({}, c, { 'ID': costId, 'ПартияID': batchId }));
+    costCtx.sheet.appendRow(row);
+  });
+
+  recalcChinaBatch(ss, batchId, username);
+  // The restored batch may itself be a rate SOURCE for other batches that had nothing to
+  // borrow while it was gone.
+  chinaRecostBorrowers(ss, username, [batchId]);
+
+  Logger.log('Заказы в Китае: партия ' + batchId + ' восстановлена из архива пользователем ' + (username || '—'));
+  return { batchId: batchId, reKeyed: reKeyed };
 }
 
 function saveChinaBatchCost(data, username) {

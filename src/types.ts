@@ -262,9 +262,20 @@ export interface ChinaBatch {
   goodsRub?: number;
   chinaDeliveryRub?: number;
   freightRub?: number;
+  /** Item 82: freight per one kilogram of the batch's own goods (or, on `freightPerKgBase:
+   * 'накладной'`, of the waybill weight) — 0 without a rate. Absent on data saved earlier. */
+  freightPerKgUsd?: number;
+  freightPerKgRub?: number;
+  /** 'товара' or 'накладной' — which kilogram the carrier actually bills; '' when unknown. */
+  freightPerKgBase?: string;
   weightKg: number;
   volumeM3: number;
   ratePerKgUsd: number;
+  /** Item 82: `ratePerKgUsd` converted to ₽ by the script — 0 without a rate. Absent on data
+   * saved earlier. The waybill's own carro tariff, as opposed to `freightPerKgUsd/Rub` below,
+   * which is what the batch actually paid per kilogram once packaging and the tariff basis are
+   * worked in. */
+  tariffRub?: number;
   packingUsd: number;
   otherCargoUsd: number;
   freightUsd: number;

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Trash2, RotateCcw, Box, User, History, Archive, Loader2, Calendar, ChevronDown } from 'lucide-react';
+import { Trash2, RotateCcw, Box, User, History, Archive, Loader2, Calendar, ChevronDown, Container } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
+import { useChinaStore } from '../store/useChinaStore';
 import { ConfirmDialog } from './ConfirmDialog';
 
 const pluralizeItems = (n: number): string => {
@@ -26,6 +27,9 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
   
   const handleHardDeleteArchivedItems = useWarehouseStore((state) => state.handleHardDeleteArchivedItems);
   const handleRestoreMultipleArchivedItems = useWarehouseStore((state) => state.handleRestoreMultipleArchivedItems);
+  // Item 82: the China store keeps its own copy of the batches, so restoring a batch out of the
+  // trash must refresh it too — the warehouse restore actions know nothing about that store.
+  const fetchChinaBatches = useChinaStore((state) => state.fetchChinaBatches);
 
   useEffect(() => {
     fetchArchivedItems();
@@ -188,6 +192,7 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
       case 'SKU': return <Box size={20} className="text-emerald-500" />;
       case 'User': return <User size={20} className="text-indigo-500" />;
       case 'Transaction': return <History size={20} className="text-amber-500" />;
+      case 'ChinaBatch': return <Container size={20} className="text-sky-500" />;
       default: return <Archive size={20} className="text-slate-500" />;
     }
   };
@@ -197,6 +202,7 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
       case 'SKU': return 'Товар / SKU';
       case 'User': return 'Пользователь';
       case 'Transaction': return 'Операция / Транзакция';
+      case 'ChinaBatch': return 'Партия из Китая';
       default: return type;
     }
   };
@@ -217,6 +223,11 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
             <span className="text-xs text-slate-500">{parsed.quantity} шт. {parsed.destination ? `на ${parsed.destination}` : ''}</span>
           </div>
         );
+      }
+      // Item 82: only the batch's own code, never its lines — the owner does not want to weed
+      // through товар rows to tell which trashed batch is which.
+      if (type === 'ChinaBatch') {
+        return <span className="font-mono text-sm">{parsed.code}</span>;
       }
       return <span className="text-xs text-slate-400">Сложные данные</span>;
     } catch (e) {
@@ -465,11 +476,15 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
         message="Вы уверены, что хотите восстановить эти данные из архива? Они вернутся в основной раздел."
         onConfirm={async () => {
           if (itemsToRestore) {
+            const restoresChinaBatch = archivedItems.some(
+              (i) => itemsToRestore.includes(i.archiveId) && i.type === 'ChinaBatch'
+            );
             if (itemsToRestore.length === 1) {
               await handleRestoreArchivedItem(itemsToRestore[0]);
             } else {
               await handleRestoreMultipleArchivedItems(itemsToRestore);
             }
+            if (restoresChinaBatch) fetchChinaBatches();
             setItemsToRestore(null);
           }
         }}

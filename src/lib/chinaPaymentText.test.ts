@@ -143,7 +143,9 @@ describe('подключение оплат', () => {
   it('the batch card says where its rate came from and what the report says about the order', () => {
     expect(tab).toContain('batch.rubRateSource');
     expect(tab).toContain('По отчёту китайцев по заказу');
-    expect(tab).toContain('оплаты не внесены, курс взят вручную');
+    // Item 82: the sentence about the rate is worked out by chinaRateStatusText, keyed on
+    // rubRateSource alone — no rate at all is no longer confused with «оплаты не внесены».
+    expect(tab).toContain('chinaRateStatusText(batch.rubRateSource');
     expect(tab).toContain('<ChinaPaymentsCard batches={batches} />');
   });
 });

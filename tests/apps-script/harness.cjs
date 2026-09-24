@@ -539,6 +539,11 @@ module.exports = {
       .filter(r => r.some(v => String(v).trim() !== ''))
       .map(r => ({ archiveId: r[0], type: r[1], deletedAt: r[2], data: JSON.parse(r[3] || '{}'), deletedBy: r[4] }));
   },
+  archiveItem: (...args) => context.archiveItem(...args),
+  getArchivedItems: (...args) => context.getArchivedItems(...args),
+  restoreArchivedItem: (...args) => context.restoreArchivedItem(...args),
+  restoreMultipleArchivedItems: (...args) => context.restoreMultipleArchivedItems(...args),
+  hardDeleteArchivedItems: (...args) => context.hardDeleteArchivedItems(...args),
   // Лист «Транзакции» как есть, В ПОРЯДКЕ СТРОК: getTransactions отдаёт разобранные и
   // отсортированные данные, а для этапа 4 важен именно физический порядок в листе.
   dumpTransSheet() {
@@ -688,5 +693,9 @@ module.exports = {
   // ---------- Owner, 2026-09-24: ruble equivalents and the borrowed-rate fallback ----------
   chinaBorrowedRate: (...args) => context.chinaBorrowedRate(...args),
   chinaRateDateOf: (...args) => context.chinaRateDateOf(...args),
+  // ---------- Owner, 2026-09-24: trash for a deleted batch, and freight per kilogram ----------
+  restoreChinaBatch: (...args) => context.restoreChinaBatch(...args),
+  chinaNextIds: (...args) => context.chinaNextIds(...args),
+  chinaStripRow: (...args) => context.chinaStripRow(...args),
   vm
 };
