@@ -13,9 +13,9 @@ docs, journals, plan entries, commit messages, memory, agent briefs. Existing Ru
 not translated back; files drift to English as they are edited.
 
 ## Secrets — the repository `NickViskr/Ostatki-na-sklade` is PUBLIC
-- No spreadsheet ids, tokens or passwords in `Code.gs` or any committed file. Foreign
-  spreadsheet ids and the KAN MCP token live in Script Properties
-  (`stock_summarySpreadsheetId`, `kan_mcpToken` etc.). KAN is reached ONLY from `Code.gs`
+- No spreadsheet ids, tokens or passwords in `Code.gs`, `ChinaOrders.gs` or any committed file.
+  Foreign spreadsheet ids and the KAN MCP token live in Script Properties
+  (`stock_summarySpreadsheetId`, `china_spreadsheetId`, `kan_mcpToken` etc.). KAN is reached ONLY from `Code.gs`
   (`UrlFetchApp` → `https://kultura-analitiki.ru/mcp/`, JSON-RPC `tools/call`); the token never
   passes through Cloud Run. It is the MCP token, not KAN's separate API token.
 - `.clasp.json` (script id) is git-ignored and exists only on the owner's Mac in `repo/`.
@@ -44,8 +44,11 @@ not translated back; files drift to English as they are edited.
   deploys nothing; the Cloud Build triggers on `main` build two UNRELATED services.
 - Verify a deployment by comparing the served chunks with the local build of the same export
   (scratchpad `norm.py`), then record the revision in the plan, DEVLOG and TEST_LOG.
-- `Code.gs` (bound to «БД Склад»): TWO owner-run commands, ALWAYS from `repo/` — the
-  classifier blocks them for the assistant:
+- The Apps Script project (bound to «БД Склад») is TWO files since item 81: `Code.gs` and
+  `ChinaOrders.gs` (module «Заказы в Китае»); `.claspignore` lets both out and `clasp push`
+  reports three files with the manifest. The stand loads both into one context. Verify BOTH
+  files after a push. TWO owner-run commands, ALWAYS from `repo/` — the classifier blocks them
+  for the assistant:
   `cd "/Users/nikolajvyskrebencev/Ostatki na sklade/repo" && clasp push`
   then `clasp deploy -i AKfycbxRb4HXyqUsqqk1x5ScRgL44O1YUOlmpemCn0AAcIB50Rh5kXKeaNxAWMU2NDZTU4F3 -d "<what>"`.
   Push alone moves HEAD only; the /exec deployment is pinned to a version. Verify with

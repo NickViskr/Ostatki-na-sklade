@@ -327,7 +327,7 @@
 
 ## Очередь дальше — current state (replaced in place, never appended)
 
-Status on 2026-09-22. Full history of revisions, dated notes and defect
+Status on 2026-09-24. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
 - **Items:** 77 of 81 closed. OPEN: 53, 81 (81a–81b deployed; 81c–81d built and reviewed, awaiting Code.gs + Cloud Run). Also 27 (optional) and 37 (deferred: not reproducible on production data).
@@ -345,6 +345,18 @@ dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
   time. Rollback point «before clasp»: version 171.
 - **Checks:** Apps Script stand 616 checks; frontend 862 tests in 39 files; `tsc --noEmit`
   clean; `vite build` passes.
+- **Module «Заказы в Китае» (item 81):** lives in its OWN spreadsheet (Script Property
+  `china_spreadsheetId`, set by the owner 2026-09-22; the id is never in the repository) and in
+  the second script file `ChinaOrders.gs`. The spreadsheet is set up live (five sheets, header rows
+  of 81a — newer columns get appended at the END on first use, which the code now handles). LIVE:
+  81a–81b (Code.gs 184, `sklad-00080-8hk`). BUILT AND REVIEWED, NOT DEPLOYED: 81c (import of the
+  Chinese files) and 81d (payments, ₽/¥ rate per order, article picked from the SKU base) plus the
+  fixes of the 2026-09-24 review, up to commit `13c8213`. NEXT: the owner runs `clasp push` (expect
+  «Pushed 3 files») and `clasp deploy -i`, the assistant verifies with `clasp clone-script` + `cmp`,
+  then Cloud Run on the owner’s «развертывай». OPEN DECISIONS for the owner: automatic matching of
+  his payments to the receipts of the report; a Gemini fallback for a file whose layout changed;
+  whether any article of the SKU base has leading zeros (Google Sheets turns «0012» into 12).
+  Stage 2 (posting an arrived batch onto the warehouse) waits for the owner’s word.
 - **Production contour:** the auto-poll writes to the production DB (Script Property
   `ozon_autoSyncTarget = 'prod'`); the dev-mode toggle switches only the browser to the
   test DB. The assistant checks the app live through the separate admin account «Claude»
