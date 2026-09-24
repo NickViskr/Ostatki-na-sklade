@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { BATCH_FILE_28, BATCH_FILE_27, REPORT_FILE, ChinaSheetGrid } from './chinaFiles.fixture';
+import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE, ChinaSheetGrid } from './chinaFiles.fixture';
 import {
-  detectChinaFile, parseChinaBatchFile, parseChinaReportFile, cargoRateFromNote,
+  detectChinaFile, parseChinaBatchFile, parseChinaArrivalFile, parseChinaReportFile, cargoRateFromNote,
   orderNoFromTicket, chinaFreightOf, chinaOrderOf, ChinaSheets
 } from './chinaFileParse';
 
@@ -22,6 +22,14 @@ describe('какой файл прислали', () => {
     expect(detectChinaFile({ 'Лист1': [['Остатки', 'Артикул'], ['', 'A-1']] })).toBe('unknown');
     expect(parseChinaBatchFile({ 'Лист1': [['ничего']] })).toBeNull();
     expect(parseChinaReportFile({ 'Лист1': [['ничего']] })).toBeNull();
+  });
+
+  it('item 81e: tells the arrival file from the batch file, though both name 货号/装箱数/单毛重', () => {
+    // The 箱单 sheet of a shipped batch has the SAME headers as the arrival file — what tells
+    // them apart is the waybill sheet (体积/重量/单价) that sits beside a batch file only.
+    expect(detectChinaFile(ARRIVAL_FILE_NV0923)).toBe('arrival');
+    expect(detectChinaFile(BATCH_FILE_30)).toBe('batch');
+    expect(parseChinaArrivalFile({ 'Лист1': [['ничего']] })).toBeNull();
   });
 });
 
@@ -91,6 +99,97 @@ describe('файл партии NV-0716-3 (заказ 27)', () => {
     expect(parsed.declaredValueCny).toBe(13950);
     expect(parsed.freightUsd).toBe(2438.45);
     expect(parsed.warnings).toEqual([]);
+  });
+});
+
+describe('файл партии NV-0923-4 (заказ 30)', () => {
+  const parsed = parseChinaBatchFile(BATCH_FILE_30)!;
+
+  it('reads a marking split over two pallets: NV-101 7 boxes then 23 more', () => {
+    expect(parsed.lines.filter((l) => l.marking === 'NV-101').map((l) => l.boxes)).toEqual([7, 23]);
+    expect(parsed.weightKg).toBe(967);
+    expect(parsed.freightUsd).toBe(2645.85);
+    expect(parsed.chinaDeliveryCny).toBe(1000);
+  });
+
+  it('has nothing to complain about in a file nobody edited', () => {
+    expect(parsed.warnings).toEqual([]);
+  });
+});
+
+describe('файл приёмки на складе в Иу (партия NV-0923-4 до отгрузки)', () => {
+  const parsed = parseChinaArrivalFile(ARRIVAL_FILE_NV0923)!;
+
+  it('reads the four markings, before they are packed onto pallets', () => {
+    expect(parsed.lines).toHaveLength(4);
+    expect(parsed.lines[0]).toEqual({
+      marking: 'NV-101', name: '收纳盒', boxes: 30, pcsPerBox: 6, qty: 180,
+      boxLengthM: 0.32, boxWidthM: 0.59, boxHeightM: 0.43, factoryBoxKg: 8.4
+    });
+  });
+
+  it('sums to the 合计 row: 80 boxes, 847 kg, 7,56112 m³', () => {
+    const boxes = parsed.lines.reduce((sum, l) => sum + l.boxes, 0);
+    const kg = parsed.lines.reduce((sum, l) => sum + l.boxes * l.factoryBoxKg, 0);
+    expect(boxes).toBe(80);
+    expect(Math.round(kg * 100) / 100).toBe(847);
+  });
+
+  it('names the draft after the customer and the day it reached the warehouse', () => {
+    expect(parsed.receivedAt).toBe('2026-09-23');
+    expect(parsed.customer).toBe('NV');
+    expect(parsed.draftCode).toBe('NV-0923');
+  });
+
+  it('has nothing to complain about in a file nobody edited', () => {
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it('is empty without a customer marker, keeping the day alone', () => {
+    const noCustomer: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
+    const header = noCustomer['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const custCol = noCustomer['Sheet2'][header].findIndex((c) => String(c).indexOf('客户') !== -1);
+    for (let r = header + 1; r < noCustomer['Sheet2'].length; r++) noCustomer['Sheet2'][r][custCol] = '';
+    const withoutCustomer = parseChinaArrivalFile(noCustomer)!;
+    expect(withoutCustomer.draftCode).toBe('0923');
+  });
+
+  it('says when boxes times pieces-per-box does not match the stated quantity', () => {
+    const sheets: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
+    const header = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const qtyCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('总数量') !== -1);
+    sheets['Sheet2'][header + 2][qtyCol] = 999; // was 180 = 30 * 6
+    const broken = parseChinaArrivalFile(sheets)!;
+    expect(broken.warnings.join(' ')).toContain('коробки на штуки в коробке дают 180 шт, в файле 999 шт');
+  });
+
+  it('says when boxes times the box weight does not match the total weight of the line', () => {
+    const sheets: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
+    const header = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const weightCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('总毛重') !== -1);
+    sheets['Sheet2'][header + 2][weightCol] = 100; // was 252 = 30 * 8.4
+    const broken = parseChinaArrivalFile(sheets)!;
+    expect(broken.warnings.join(' ')).toContain('вес коробок 252 кг, в файле 100 кг');
+  });
+
+  it('says when the lines do not sum to the 合计 row', () => {
+    const sheets: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
+    const totalsRow = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c) === '合计'));
+    const header = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const boxCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('件数') !== -1);
+    sheets['Sheet2'][totalsRow][boxCol] = 999; // was 80
+    const broken = parseChinaArrivalFile(sheets)!;
+    expect(broken.warnings.join(' ')).toContain('Коробки: по строкам 80, в строке "合计" 999');
+  });
+
+  it('says when there is no goods row at all', () => {
+    const sheets: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
+    const header = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const markCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('货号') !== -1);
+    for (let r = header + 1; r < sheets['Sheet2'].length; r++) sheets['Sheet2'][r][markCol] = '';
+    const empty = parseChinaArrivalFile(sheets)!;
+    expect(empty.lines).toHaveLength(0);
+    expect(empty.warnings.join(' ')).toContain('ни одной строки товара');
   });
 });
 

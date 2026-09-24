@@ -90,6 +90,35 @@ export interface ChinaReportPayment {
   cargoRate: number;
 }
 
+/** Item 81e: one marking of the arrival file, before the goods are put on a pallet. */
+export interface ChinaArrivalLine {
+  marking: string;
+  name: string;
+  boxes: number;
+  pcsPerBox: number;
+  qty: number;
+  /** Of ONE factory box, in metres. */
+  boxLengthM: number;
+  boxWidthM: number;
+  boxHeightM: number;
+  /** Gross weight of ONE factory box, in kilograms. */
+  factoryBoxKg: number;
+}
+
+/**
+ * Item 81e: what the carrier's Yiwu warehouse reports on arrival, before the batch is
+ * palletised and shipped — no prices, no batch code, only the goods and the box they came in.
+ */
+export interface ChinaParsedArrival {
+  kind: 'arrival';
+  receivedAt: string;
+  customer: string;
+  /** A batch not yet shipped has no code of its own: `${customer}-${MM}${DD}` of receivedAt. */
+  draftCode: string;
+  lines: ChinaArrivalLine[];
+  warnings: string[];
+}
+
 export interface ChinaParsedReport {
   kind: 'report';
   orders: ChinaReportOrder[];
@@ -165,9 +194,13 @@ const sheetWith = (sheets: ChinaSheets, needles: string[]): ChinaSheetGrid | nul
   return null;
 };
 
-export function detectChinaFile(sheets: ChinaSheets): 'batch' | 'report' | 'unknown' {
+export function detectChinaFile(sheets: ChinaSheets): 'batch' | 'report' | 'arrival' | 'unknown' {
   if (sheetWith(sheets, ['订单号', '汇款金额'])) return 'report';
-  if (sheetWith(sheets, ['货号', '装箱数'])) return 'batch';
+  if (!sheetWith(sheets, ['货号', '装箱数'])) return 'unknown';
+  // The batch file always sits beside a waybill sheet (体积/重量/单价); the arrival file, sent
+  // BEFORE the goods are palletised and shipped, never does.
+  if (sheetWith(sheets, ['体积', '重量', '单价'])) return 'batch';
+  if (sheetWith(sheets, ['货号', '装箱数', '单毛重'])) return 'arrival';
   return 'unknown';
 }
 
@@ -325,6 +358,116 @@ export function parseChinaBatchFile(sheets: ChinaSheets): ChinaParsedBatch | nul
     lines,
     warnings
   };
+}
+
+const MONTH_DAY = /^\d{4}-(\d{2})-(\d{2})$/;
+
+/**
+ * Item 81e: the arrival file — one sheet, a 合计 totals row above the header, the Russian
+ * caption row below it (skipped the same way the batch file's own caption row is), then one
+ * row per marking. No waybill sheet exists beside it: `detectChinaFile` tells the two kinds
+ * of file apart by that, not by a flag inside the file.
+ */
+export function parseChinaArrivalFile(sheets: ChinaSheets): ChinaParsedArrival | null {
+  const detail = sheetWith(sheets, ['货号', '装箱数', '单毛重']);
+  if (!detail) return null;
+
+  const warnings: string[] = [];
+  const head = findHeaderRow(detail, ['货号', '装箱数', '单毛重']);
+  const dRow = detail[head] || [];
+  const col = {
+    date: columnOf(dRow, '入库日期'),
+    customer: columnOf(dRow, '客户'),
+    marking: columnOf(dRow, '货号'),
+    name: columnOf(dRow, '品名'),
+    boxes: columnOf(dRow, '件数'),
+    pcsPerBox: columnOf(dRow, '装箱数'),
+    qty: columnOf(dRow, '总数量'),
+    length: columnOf(dRow, '长'),
+    width: columnOf(dRow, '宽'),
+    height: columnOf(dRow, '高'),
+    volume: columnOf(dRow, '立方'),
+    boxWeight: columnOf(dRow, '单毛重'),
+    totalWeight: columnOf(dRow, '总毛重')
+  };
+
+  const get = (row: (string | number)[], c: number): number => (c === -1 ? 0 : num(row[c]));
+
+  const lines: ChinaArrivalLine[] = [];
+  let customer = '';
+  let receivedAt = '';
+  let sumBoxes = 0;
+  let sumVolume = 0;
+  let sumWeight = 0;
+  for (let r = head + 1; r < detail.length; r++) {
+    const row = detail[r];
+    const joined = row.map((c) => str(c)).join(' ');
+    // The Russian caption row repeats the header in another language.
+    if (joined.indexOf('маркировка') !== -1) continue;
+    const marking = col.marking === -1 ? '' : str(row[col.marking]);
+    if (!marking) continue;
+    const qty = get(row, col.qty);
+    if (qty <= 0) continue;
+
+    const dateText = col.date === -1 ? '' : str(row[col.date]);
+    if (dateText && dateText > receivedAt) receivedAt = dateText;
+    if (!customer && col.customer !== -1) customer = str(row[col.customer]);
+
+    const boxes = get(row, col.boxes);
+    const pcsPerBox = get(row, col.pcsPerBox);
+    const boxLengthM = get(row, col.length);
+    const boxWidthM = get(row, col.width);
+    const boxHeightM = get(row, col.height);
+    const factoryBoxKg = get(row, col.boxWeight);
+    const lineVolume = get(row, col.volume);
+    const lineWeight = get(row, col.totalWeight);
+
+    if (boxes > 0 && pcsPerBox > 0 && boxes * pcsPerBox !== qty) {
+      warnings.push(`${marking}: коробки на штуки в коробке дают ${boxes * pcsPerBox} шт, в файле ${qty} шт`);
+    }
+    if (boxes > 0 && boxLengthM > 0 && boxWidthM > 0 && boxHeightM > 0 && lineVolume > 0) {
+      const expected = boxes * boxLengthM * boxWidthM * boxHeightM;
+      if (Math.abs(expected - lineVolume) > 0.001) {
+        warnings.push(`${marking}: объём по размерам ${round2(expected)} м³, в файле ${lineVolume} м³`);
+      }
+    }
+    if (boxes > 0 && factoryBoxKg > 0 && lineWeight > 0) {
+      const expected = round2(boxes * factoryBoxKg);
+      if (Math.abs(expected - lineWeight) > 0.01) {
+        warnings.push(`${marking}: вес коробок ${expected} кг, в файле ${lineWeight} кг`);
+      }
+    }
+
+    lines.push({ marking, name: col.name === -1 ? '' : str(row[col.name]), boxes, pcsPerBox, qty, boxLengthM, boxWidthM, boxHeightM, factoryBoxKg });
+    sumBoxes += boxes;
+    sumVolume += lineVolume;
+    sumWeight += lineWeight;
+  }
+
+  if (lines.length === 0) warnings.push('В файле не нашлось ни одной строки товара');
+
+  // The 合计 row sits above the header, in the SAME columns as the data rows.
+  const totalRow = detail.slice(0, head).find((row) => row.some((c) => has(c, '合计')));
+  if (totalRow) {
+    const totalBoxes = get(totalRow, col.boxes);
+    const totalVolume = get(totalRow, col.volume);
+    const totalWeight = get(totalRow, col.totalWeight);
+    if (totalBoxes > 0 && Math.abs(totalBoxes - sumBoxes) > 0.01) {
+      warnings.push(`Коробки: по строкам ${sumBoxes}, в строке "合计" ${totalBoxes}`);
+    }
+    if (totalVolume > 0 && Math.abs(totalVolume - sumVolume) > 0.001) {
+      warnings.push(`Объём: по строкам ${round2(sumVolume)} м³, в строке "合计" ${totalVolume} м³`);
+    }
+    if (totalWeight > 0 && Math.abs(totalWeight - sumWeight) > 0.01) {
+      warnings.push(`Вес: по строкам ${sumWeight} кг, в строке "合计" ${totalWeight} кг`);
+    }
+  }
+
+  let draftCode = '';
+  const match = receivedAt.match(MONTH_DAY);
+  if (match) draftCode = customer ? `${customer}-${match[1]}${match[2]}` : `${match[1]}${match[2]}`;
+
+  return { kind: 'arrival', receivedAt, customer, draftCode, lines, warnings };
 }
 
 export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | null {

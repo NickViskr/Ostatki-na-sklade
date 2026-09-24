@@ -9,9 +9,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createRequire } from 'module';
-import { BATCH_FILE_27, BATCH_FILE_28, REPORT_FILE } from './chinaFiles.fixture';
-import { parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
-import { chinaFormFromFiles, chinaFormToPayload, chinaGroupIds } from './chinaBatchForm';
+import { ARRIVAL_FILE_NV0923, BATCH_FILE_27, BATCH_FILE_28, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
+import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
+import { chinaBatchToForm, chinaFormFromArrival, chinaFormFromFiles, chinaFormToPayload, chinaGroupIds } from './chinaBatchForm';
 import { ChinaBatch } from '../types';
 
 const require = createRequire(import.meta.url);
@@ -113,5 +113,131 @@ describe('экран и скрипт считают одинаковые тов�
     cases.forEach((lines) => {
       expect(chinaGroupIds(lines)).toEqual(stand.chinaGroupIds(lines));
     });
+  });
+});
+
+/**
+ * Item 81e: the arrival file — one marking of the arrival split into two lines of the final
+ * batch (NV-101: 7 and 23 boxes), each factory-weighed on its own. The numbers below were
+ * worked out independently in Python from the same fixtures before this test was written.
+ */
+describe('партия из файлов китайцев — приёмка на складе перед отправкой', () => {
+  const importArrival = (stand: any, existing: ChinaBatch | null) => {
+    const parsed = parseChinaArrivalFile(ARRIVAL_FILE_NV0923)!;
+    const { form } = chinaFormFromArrival(parsed, existing);
+    return stand.saveChinaBatch(chinaFormToPayload(form), 'Николай');
+  };
+
+  const finalLineOrder = ['NV-101', 'NV-104', 'NV-103', 'NV-104', 'NV-101', 'NV-102', 'NV-102'];
+  const finalBoxesOrder = [7, 9, 15, 1, 23, 1, 24];
+  const factoryBoxKgOf: Record<string, number> = { 'NV-101': 8.4, 'NV-102': 8.2, 'NV-103': 15.6, 'NV-104': 15.6 };
+
+  const assertFinalBatch = (batch: any) => {
+    expect(batch.code).toBe('NV-0923-4');
+    expect(batch.lines).toHaveLength(7);
+    expect(batch.lines.map((l: any) => l.marking)).toEqual(finalLineOrder);
+    expect(batch.lines.map((l: any) => l.boxes)).toEqual(finalBoxesOrder);
+    expect(batch.lines.every((l: any, i: number) => l.factoryBoxKg === factoryBoxKgOf[finalLineOrder[i]])).toBe(true);
+    expect(batch.lines.every((l: any) => l.weightSource === 'приёмка')).toBe(true);
+
+    expect(batch.goodsKg).toBe(847);
+    expect(batch.packagingKg).toBe(120);
+    expect(batch.goodsVolumeM3).toBe(7.5611);
+    expect(batch.packagingM3).toBe(1.5789);
+    expect(batch.goodsDensity).toBe(112.02);
+    expect(batch.packedDensity).toBe(105.8);
+    expect(batch.tariffBasis).toBe('кг');
+    expect(batch.packagingUsd).toBe(486);
+    expect(batch.goodsFreightUsd).toBe(2159.85);
+    expect(batch.packagingShareFreight).toBe(18.37);
+    expect(batch.packagingRub).toBe(42184.8);
+    expect(batch.goodsFreightRub).toBe(187474.98);
+    expect(batch.totalRub).toBe(397307.79);
+    expect(batch.packagingShareCost).toBe(10.62);
+    expect(batch.goodsFreightShareCost).toBe(47.19);
+
+    expect(batch.lines.map((l: any) => l.freightShareCny)).toEqual([1285.75, 3070.06, 5116.77, 341.12, 4224.61, 179.31, 4303.33]);
+    const sumOfLineCosts = batch.lines.reduce((s: number, l: any) => Math.round((s + l.costRub) * 100) / 100, 0);
+    expect(sumOfLineCosts).toBe(batch.totalRub);
+    // Both NV-101 lines (idx 0 and 4) are one product: the cost per piece is levelled equal.
+    expect(batch.lines[0].unitRub).toBe(batch.lines[4].unitRub);
+  };
+
+  it('order A: an arrival draft, the owner\'s articles, then the final file over the same batch', () => {
+    const stand = freshStand();
+
+    // 1. Arrival file lands as a fresh 'Черновик', named after the customer and the date.
+    const draftState = importArrival(stand, null);
+    let draft = draftState.batches[0];
+    expect(draft.code).toBe('NV-0923');
+    expect(draft.status).toBe('Черновик');
+    expect(draft.receivedAt).toBe('2026-09-23');
+    expect(draft.lines).toHaveLength(4);
+
+    // 2. The owner opens the draft, types the articles by marking, and saves through the
+    // same path the modal form uses.
+    const articleByMarking: Record<string, string> = { 'NV-101': 'ART-101', 'NV-102': 'ART-102', 'NV-103': 'ART-103', 'NV-104': 'ART-104' };
+    const editForm = chinaBatchToForm(draft);
+    editForm.lines = editForm.lines.map((l) => ({ ...l, article: articleByMarking[l.marking] || l.article }));
+    const labelledState = stand.saveChinaBatch(chinaFormToPayload(editForm), 'Николай');
+    draft = labelledState.batches[0];
+    expect(draft.lines.every((l: any) => l.article === articleByMarking[l.marking])).toBe(true);
+    expect(draft.lines.every((l: any) => l.factoryBoxKg === factoryBoxKgOf[l.marking])).toBe(true);
+
+    // 3. The final file + report is matched to the draft by 'NV-0923-4'.replace(/-\d+$/, '') === 'NV-0923'.
+    const parsedFinal = parseChinaBatchFile(BATCH_FILE_30)!;
+    const { form: finalForm } = chinaFormFromFiles(parsedFinal, report, draft);
+    finalForm.rubRate = '12,4';
+    const finalState = stand.saveChinaBatch(chinaFormToPayload(finalForm), 'Николай');
+    const batch = finalState.batches[0];
+
+    expect(batch.id).toBe(draft.id);
+    expect(batch.orderNo).toBe('30');
+    expect(batch.lines.every((l: any) => l.article === articleByMarking[l.marking])).toBe(true);
+    assertFinalBatch(batch);
+  });
+
+  it('order B: the final file first, then the arrival file fills the box data by marking', () => {
+    const stand = freshStand();
+
+    // 1. The final file + report, with no draft to match — a batch of its own.
+    const parsedFinal = parseChinaBatchFile(BATCH_FILE_30)!;
+    const { form: finalForm } = chinaFormFromFiles(parsedFinal, report, null);
+    finalForm.rubRate = '12,4';
+    const firstState = stand.saveChinaBatch(chinaFormToPayload(finalForm), 'Николай');
+    const saved = firstState.batches[0];
+    expect(saved.code).toBe('NV-0923-4');
+    expect(saved.lines.every((l: any) => l.factoryBoxKg === 0)).toBe(true);
+
+    // 2. The arrival file, matched by 'NV-0923-4'.startsWith('NV-0923-').
+    const arrivedState = importArrival(stand, saved);
+    const batch = arrivedState.batches[0];
+
+    expect(batch.id).toBe(saved.id);
+    expect(batch.orderNo).toBe('30');
+    // Nothing the final file gave the lines is disturbed by the merge.
+    expect(batch.lines.map((l: any) => l.priceCny)).toEqual([19, 25, 25, 25, 19, 19, 19]);
+    assertFinalBatch(batch);
+  });
+
+  it('a re-save through the edit modal keeps the box data and the receiving date', () => {
+    const stand = freshStand();
+    importArrival(stand, null);
+    const draft = stand.getChinaBatches().batches[0];
+    const parsedFinal = parseChinaBatchFile(BATCH_FILE_30)!;
+    const { form: finalForm } = chinaFormFromFiles(parsedFinal, report, draft);
+    finalForm.rubRate = '12,4';
+    stand.saveChinaBatch(chinaFormToPayload(finalForm), 'Николай');
+    const before = stand.getChinaBatches().batches[0];
+
+    // The owner opens the saved batch in the modal and saves it back untouched.
+    const roundTripForm = chinaBatchToForm(before);
+    const after = stand.saveChinaBatch(chinaFormToPayload(roundTripForm), 'Николай').batches[0];
+
+    expect(after.receivedAt).toBe(before.receivedAt);
+    expect(after.receivedAt).toBe('2026-09-23');
+    expect(after.lines.map((l: any) => l.factoryBoxKg)).toEqual(before.lines.map((l: any) => l.factoryBoxKg));
+    expect(after.lines.map((l: any) => l.boxLengthM)).toEqual(before.lines.map((l: any) => l.boxLengthM));
+    assertFinalBatch(after);
   });
 });

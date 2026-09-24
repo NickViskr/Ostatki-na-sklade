@@ -103,6 +103,10 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
               <span className="text-xs font-bold text-slate-500 uppercase">Дата прибытия</span>
               <input type="date" className={field} value={form.arrivedAt} onChange={(e) => set({ arrivedAt: e.target.value })} />
             </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-500 uppercase">Дата приёмки в Китае</span>
+              <input type="date" className={field} value={form.receivedAt} onChange={(e) => set({ receivedAt: e.target.value })} />
+            </label>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

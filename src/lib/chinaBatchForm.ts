@@ -8,7 +8,7 @@
  */
 
 import { ChinaBatch, ChinaBatchLine } from '../types';
-import { ChinaParsedBatch, ChinaParsedReport, chinaFreightOf, chinaOrderOf } from './chinaFileParse';
+import { ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, chinaFreightOf, chinaOrderOf } from './chinaFileParse';
 
 export interface ChinaLineForm {
   marking: string;
@@ -20,6 +20,16 @@ export interface ChinaLineForm {
   pallet: string;
   palletWeightKg: string;
   boxWeightKg: string;
+  /** Item 81e: dimensions and weight of ONE factory box, from the arrival file. Typed by no one. */
+  boxLengthM: string;
+  boxWidthM: string;
+  boxHeightM: string;
+  factoryBoxKg: string;
+  /** Read-only, worked out by the script: shown, never sent back. */
+  boxVolumeM3: string;
+  goodsKg: string;
+  densityKgM3: string;
+  kgPerPiece: string;
   article: string;
   group: string;
 }
@@ -30,6 +40,8 @@ export interface ChinaBatchForm {
   code: string;
   shippedAt: string;
   arrivedAt: string;
+  /** Item 81e: date the goods reached the carrier's Yiwu warehouse, from the arrival file. */
+  receivedAt: string;
   status: string;
   chinaDeliveryCny: string;
   weightKg: string;
@@ -45,6 +57,21 @@ export interface ChinaBatchForm {
   unpaidCny: string;
   comment: string;
   lines: ChinaLineForm[];
+  /** Item 81e: packaging and carriage — read-only, worked out by the script. */
+  goodsKg: string;
+  goodsVolumeM3: string;
+  packagingKg: string;
+  packagingM3: string;
+  goodsDensity: string;
+  packedDensity: string;
+  tariffBasis: string;
+  packagingUsd: string;
+  goodsFreightUsd: string;
+  packagingRub: string;
+  goodsFreightRub: string;
+  packagingShareFreight: string;
+  packagingShareCost: string;
+  goodsFreightShareCost: string;
 }
 
 export const CHINA_STATUSES = ['Черновик', 'В пути', 'Прибыла'];
@@ -66,16 +93,22 @@ export function chinaNumber(value: string | number): number {
 export function emptyChinaLine(): ChinaLineForm {
   return {
     marking: '', name: '', boxes: '', pcsPerBox: '', qty: '', priceCny: '',
-    pallet: '', palletWeightKg: '', boxWeightKg: '', article: '', group: ''
+    pallet: '', palletWeightKg: '', boxWeightKg: '',
+    boxLengthM: '', boxWidthM: '', boxHeightM: '', factoryBoxKg: '',
+    boxVolumeM3: '', goodsKg: '', densityKgM3: '', kgPerPiece: '',
+    article: '', group: ''
   };
 }
 
 export function emptyChinaBatchForm(): ChinaBatchForm {
   return {
-    id: '', orderNo: '', code: '', shippedAt: '', arrivedAt: '', status: CHINA_STATUSES[0],
+    id: '', orderNo: '', code: '', shippedAt: '', arrivedAt: '', receivedAt: '', status: CHINA_STATUSES[0],
     chinaDeliveryCny: '', weightKg: '', volumeM3: '', ratePerKgUsd: '', packingUsd: '',
     otherCargoUsd: '', freightUsd: '', cargoRate: '', rubRate: '', paidCny: '', unpaidCny: '',
-    comment: '', lines: [emptyChinaLine()]
+    comment: '', lines: [emptyChinaLine()],
+    goodsKg: '', goodsVolumeM3: '', packagingKg: '', packagingM3: '', goodsDensity: '', packedDensity: '',
+    tariffBasis: '', packagingUsd: '', goodsFreightUsd: '', packagingRub: '', goodsFreightRub: '',
+    packagingShareFreight: '', packagingShareCost: '', goodsFreightShareCost: ''
   };
 }
 
@@ -88,6 +121,7 @@ export function chinaBatchToForm(batch: ChinaBatch): ChinaBatchForm {
     code: batch.code,
     shippedAt: batch.shippedAt,
     arrivedAt: batch.arrivedAt,
+    receivedAt: batch.receivedAt || '',
     status: batch.status || CHINA_STATUSES[0],
     chinaDeliveryCny: text(batch.chinaDeliveryCny),
     weightKg: text(batch.weightKg),
@@ -113,9 +147,31 @@ export function chinaBatchToForm(batch: ChinaBatch): ChinaBatchForm {
       pallet: l.pallet,
       palletWeightKg: text(l.palletWeightKg),
       boxWeightKg: text(l.boxWeightKg),
+      boxLengthM: text(l.boxLengthM),
+      boxWidthM: text(l.boxWidthM),
+      boxHeightM: text(l.boxHeightM),
+      factoryBoxKg: text(l.factoryBoxKg),
+      boxVolumeM3: text(l.boxVolumeM3),
+      goodsKg: text(l.goodsKg),
+      densityKgM3: text(l.densityKgM3),
+      kgPerPiece: text(l.kgPerPiece),
       article: l.article,
       group: l.group
-    }))
+    })),
+    goodsKg: text(batch.goodsKg),
+    goodsVolumeM3: text(batch.goodsVolumeM3),
+    packagingKg: text(batch.packagingKg),
+    packagingM3: text(batch.packagingM3),
+    goodsDensity: text(batch.goodsDensity),
+    packedDensity: text(batch.packedDensity),
+    tariffBasis: batch.tariffBasis || '',
+    packagingUsd: text(batch.packagingUsd),
+    goodsFreightUsd: text(batch.goodsFreightUsd),
+    packagingRub: text(batch.packagingRub),
+    goodsFreightRub: text(batch.goodsFreightRub),
+    packagingShareFreight: text(batch.packagingShareFreight),
+    packagingShareCost: text(batch.packagingShareCost),
+    goodsFreightShareCost: text(batch.goodsFreightShareCost)
   };
 }
 
@@ -127,6 +183,7 @@ export function chinaFormToPayload(form: ChinaBatchForm): Record<string, unknown
     code: form.code.trim(),
     shippedAt: form.shippedAt.trim(),
     arrivedAt: form.arrivedAt.trim(),
+    receivedAt: form.receivedAt.trim(),
     status: form.status,
     chinaDeliveryCny: chinaNumber(form.chinaDeliveryCny),
     weightKg: chinaNumber(form.weightKg),
@@ -150,6 +207,10 @@ export function chinaFormToPayload(form: ChinaBatchForm): Record<string, unknown
       pallet: l.pallet.trim(),
       palletWeightKg: chinaNumber(l.palletWeightKg),
       boxWeightKg: chinaNumber(l.boxWeightKg),
+      boxLengthM: chinaNumber(l.boxLengthM),
+      boxWidthM: chinaNumber(l.boxWidthM),
+      boxHeightM: chinaNumber(l.boxHeightM),
+      factoryBoxKg: chinaNumber(l.factoryBoxKg),
       article: l.article.trim(),
       group: l.group.trim()
     }))
@@ -291,6 +352,12 @@ export function chinaFormFromFiles(
   report: ChinaParsedReport | null,
   existing: ChinaBatch | null
 ): ChinaImportResult {
+  // Item 81e, flow c: the final file was matched not to a batch of its OWN code but to a
+  // 'Черновик' left by an arrival file (NV-0923-4 → the draft NV-0923). The code becomes the
+  // final one, the id and the box measurements of the draft stay.
+  const fromDraft = !!existing && existing.status === 'Черновик' &&
+    existing.code.trim().toLowerCase() !== parsed.code.trim().toLowerCase();
+
   const notes: string[] = [];
   const freight = chinaFreightOf(report, parsed.code);
   const orderNoFromReport = freight && freight.orderNo ? freight.orderNo : (existing ? existing.orderNo : '');
@@ -316,13 +383,28 @@ export function chinaFormFromFiles(
     notes.push('Финансовый отчёт не загружен: заказ, дата прибытия и курс ¥/$ не подставлены');
   }
 
-  // Our articles and the markers belong to the owner, not to the file: they travel by marking.
-  const spare = existing ? existing.lines.slice() : [];
-  const carry = (marking: string) => {
-    const at = spare.findIndex((l) => l.marking === marking);
-    if (at === -1) return null;
-    return spare.splice(at, 1)[0];
-  };
+  // Our articles, the markers and the box measurements belong to the owner, not to the file:
+  // they travel by marking, to EVERY line of that marking — a marking of the arrival file can
+  // split into several pallet lines of the final one (item 81e), and each must get its data,
+  // not only the first.
+  const byMarking = new Map<string, ChinaBatchLine>();
+  (existing ? existing.lines : []).forEach((l) => { if (!byMarking.has(l.marking)) byMarking.set(l.marking, l); });
+  const carry = (marking: string) => byMarking.get(marking) || null;
+
+  // Item 81e: warn when the boxes of a marking do not add up the same way in the draft and the
+  // final file — the arrival file may have been counted before a box broke, say.
+  const draftBoxesByMarking = new Map<string, number>();
+  (existing ? existing.lines : []).forEach((l) => draftBoxesByMarking.set(l.marking, (draftBoxesByMarking.get(l.marking) || 0) + l.boxes));
+  const finalBoxesByMarking = new Map<string, number>();
+  parsed.lines.forEach((l) => finalBoxesByMarking.set(l.marking, (finalBoxesByMarking.get(l.marking) || 0) + l.boxes));
+  if (fromDraft) {
+    finalBoxesByMarking.forEach((boxes, marking) => {
+      const draftBoxes = draftBoxesByMarking.get(marking);
+      if (draftBoxes !== undefined && draftBoxes !== boxes) {
+        notes.push(`${marking}: коробок в черновике ${draftBoxes}, в партии ${boxes}`);
+      }
+    });
+  }
 
   const lines: ChinaLineForm[] = parsed.lines.map((line) => {
     const old = carry(line.marking);
@@ -337,17 +419,24 @@ export function chinaFormFromFiles(
       pallet: '',
       palletWeightKg: line.palletWeightKg ? String(line.palletWeightKg) : '',
       boxWeightKg: old && old.boxWeightKg ? String(old.boxWeightKg) : '',
+      boxLengthM: old && old.boxLengthM ? String(old.boxLengthM) : '',
+      boxWidthM: old && old.boxWidthM ? String(old.boxWidthM) : '',
+      boxHeightM: old && old.boxHeightM ? String(old.boxHeightM) : '',
+      factoryBoxKg: old && old.factoryBoxKg ? String(old.factoryBoxKg) : '',
+      boxVolumeM3: '', goodsKg: '', densityKgM3: '', kgPerPiece: '',
       article: old ? old.article : '',
       group: old ? old.group : ''
     };
   });
 
   const form: ChinaBatchForm = {
+    ...emptyChinaBatchForm(),
     id: existing ? existing.id : '',
     orderNo,
     code: parsed.code,
     shippedAt: parsed.shippedAt,
     arrivedAt,
+    receivedAt: existing ? (existing.receivedAt || '') : '',
     status: arrivedAt ? 'Прибыла' : 'В пути',
     chinaDeliveryCny: parsed.chinaDeliveryCny ? String(parsed.chinaDeliveryCny) : '',
     weightKg: parsed.weightKg ? String(parsed.weightKg) : '',
@@ -364,8 +453,81 @@ export function chinaFormFromFiles(
     lines: lines.length > 0 ? lines : [emptyChinaLine()]
   };
 
-  if (existing) notes.push(`Партия ${parsed.code} уже есть в базе — будет обновлена, а не создана заново`);
+  if (fromDraft) {
+    notes.push(`Дополнен черновик ${existing!.code} из данных о приёмке`);
+  } else if (existing) {
+    notes.push(`Партия ${parsed.code} уже есть в базе — будет обновлена, а не создана заново`);
+  }
   if (!form.rubRate) notes.push('Курс ₽/¥ не заполнен: впишите курс, по которому купили юани этой партии');
+
+  return { form, notes, warnings: parsed.warnings.slice() };
+}
+
+/**
+ * Item 81e, flows a and b: the arrival file at the Yiwu warehouse arrives BEFORE the batch is
+ * shipped, so it never carries a batch code of its own — `draftCode` names a new 'Черновик'.
+ * When a batch already sits under that code (or that code plus '-N', once it has shipped and
+ * got its real code), the box measurements are filled into ITS lines by marking instead.
+ */
+export function chinaFormFromArrival(
+  parsed: ChinaParsedArrival,
+  existing: ChinaBatch | null
+): ChinaImportResult {
+  const notes: string[] = [];
+
+  if (!existing) {
+    const lines: ChinaLineForm[] = parsed.lines.map((line) => ({
+      ...emptyChinaLine(),
+      marking: line.marking,
+      name: line.name,
+      boxes: line.boxes ? String(line.boxes) : '',
+      pcsPerBox: line.pcsPerBox ? String(line.pcsPerBox) : '',
+      qty: line.qty ? String(line.qty) : '',
+      boxLengthM: line.boxLengthM ? String(line.boxLengthM) : '',
+      boxWidthM: line.boxWidthM ? String(line.boxWidthM) : '',
+      boxHeightM: line.boxHeightM ? String(line.boxHeightM) : '',
+      factoryBoxKg: line.factoryBoxKg ? String(line.factoryBoxKg) : ''
+    }));
+    const form: ChinaBatchForm = {
+      ...emptyChinaBatchForm(),
+      code: parsed.draftCode,
+      status: 'Черновик',
+      receivedAt: parsed.receivedAt,
+      lines: lines.length > 0 ? lines : [emptyChinaLine()]
+    };
+    notes.push(`Черновик ${parsed.draftCode} создан по данным приёмки в Китае — впишите наши артикулы и сохраните`);
+    return { form, notes, warnings: parsed.warnings.slice() };
+  }
+
+  // The batch file already exists (shipped, or still a draft of its own): fill its lines with
+  // the box measurements BY MARKING, keep everything the owner already entered.
+  const arrivalByMarking = new Map<string, ChinaParsedArrival['lines'][number]>();
+  parsed.lines.forEach((line) => arrivalByMarking.set(line.marking, line));
+  const arrivalBoxesByMarking = new Map<string, number>();
+  parsed.lines.forEach((line) => arrivalBoxesByMarking.set(line.marking, (arrivalBoxesByMarking.get(line.marking) || 0) + line.boxes));
+  const batchBoxesByMarking = new Map<string, number>();
+  existing.lines.forEach((l) => batchBoxesByMarking.set(l.marking, (batchBoxesByMarking.get(l.marking) || 0) + l.boxes));
+  batchBoxesByMarking.forEach((boxes, marking) => {
+    const arrivalBoxes = arrivalBoxesByMarking.get(marking);
+    if (arrivalBoxes !== undefined && arrivalBoxes !== boxes) {
+      notes.push(`${marking}: коробок в приёмке ${arrivalBoxes}, в партии ${boxes}`);
+    }
+  });
+
+  const form = chinaBatchToForm(existing);
+  form.receivedAt = parsed.receivedAt || form.receivedAt;
+  form.lines = form.lines.map((line) => {
+    const a = arrivalByMarking.get(line.marking);
+    if (!a) return line;
+    return {
+      ...line,
+      boxLengthM: a.boxLengthM ? String(a.boxLengthM) : '',
+      boxWidthM: a.boxWidthM ? String(a.boxWidthM) : '',
+      boxHeightM: a.boxHeightM ? String(a.boxHeightM) : '',
+      factoryBoxKg: a.factoryBoxKg ? String(a.factoryBoxKg) : ''
+    };
+  });
+  notes.push(`Партия ${existing.code} дополнена данными приёмки — будет обновлена, а не создана заново`);
 
   return { form, notes, warnings: parsed.warnings.slice() };
 }

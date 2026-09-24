@@ -190,6 +190,12 @@ export interface ChinaBatchLine {
   palletWeightKg: number;
   /** Weight of one box, entered by hand; it beats the estimate taken from the pallets. */
   boxWeightKg: number;
+  /** Item 81e: dimensions of ONE factory box, from the arrival file at the Yiwu warehouse. */
+  boxLengthM: number;
+  boxWidthM: number;
+  boxHeightM: number;
+  /** Gross weight of ONE factory box, from the arrival file — beats the pallet estimate too. */
+  factoryBoxKg: number;
   weightKg: number;
   weightSource: string;
   chinaShareCny: number;
@@ -200,6 +206,12 @@ export interface ChinaBatchLine {
   article: string;
   /** Lines carrying the same marker are one product and are costed as one. */
   group: string;
+  /** boxes * boxLengthM * boxWidthM * boxHeightM; 0 when the box was not measured. */
+  boxVolumeM3: number;
+  /** Weight of the goods of this line: qty pieces at their share of the box weight. */
+  goodsKg: number;
+  densityKgM3: number;
+  kgPerPiece: number;
 }
 
 export interface ChinaBatchCost {
@@ -235,6 +247,8 @@ export interface ChinaBatch {
   code: string;
   shippedAt: string;
   arrivedAt: string;
+  /** Item 81e: date the goods reached the carrier's Yiwu warehouse, from the arrival file. */
+  receivedAt: string;
   status: string;
   goodsCny: number;
   chinaDeliveryCny: number;
@@ -265,4 +279,21 @@ export interface ChinaBatch {
   costs: ChinaBatchCost[];
   /** The payments put against this batch's order. */
   payments: ChinaPayment[];
+  /** Item 81e: packaging and carriage, worked out from the box measurements of the lines. */
+  goodsKg: number;
+  goodsVolumeM3: number;
+  packagingKg: number;
+  packagingM3: number;
+  goodsDensity: number;
+  packedDensity: number;
+  /** 'кг' or 'м³' — whichever the carrier's rate actually bills; '' when unknown. */
+  tariffBasis: string;
+  packagingUsd: number;
+  goodsFreightUsd: number;
+  packagingRub: number;
+  goodsFreightRub: number;
+  /** Share of the freight, and of the whole batch cost, that packaging alone accounts for. */
+  packagingShareFreight: number;
+  packagingShareCost: number;
+  goodsFreightShareCost: number;
 }

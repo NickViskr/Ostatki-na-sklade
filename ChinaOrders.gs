@@ -24,6 +24,15 @@
 // estimate is visibly wrong (one real batch gives 22 kg per box for goods that weigh 11),
 // the owner types the weight of one box himself and that number wins.
 //
+// Item 81e: the carrier's "arrival" file goes further and states, per marking, the dimensions
+// and gross weight of ONE factory box — not an estimate but the box actually weighed. That
+// weight outranks the pallet estimate (it stays below only the owner's own typed weight) and
+// its volume and density are kept on the line. From the same box data the module also works
+// out, per batch, how much of the carrier's weight/volume/money is the GOODS and how much is
+// the carrier's own packaging (pallets, dunnage) — pure analytics that never move a line's cost.
+
+
+//
 // The marking (NV-99, NV-98) is the CARRIER'S and identifies goods inside ONE batch only,
 // so there is no permanent dictionary of markings. Our own article is assigned to a line
 // afterwards and does not take part in the costing.
@@ -42,7 +51,12 @@ const CHINA_BATCH_HEADERS = [
   'Ставка $/кг', 'Упаковка $', 'Прочее карго $', 'Перевозка $', 'Курс ¥/$', 'Перевозка ¥',
   'Расходы РФ ₽', 'Курс ₽/¥', 'Курс вручную', 'Источник курса', 'Себестоимость партии ₽', 'Коэффициент веса',
   'Оплачено по отчёту ¥', 'Долг по отчёту ¥',
-  'Комментарий', 'Кто', 'Обновлено'
+  'Комментарий', 'Кто', 'Обновлено',
+  // Item 81e: the carrier's box data and the packaging analytics it gives.
+  'Дата приёмки', 'Вес товара, кг', 'Объём товара, м³', 'Вес упаковки, кг', 'Объём упаковки, м³',
+  'Плотность товара, кг/м³', 'Плотность в упаковке, кг/м³', 'Тариф за',
+  'Упаковка всего $', 'Перевозка товара $', 'Упаковка ₽', 'Перевозка товара ₽',
+  'Доля упаковки в перевозке, %', 'Доля упаковки в себестоимости, %', 'Доля перевозки товара в себестоимости, %'
 ];
 
 const CHINA_LINE_HEADERS = [
@@ -50,7 +64,10 @@ const CHINA_LINE_HEADERS = [
   'Цена ¥', 'Сумма ¥', 'Паллета', 'Вес паллеты, кг', 'Вес коробки, кг',
   'Вес расчётный, кг', 'Источник веса',
   'Доставка Китай ¥', 'Перевозка ¥', 'Расходы РФ ₽',
-  'Себестоимость ₽', 'Себестоимость ₽/шт', 'Наш артикул', 'Один товар'
+  'Себестоимость ₽', 'Себестоимость ₽/шт', 'Наш артикул', 'Один товар',
+  // Item 81e: one factory box from the carrier's arrival file, and what it works out to.
+  'Длина коробки, м', 'Ширина коробки, м', 'Высота коробки, м', 'Вес коробки фабрики, кг',
+  'Объём коробки, м³', 'Вес товара, кг', 'Плотность, кг/м³', 'Вес 1 шт, кг'
 ];
 
 const CHINA_COST_HEADERS = ['ID', 'ПартияID', 'Дата', 'Тип', 'Сумма ₽', 'Комментарий', 'Кто'];
@@ -262,7 +279,25 @@ function chinaBatchFromRow(r) {
     weightFactor: r['Коэффициент веса'] === '' ? null : parseNumber(r['Коэффициент веса']),
     comment: String(r['Комментарий'] || '').trim(),
     user: String(r['Кто'] || '').trim(),
-    updatedAt: String(r['Обновлено'] || '').trim()
+    updatedAt: String(r['Обновлено'] || '').trim(),
+    // Item 81e: «Дата приёмки» is the only INPUT among the new batch columns; the rest is
+    // chinaPackagingStats, rewritten on every save/recalc — read back here so a plain
+    // getChinaBatches() (no recalc) still answers with the packaging analytics.
+    receivedAt: chinaDateText(r['Дата приёмки'], 'Дата приёмки'),
+    goodsKg: parseNumber(r['Вес товара, кг']),
+    goodsVolumeM3: parseNumber(r['Объём товара, м³']),
+    packagingKg: parseNumber(r['Вес упаковки, кг']),
+    packagingM3: parseNumber(r['Объём упаковки, м³']),
+    goodsDensity: parseNumber(r['Плотность товара, кг/м³']),
+    packedDensity: parseNumber(r['Плотность в упаковке, кг/м³']),
+    tariffBasis: String(r['Тариф за'] || '').trim(),
+    packagingUsd: parseNumber(r['Упаковка всего $']),
+    goodsFreightUsd: parseNumber(r['Перевозка товара $']),
+    packagingRub: parseNumber(r['Упаковка ₽']),
+    goodsFreightRub: parseNumber(r['Перевозка товара ₽']),
+    packagingShareFreight: parseNumber(r['Доля упаковки в перевозке, %']),
+    packagingShareCost: parseNumber(r['Доля упаковки в себестоимости, %']),
+    goodsFreightShareCost: parseNumber(r['Доля перевозки товара в себестоимости, %'])
   };
 }
 
@@ -303,7 +338,18 @@ function chinaLineFromRow(r) {
     costRub: parseNumber(r['Себестоимость ₽']),
     unitRub: parseNumber(r['Себестоимость ₽/шт']),
     article: String(r['Наш артикул'] || '').trim(),
-    group: String(r['Один товар'] || '').trim()
+    group: String(r['Один товар'] || '').trim(),
+    // Item 81e: one factory box, from the arrival file — INPUT, saved as given.
+    boxLengthM: parseNumber(r['Длина коробки, м']),
+    boxWidthM: parseNumber(r['Ширина коробки, м']),
+    boxHeightM: parseNumber(r['Высота коробки, м']),
+    factoryBoxKg: parseNumber(r['Вес коробки фабрики, кг']),
+    // The rest is chinaLineBoxStats, rewritten on every save/recalc — read back here so a
+    // plain getChinaBatches() (no recalc) still answers with the box's own numbers.
+    boxVolumeM3: parseNumber(r['Объём коробки, м³']),
+    goodsKg: parseNumber(r['Вес товара, кг']),
+    densityKgM3: parseNumber(r['Плотность, кг/м³']),
+    kgPerPiece: parseNumber(r['Вес 1 шт, кг'])
   };
 }
 
@@ -483,6 +529,10 @@ function chinaLineWeights(lines, invoiceWeight) {
   const est = lines.map(function (l, i) {
     const manual = Number(l.boxWeightKg) || 0;
     if (manual > 0 && boxes[i] > 0) { sources.push('вручную'); return manual * boxes[i]; }
+    // Item 81e: the carrier's own arrival file weighed one factory box of this marking —
+    // a real weight, so it outranks the pallet estimate below it.
+    const factory = Number(l.factoryBoxKg) || 0;
+    if (factory > 0 && boxes[i] > 0) { sources.push('приёмка'); return factory * boxes[i]; }
     const m = byMark[marks[i]];
     if (m && m.boxes > 0) { sources.push('паллета'); return (m.kg / m.boxes) * boxes[i]; }
     if (avgPerBox > 0) { sources.push('среднее по партии'); return avgPerBox * boxes[i]; }
@@ -556,6 +606,112 @@ function chinaLevelGroups(lines, computed) {
   });
 }
 
+// One factory box of a line, from the carrier's arrival file: its volume, the weight of the
+// goods it holds, its density and the weight of a single piece. Pure — no sheet, no other
+// line, no freight — so it is the same whether the batch is being saved, recalculated or just
+// displayed.
+function chinaLineBoxStats(l) {
+  const line = l || {};
+  const length = Number(line.boxLengthM) || 0;
+  const width = Number(line.boxWidthM) || 0;
+  const height = Number(line.boxHeightM) || 0;
+  const boxVolumeM3 = (length > 0 && width > 0 && height > 0)
+    ? Math.round(length * width * height * 1e6) / 1e6 : 0;
+
+  // Same priority as the freight weight: a weight the owner typed himself beats the one the
+  // carrier's file states for the box.
+  const typed = Number(line.boxWeightKg) || 0;
+  const factory = Number(line.factoryBoxKg) || 0;
+  const boxWeightUsed = typed > 0 ? typed : factory;
+
+  const boxes = Number(line.boxes) || 0;
+  const pcsPerBox = Number(line.pcsPerBox) || 0;
+  const goodsKg = (boxWeightUsed > 0 && boxes > 0) ? roundToTwo(boxWeightUsed * boxes) : 0;
+  const densityKgM3 = (boxWeightUsed > 0 && boxVolumeM3 > 0) ? roundToTwo(boxWeightUsed / boxVolumeM3) : 0;
+  const kgPerPiece = (boxWeightUsed > 0 && pcsPerBox > 0) ? Math.round((boxWeightUsed / pcsPerBox) * 1000) / 1000 : 0;
+
+  return { boxVolumeM3: boxVolumeM3, goodsKg: goodsKg, densityKgM3: densityKgM3, kgPerPiece: kgPerPiece };
+}
+
+/**
+ * Item 81e: what the carrier's own packaging (pallets, dunnage) costs the batch — in weight,
+ * volume, dollars, rubles and share of the total — worked out from the boxes weighed on
+ * arrival against the waybill's own totals. NEVER changes a line's cost: it only explains a
+ * cost that chinaBatchCost already put on the lines through the freight split (a).
+ *
+ * `lineStats` is the array chinaLineBoxStats returned for the same lines, in the same order.
+ * `calc` carries the money chinaBatchCost has already worked out for the batch: freightUsd,
+ * freightCny, cargoRate, rubRate and, once known, totalRub.
+ */
+function chinaPackagingStats(batch, lines, lineStats, calc) {
+  const b = batch || {};
+  const list = lines || [];
+  const stats = lineStats || [];
+  const weightKg = Number(b.weightKg) || 0;
+  const volumeM3 = Number(b.volumeM3) || 0;
+
+  let goodsKgSum = 0, everyKg = list.length > 0;
+  let goodsVolSum = 0, everyVol = list.length > 0;
+  list.forEach(function (l, i) {
+    const s = stats[i] || {};
+    const g = Number(s.goodsKg) || 0;
+    if (g > 0) goodsKgSum += g; else everyKg = false;
+    const boxes = Number(l.boxes) || 0;
+    const bv = Number(s.boxVolumeM3) || 0;
+    if (bv > 0) goodsVolSum += boxes * bv; else everyVol = false;
+  });
+  const goodsKg = everyKg ? roundToTwo(goodsKgSum) : 0;
+  const goodsVolumeM3 = everyVol ? Math.round(goodsVolSum * 10000) / 10000 : 0;
+
+  const packagingKg = (weightKg > 0 && goodsKg > 0) ? roundToTwo(weightKg - goodsKg) : 0;
+  const packagingM3 = (volumeM3 > 0 && goodsVolumeM3 > 0) ? Math.round((volumeM3 - goodsVolumeM3) * 10000) / 10000 : 0;
+  const goodsDensity = (goodsKg > 0 && goodsVolumeM3 > 0) ? roundToTwo(goodsKg / goodsVolumeM3) : 0;
+  const packedDensity = (weightKg > 0 && volumeM3 > 0) ? roundToTwo(weightKg / volumeM3) : 0;
+
+  // What the batch was actually billed for: weight or volume. Real case NV-0617-3 was billed
+  // 310 $ per m³, not per kilogram at all.
+  const ratePerKgUsd = Number(b.ratePerKgUsd) || 0;
+  const packingUsd = Number(b.packingUsd) || 0;
+  const otherCargoUsd = Number(b.otherCargoUsd) || 0;
+  const freightUsd = Number((calc || {}).freightUsd) || 0;
+  const base = roundToTwo(freightUsd - packingUsd - otherCargoUsd);
+  const byKg = roundToTwo(weightKg * ratePerKgUsd);
+  const byM3 = roundToTwo(volumeM3 * ratePerKgUsd);
+  let tariffBasis = '';
+  if (Math.abs(byKg - base) <= 1) tariffBasis = 'кг';
+  else if (Math.abs(byM3 - base) <= 1) tariffBasis = 'м³';
+
+  let packagingUsd = 0;
+  if (tariffBasis === 'кг' && packagingKg > 0) packagingUsd = roundToTwo(packagingKg * ratePerKgUsd + packingUsd);
+  else if (tariffBasis === 'м³' && packagingM3 > 0) packagingUsd = roundToTwo(packagingM3 * ratePerKgUsd + packingUsd);
+
+  const cargoRate = Number((calc || {}).cargoRate) || 0;
+  const rubRate = Number((calc || {}).rubRate) || 0;
+  const freightCny = Number((calc || {}).freightCny) || 0;
+  const freightRub = rubRate > 0 ? roundToTwo(freightCny * rubRate) : 0;
+
+  // Everything below only exists once packagingUsd is actually known — otherwise a batch
+  // whose packaging cannot be told apart from its goods would silently show its WHOLE
+  // freight as "goods freight", which is worse than showing nothing.
+  const goodsFreightUsd = packagingUsd > 0 ? roundToTwo(freightUsd - packagingUsd) : 0;
+  const packagingRub = (packagingUsd > 0 && rubRate > 0) ? roundToTwo(packagingUsd * cargoRate * rubRate) : 0;
+  const goodsFreightRub = (packagingUsd > 0 && freightRub > 0) ? roundToTwo(freightRub - packagingRub) : 0;
+
+  const totalRub = Number((calc || {}).totalRub) || 0;
+  const packagingShareFreight = (packagingUsd > 0 && freightUsd > 0) ? roundToTwo(packagingUsd / freightUsd * 100) : 0;
+  const packagingShareCost = (packagingRub > 0 && totalRub > 0) ? roundToTwo(packagingRub / totalRub * 100) : 0;
+  const goodsFreightShareCost = (goodsFreightRub > 0 && totalRub > 0) ? roundToTwo(goodsFreightRub / totalRub * 100) : 0;
+
+  return {
+    goodsKg: goodsKg, goodsVolumeM3: goodsVolumeM3, packagingKg: packagingKg, packagingM3: packagingM3,
+    goodsDensity: goodsDensity, packedDensity: packedDensity, tariffBasis: tariffBasis,
+    packagingUsd: packagingUsd, goodsFreightUsd: goodsFreightUsd,
+    packagingRub: packagingRub, goodsFreightRub: goodsFreightRub,
+    packagingShareFreight: packagingShareFreight, packagingShareCost: packagingShareCost,
+    goodsFreightShareCost: goodsFreightShareCost
+  };
+}
+
 // The whole calculation of a batch. Takes plain objects, touches no sheet, and is the only
 // place where money is worked out.
 function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
@@ -585,10 +741,13 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
   const chinaShares = chinaAllocate(chinaCny, w.weights);
   const rubShares = chinaAllocate(rubCosts, chinaBoxBases(list));
 
+  const boxStats = list.map(chinaLineBoxStats);
+
   const out = list.map(function (l, i) {
     const cny = roundToTwo(goods[i] + freightShares[i] + chinaShares[i]);
     const costRub = roundToTwo(roundToTwo(cny * rubRate) + rubShares[i]);
     const qty = Number(l.qty) || 0;
+    const s = boxStats[i];
     return {
       sumCny: goods[i],
       weightKg: roundToTwo(w.weights[i]),
@@ -598,7 +757,12 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
       rubShare: rubShares[i],
       costCny: cny,
       costRub: costRub,
-      unitRub: qty > 0 ? roundToTwo(costRub / qty) : 0
+      unitRub: qty > 0 ? roundToTwo(costRub / qty) : 0,
+      // Item 81e: the factory box, independent of freight — see chinaLineBoxStats.
+      boxVolumeM3: s.boxVolumeM3,
+      goodsKg: s.goodsKg,
+      densityKgM3: s.densityKgM3,
+      kgPerPiece: s.kgPerPiece
     };
   });
 
@@ -606,6 +770,9 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
 
   let totalRub = 0;
   out.forEach(function (l) { totalRub = roundToTwo(totalRub + l.costRub); });
+
+  const packaging = chinaPackagingStats(b, list, boxStats,
+    { freightUsd: freightUsd, freightCny: freightCny, cargoRate: cargoRate, rubRate: rubRate, totalRub: totalRub });
 
   return {
     lines: out,
@@ -617,7 +784,22 @@ function chinaBatchCost(batch, lines, rubCostsTotal, settings) {
     rubCosts: rubCosts,
     rubRate: rubRate,
     totalRub: totalRub,
-    weightFactor: w.factor === null ? null : Math.round(w.factor * 10000) / 10000
+    weightFactor: w.factor === null ? null : Math.round(w.factor * 10000) / 10000,
+    // Item 81e: the batch's packaging analytics — see chinaPackagingStats.
+    goodsKg: packaging.goodsKg,
+    goodsVolumeM3: packaging.goodsVolumeM3,
+    packagingKg: packaging.packagingKg,
+    packagingM3: packaging.packagingM3,
+    goodsDensity: packaging.goodsDensity,
+    packedDensity: packaging.packedDensity,
+    tariffBasis: packaging.tariffBasis,
+    packagingUsd: packaging.packagingUsd,
+    goodsFreightUsd: packaging.goodsFreightUsd,
+    packagingRub: packaging.packagingRub,
+    goodsFreightRub: packaging.goodsFreightRub,
+    packagingShareFreight: packaging.packagingShareFreight,
+    packagingShareCost: packaging.packagingShareCost,
+    goodsFreightShareCost: packaging.goodsFreightShareCost
   };
 }
 
@@ -699,7 +881,8 @@ function saveChinaBatch(data, username) {
     manualRate: parseNumber(data.rubRate),
     paidCny: parseNumber(data.paidCny),
     unpaidCny: parseNumber(data.unpaidCny),
-    comment: String(data.comment || '').trim()
+    comment: String(data.comment || '').trim(),
+    receivedAt: chinaDateText(data.receivedAt, 'Дата приёмки')
   };
 
   const lines = incoming.map(function (l) {
@@ -714,7 +897,12 @@ function saveChinaBatch(data, username) {
       palletWeightKg: parseNumber(l.palletWeightKg),
       boxWeightKg: parseNumber(l.boxWeightKg),
       article: String(l.article || '').trim(),
-      group: String(l.group || '').trim()
+      group: String(l.group || '').trim(),
+      // Item 81e: one factory box, from the carrier's arrival file — saved as given.
+      boxLengthM: parseNumber(l.boxLengthM),
+      boxWidthM: parseNumber(l.boxWidthM),
+      boxHeightM: parseNumber(l.boxHeightM),
+      factoryBoxKg: parseNumber(l.factoryBoxKg)
     };
   });
 
@@ -771,7 +959,23 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
     'Коэффициент веса': calc.weightFactor === null ? '' : calc.weightFactor,
     'Комментарий': batch.comment,
     'Кто': username || '',
-    'Обновлено': chinaStamp()
+    'Обновлено': chinaStamp(),
+    // Item 81e: box data survives as given; the rest is chinaPackagingStats, fresh every time.
+    'Дата приёмки': batch.receivedAt || '',
+    'Вес товара, кг': calc.goodsKg,
+    'Объём товара, м³': calc.goodsVolumeM3,
+    'Вес упаковки, кг': calc.packagingKg,
+    'Объём упаковки, м³': calc.packagingM3,
+    'Плотность товара, кг/м³': calc.goodsDensity,
+    'Плотность в упаковке, кг/м³': calc.packedDensity,
+    'Тариф за': calc.tariffBasis,
+    'Упаковка всего $': calc.packagingUsd,
+    'Перевозка товара $': calc.goodsFreightUsd,
+    'Упаковка ₽': calc.packagingRub,
+    'Перевозка товара ₽': calc.goodsFreightRub,
+    'Доля упаковки в перевозке, %': calc.packagingShareFreight,
+    'Доля упаковки в себестоимости, %': calc.packagingShareCost,
+    'Доля перевозки товара в себестоимости, %': calc.goodsFreightShareCost
   });
 
   let targetRow = 0;
@@ -810,7 +1014,16 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
       'Себестоимость ₽': c.costRub,
       'Себестоимость ₽/шт': c.unitRub,
       'Наш артикул': l.article,
-      'Один товар': l.group
+      'Один товар': l.group,
+      // Item 81e: box data survives as given; the stats next to it are chinaLineBoxStats.
+      'Длина коробки, м': l.boxLengthM,
+      'Ширина коробки, м': l.boxWidthM,
+      'Высота коробки, м': l.boxHeightM,
+      'Вес коробки фабрики, кг': l.factoryBoxKg,
+      'Объём коробки, м³': c.boxVolumeM3,
+      'Вес товара, кг': c.goodsKg,
+      'Плотность, кг/м³': c.densityKgM3,
+      'Вес 1 шт, кг': c.kgPerPiece
     });
   });
 

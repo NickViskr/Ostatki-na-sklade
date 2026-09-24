@@ -4,11 +4,34 @@ import path from 'path';
 import {
   chinaNumber, emptyChinaBatchForm, emptyChinaLine, chinaBatchToForm, chinaFormToPayload,
   chinaFormCounts, chinaGroupIds, chinaLevelledIndexes, chinaArticleConflicts, validateChinaBatchForm, chinaFilledLines,
-  chinaFormFromFiles, ChinaBatchForm
+  chinaFormFromFiles, chinaFormFromArrival, ChinaBatchForm
 } from './chinaBatchForm';
-import { parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
-import { BATCH_FILE_28, BATCH_FILE_27, REPORT_FILE } from './chinaFiles.fixture';
-import { ChinaBatch } from '../types';
+import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
+import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
+import { ChinaBatch, ChinaBatchLine } from '../types';
+
+/** A saved batch, filled in only where the test needs it — item 81e added 12 fields to the shape. */
+const makeBatch = (overrides: Partial<ChinaBatch>): ChinaBatch => ({
+  id: '', orderNo: '', code: '', shippedAt: '', arrivedAt: '', receivedAt: '', status: 'Прибыла',
+  goodsCny: 0, chinaDeliveryCny: 0, weightKg: 0, volumeM3: 0, ratePerKgUsd: 0, packingUsd: 0,
+  otherCargoUsd: 0, freightUsd: 0, cargoRate: 0, freightCny: 0, rubCosts: 0, rubRate: 0,
+  manualRate: 0, rubRateSource: '', paidCny: 0, unpaidCny: 0, totalRub: 0, weightFactor: null,
+  comment: '', user: '', updatedAt: '', lines: [], costs: [], payments: [],
+  goodsKg: 0, goodsVolumeM3: 0, packagingKg: 0, packagingM3: 0, goodsDensity: 0, packedDensity: 0,
+  tariffBasis: '', packagingUsd: 0, goodsFreightUsd: 0, packagingRub: 0, goodsFreightRub: 0,
+  packagingShareFreight: 0, packagingShareCost: 0, goodsFreightShareCost: 0,
+  ...overrides
+});
+
+/** A saved line, filled in only where the test needs it. */
+const makeLine = (overrides: Partial<ChinaBatchLine>): ChinaBatchLine => ({
+  id: '', batchId: '', marking: '', name: '', boxes: 0, pcsPerBox: 0, qty: 0, priceCny: 0,
+  sumCny: 0, pallet: '', palletWeightKg: 0, boxWeightKg: 0, boxLengthM: 0, boxWidthM: 0,
+  boxHeightM: 0, factoryBoxKg: 0, weightKg: 0, weightSource: '', chinaShareCny: 0,
+  freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: '', group: '',
+  boxVolumeM3: 0, goodsKg: 0, densityKgM3: 0, kgPerPiece: 0,
+  ...overrides
+});
 
 const filledForm = (): ChinaBatchForm => ({
   ...emptyChinaBatchForm(),
@@ -78,17 +101,22 @@ describe('a batch opened for editing', () => {
   it('comes back with the same numbers it was saved with', () => {
     const batch = {
       id: 'CB1', orderNo: '28', code: 'NV-0825-2', shippedAt: '2026-08-27', arrivedAt: '2026-09-17',
-      status: 'Прибыла', goodsCny: 9744, chinaDeliveryCny: 700, weightKg: 672.5, volumeM3: 4.92,
+      receivedAt: '', status: 'Прибыла', goodsCny: 9744, chinaDeliveryCny: 700, weightKg: 672.5, volumeM3: 4.92,
       ratePerKgUsd: 2.3, packingUsd: 90, otherCargoUsd: 0, freightUsd: 1636.75, cargoRate: 7,
       freightCny: 11457.25, rubCosts: 0, rubRate: 12.4, totalRub: 271575.49, weightFactor: 0.7987,
       comment: '', user: 'Николай', updatedAt: '2026-09-22 20:00:00',
       lines: [{
         id: 'CB1-1', batchId: 'CB1', marking: 'NV-99', name: '收纳盒', boxes: 30, pcsPerBox: 8,
         qty: 240, priceCny: 20.3, sumCny: 4872, pallet: '1', palletWeightKg: 339, boxWeightKg: 0,
+        boxLengthM: 0, boxWidthM: 0, boxHeightM: 0, factoryBoxKg: 0,
         weightKg: 270.76, weightSource: 'паллета', chinaShareCny: 281.83, freightShareCny: 4612.83,
-        rubShare: 0, costRub: 121106.58, unitRub: 504.61, article: 'BOX', group: ''
+        rubShare: 0, costRub: 121106.58, unitRub: 504.61, article: 'BOX', group: '',
+        boxVolumeM3: 0, goodsKg: 0, densityKgM3: 0, kgPerPiece: 0
       }],
-      costs: [], payments: [], rubRateSource: 'вручную', manualRate: 12.4, paidCny: 0, unpaidCny: 0
+      costs: [], payments: [], rubRateSource: 'вручную', manualRate: 12.4, paidCny: 0, unpaidCny: 0,
+      goodsKg: 0, goodsVolumeM3: 0, packagingKg: 0, packagingM3: 0, goodsDensity: 0, packedDensity: 0,
+      tariffBasis: '', packagingUsd: 0, goodsFreightUsd: 0, packagingRub: 0, goodsFreightRub: 0,
+      packagingShareFreight: 0, packagingShareCost: 0, goodsFreightShareCost: 0
     } as ChinaBatch;
     const form = chinaBatchToForm(batch);
     expect(form.weightKg).toBe('672.5');
@@ -266,16 +294,34 @@ describe('партия, собранная из файлов китайцев', 
   it('updates the batch already saved instead of creating a second one', () => {
     const saved = {
       id: 'CB7', orderNo: '28', code: 'NV-0825-2', shippedAt: '2026-08-27', arrivedAt: '2026-09-17',
-      status: 'Прибыла', goodsCny: 9744, chinaDeliveryCny: 700, weightKg: 672.5, volumeM3: 4.92,
+      receivedAt: '', status: 'Прибыла', goodsCny: 9744, chinaDeliveryCny: 700, weightKg: 672.5, volumeM3: 4.92,
       ratePerKgUsd: 2.3, packingUsd: 90, otherCargoUsd: 0, freightUsd: 1636.75, cargoRate: 7,
       freightCny: 11457.25, rubCosts: 0, rubRate: 12.4, totalRub: 271575.49, weightFactor: 0.7987,
       comment: 'первая партия коробов', user: 'Николай', updatedAt: '2026-09-24 10:00:00',
       lines: [
-        { id: 'CB7-1', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 30, pcsPerBox: 8, qty: 240, priceCny: 20.3, sumCny: 4872, pallet: '', palletWeightKg: 339, boxWeightKg: 11.2, weightKg: 336, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт' },
-        { id: 'CB7-2', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 0, boxWeightKg: 0, weightKg: 168, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт' },
-        { id: 'CB7-3', batchId: 'CB7', marking: 'NV-98', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 333.5, boxWeightKg: 10.93, weightKg: 164, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-GREY', group: 'короб 8 шт' }
+        {
+          id: 'CB7-1', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 30, pcsPerBox: 8, qty: 240, priceCny: 20.3, sumCny: 4872, pallet: '', palletWeightKg: 339, boxWeightKg: 11.2,
+          boxLengthM: 0.4, boxWidthM: 0.3, boxHeightM: 0.2, factoryBoxKg: 11.2,
+          weightKg: 336, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт',
+          boxVolumeM3: 0, goodsKg: 0, densityKgM3: 0, kgPerPiece: 0
+        },
+        {
+          id: 'CB7-2', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 0, boxWeightKg: 0,
+          boxLengthM: 0, boxWidthM: 0, boxHeightM: 0, factoryBoxKg: 0,
+          weightKg: 168, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт',
+          boxVolumeM3: 0, goodsKg: 0, densityKgM3: 0, kgPerPiece: 0
+        },
+        {
+          id: 'CB7-3', batchId: 'CB7', marking: 'NV-98', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 333.5, boxWeightKg: 10.93,
+          boxLengthM: 0, boxWidthM: 0, boxHeightM: 0, factoryBoxKg: 0,
+          weightKg: 164, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-GREY', group: 'короб 8 шт',
+          boxVolumeM3: 0, goodsKg: 0, densityKgM3: 0, kgPerPiece: 0
+        }
       ],
-      costs: [], payments: [], rubRateSource: 'вручную', manualRate: 12.4, paidCny: 0, unpaidCny: 0
+      costs: [], payments: [], rubRateSource: 'вручную', manualRate: 12.4, paidCny: 0, unpaidCny: 0,
+      goodsKg: 0, goodsVolumeM3: 0, packagingKg: 0, packagingM3: 0, goodsDensity: 0, packedDensity: 0,
+      tariffBasis: '', packagingUsd: 0, goodsFreightUsd: 0, packagingRub: 0, goodsFreightRub: 0,
+      packagingShareFreight: 0, packagingShareCost: 0, goodsFreightShareCost: 0
     } as ChinaBatch;
     const { form, notes } = chinaFormFromFiles(parsed, report, saved);
     expect(form.id).toBe('CB7');
@@ -285,6 +331,11 @@ describe('партия, собранная из файлов китайцев', 
     expect(form.lines.map((l) => l.group)).toEqual(['короб 8 шт', 'короб 8 шт', 'короб 8 шт']);
     // The box weight the owner measured himself survives too.
     expect(form.lines[2].boxWeightKg).toBe('10.93');
+    // Item 81e / item d fix: the box measurements of ONE saved line reach BOTH parsed lines of
+    // the same marking, not only the first — `carry` used to splice its match away.
+    expect(form.lines[0].boxLengthM).toBe('0.4');
+    expect(form.lines[1].boxLengthM).toBe('0.4');
+    expect(form.lines[1].factoryBoxKg).toBe('11.2');
     expect(notes.join(' ')).toContain('будет обновлена');
   });
 
@@ -390,5 +441,149 @@ describe('подключение модуля «Заказы в Китае»', (
   it('the tab warns when the estimate of the weights and the waybill disagree', () => {
     expect(tab).toContain('weightFactor');
     expect(tab).toContain('Если знаете вес коробки');
+  });
+
+  it('item 81e: the weight-factor warning is silenced when every line was weighed at arrival or by hand', () => {
+    // .every, not .some: ONE line weighed on the pallet estimate is enough to keep the warning.
+    expect(tab).toContain("!batch.lines.every((l) => l.weightSource === 'приёмка' || l.weightSource === 'вручную')");
+  });
+
+  it('item 81e: the tab also reads the arrival file, and the modal asks for its date', () => {
+    expect(tab).toContain('parseChinaArrivalFile(sheets)');
+    expect(tab).toContain('chinaFormFromArrival(parsed,');
+    expect(modal).toContain('Дата приёмки в Китае');
+    expect(modal).toContain('form.receivedAt');
+  });
+
+  it('item 81e: the batch card shows packaging and freight only from figures the script sent', () => {
+    expect(tab).toContain('Упаковка и перевозка');
+    expect(tab).toContain('batch.goodsKg > 0');
+    expect(tab).toContain('batch.packagingShareFreight');
+    expect(tab).toContain('batch.goodsFreightShareCost');
+  });
+});
+
+// Item 81e: the arrival file at the carrier's Yiwu warehouse, before a batch has shipped or
+// got a code of its own.
+describe('партия, собранная из файла приёмки в Китае', () => {
+  const arrival = parseChinaArrivalFile(ARRIVAL_FILE_NV0923)!;
+
+  it('flow a: opens a new draft when nothing matches the draft code yet', () => {
+    const { form, notes } = chinaFormFromArrival(arrival, null);
+    expect(form.status).toBe('Черновик');
+    expect(form.code).toBe('NV-0923');
+    expect(form.receivedAt).toBe('2026-09-23');
+    expect(form.lines).toHaveLength(4);
+    expect(form.lines.every((l) => l.priceCny === '' && l.article === '')).toBe(true);
+    expect(form.lines[0]).toMatchObject({ marking: 'NV-101', boxes: '30', boxLengthM: '0.32', factoryBoxKg: '8.4' });
+    expect(notes.join(' ')).toContain('Черновик NV-0923 создан');
+  });
+
+  it('flow b: fills the lines of an already-existing batch by marking, keeping what the owner set', () => {
+    const existing = makeBatch({
+      id: 'CB9', code: 'NV-0923-4', status: 'В пути',
+      lines: [
+        makeLine({ id: 'L1', marking: 'NV-101', boxes: 7, article: 'A1' }),
+        makeLine({ id: 'L2', marking: 'NV-101', boxes: 23, article: 'A1' }),
+        makeLine({ id: 'L3', marking: 'NV-102', boxes: 25, article: 'A2' })
+      ]
+    });
+    const { form, notes } = chinaFormFromArrival(arrival, existing);
+    expect(form.id).toBe('CB9');
+    expect(form.code).toBe('NV-0923-4');
+    expect(form.lines.filter((l) => l.marking === 'NV-101').every((l) => l.boxLengthM === '0.32')).toBe(true);
+    expect(form.lines.find((l) => l.marking === 'NV-102')!.article).toBe('A2');
+    expect(notes.join(' ')).not.toContain('коробок в приёмке');
+    expect(notes.join(' ')).toContain('дополнена данными приёмки');
+  });
+
+  it('flow b: notes a marking whose boxes do not match between the arrival file and the batch', () => {
+    const existing = makeBatch({
+      id: 'CB9', code: 'NV-0923-4',
+      lines: [makeLine({ id: 'L1', marking: 'NV-101', boxes: 29 })] // the arrival file says 30
+    });
+    const { notes } = chinaFormFromArrival(arrival, existing);
+    expect(notes.join(' ')).toContain('NV-101: коробок в приёмке 30, в партии 29');
+  });
+});
+
+describe('item 81e: две последовательности импорта дают одно и то же', () => {
+  const arrival = parseChinaArrivalFile(ARRIVAL_FILE_NV0923)!;
+  const finalParsed = parseChinaBatchFile(BATCH_FILE_30)!;
+  const report = parseChinaReportFile(REPORT_FILE)!;
+
+  it('приёмка, потом партия: артикул черновика доходит до ОБЕИХ строк NV-101 после разбивки по паллетам', () => {
+    const { form: draftForm } = chinaFormFromArrival(arrival, null);
+    const draftBatch = makeBatch({
+      id: 'CB30', code: 'NV-0923', status: 'Черновик', receivedAt: arrival.receivedAt,
+      lines: draftForm.lines.map((l, i) => makeLine({
+        id: `CB30-${i}`, marking: l.marking, boxes: Number(l.boxes),
+        boxLengthM: Number(l.boxLengthM), boxWidthM: Number(l.boxWidthM),
+        boxHeightM: Number(l.boxHeightM), factoryBoxKg: Number(l.factoryBoxKg),
+        article: l.marking === 'NV-101' ? 'BOX-101' : ''
+      }))
+    });
+
+    const { form, notes } = chinaFormFromFiles(finalParsed, report, draftBatch);
+    expect(form.id).toBe('CB30');
+    expect(form.code).toBe('NV-0923-4');
+    const nv101 = form.lines.filter((l) => l.marking === 'NV-101');
+    expect(nv101).toHaveLength(2);
+    expect(nv101.every((l) => l.article === 'BOX-101')).toBe(true);
+    expect(nv101.every((l) => l.boxLengthM === '0.32')).toBe(true);
+    expect(notes.join(' ')).toContain('Дополнен черновик NV-0923 из данных о приёмке');
+  });
+
+  it('партия, потом приёмка: размеры коробки доходят до ОБЕИХ строк NV-101, артикулы не трогаются', () => {
+    const { form: finalForm } = chinaFormFromFiles(finalParsed, report, null);
+    const savedBatch = makeBatch({
+      id: 'CB30', code: 'NV-0923-4', status: 'В пути',
+      lines: finalForm.lines.map((l, i) => makeLine({
+        id: `CB30-${i}`, marking: l.marking, boxes: Number(l.boxes),
+        article: l.marking === 'NV-101' ? 'BOX-101' : ''
+      }))
+    });
+
+    const { form, notes } = chinaFormFromArrival(arrival, savedBatch);
+    const nv101 = form.lines.filter((l) => l.marking === 'NV-101');
+    expect(nv101).toHaveLength(2);
+    expect(nv101.every((l) => l.article === 'BOX-101')).toBe(true);
+    expect(nv101.every((l) => l.boxLengthM === '0.32')).toBe(true);
+    expect(notes.join(' ')).toContain('дополнена данными приёмки');
+  });
+});
+
+describe('item 81e: box measurements and the arrival date survive a save', () => {
+  it('round trip through chinaBatchToForm and chinaFormToPayload', () => {
+    const batch = makeBatch({
+      id: 'CB1', code: 'NV-0923-4', receivedAt: '2026-09-23',
+      lines: [makeLine({
+        id: 'L1', marking: 'NV-101', boxLengthM: 0.32, boxWidthM: 0.59, boxHeightM: 0.43, factoryBoxKg: 8.4
+      })]
+    });
+    const form = chinaBatchToForm(batch);
+    expect(form.receivedAt).toBe('2026-09-23');
+    expect(form.lines[0]).toMatchObject({ boxLengthM: '0.32', boxWidthM: '0.59', boxHeightM: '0.43', factoryBoxKg: '8.4' });
+
+    const payload = chinaFormToPayload(form) as Record<string, unknown>;
+    expect(payload.receivedAt).toBe('2026-09-23');
+    const lines = payload.lines as Record<string, unknown>[];
+    expect(lines[0]).toMatchObject({ boxLengthM: 0.32, boxWidthM: 0.59, boxHeightM: 0.43, factoryBoxKg: 8.4 });
+  });
+
+  it('does not break on an old batch saved before item 81e, which has none of the new fields', () => {
+    const old = makeBatch({ id: 'CB2', code: 'NV-OLD', lines: [makeLine({ id: 'L1', marking: 'NV-1' })] });
+    const asRecord = old as unknown as Record<string, unknown>;
+    delete asRecord.receivedAt;
+    delete asRecord.goodsKg;
+    const lineAsRecord = old.lines[0] as unknown as Record<string, unknown>;
+    delete lineAsRecord.boxLengthM;
+    delete lineAsRecord.factoryBoxKg;
+
+    const form = chinaBatchToForm(old);
+    expect(form.receivedAt).toBe('');
+    expect(form.goodsKg).toBe('');
+    expect(form.lines[0].boxLengthM).toBe('');
+    expect(form.lines[0].factoryBoxKg).toBe('');
   });
 });

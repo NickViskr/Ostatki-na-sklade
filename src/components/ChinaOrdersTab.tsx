@@ -10,10 +10,13 @@ import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import {
-  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaFormFromFiles,
-  chinaFormToPayload, chinaLevelledIndexes
+  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaFormFromArrival,
+  chinaFormFromFiles, chinaFormToPayload, chinaLevelledIndexes
 } from '../lib/chinaBatchForm';
-import { ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaBatchFile, parseChinaReportFile } from '../lib/chinaFileParse';
+import {
+  ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaArrivalFile,
+  parseChinaBatchFile, parseChinaReportFile
+} from '../lib/chinaFileParse';
 import { chinaSheetsFromFile } from '../lib/chinaXlsx';
 import { chinaArticleOptions } from '../lib/chinaArticles';
 
@@ -103,15 +106,26 @@ export const ChinaOrdersTab: React.FC = () => {
     if (ok) { setCostAmount(''); setCostComment(''); }
   };
 
+  /** A batch already saved with exactly this code, case-insensitively. */
+  const batchByCode = (code: string): ChinaBatch | null => {
+    const wanted = code.trim().toLowerCase();
+    return batches.find((b) => b.code.trim().toLowerCase() === wanted) || null;
+  };
+
   // Item 81c: the owner picks the files the Chinese side sent — the batch file and, beside
   // it, the running account, which is the only place the order number, the arrival date and
   // the carrier's yuan-per-dollar rate are written. The parser fills the form, the owner
   // checks it and saves; the script does the money.
+  //
+  // Item 81e: a THIRD kind of file, the arrival at the carrier's Yiwu warehouse, comes before
+  // the batch has a code of its own — files may be picked in any order, so both kinds are
+  // matched against the batches already saved, not against each other.
   const readFiles = async (picked: FileList | null) => {
     if (!picked || picked.length === 0) return;
     setIsReading(true);
     const problems: string[] = [];
-    const found: ChinaParsedBatch[] = [];
+    const foundBatches: ChinaParsedBatch[] = [];
+    const foundArrivals: ChinaParsedArrival[] = [];
     let report: ChinaParsedReport | null = null;
     for (const file of Array.from(picked)) {
       try {
@@ -121,9 +135,12 @@ export const ChinaOrdersTab: React.FC = () => {
           report = parseChinaReportFile(sheets);
         } else if (kind === 'batch') {
           const parsed = parseChinaBatchFile(sheets);
-          if (parsed) found.push(parsed);
+          if (parsed) foundBatches.push(parsed);
+        } else if (kind === 'arrival') {
+          const parsed = parseChinaArrivalFile(sheets);
+          if (parsed) foundArrivals.push(parsed);
         } else {
-          problems.push(`${file.name}: не похоже ни на файл партии, ни на финансовый отчёт`);
+          problems.push(`${file.name}: не похоже ни на файл партии, ни на данные приёмки, ни на финансовый отчёт`);
         }
       } catch (e) {
         problems.push(`${file.name}: не удалось прочитать — ${(e as Error).message}`);
@@ -132,16 +149,33 @@ export const ChinaOrdersTab: React.FC = () => {
     setIsReading(false);
     if (fileInput.current) fileInput.current.value = '';
 
-    if (found.length === 0) {
+    if (foundBatches.length === 0 && foundArrivals.length === 0) {
       toast.error(problems[0] || 'Файл партии в выбранных файлах не нашёлся');
       return;
     }
-    if (found.length > 1) {
-      problems.push(`Файлов партий выбрано ${found.length}; открыт первый (${found[0].code}), остальные загрузите после`);
+    if (foundBatches.length > 1) {
+      problems.push(`Файлов партий выбрано ${foundBatches.length}; открыт первый (${foundBatches[0].code}), остальные загрузите после`);
     }
-    const parsed = found[0];
-    const already = batches.filter((b) => b.code.trim().toLowerCase() === parsed.code.trim().toLowerCase());
-    const result = chinaFormFromFiles(parsed, report, already.length > 0 ? already[0] : null);
+    if (foundArrivals.length > 1) {
+      problems.push(`Файлов приёмки выбрано ${foundArrivals.length}; открыт первый (${foundArrivals[0].draftCode}), остальные загрузите после`);
+    }
+
+    let result: { form: ChinaBatchForm; notes: string[]; warnings: string[] };
+    if (foundBatches.length > 0) {
+      const parsed = foundBatches[0];
+      // The batch's own code — or, failing that, a 'Черновик' left by an arrival file, named
+      // by the code without its last '-N' (NV-0923-4 → NV-0923).
+      const exact = batchByCode(parsed.code);
+      const draftCode = parsed.code.replace(/-\d+$/, '');
+      const draft = exact ? null : batches.find((b) => b.status === 'Черновик' && b.code.trim().toLowerCase() === draftCode.trim().toLowerCase()) || null;
+      result = chinaFormFromFiles(parsed, report, exact || draft);
+    } else {
+      const parsed = foundArrivals[0];
+      const prefix = `${parsed.draftCode.trim().toLowerCase()}-`;
+      const matches = batches.filter((b) => b.code.trim().toLowerCase() === parsed.draftCode.trim().toLowerCase()
+        || b.code.trim().toLowerCase().startsWith(prefix));
+      result = chinaFormFromArrival(parsed, matches.length === 1 ? matches[0] : null);
+    }
     setImportForm(result.form);
     setImportNotes(result.notes.concat(problems));
     setImportWarnings(result.warnings);
@@ -236,6 +270,7 @@ export const ChinaOrdersTab: React.FC = () => {
           const isOpen = batch.id === openId;
           const levelledLines = chinaLevelledIndexes(batch.lines);
           const conflicts = chinaArticleConflicts(batch.lines);
+          const hasBoxData = batch.lines.some((l) => l.boxVolumeM3 > 0 || l.factoryBoxKg > 0);
           return (
             <div key={batch.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <button
@@ -295,7 +330,52 @@ export const ChinaOrdersTab: React.FC = () => {
                     </div>
                   )}
 
-                  {batch.weightFactor !== null && (batch.weightFactor < 0.8 || batch.weightFactor > 1.25) && (
+                  {batch.goodsKg > 0 && (
+                    <div className="bg-slate-50 rounded-xl p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                      <h3 className="col-span-2 md:col-span-4 font-bold text-sm -mb-1">Упаковка и перевозка</h3>
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Вес товара → упаковано</div>
+                        {money(batch.goodsKg, 'кг')} → {money(batch.weightKg, 'кг')}
+                        <span className="block text-[10px] text-slate-400">упаковка {money(batch.packagingKg, 'кг')}, +{money((batch.packagingKg / batch.goodsKg) * 100, '%')}</span>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Объём товара → упаковано</div>
+                        {batch.goodsVolumeM3 > 0 ? (
+                          <>
+                            {money(batch.goodsVolumeM3, 'м³')} → {money(batch.volumeM3, 'м³')}
+                            <span className="block text-[10px] text-slate-400">+{money((batch.packagingM3 / batch.goodsVolumeM3) * 100, '%')}</span>
+                          </>
+                        ) : '—'}
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Плотность товара / упаковано</div>
+                        {money(batch.goodsDensity, '')} / {money(batch.packedDensity, '')} кг/м³
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Тариф считается по</div>
+                        {batch.tariffBasis || '—'}
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Перевозка товара</div>
+                        {money(batch.goodsFreightUsd, '$')} → {money(batch.goodsFreightRub, '₽')}
+                        <span className="block text-[10px] text-slate-400">{money(batch.goodsFreightShareCost, '%')} себестоимости партии</span>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Перевозка упаковки</div>
+                        {money(batch.packagingUsd, '$')} → {money(batch.packagingRub, '₽')}
+                        <span className="block text-[10px] text-slate-400">
+                          {money(batch.packagingShareFreight, '%')} перевозки, {money(batch.packagingShareCost, '%')} себестоимости
+                        </span>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Дата приёмки в Китае</div>
+                        {batch.receivedAt || '—'}
+                      </div>
+                    </div>
+                  )}
+
+                  {batch.weightFactor !== null && (batch.weightFactor < 0.8 || batch.weightFactor > 1.25)
+                    && !batch.lines.every((l) => l.weightSource === 'приёмка' || l.weightSource === 'вручную') && (
                     <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                       Оценка веса по паллетам расходится с накладной в {batch.weightFactor} раза.
                       Если знаете вес коробки — впишите его в строке, он важнее оценки.
@@ -312,6 +392,10 @@ export const ChinaOrdersTab: React.FC = () => {
                           <th className="py-2 pr-3">Цена ¥</th>
                           <th className="py-2 pr-3">Сумма ¥</th>
                           <th className="py-2 pr-3">Вес, кг</th>
+                          {hasBoxData && <th className="py-2 pr-3">Коробка Д×Ш×В, м</th>}
+                          {hasBoxData && <th className="py-2 pr-3">Кг/коробка</th>}
+                          {hasBoxData && <th className="py-2 pr-3">Кг/шт</th>}
+                          {hasBoxData && <th className="py-2 pr-3">Плотность</th>}
                           <th className="py-2 pr-3">Перевозка ¥</th>
                           <th className="py-2 pr-3">Расходы РФ ₽</th>
                           <th className="py-2 pr-3">Себестоимость ₽</th>
@@ -338,6 +422,14 @@ export const ChinaOrdersTab: React.FC = () => {
                                 {line.weightKg}
                                 <span className="block text-[10px] text-slate-400">{line.weightSource}</span>
                               </td>
+                              {hasBoxData && (
+                                <td className="py-2 pr-3">
+                                  {line.boxLengthM > 0 ? `${line.boxLengthM}×${line.boxWidthM}×${line.boxHeightM}` : '—'}
+                                </td>
+                              )}
+                              {hasBoxData && <td className="py-2 pr-3">{line.factoryBoxKg || '—'}</td>}
+                              {hasBoxData && <td className="py-2 pr-3">{line.kgPerPiece || '—'}</td>}
+                              {hasBoxData && <td className="py-2 pr-3">{line.densityKgM3 ? money(line.densityKgM3, '') : '—'}</td>}
                               <td className="py-2 pr-3">{money(line.freightShareCny, '¥')}</td>
                               <td className="py-2 pr-3">{money(line.rubShare, '₽')}</td>
                               <td className="py-2 pr-3">{money(line.costRub, '₽')}</td>

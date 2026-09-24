@@ -682,5 +682,8 @@ module.exports = {
   chinaPaymentMoney: (...args) => context.chinaPaymentMoney(...args),
   chinaRateFromPayments: (...args) => context.chinaRateFromPayments(...args),
   chinaGroupIds: (...args) => context.chinaGroupIds(...args),
+  // ---------- Item 81e: box data from the carrier's arrival file and packaging analytics ----------
+  chinaLineBoxStats: (...args) => context.chinaLineBoxStats(...args),
+  chinaPackagingStats: (...args) => context.chinaPackagingStats(...args),
   vm
 };

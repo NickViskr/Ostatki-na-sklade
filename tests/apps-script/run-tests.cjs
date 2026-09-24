@@ -4692,6 +4692,215 @@ function withOldChina(withBatch) {
     h.getChinaBatches().batches[0].arrivedAt === '2026-09-17', h.getChinaBatches().batches[0].arrivedAt);
 })();
 
+// ---- 81e: the carrier's arrival file — box data, priority, packaging analytics ----
+//
+// Fixture: the owner's real batch NV-0923-4 (order 30), final lines and the arrival file's
+// factory-box data. Every expected figure below was worked out independently in Python before
+// the code was run (see the coder's report) and only THEN asserted here.
+
+const CHINA_923_FACTORY = {
+  'NV-101': [0.32, 0.59, 0.43, 8.4],
+  'NV-102': [0.32, 0.59, 0.43, 8.2],
+  'NV-103': [0.48, 0.6, 0.43, 15.6],
+  'NV-104': [0.48, 0.6, 0.43, 15.6]
+};
+
+function china923LineOf(marking, boxes, pcsPerBox, qty, priceCny, palletWeightKg) {
+  const f = CHINA_923_FACTORY[marking];
+  return {
+    marking: marking, boxes: boxes, pcsPerBox: pcsPerBox, qty: qty, priceCny: priceCny, palletWeightKg: palletWeightKg,
+    boxLengthM: f[0], boxWidthM: f[1], boxHeightM: f[2], factoryBoxKg: f[3]
+  };
+}
+
+function china923Lines() {
+  return [
+    china923LineOf('NV-101', 7, 6, 42, 19, 229),
+    china923LineOf('NV-104', 9, 10, 90, 25, 0),
+    china923LineOf('NV-103', 15, 10, 150, 25, 278),
+    china923LineOf('NV-104', 1, 10, 10, 25, 0),
+    china923LineOf('NV-101', 23, 6, 138, 19, 229.5),
+    china923LineOf('NV-102', 1, 6, 6, 19, 0),
+    china923LineOf('NV-102', 24, 6, 144, 19, 230.5)
+  ];
+}
+
+function china923Payload(over) {
+  const out = {
+    orderNo: '30', code: 'NV-0923-4', status: 'Прибыла',
+    weightKg: 967, volumeM3: 9.14, ratePerKgUsd: 2.55, packingUsd: 180, otherCargoUsd: 0,
+    freightUsd: 2645.85, chinaDeliveryCny: 1000, cargoRate: 7, rubRate: 12.4,
+    receivedAt: '2026-09-23', shippedAt: '2026-09-23', arrivedAt: '2026-09-23',
+    lines: china923Lines()
+  };
+  Object.keys(over || {}).forEach(function (k) { out[k] = over[k]; });
+  return out;
+}
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(china923Payload({}), 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+
+  check('81e: the batch is billed per kilogram, not per m³',
+    batch.tariffBasis === 'кг', batch.tariffBasis);
+  check('81e: goods weight and volume are summed from the boxes, not the waybill',
+    batch.goodsKg === 847 && batch.goodsVolumeM3 === 7.5611,
+    batch.goodsKg + ' / ' + batch.goodsVolumeM3);
+  check('81e: what is left over the goods is the carrier\'s own packaging',
+    batch.packagingKg === 120 && batch.packagingM3 === 1.5789,
+    batch.packagingKg + ' / ' + batch.packagingM3);
+  check('81e: goods density and packed density',
+    batch.goodsDensity === 112.02 && batch.packedDensity === 105.8,
+    batch.goodsDensity + ' / ' + batch.packedDensity);
+  check('81e: packaging in dollars and what is left for the goods',
+    batch.packagingUsd === 486 && batch.goodsFreightUsd === 2159.85,
+    batch.packagingUsd + ' / ' + batch.goodsFreightUsd);
+  check('81e: packaging in rubles, and the two halves of the freight add up exactly',
+    batch.packagingRub === 42184.8 && batch.goodsFreightRub === 187474.98,
+    batch.packagingRub + ' / ' + batch.goodsFreightRub);
+  check('81e: packaging\'s three shares — of freight, and of the cost twice over',
+    batch.packagingShareFreight === 18.37 && batch.packagingShareCost === 10.62 &&
+    batch.goodsFreightShareCost === 47.19,
+    [batch.packagingShareFreight, batch.packagingShareCost, batch.goodsFreightShareCost].join(' / '));
+  check('81e: the date of acceptance is kept', batch.receivedAt === '2026-09-23', batch.receivedAt);
+
+  const freightShares = batch.lines.map(function (l) { return l.freightShareCny; });
+  const chinaShares = batch.lines.map(function (l) { return l.chinaShareCny; });
+  check('81e: freight is split by the EXACT box weight from the arrival file',
+    JSON.stringify(freightShares) === JSON.stringify([1285.75, 3070.06, 5116.77, 341.12, 4224.61, 179.31, 4303.33]),
+    freightShares.join(', '));
+  check('81e: so is the China-delivery share',
+    JSON.stringify(chinaShares) === JSON.stringify([69.42, 165.76, 276.27, 18.42, 228.1, 9.68, 232.35]),
+    chinaShares.join(', '));
+
+  const goodsKgs = batch.lines.map(function (l) { return l.goodsKg; });
+  const densities = batch.lines.map(function (l) { return l.densityKgM3; });
+  const kgPerPiece = batch.lines.map(function (l) { return l.kgPerPiece; });
+  const boxVolumes = batch.lines.map(function (l) { return l.boxVolumeM3; });
+  check('81e: every line has its own box volume, goods weight, density and weight per piece',
+    JSON.stringify(boxVolumes) === JSON.stringify([0.081184, 0.12384, 0.12384, 0.12384, 0.081184, 0.081184, 0.081184]) &&
+    JSON.stringify(goodsKgs) === JSON.stringify([58.8, 140.4, 234, 15.6, 193.2, 8.2, 196.8]) &&
+    JSON.stringify(densities) === JSON.stringify([103.47, 125.97, 125.97, 125.97, 103.47, 101.01, 101.01]) &&
+    JSON.stringify(kgPerPiece) === JSON.stringify([1.4, 1.56, 1.56, 1.56, 1.4, 1.367, 1.367]),
+    JSON.stringify({ boxVolumes: boxVolumes, goodsKgs: goodsKgs, densities: densities, kgPerPiece: kgPerPiece }));
+  check('81e: the box weight from the arrival file wins over the pallet estimate',
+    batch.lines.every(function (l) { return l.weightSource === 'приёмка'; }),
+    batch.lines.map(function (l) { return l.weightSource; }).join(', '));
+
+  // (5) The analytics is read-only: it must not move a single kopeck of what the lines add up to.
+  const sumOfLines = Math.round(batch.lines.reduce(function (s, l) { return s + l.costRub; }, 0) * 100) / 100;
+  check('81e: the analytics never moves the total — sum of line costs = cost of the batch',
+    sumOfLines === batch.totalRub && batch.totalRub === 397307.79, sumOfLines + ' vs ' + batch.totalRub);
+})();
+
+// (1) A batch billed by volume, not weight.
+(function () {
+  const h = withChina();
+  const batch = { weightKg: 500, volumeM3: 10, ratePerKgUsd: 310, packingUsd: 0, otherCargoUsd: 0,
+    freightUsd: 3100, cargoRate: 7, rubRate: 12.4, chinaDeliveryCny: 0 };
+  const lines = [{ boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 10,
+    boxLengthM: 0.3, boxWidthM: 0.3, boxHeightM: 0.3, factoryBoxKg: 5 }];
+  const calc = h.chinaBatchCost(batch, lines, 0, { cargoRateCnyPerUsd: 7 });
+  check('81e: a batch billed per m³ is recognised as such, not as «кг»',
+    calc.tariffBasis === 'м³', calc.tariffBasis);
+  check('81e: its packaging in dollars comes from the packaging M³, not the packaging kg',
+    calc.packagingM3 === 9.73 && calc.packagingUsd === 3016.3, calc.packagingM3 + ' / ' + calc.packagingUsd);
+
+  // The ±1 $ tolerance itself: exactly 1 $ off is still «кг», a cent further is not.
+  function tariffOf(freightUsd) {
+    const b = { weightKg: 100, volumeM3: 1, ratePerKgUsd: 10, packingUsd: 0, otherCargoUsd: 0,
+      freightUsd: freightUsd, cargoRate: 7, rubRate: 12.4, chinaDeliveryCny: 0 };
+    return h.chinaBatchCost(b, [{ boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 1 }], 0, { cargoRateCnyPerUsd: 7 }).tariffBasis;
+  }
+  check('81e: the ±1 $ tolerance holds exactly at the boundary',
+    tariffOf(999) === 'кг' && tariffOf(998.99) !== 'кг', tariffOf(999) + ' / ' + tariffOf(998.99));
+})();
+
+// (2) A batch where one line has no factory weight at all.
+(function () {
+  const h = withChina();
+  const lines = china923Lines();
+  lines[1].factoryBoxKg = 0;
+  h.saveChinaBatch(china923Payload({ lines: lines }), 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+  check('81e: one line without a factory weight zeroes the batch\'s goods weight, not just that line',
+    batch.goodsKg === 0 && batch.packagingKg === 0 && batch.packagingUsd === 0,
+    batch.goodsKg + ' / ' + batch.packagingKg + ' / ' + batch.packagingUsd);
+  check('81e: that line falls back to the batch average, and the batch still costs the same',
+    batch.lines[1].weightSource === 'среднее по партии' && batch.totalRub === 397307.79,
+    batch.lines[1].weightSource + ' / ' + batch.totalRub);
+})();
+
+// (3) A typed box weight beats the factory weight from the arrival file.
+(function () {
+  const h = withChina();
+  const lines = china923Lines();
+  lines[0].boxWeightKg = 9; // the owner overrides 8.4 кг from the file
+  h.saveChinaBatch(china923Payload({ lines: lines }), 'Николай');
+  const line0 = h.getChinaBatches().batches[0].lines[0];
+  check('81e: a typed box weight beats the factory weight, in the freight AND in the box stats',
+    line0.weightSource === 'вручную' && line0.goodsKg === 63 && line0.densityKgM3 === 110.86 && line0.kgPerPiece === 1.5,
+    line0.weightSource + ' / ' + line0.goodsKg + ' / ' + line0.densityKgM3 + ' / ' + line0.kgPerPiece);
+})();
+
+// (4) The new input fields survive a recalc, whichever path triggers it.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(china923Payload({}), 'Николай');
+  const boxCell = function () {
+    const line = h.dumpChinaSheet('Строки партий')[0];
+    const batch = h.dumpChinaSheet('Партии')[0];
+    return [line['Длина коробки, м'], line['Вес коробки фабрики, кг'], batch['Дата приёмки']];
+  };
+  check('81e: box data is there right after saving', JSON.stringify(boxCell()) === JSON.stringify([0.32, 8.4, '2026-09-23']), JSON.stringify(boxCell()));
+
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Разгрузка', amountRub: 9000 }, 'Николай');
+  check('81e: box data and the acceptance date survive a recalc from a Russian-side cost',
+    JSON.stringify(boxCell()) === JSON.stringify([0.32, 8.4, '2026-09-23']), JSON.stringify(boxCell()));
+
+  h.saveChinaPayment({ amountRub: 100000, rate: 11, orderNo: '30' }, 'Николай');
+  check('81e: and survive a recalc from a payment',
+    JSON.stringify(boxCell()) === JSON.stringify([0.32, 8.4, '2026-09-23']), JSON.stringify(boxCell()));
+})();
+
+// (6) A live sheet with the OLD headers (no 81e columns at all).
+const PRE_81E_BATCH_HEADERS = ['ID', 'Номер заказа', 'Код партии', 'Дата отгрузки', 'Дата прибытия', 'Статус',
+  'Товар ¥', 'Доставка по Китаю ¥', 'Вес накладной, кг', 'Объём, м³', 'Ставка $/кг', 'Упаковка $',
+  'Прочее карго $', 'Перевозка $', 'Курс ¥/$', 'Перевозка ¥', 'Расходы РФ ₽', 'Курс ₽/¥', 'Курс вручную',
+  'Источник курса', 'Себестоимость партии ₽', 'Коэффициент веса', 'Оплачено по отчёту ¥', 'Долг по отчёту ¥',
+  'Комментарий', 'Кто', 'Обновлено'];
+const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', 'Название', 'Коробок', 'Шт/коробку', 'Количество',
+  'Цена ¥', 'Сумма ¥', 'Паллета', 'Вес паллеты, кг', 'Вес коробки, кг', 'Вес расчётный, кг', 'Источник веса',
+  'Доставка Китай ¥', 'Перевозка ¥', 'Расходы РФ ₽', 'Себестоимость ₽', 'Себестоимость ₽/шт', 'Наш артикул', 'Один товар'];
+
+(function () {
+  const h = freshHarness();
+  h.setChinaSpreadsheet();
+  h.setTargetSheet('Партии', [PRE_81E_BATCH_HEADERS.slice()]);
+  h.setTargetSheet('Строки партий', [PRE_81E_LINE_HEADERS.slice()]);
+  h.setupChinaSpreadsheet();
+
+  h.saveChinaBatch(china923Payload({}), 'Николай');
+
+  const batchHead = h.headerRowOf(h.getTargetSheet('Партии'));
+  const lineHead = h.headerRowOf(h.getTargetSheet('Строки партий'));
+  check('81e: on an old batch sheet the new columns are appended at the end',
+    batchHead.slice(0, PRE_81E_BATCH_HEADERS.length).join('|') === PRE_81E_BATCH_HEADERS.join('|') &&
+    batchHead[batchHead.length - 1] === 'Доля перевозки товара в себестоимости, %',
+    batchHead.slice(-3).join(' | '));
+  check('81e: same for the lines sheet',
+    lineHead.slice(0, PRE_81E_LINE_HEADERS.length).join('|') === PRE_81E_LINE_HEADERS.join('|') &&
+    lineHead[lineHead.length - 1] === 'Вес 1 шт, кг',
+    lineHead.slice(-3).join(' | '));
+
+  const batch = h.getChinaBatches().batches[0];
+  check('81e: on an old sheet everything still lands under its own header and reads back',
+    batch.goodsKg === 847 && batch.tariffBasis === 'кг' && batch.receivedAt === '2026-09-23' &&
+    batch.lines[0].goodsKg === 58.8,
+    JSON.stringify({ goodsKg: batch.goodsKg, tariffBasis: batch.tariffBasis, receivedAt: batch.receivedAt }));
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
