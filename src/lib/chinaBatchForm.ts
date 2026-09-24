@@ -53,7 +53,11 @@ export const CHINA_COST_TYPES = ['Разгрузка', 'Доставка до с
 /** A number typed by a person: a comma for the decimal point, spaces inside, empty for zero. */
 export function chinaNumber(value: string | number): number {
   if (typeof value === 'number') return isFinite(value) ? value : 0;
-  const text = String(value == null ? '' : value).replace(/\s/g, '').replace(',', '.');
+  let text = String(value == null ? '' : value).replace(/\s/g, '');
+  // «1,636.75», pasted from an English sheet: the comma separates thousands there, and read
+  // as a decimal point it would turn the number into nothing at all.
+  if (text.indexOf(',') !== -1 && text.indexOf('.') !== -1) text = text.replace(/,/g, '');
+  text = text.replace(',', '.');
   if (text === '') return 0;
   const num = Number(text);
   return isFinite(num) ? num : 0;
@@ -93,7 +97,9 @@ export function chinaBatchToForm(batch: ChinaBatch): ChinaBatchForm {
     otherCargoUsd: text(batch.otherCargoUsd),
     freightUsd: text(batch.freightUsd),
     cargoRate: text(batch.cargoRate),
-    rubRate: text(batch.rubRate),
+    // The rate the owner TYPED. «Курс ₽/¥» of a batch may have come from its payments, and
+    // offering that one here would make it the typed rate on the next save.
+    rubRate: text(batch.manualRate),
     paidCny: text(batch.paidCny),
     unpaidCny: text(batch.unpaidCny),
     comment: batch.comment,
@@ -170,32 +176,68 @@ export function chinaFormCounts(lines: ChinaLineForm[]): ChinaFormCounts {
   return { rows, boxes, qty };
 }
 
+type ChinaIdentity = { group?: string; article?: string; marking?: string };
+
 /**
- * What the script will treat as one product: the owner's marker first, our article second,
- * the carrier's marking last. Kept in step with `chinaGroupKey` in `ChinaOrders.gs`.
+ * Which lines the script costs as one product — by exactly the rule of `chinaGroupIds` in
+ * `ChinaOrders.gs`: two lines sharing the carrier's marking, our article or the owner's marker
+ * are one product, and the sameness chains. A test runs both implementations on the same
+ * lines, so the badge on the screen cannot tell a different story from the cost.
  */
-export function chinaGroupLabel(line: { group?: string; article?: string; marking?: string }): string {
-  const group = String(line.group || '').trim();
-  if (group) return group;
-  const article = String(line.article || '').trim();
-  if (article) return article;
-  return String(line.marking || '').trim();
+export function chinaGroupIds(lines: ChinaIdentity[]): string[] {
+  const parent = lines.map((_, i) => i);
+  const find = (i: number): number => {
+    let at = i;
+    while (parent[at] !== at) { parent[at] = parent[parent[at]]; at = parent[at]; }
+    return at;
+  };
+  const join = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);
+  };
+  const seen: Record<string, number> = {};
+  lines.forEach((line, i) => {
+    const l = line || {};
+    ([['M', l.marking], ['A', l.article], ['G', l.group]] as [string, string | undefined][]).forEach(([kind, raw]) => {
+      const value = String(raw || '').trim().toLowerCase();
+      if (!value) return;
+      const key = `${kind}:${value}`;
+      if (seen[key] === undefined) seen[key] = i; else join(i, seen[key]);
+    });
+  });
+  return lines.map((_, i) => `g${find(i)}`);
 }
 
-/** Lines the script will cost together, by index. A group of one is left out. */
-export function chinaLevelledGroups(lines: { group?: string; article?: string; marking?: string }[]): Record<string, number[]> {
-  const groups: Record<string, number[]> = {};
-  lines.forEach((l, i) => {
-    const key = chinaGroupLabel(l).toLowerCase();
-    if (!key) return;
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(i);
-  });
-  const out: Record<string, number[]> = {};
-  Object.keys(groups).forEach((key) => {
-    if (groups[key].length > 1) out[key] = groups[key];
-  });
+/** The lines that share their cost with at least one other line. */
+export function chinaLevelledIndexes(lines: ChinaIdentity[]): Set<number> {
+  const ids = chinaGroupIds(lines);
+  const count: Record<string, number> = {};
+  ids.forEach((id) => { count[id] = (count[id] || 0) + 1; });
+  const out = new Set<number>();
+  ids.forEach((id, i) => { if (count[id] > 1) out.add(i); });
   return out;
+}
+
+/**
+ * A carrier marking names one product within its batch, so a marking written against two
+ * different articles of ours is a slip: the script still costs its lines as one, and the owner
+ * should be told rather than left to wonder why two articles came out at one price.
+ */
+export function chinaArticleConflicts(lines: ChinaIdentity[]): string[] {
+  const byMarking: Record<string, { marking: string; articles: string[] }> = {};
+  lines.forEach((l) => {
+    const marking = String(l.marking || '').trim();
+    const article = String(l.article || '').trim();
+    if (!marking || !article) return;
+    const key = marking.toLowerCase();
+    if (!byMarking[key]) byMarking[key] = { marking, articles: [] };
+    if (byMarking[key].articles.indexOf(article) === -1) byMarking[key].articles.push(article);
+  });
+  return Object.keys(byMarking)
+    .filter((key) => byMarking[key].articles.length > 1)
+    .map((key) => `Маркировка ${byMarking[key].marking} стоит на разных артикулах: ${byMarking[key].articles.join(', ')}. ` +
+      'Одна маркировка — один товар, поэтому себестоимость у них общая; проверьте выбор артикула.');
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -315,7 +357,7 @@ export function chinaFormFromFiles(
     otherCargoUsd: parsed.otherCargoUsd ? String(parsed.otherCargoUsd) : '',
     freightUsd: parsed.freightUsd ? String(parsed.freightUsd) : '',
     cargoRate: cargoRate ? String(cargoRate) : '',
-    rubRate: existing && existing.rubRate ? String(existing.rubRate) : '',
+    rubRate: existing && existing.manualRate ? String(existing.manualRate) : '',
     paidCny: order && order.receivedCny ? String(order.receivedCny) : (existing ? text(existing.paidCny) : ''),
     unpaidCny: order && order.unpaidCny ? String(order.unpaidCny) : (existing ? text(existing.unpaidCny) : ''),
     comment: existing ? existing.comment : '',

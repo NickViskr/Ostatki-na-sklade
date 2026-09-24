@@ -248,6 +248,8 @@ export interface ChinaBatch {
   freightCny: number;
   rubCosts: number;
   rubRate: number;
+  /** The ₽/¥ rate the owner typed; the fallback when the order has no payments. */
+  manualRate: number;
   /** 'оплаты' when the rate came from the payments of the order, 'вручную' when typed in. */
   rubRateSource: string;
   /** What the report of the Chinese side says about the order, kept at import time. */

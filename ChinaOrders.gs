@@ -40,7 +40,7 @@ const CHINA_BATCH_HEADERS = [
   'ID', 'Номер заказа', 'Код партии', 'Дата отгрузки', 'Дата прибытия', 'Статус',
   'Товар ¥', 'Доставка по Китаю ¥', 'Вес накладной, кг', 'Объём, м³',
   'Ставка $/кг', 'Упаковка $', 'Прочее карго $', 'Перевозка $', 'Курс ¥/$', 'Перевозка ¥',
-  'Расходы РФ ₽', 'Курс ₽/¥', 'Источник курса', 'Себестоимость партии ₽', 'Коэффициент веса',
+  'Расходы РФ ₽', 'Курс ₽/¥', 'Курс вручную', 'Источник курса', 'Себестоимость партии ₽', 'Коэффициент веса',
   'Оплачено по отчёту ¥', 'Долг по отчёту ¥',
   'Комментарий', 'Кто', 'Обновлено'
 ];
@@ -87,16 +87,24 @@ function chinaIdFromSetting(raw) {
   return value;
 }
 
+// The time zone of the module's spreadsheet. A date typed into a sheet is midnight in THAT
+// zone; read in the script's zone (Asia/Yekaterinburg) it would move a day back whenever the
+// spreadsheet sits east of it. Set every time the spreadsheet is opened.
+let _chinaTimeZone = '';
+
 function chinaSpreadsheet() {
   const id = chinaIdFromSetting(PropertiesService.getScriptProperties().getProperty(CHINA_PROPERTY));
   if (!id) {
     throw new Error('Таблица «Заказы в Китае» не настроена: в свойствах скрипта нет ' + CHINA_PROPERTY);
   }
+  let ss;
   try {
-    return SpreadsheetApp.openById(id);
+    ss = SpreadsheetApp.openById(id);
   } catch (e) {
     throw new Error('Таблица «Заказы в Китае» недоступна: ' + errorMessage(e));
   }
+  _chinaTimeZone = typeof ss.getSpreadsheetTimeZone === 'function' ? String(ss.getSpreadsheetTimeZone() || '') : '';
+  return ss;
 }
 
 function chinaSheet(ss, name, headers) {
@@ -173,13 +181,19 @@ function nameChinaSpreadsheet(ss) {
 
 // Reads a sheet into plain objects keyed by the header text, so a reordered or widened
 // header row cannot shift a column.
+// The header row is ALWAYS the sheet's own, even when there is no data under it. A sheet made
+// by an earlier version of the module has its newer columns appended at the END by
+// ensureColumns, so the order of the constants in this file is not the order of the sheet —
+// and every write below goes by the sheet's own header row for exactly that reason.
+// (Review of 2026-09-24: writing in the order of the constants shifted every value of a
+// batch on the live spreadsheet, and its cost read back as 0.)
 function chinaReadSheet(ss, name, headers) {
   const sheet = chinaSheet(ss, name, headers);
   const lastRow = sheet.getLastRow();
   const lastCol = Math.max(sheet.getLastColumn(), headers.length);
-  if (lastRow <= 1) return { sheet: sheet, headers: headers.slice(), rows: [] };
-  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const values = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
   const head = values[0].map(function (h) { return String(h).trim(); });
+  if (lastRow <= 1) return { sheet: sheet, headers: head, rows: [] };
   const rows = [];
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
@@ -210,7 +224,7 @@ function getChinaSettings() {
 function chinaDateText(value, field) {
   if (value === null || value === undefined || value === '') return '';
   if (value instanceof Date) {
-    return Utilities.formatDate(value, Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd');
+    return Utilities.formatDate(value, _chinaTimeZone || Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd');
   }
   const str = String(value).trim();
   if (!str) return '';
@@ -240,6 +254,7 @@ function chinaBatchFromRow(r) {
     freightCny: parseNumber(r['Перевозка ¥']),
     rubCosts: parseNumber(r['Расходы РФ ₽']),
     rubRate: parseNumber(r['Курс ₽/¥']),
+    manualRate: chinaManualRateOf(r),
     rubRateSource: String(r['Источник курса'] || '').trim(),
     paidCny: parseNumber(r['Оплачено по отчёту ¥']),
     unpaidCny: parseNumber(r['Долг по отчёту ¥']),
@@ -249,6 +264,21 @@ function chinaBatchFromRow(r) {
     user: String(r['Кто'] || '').trim(),
     updatedAt: String(r['Обновлено'] || '').trim()
   };
+}
+
+/**
+ * The ₽/¥ rate the owner typed himself. It is kept apart from «Курс ₽/¥», the rate the batch
+ * was actually costed at: once payments of the order set that one, the typed rate must still
+ * be there to come back to when the payments go (review of 2026-09-24 — it used to be lost,
+ * and the rate of a deleted payment stayed on the batch labelled «вручную»).
+ * A row written before this column existed only ever held a typed rate, unless its rate came
+ * from payments.
+ */
+function chinaManualRateOf(r) {
+  const cell = r['Курс вручную'];
+  if (cell !== undefined && cell !== null && String(cell).trim() !== '') return parseNumber(cell);
+  if (String(r['Источник курса'] || '').trim() === 'оплаты') return 0;
+  return parseNumber(r['Курс ₽/¥']);
 }
 
 function chinaLineFromRow(r) {
@@ -393,21 +423,39 @@ function chinaAllocate(total, bases) {
   return out;
 }
 
-// What makes two lines THE SAME GOODS (owner, 2026-09-22). The carrier splits one product
-// over several lines and pallets, so lines have to be grouped before anything is split
-// between them. Three keys, in order:
+// What makes two lines THE SAME GOODS (owner, 2026-09-22). Each of three things says so on
+// its own, and they chain:
 //
-//   «Один товар»  the owner said so himself — the same box in two colours carries two
-//                  different articles of ours and nothing else could tie the lines together;
-//   «Наш артикул» once it is written against a line, it says what the goods are;
-//   the marking    the carrier's own, good only inside this batch, and all there is until
-//                  the articles are assigned.
-function chinaGroupKey(line) {
-  const group = String((line || {}).group || '').trim();
-  if (group) return 'G:' + group.toLowerCase();
-  const article = String((line || {}).article || '').trim();
-  if (article) return 'A:' + article.toLowerCase();
-  return 'M:' + String((line || {}).marking || '').trim().toLowerCase();
+//   the marking    the carrier's, and within one batch it names one product (owner);
+//   «Наш артикул» one article of ours is one product, whatever marking it came under;
+//   «Один товар»  the owner's own marker, for the same box in two colours that carries two
+//                  different articles of ours.
+//
+// Two lines sharing ANY of the three are one product, and so is everything they are tied to
+// in turn. Review of 2026-09-24: the key used to be the first filled of the three, so an
+// article written against one of two NV-99 lines split one product into two groups and gave
+// it two costs, 489,19 and 565,78 ₽ a piece.
+function chinaGroupIds(lines) {
+  const parent = lines.map(function (_, i) { return i; });
+  const find = function (i) {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  };
+  const join = function (a, b) {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);
+  };
+  const seen = {};
+  lines.forEach(function (line, i) {
+    const l = line || {};
+    [['M', l.marking], ['A', l.article], ['G', l.group]].forEach(function (pair) {
+      const value = String(pair[1] || '').trim().toLowerCase();
+      if (!value) return;
+      const key = pair[0] + ':' + value;
+      if (seen[key] === undefined) seen[key] = i; else join(i, seen[key]);
+    });
+  });
+  return lines.map(function (_, i) { return 'g' + find(i); });
 }
 
 // Weight of every line, in kilograms, and where each number came from. Kilograms per box are
@@ -415,7 +463,7 @@ function chinaGroupKey(line) {
 // pallet they were packed into and whichever marking the carrier gave them.
 function chinaLineWeights(lines, invoiceWeight) {
   const boxes = lines.map(function (l) { return Number(l.boxes) || 0; });
-  const marks = lines.map(chinaGroupKey);
+  const marks = chinaGroupIds(lines);
 
   // Kilograms per box, from the pallets where a marking was actually weighed.
   const byMark = {};
@@ -479,8 +527,9 @@ function chinaBoxBases(lines) {
 // goes to the largest line, so the total of the batch does not move.
 function chinaLevelGroups(lines, computed) {
   const groups = {};
+  const ids = chinaGroupIds(lines);
   lines.forEach(function (l, i) {
-    const key = chinaGroupKey(l);
+    const key = ids[i];
     if (!groups[key]) groups[key] = [];
     groups[key].push(i);
   });
@@ -590,11 +639,16 @@ function chinaStamp() {
 }
 
 // Rewrites a sheet from its header row down. Used for the lines of a batch: an edit changes
-// how many lines there are, and rewriting is both simpler and safer than patching rows.
+// how many lines there are, and rewriting is simpler than patching rows. The new table goes
+// OVER the old one first and only the rows left below it are cleared after: cleared first, a
+// failure between the two steps would have wiped the lines of every batch in the module.
 function chinaWriteSheet(sheet, headers, rows) {
-  sheet.clearContents();
   const table = [headers.slice()].concat(rows);
+  const before = sheet.getLastRow();
   sheet.getRange(1, 1, table.length, headers.length).setValues(table);
+  if (before > table.length) {
+    sheet.getRange(table.length + 1, 1, before - table.length, headers.length).clearContent();
+  }
 }
 
 function chinaRowFrom(headers, values) {
@@ -642,6 +696,7 @@ function saveChinaBatch(data, username) {
     freightUsd: parseNumber(data.freightUsd),
     cargoRate: parseNumber(data.cargoRate),
     rubRate: parseNumber(data.rubRate),
+    manualRate: parseNumber(data.rubRate),
     paidCny: parseNumber(data.paidCny),
     unpaidCny: parseNumber(data.unpaidCny),
     comment: String(data.comment || '').trim()
@@ -683,13 +738,13 @@ function chinaWithPaymentRate(ss, batch) {
   const fromPayments = chinaRateFromPayments(payments, batch.orderNo);
   const out = {};
   Object.keys(batch).forEach(function (k) { out[k] = batch[k]; });
-  out.rubRate = fromPayments > 0 ? fromPayments : (Number(batch.rubRate) || 0);
+  out.rubRate = fromPayments > 0 ? fromPayments : (Number(batch.manualRate) || 0);
   out.rubRateSource = fromPayments > 0 ? 'оплаты' : (out.rubRate > 0 ? 'вручную' : '');
   return out;
 }
 
 function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
-  const row = chinaRowFrom(CHINA_BATCH_HEADERS, {
+  const row = chinaRowFrom(batchCtx.headers, {
     'ID': batch.id,
     'Номер заказа': batch.orderNo,
     'Код партии': batch.code,
@@ -708,6 +763,7 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
     'Перевозка ¥': calc.freightCny,
     'Расходы РФ ₽': calc.rubCosts,
     'Курс ₽/¥': calc.rubRate,
+    'Курс вручную': batch.manualRate || '',
     'Источник курса': batch.rubRateSource || '',
     'Оплачено по отчёту ¥': batch.paidCny || '',
     'Долг по отчёту ¥': batch.unpaidCny || '',
@@ -721,7 +777,7 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
   let targetRow = 0;
   batchCtx.rows.forEach(function (r) { if (String(r['ID']).trim() === batch.id) targetRow = r.__row; });
   if (targetRow > 0) {
-    batchCtx.sheet.getRange(targetRow, 1, 1, CHINA_BATCH_HEADERS.length).setValues([row]);
+    batchCtx.sheet.getRange(targetRow, 1, 1, batchCtx.headers.length).setValues([row]);
   } else {
     batchCtx.sheet.appendRow(row);
   }
@@ -729,11 +785,11 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
   const lineCtx = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS);
   const kept = lineCtx.rows
     .filter(function (r) { return String(r['ПартияID']).trim() !== batch.id; })
-    .map(function (r) { return chinaRowFrom(CHINA_LINE_HEADERS, r); });
+    .map(function (r) { return chinaRowFrom(lineCtx.headers, r); });
 
   const fresh = lines.map(function (l, i) {
     const c = calc.lines[i];
-    return chinaRowFrom(CHINA_LINE_HEADERS, {
+    return chinaRowFrom(lineCtx.headers, {
       'ID': batch.id + '-' + (i + 1),
       'ПартияID': batch.id,
       'Маркировка': l.marking,
@@ -758,7 +814,7 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
     });
   });
 
-  chinaWriteSheet(lineCtx.sheet, CHINA_LINE_HEADERS, kept.concat(fresh));
+  chinaWriteSheet(lineCtx.sheet, lineCtx.headers, kept.concat(fresh));
 }
 
 // Recomputes a batch that is already in the sheet. Called after a Russian-side cost is added
@@ -797,14 +853,14 @@ function deleteChinaBatch(data, username) {
   const lineCtx = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS);
   const keptLines = lineCtx.rows
     .filter(function (r) { return String(r['ПартияID']).trim() !== id; })
-    .map(function (r) { return chinaRowFrom(CHINA_LINE_HEADERS, r); });
-  chinaWriteSheet(lineCtx.sheet, CHINA_LINE_HEADERS, keptLines);
+    .map(function (r) { return chinaRowFrom(lineCtx.headers, r); });
+  chinaWriteSheet(lineCtx.sheet, lineCtx.headers, keptLines);
 
   const costCtx = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS);
   const keptCosts = costCtx.rows
     .filter(function (r) { return String(r['ПартияID']).trim() !== id; })
-    .map(function (r) { return chinaRowFrom(CHINA_COST_HEADERS, r); });
-  chinaWriteSheet(costCtx.sheet, CHINA_COST_HEADERS, keptCosts);
+    .map(function (r) { return chinaRowFrom(costCtx.headers, r); });
+  chinaWriteSheet(costCtx.sheet, costCtx.headers, keptCosts);
 
   Logger.log('Заказы в Китае: партия ' + id + ' удалена пользователем ' + (username || '—'));
   return getChinaBatches();
@@ -822,13 +878,19 @@ function saveChinaBatchCost(data, username) {
   if (!(amount > 0)) throw new Error('Сумма расхода должна быть больше нуля');
 
   const ss = chinaSpreadsheet();
+  // The batch is checked BEFORE anything is written: a cost of a batch that is not there
+  // used to be appended first and refused after, leaving an orphan row in the sheet.
+  const known = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows
+    .some(function (r) { return String(r['ID']).trim() === batchId; });
+  if (!known) throw new Error('Партия ' + batchId + ' не найдена');
+
   const ctx = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS);
   const requested = String(data.id || '').trim();
   let targetRow = 0;
   ctx.rows.forEach(function (r) { if (String(r['ID']).trim() === requested) targetRow = r.__row; });
   if (requested && !targetRow) throw new Error('Расход ' + requested + ' не найден');
 
-  const row = chinaRowFrom(CHINA_COST_HEADERS, {
+  const row = chinaRowFrom(ctx.headers, {
     'ID': requested || chinaNextId(ctx.rows, 'CC'),
     'ПартияID': batchId,
     'Дата': chinaDateText(data.date, 'Дата') || getTodayDateString(),
@@ -838,7 +900,7 @@ function saveChinaBatchCost(data, username) {
     'Кто': username || ''
   });
   if (targetRow > 0) {
-    ctx.sheet.getRange(targetRow, 1, 1, CHINA_COST_HEADERS.length).setValues([row]);
+    ctx.sheet.getRange(targetRow, 1, 1, ctx.headers.length).setValues([row]);
   } else {
     ctx.sheet.appendRow(row);
   }
@@ -868,7 +930,7 @@ function saveChinaPayment(data, username) {
   });
   if (requested && !targetRow) throw new Error('Оплата ' + requested + ' не найдена');
 
-  const row = chinaRowFrom(CHINA_PAYMENT_HEADERS, {
+  const row = chinaRowFrom(ctx.headers, {
     'ID': requested || chinaNextId(ctx.rows, 'CP'),
     'Дата': chinaDateText(data.date, 'Дата') || getTodayDateString(),
     'Сумма ₽': money.amountRub,
@@ -881,7 +943,7 @@ function saveChinaPayment(data, username) {
     'Кто': username || ''
   });
   if (targetRow > 0) {
-    ctx.sheet.getRange(targetRow, 1, 1, CHINA_PAYMENT_HEADERS.length).setValues([row]);
+    ctx.sheet.getRange(targetRow, 1, 1, ctx.headers.length).setValues([row]);
   } else {
     ctx.sheet.appendRow(row);
   }

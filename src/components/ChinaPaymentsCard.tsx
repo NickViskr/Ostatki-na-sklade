@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Wallet, Loader2, Trash2, Wand2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
-import { ChinaBatch } from '../types';
+import { ChinaBatch, ChinaPayment } from '../types';
 import { chinaNumber } from '../lib/chinaBatchForm';
 import { parseChinaPaymentText } from '../lib/chinaPaymentText';
 
@@ -64,7 +64,9 @@ export const ChinaPaymentsCard: React.FC<ChinaPaymentsCardProps> = ({ batches })
       toast.error('Не понял сообщение. Нужны сумма в рублях и курс — или сумма в юанях, которую подтвердили китайцы');
       return;
     }
-    if (parsed.date) setDate(parsed.date);
+    // The date of THIS sentence, or none: kept from the payment before, it would quietly date a
+    // payment made today with the day of the last one.
+    setDate(parsed.date);
     setAmountRub(String(parsed.amountRub));
     setRate(parsed.rate ? String(parsed.rate) : '');
     setAmountCny(parsed.amountCny ? String(parsed.amountCny) : '');
@@ -83,9 +85,24 @@ export const ChinaPaymentsCard: React.FC<ChinaPaymentsCardProps> = ({ batches })
       comment: comment.trim()
     });
     if (ok) {
-      setText(''); setAmountRub(''); setRate(''); setAmountCny(''); setComment(''); setConfirmed(false);
+      setText(''); setDate(''); setAmountRub(''); setRate(''); setAmountCny(''); setComment(''); setConfirmed(false);
     }
   };
+
+  // The owner's own order of events: he pays, and only later does the report of the Chinese
+  // side say which order the money went to. The payment is then put against that order in
+  // place — the script re-costs the batches of the order it lands on and of the one it left.
+  const reassign = (p: ChinaPayment, patch: { orderNo?: string; confirmed?: boolean }) => savePayment({
+    id: p.id,
+    date: p.date,
+    amountRub: p.amountRub,
+    rate: p.rate,
+    amountCny: p.amountCny,
+    purpose: p.purpose,
+    orderNo: patch.orderNo !== undefined ? patch.orderNo : p.orderNo,
+    confirmed: patch.confirmed !== undefined ? patch.confirmed : p.confirmed,
+    comment: p.comment
+  });
 
   const field = 'block px-3 py-2 border border-slate-200 rounded-lg text-sm';
 
@@ -199,8 +216,31 @@ export const ChinaPaymentsCard: React.FC<ChinaPaymentsCardProps> = ({ batches })
                   <td className="py-2 pr-3">{p.rate}</td>
                   <td className="py-2 pr-3">{money(p.amountCny, '¥')}</td>
                   <td className="py-2 pr-3">{p.purpose}</td>
-                  <td className="py-2 pr-3">{p.orderNo ? `№${p.orderNo}` : <span className="text-amber-600">не привязана</span>}</td>
-                  <td className="py-2 pr-3">{p.confirmed ? 'подтверждена' : '—'}</td>
+                  <td className="py-2 pr-3">
+                    <select
+                      data-testid="select-china-payment-reassign"
+                      className={`px-2 py-1 border rounded text-sm ${p.orderNo ? 'border-slate-200' : 'border-amber-300 text-amber-700'}`}
+                      value={p.orderNo}
+                      disabled={isSaving}
+                      onChange={(e) => reassign(p, { orderNo: e.target.value })}
+                    >
+                      <option value="">— не привязана —</option>
+                      {(p.orderNo && orders.indexOf(p.orderNo) === -1 ? [p.orderNo].concat(orders) : orders).map((no) => (
+                        <option key={no} value={no}>№{no}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="py-2 pr-3">
+                    <label className="flex items-center gap-1 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={p.confirmed}
+                        disabled={isSaving}
+                        onChange={(e) => reassign(p, { confirmed: e.target.checked })}
+                      />
+                      {p.confirmed ? 'подтверждена' : 'нет'}
+                    </label>
+                  </td>
                   <td className="py-2 pr-3 text-slate-500">{p.comment}</td>
                   <td className="py-2 text-right">
                     <button onClick={() => deletePayment(p.id)} className="text-slate-300 hover:text-red-500">

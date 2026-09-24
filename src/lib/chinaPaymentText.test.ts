@@ -123,6 +123,23 @@ describe('подключение оплат', () => {
     expect(card).toContain('rub / cny');
   });
 
+  it('a sentence without a date does not inherit the date of the payment before (review)', () => {
+    expect(card).toContain('setDate(parsed.date);');
+    expect(card).not.toContain('if (parsed.date) setDate(parsed.date);');
+    expect(card).toContain("setText(''); setDate('');");
+  });
+
+  it('a payment already made can be put against its order when the report confirms it (review)', () => {
+    expect(card).toContain('select-china-payment-reassign');
+    expect(card).toContain('reassign(p, { orderNo: e.target.value })');
+    expect(card).toContain('reassign(p, { confirmed: e.target.checked })');
+    // The edit goes by id and carries the money unchanged: only its order and its mark move.
+    const reassign = card.split('const reassign = ')[1] || '';
+    expect(reassign).toContain('id: p.id');
+    expect(reassign).toContain('amountRub: p.amountRub');
+    expect(reassign).toContain('amountCny: p.amountCny');
+  });
+
   it('the batch card says where its rate came from and what the report says about the order', () => {
     expect(tab).toContain('batch.rubRateSource');
     expect(tab).toContain('По отчёту китайцев по заказу');

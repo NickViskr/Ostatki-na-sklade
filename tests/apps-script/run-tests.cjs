@@ -4472,6 +4472,226 @@ function batch28Payload(over) {
   }, 'больше нуля');
 })();
 
+// ================= Item 81, review of 2026-09-24 =================
+//
+// Every check below was written against a defect the review reproduced first. None of them
+// could be seen by the checks above, because every one of those starts from a spreadsheet
+// the CURRENT code has just created — while the owner's live spreadsheet was set up on
+// Code.gs 183 and holds the header rows of item 81a.
+
+const OLD_BATCH_HEADERS = ['ID', 'Номер заказа', 'Код партии', 'Дата отгрузки', 'Дата прибытия', 'Статус',
+  'Товар ¥', 'Доставка по Китаю ¥', 'Вес накладной, кг', 'Объём, м³', 'Ставка $/кг', 'Упаковка $',
+  'Прочее карго $', 'Перевозка $', 'Курс ¥/$', 'Перевозка ¥', 'Расходы РФ ₽', 'Курс ₽/¥',
+  'Себестоимость партии ₽', 'Коэффициент веса', 'Комментарий', 'Кто', 'Обновлено'];
+const OLD_PAYMENT_HEADERS = ['ID', 'Дата', 'Сумма ₽', 'Курс ₽/¥', 'Куплено ¥', 'Назначение', 'Комментарий', 'Кто'];
+
+// The live spreadsheet as it stands: set up by the old code, possibly with a batch saved by
+// hand on Cloud Run sklad-00080 (item 81b), before any of the columns added since.
+function withOldChina(withBatch) {
+  const h = freshHarness();
+  h.setChinaSpreadsheet();
+  const batchRows = [OLD_BATCH_HEADERS.slice()];
+  if (withBatch) {
+    const row = OLD_BATCH_HEADERS.map(function () { return ''; });
+    const put = function (name, value) { row[OLD_BATCH_HEADERS.indexOf(name)] = value; };
+    put('ID', 'CB1'); put('Номер заказа', '28'); put('Код партии', 'NV-0825-2'); put('Статус', 'Прибыла');
+    put('Доставка по Китаю ¥', 700); put('Вес накладной, кг', 672.5); put('Перевозка $', 1636.75);
+    put('Курс ¥/$', 7); put('Курс ₽/¥', 12.4); put('Себестоимость партии ₽', 271575.49);
+    put('Комментарий', 'внесена вручную'); put('Кто', 'Николай');
+    batchRows.push(row);
+  }
+  h.setTargetSheet('Партии', batchRows);
+  h.setTargetSheet('Платежи', [OLD_PAYMENT_HEADERS.slice()]);
+  h.setupChinaSpreadsheet();
+  if (withBatch) {
+    // The lines of that batch, as 81b wrote them: its header row already had «Один товар».
+    const lineHead = h.CHINA_LINE_HEADERS;
+    const lineRows = [lineHead.slice()];
+    batch28Lines().forEach(function (l, i) {
+      const row = lineHead.map(function () { return ''; });
+      const put = function (name, value) { row[lineHead.indexOf(name)] = value; };
+      put('ID', 'CB1-' + (i + 1)); put('ПартияID', 'CB1'); put('Маркировка', l.marking);
+      put('Коробок', l.boxes); put('Шт/коробку', l.pcsPerBox); put('Количество', l.qty);
+      put('Цена ¥', l.priceCny); put('Вес паллеты, кг', l.palletWeightKg || '');
+      lineRows.push(row);
+    });
+    h.setTargetSheet('Строки партий', lineRows);
+  }
+  return h;
+}
+
+(function () {
+  const h = withOldChina(false);
+  const head = h.headerRowOf(h.getTargetSheet('Партии'));
+  check('review: the newer columns are added at the END of an old sheet, not in their code order',
+    head.indexOf('Себестоимость партии ₽') === 18 && head.indexOf('Курс вручную') > head.indexOf('Обновлено'),
+    head.slice(17).join(' | '));
+
+  h.saveChinaBatch(batch28Payload({ paidCny: 10444, comment: 'из файла' }), 'Николай');
+  const raw = h.getTargetSheet('Партии').__dump();
+  const cell = function (name) { return raw[1][raw[0].indexOf(name)]; };
+  check('review: on an old sheet every value lands under its own header',
+    cell('Себестоимость партии ₽') === 271575.49 && cell('Кто') === 'Николай' &&
+    cell('Комментарий') === 'из файла' && cell('Источник курса') === 'вручную' &&
+    cell('Оплачено по отчёту ¥') === 10444 && cell('Коэффициент веса') === 0.7987,
+    JSON.stringify(raw[1]));
+
+  const back = h.getChinaBatches().batches[0];
+  check('review: and reads back as it was written',
+    back.totalRub === 271575.49 && back.user === 'Николай' && back.comment === 'из файла' && back.manualRate === 12.4,
+    JSON.stringify({ totalRub: back.totalRub, user: back.user, comment: back.comment, manualRate: back.manualRate }));
+
+  h.saveChinaPayment({ date: '2026-08-27', amountRub: 100000, rate: 12.4, orderNo: '28', comment: 'аванс 30%' }, 'Николай');
+  const pay = h.dumpChinaSheet('Платежи')[0];
+  check('review: a payment on the old payments sheet keeps its order and its comment apart',
+    pay['Номер заказа'] === '28' && pay['Комментарий'] === 'аванс 30%' && pay['Кто'] === 'Николай' &&
+    pay['Куплено ¥'] === 8064.52,
+    JSON.stringify(pay));
+})();
+
+(function () {
+  const h = withOldChina(true);
+  const before = h.getChinaBatches().batches[0];
+  check('review: a batch saved before the typed rate had a column of its own keeps that rate',
+    before.manualRate === 12.4 && before.rubRate === 12.4, before.manualRate + ' / ' + before.rubRate);
+
+  // The first thing the new code does to it: a payment that re-costs it, then goes away.
+  h.saveChinaPayment({ amountRub: 100000, rate: 11, orderNo: '28' }, 'Николай');
+  h.deleteChinaPayment({ id: 'CP1' }, 'Николай');
+  const after = h.getChinaBatches().batches[0];
+  check('review: an old batch comes back to its own typed rate and cost after a payment comes and goes',
+    after.rubRate === 12.4 && after.rubRateSource === 'вручную' && after.totalRub === 271575.49 &&
+    after.comment === 'внесена вручную',
+    JSON.stringify({ rubRate: after.rubRate, src: after.rubRateSource, totalRub: after.totalRub, comment: after.comment }));
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  const rates = function () {
+    const r = h.dumpChinaSheet('Партии')[0];
+    return [Number(r['Курс ₽/¥']), Number(r['Курс вручную']), r['Источник курса'], Number(r['Себестоимость партии ₽'])];
+  };
+  // A payment at a rate DIFFERENT from the typed one: the checks of 81d used 12,4 for both,
+  // which is exactly why they could not see the typed rate being lost.
+  h.saveChinaPayment({ amountRub: 100000, rate: 11, orderNo: '28' }, 'Николай');
+  check('review: a payment at another rate costs the batch at the rate of the payment',
+    JSON.stringify(rates()) === JSON.stringify([11, 12.4, 'оплаты', 240913.75]), JSON.stringify(rates()));
+  check('review: while the payment is on, the window still offers the rate the owner typed',
+    h.getChinaBatches().batches[0].manualRate === 12.4, String(h.getChinaBatches().batches[0].manualRate));
+
+  // Saving the batch from the window while the payment is on must not turn 11 into «typed».
+  h.saveChinaBatch(batch28Payload({ id: 'CB1', rubRate: h.getChinaBatches().batches[0].manualRate }), 'Николай');
+  h.deleteChinaPayment({ id: 'CP1' }, 'Николай');
+  check('review: with the payment gone the typed 12,4 and its 271 575,49 ₽ come back',
+    JSON.stringify(rates()) === JSON.stringify([12.4, 12.4, 'вручную', 271575.49]), JSON.stringify(rates()));
+})();
+
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.saveChinaBatch(batch28Payload({ orderNo: '27', code: 'NV-0716-3', lines: batch27Lines(),
+    chinaDeliveryCny: 900, weightKg: 1001.5, packingUsd: 135, freightUsd: 2438.45 }), 'Николай');
+
+  // A failure in the middle of rewriting the lines: the write of the new table breaks.
+  const sheet = h.getTargetSheet('Строки партий');
+  const realGetRange = sheet.getRange;
+  sheet.getRange = function (row, col, rows, cols) {
+    const range = realGetRange.call(sheet, row, col, rows, cols);
+    if (rows > 1) range.setValues = function () { throw new Error('Service invoked too many times'); };
+    return range;
+  };
+  let failed = '';
+  try { h.saveChinaBatch(batch28Payload({ id: 'CB1' }), 'Николай'); } catch (e) { failed = e.message; }
+  sheet.getRange = realGetRange;
+  const left = h.dumpChinaSheet('Строки партий');
+  check('review: a write that fails half way leaves the lines of every batch in place',
+    failed.indexOf('too many') !== -1 && left.length === 8 &&
+    left.filter(function (l) { return l['ПартияID'] === 'CB2'; }).length === 5,
+    failed + ' :: ' + left.length);
+})();
+
+(function () {
+  // The owner typed NO rate: the batch was imported, and payments gave it its rate. When the
+  // only payment goes, the batch must be left without a rate — not keep the payment's rate
+  // and call it typed.
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({ rubRate: 0 }), 'Николай');
+  h.saveChinaPayment({ amountRub: 100000, rate: 11, orderNo: '28' }, 'Николай');
+  const paid = h.getChinaBatches().batches[0];
+  h.deleteChinaPayment({ id: 'CP1' }, 'Николай');
+  const after = h.getChinaBatches().batches[0];
+  check('review: a batch whose only rate came from a payment has no rate once the payment goes',
+    paid.rubRate === 11 && paid.manualRate === 0 && after.rubRate === 0 && after.rubRateSource === '',
+    JSON.stringify({ paid: [paid.rubRate, paid.manualRate], after: [after.rubRate, after.rubRateSource] }));
+})();
+
+(function () {
+  const h = withChina();
+  let msg = '';
+  try { h.saveChinaBatchCost({ batchId: 'CB404', kind: 'Разгрузка', amountRub: 9000 }, 'Николай'); } catch (e) { msg = e.message; }
+  check('review: a cost of a batch that is not there is refused before anything is written',
+    msg.indexOf('не найдена') !== -1 && h.dumpChinaSheet('Расходы партии').length === 0,
+    msg + ' :: ' + h.dumpChinaSheet('Расходы партии').length);
+})();
+
+(function () {
+  const h = withChina();
+  const b = batch28();
+  const units = function (lines) {
+    return h.chinaBatchCost(b, lines, 0, { cargoRateCnyPerUsd: 7 }).lines.map(function (l) { return l.unitRub; });
+  };
+  const partial = batch28Lines();
+  partial[0].article = 'BOX-WHITE';
+  check('review: an article written against ONE of two NV-99 lines does not split the product',
+    JSON.stringify(units(partial)) === JSON.stringify([504.61, 504.61, 749.3]), units(partial).join(' / '));
+
+  const across = batch28Lines();
+  across[0].article = 'BOX';
+  across[2].article = 'BOX';
+  check('review: one article under two markings ties both markings into one product',
+    JSON.stringify(units(across)) === JSON.stringify([565.78, 565.78, 565.78]), units(across).join(' / '));
+
+  const clash = batch28Lines();
+  clash[0].article = 'BOX-WHITE';
+  clash[1].article = 'BOX-GREY';
+  check('review: one marking stays one product even when its lines were given two articles',
+    units(clash)[0] === units(clash)[1], units(clash).join(' / '));
+
+  // The chain: A and B share a marking, B and C an article, C and D a marker. E stands alone.
+  const ids = h.chinaGroupIds([
+    { marking: 'NV-1' },
+    { marking: 'NV-1', article: 'P' },
+    { marking: 'NV-2', article: 'P', group: 'G' },
+    { marking: 'NV-3', group: 'G' },
+    { marking: 'NV-4' }
+  ]);
+  check('review: sameness chains from marking to article to marker',
+    ids[0] === ids[1] && ids[1] === ids[2] && ids[2] === ids[3] && ids[4] !== ids[0], ids.join(' '));
+  check('review: letter case does not make two products of one',
+    (function () {
+      const x = h.chinaGroupIds([{ marking: 'nv-99' }, { marking: 'NV-99' }]);
+      return x[0] === x[1];
+    })(), 'nv-99 / NV-99');
+})();
+
+(function () {
+  const h = withChina();
+  // The script runs in one zone, the spreadsheet sits in another; a date in the sheet is
+  // midnight of the spreadsheet's own zone.
+  h.context.Session = { getScriptTimeZone: function () { return 'UTC'; } };
+  h.setTargetSpreadsheetTimeZone('Europe/Moscow');
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  const sheet = h.getTargetSheet('Партии');
+  const data = sheet.__dump();
+  // The Date has to be the stand's own class: the script runs in a sandbox whose Date it is,
+  // exactly as a cell of a real sheet hands the script a Date of its own world.
+  data[1][data[0].indexOf('Дата прибытия')] = new h.FakeDate(Date.UTC(2026, 8, 16, 21, 0, 0)); // 17.09 00:00 МСК
+  sheet.__setData(data);
+  check('review: a date is read in the time zone of the spreadsheet it came from',
+    h.getChinaBatches().batches[0].arrivedAt === '2026-09-17', h.getChinaBatches().batches[0].arrivedAt);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

@@ -173,6 +173,8 @@ let targetSheets = {};
 // Item 81: the module names the spreadsheet of «Заказы в Китае» itself when the owner left it
 // with the default name Google gives a new file.
 let targetSpreadsheetName = 'Новая таблица';
+// Review of item 81: dates are read in the time zone of the module's own spreadsheet.
+let targetSpreadsheetTimeZone = 'Europe/Moscow';
 
 // ---------- Item 78a: UrlFetchApp — a programmable stand-in for the KAN MCP server ----------
 // A test installs a handler (url, options) => { code, body }; every call is logged so a test
@@ -232,6 +234,7 @@ const sandbox = {
       return {
         getId: () => targetSpreadsheetId,
         getName: () => targetSpreadsheetName,
+        getSpreadsheetTimeZone: () => targetSpreadsheetTimeZone,
         rename: (name) => { targetSpreadsheetName = name; },
         getSheetByName: (name) => targetSheets[name] || null,
         getSheets: () => Object.keys(targetSheets).map(k => targetSheets[k]),
@@ -649,6 +652,7 @@ module.exports = {
   targetSheetNames() { return Object.keys(targetSheets); },
   targetSpreadsheetName() { return targetSpreadsheetName; },
   setTargetSpreadsheetName(name) { targetSpreadsheetName = name; },
+  setTargetSpreadsheetTimeZone(tz) { targetSpreadsheetTimeZone = tz; },
   // A sheet of the module as objects keyed by its header text: the assertions of item 81 are
   // about «Себестоимость ₽», not about column 18.
   dumpChinaSheet(name) {
@@ -677,5 +681,6 @@ module.exports = {
   deleteChinaPayment: (...args) => context.deleteChinaPayment(...args),
   chinaPaymentMoney: (...args) => context.chinaPaymentMoney(...args),
   chinaRateFromPayments: (...args) => context.chinaRateFromPayments(...args),
+  chinaGroupIds: (...args) => context.chinaGroupIds(...args),
   vm
 };

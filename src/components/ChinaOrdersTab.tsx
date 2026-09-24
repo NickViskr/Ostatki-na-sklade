@@ -10,8 +10,8 @@ import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import {
-  CHINA_COST_TYPES, ChinaBatchForm, chinaBatchToForm, chinaFormFromFiles, chinaFormToPayload,
-  chinaGroupLabel, chinaLevelledGroups
+  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaFormFromFiles,
+  chinaFormToPayload, chinaLevelledIndexes
 } from '../lib/chinaBatchForm';
 import { ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaBatchFile, parseChinaReportFile } from '../lib/chinaFileParse';
 import { chinaSheetsFromFile } from '../lib/chinaXlsx';
@@ -234,7 +234,8 @@ export const ChinaOrdersTab: React.FC = () => {
       <div className="space-y-3">
         {batches.map((batch) => {
           const isOpen = batch.id === openId;
-          const groups = chinaLevelledGroups(batch.lines);
+          const levelledLines = chinaLevelledIndexes(batch.lines);
+          const conflicts = chinaArticleConflicts(batch.lines);
           return (
             <div key={batch.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <button
@@ -288,6 +289,12 @@ export const ChinaOrdersTab: React.FC = () => {
                     </p>
                   )}
 
+                  {conflicts.length > 0 && (
+                    <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      {conflicts.map((c, i) => <p key={i}>{c}</p>)}
+                    </div>
+                  )}
+
                   {batch.weightFactor !== null && (batch.weightFactor < 0.8 || batch.weightFactor > 1.25) && (
                     <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                       Оценка веса по паллетам расходится с накладной в {batch.weightFactor} раза.
@@ -314,10 +321,9 @@ export const ChinaOrdersTab: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {batch.lines.map((line) => {
+                        {batch.lines.map((line, index) => {
                           const draft = labelOf(line);
-                          const key = chinaGroupLabel(line).toLowerCase();
-                          const levelled = !!groups[key];
+                          const levelled = levelledLines.has(index);
                           return (
                             <tr key={line.id} className="border-b border-slate-50">
                               <td className="py-2 pr-3 font-bold">

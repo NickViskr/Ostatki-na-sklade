@@ -155,7 +155,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Курс ₽/¥</span>
               <input className={field} value={form.rubRate} onChange={(e) => set({ rubRate: e.target.value })} placeholder="12,4" />
-              <span className="text-[11px] text-slate-400">Курс, по которому куплены юани этой партии.</span>
+              <span className="text-[11px] text-slate-400">Курс, вписанный вручную. Когда к заказу привязаны оплаты, партия считается по их курсу, а этот остаётся запасным.</span>
             </label>
             <label className="block md:col-span-2">
               <span className="text-xs font-bold text-slate-500 uppercase">Комментарий</span>

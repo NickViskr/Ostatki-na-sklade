@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import {
   chinaNumber, emptyChinaBatchForm, emptyChinaLine, chinaBatchToForm, chinaFormToPayload,
-  chinaFormCounts, chinaGroupLabel, chinaLevelledGroups, validateChinaBatchForm, chinaFilledLines,
+  chinaFormCounts, chinaGroupIds, chinaLevelledIndexes, chinaArticleConflicts, validateChinaBatchForm, chinaFilledLines,
   chinaFormFromFiles, ChinaBatchForm
 } from './chinaBatchForm';
 import { parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
@@ -37,6 +37,11 @@ describe('chinaNumber', () => {
 
   it('ignores the spaces of a pasted number', () => {
     expect(chinaNumber('11 457,25')).toBe(11457.25);
+  });
+
+  it('reads a number pasted from an English sheet, where the comma separates thousands', () => {
+    expect(chinaNumber('1,636.75')).toBe(1636.75);
+    expect(chinaNumber('11,457.25')).toBe(11457.25);
   });
 
   it('turns an empty field and nonsense into zero', () => {
@@ -83,10 +88,14 @@ describe('a batch opened for editing', () => {
         weightKg: 270.76, weightSource: 'паллета', chinaShareCny: 281.83, freightShareCny: 4612.83,
         rubShare: 0, costRub: 121106.58, unitRub: 504.61, article: 'BOX', group: ''
       }],
-      costs: [], payments: [], rubRateSource: 'вручную', paidCny: 0, unpaidCny: 0
+      costs: [], payments: [], rubRateSource: 'вручную', manualRate: 12.4, paidCny: 0, unpaidCny: 0
     } as ChinaBatch;
     const form = chinaBatchToForm(batch);
     expect(form.weightKg).toBe('672.5');
+    // The window offers the rate the owner TYPED, never the one payments gave the batch:
+    // saving the window untouched would otherwise make the payments' rate the typed one.
+    const paidFor = chinaBatchToForm({ ...batch, rubRate: 11, manualRate: 12.4, rubRateSource: 'оплаты' });
+    expect(paidFor.rubRate).toBe('12.4');
     expect(form.lines[0].qty).toBe('240');
     expect(form.lines[0].article).toBe('BOX');
     // A zero is an empty field, not the digit 0: the owner sees a blank to fill in.
@@ -109,15 +118,16 @@ describe('what the form counts', () => {
 });
 
 describe('which lines are one product', () => {
-  it('prefers the owner marker, then our article, then the carrier marking', () => {
-    expect(chinaGroupLabel({ group: 'короб 8 шт', article: 'BOX-WHITE', marking: 'NV-99' })).toBe('короб 8 шт');
-    expect(chinaGroupLabel({ article: 'BOX-WHITE', marking: 'NV-99' })).toBe('BOX-WHITE');
-    expect(chinaGroupLabel({ marking: 'NV-99' })).toBe('NV-99');
+  it('two lines of one marking are one product', () => {
+    const lines = [{ marking: 'NV-99' }, { marking: 'NV-99' }, { marking: 'NV-98' }];
+    expect(Array.from(chinaLevelledIndexes(lines))).toEqual([0, 1]);
   });
 
-  it('shows a group only where there is something to level', () => {
-    const lines = [{ marking: 'NV-99' }, { marking: 'NV-99' }, { marking: 'NV-98' }];
-    expect(chinaLevelledGroups(lines)).toEqual({ 'nv-99': [0, 1] });
+  it('an article on ONE of two lines of a marking does not split them (review 2026-09-24)', () => {
+    const lines = [{ marking: 'NV-99', article: 'BOX-WHITE' }, { marking: 'NV-99' }, { marking: 'NV-98' }];
+    const ids = chinaGroupIds(lines);
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[2]).not.toBe(ids[0]);
   });
 
   it('ties two colours together by the marker, across their own articles', () => {
@@ -125,7 +135,34 @@ describe('which lines are one product', () => {
       { marking: 'NV-99', article: 'BOX-WHITE', group: 'короб 8 шт' },
       { marking: 'NV-98', article: 'BOX-GREY', group: 'короб 8 шт' }
     ];
-    expect(chinaLevelledGroups(lines)).toEqual({ 'короб 8 шт': [0, 1] });
+    expect(Array.from(chinaLevelledIndexes(lines))).toEqual([0, 1]);
+  });
+
+  it('sameness chains from marking to article to marker', () => {
+    const ids = chinaGroupIds([
+      { marking: 'NV-1' },
+      { marking: 'NV-1', article: 'P' },
+      { marking: 'NV-2', article: 'P', group: 'G' },
+      { marking: 'NV-3', group: 'G' },
+      { marking: 'NV-4' }
+    ]);
+    expect(new Set(ids.slice(0, 4)).size).toBe(1);
+    expect(ids[4]).not.toBe(ids[0]);
+  });
+
+  it('a marker equal to someone else\u2019s article is still a different kind of thing', () => {
+    // The marker «BOX» and the article «BOX» are not the same identifier.
+    const ids = chinaGroupIds([{ marking: 'NV-1', group: 'BOX' }, { marking: 'NV-2', article: 'BOX' }]);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  it('says so when one marking was given two different articles', () => {
+    const lines = [{ marking: 'NV-99', article: 'BOX-WHITE' }, { marking: 'NV-99', article: 'BOX-GREY' }, { marking: 'NV-98', article: 'BOX-GREY' }];
+    const conflicts = chinaArticleConflicts(lines);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toContain('NV-99');
+    expect(conflicts[0]).toContain('BOX-WHITE, BOX-GREY');
+    expect(chinaArticleConflicts([{ marking: 'NV-99', article: 'A' }, { marking: 'NV-99', article: 'A' }])).toEqual([]);
   });
 });
 
@@ -238,7 +275,7 @@ describe('партия, собранная из файлов китайцев', 
         { id: 'CB7-2', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 0, boxWeightKg: 0, weightKg: 168, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт' },
         { id: 'CB7-3', batchId: 'CB7', marking: 'NV-98', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 333.5, boxWeightKg: 10.93, weightKg: 164, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-GREY', group: 'короб 8 шт' }
       ],
-      costs: [], payments: [], rubRateSource: 'вручную', paidCny: 0, unpaidCny: 0
+      costs: [], payments: [], rubRateSource: 'вручную', manualRate: 12.4, paidCny: 0, unpaidCny: 0
     } as ChinaBatch;
     const { form, notes } = chinaFormFromFiles(parsed, report, saved);
     expect(form.id).toBe('CB7');
@@ -310,7 +347,8 @@ describe('подключение модуля «Заказы в Китае»', (
   it('saving the articles saves the batch, so the script levels the goods again', () => {
     expect(tab).toContain('btn-save-china-labels');
     expect(tab).toContain('chinaFormToPayload(form)');
-    expect(tab).toContain('chinaLevelledGroups');
+    expect(tab).toContain('chinaLevelledIndexes(batch.lines)');
+    expect(tab).toContain('chinaArticleConflicts(batch.lines)');
   });
 
   it('the batch window can be scrolled to its buttons, as item 80 taught', () => {
