@@ -300,6 +300,11 @@ this.CHINA_LINE_HEADERS = CHINA_LINE_HEADERS;
 this.CHINA_COST_HEADERS = CHINA_COST_HEADERS;
 this.CHINA_PAYMENT_HEADERS = CHINA_PAYMENT_HEADERS;
 this.CHINA_SETTINGS_HEADERS = CHINA_SETTINGS_HEADERS;
+this.CHINA_REPORT_HEADERS = CHINA_REPORT_HEADERS;
+this.CHINA_RECEIPT_HEADERS = CHINA_RECEIPT_HEADERS;
+this.CHINA_MOVEMENT_HEADERS = CHINA_MOVEMENT_HEADERS;
+this.CHINA_TRACKING_START_DATE = CHINA_TRACKING_START_DATE;
+this.CHINA_CARRYOVER_RECEIPT_DATE = CHINA_CARRYOVER_RECEIPT_DATE;
 `;
 vm.runInContext(chinaSrc + chinaExportLine, context, { filename: 'ChinaOrders.gs' });
 
@@ -697,5 +702,32 @@ module.exports = {
   restoreChinaBatch: (...args) => context.restoreChinaBatch(...args),
   chinaNextIds: (...args) => context.chinaNextIds(...args),
   chinaStripRow: (...args) => context.chinaStripRow(...args),
+  // ---------- Item 81g-1: the Chinese financial report and the goods pool allocation ----------
+  CHINA_REPORT_HEADERS: context.CHINA_REPORT_HEADERS,
+  CHINA_RECEIPT_HEADERS: context.CHINA_RECEIPT_HEADERS,
+  CHINA_MOVEMENT_HEADERS: context.CHINA_MOVEMENT_HEADERS,
+  CHINA_TRACKING_START_DATE: context.CHINA_TRACKING_START_DATE,
+  CHINA_CARRYOVER_RECEIPT_DATE: context.CHINA_CARRYOVER_RECEIPT_DATE,
+  saveChinaReport: (...args) => context.saveChinaReport(...args),
+  chinaAllocateGoodsLedger: (...args) => context.chinaAllocateGoodsLedger(...args),
+  chinaSplitLots: (...args) => context.chinaSplitLots(...args),
+  chinaTakeFifo: (...args) => context.chinaTakeFifo(...args),
+  chinaReportCanonical: (...args) => context.chinaReportCanonical(...args),
+  // ---------- Item 81g-2: payment matching, freight FIFO, getChinaMoney ----------
+  getChinaMoney: (...args) => context.getChinaMoney(...args),
+  matchChinaPayment: (...args) => context.matchChinaPayment(...args),
+  unmatchChinaPayment: (...args) => context.unmatchChinaPayment(...args),
+  chinaPaymentCandidates: (...args) => context.chinaPaymentCandidates(...args),
+  chinaAddDaysText: (...args) => context.chinaAddDaysText(...args),
+  chinaAllocateFreightLedger: (...args) => context.chinaAllocateFreightLedger(...args),
+  chinaLotsKnownRub: (...args) => context.chinaLotsKnownRub(...args),
+  // ---------- Item 81g-3: rates into chinaBatchCost, missing/closed/history, checkMark ----------
+  setChinaRubCostsDone: (...args) => context.setChinaRubCostsDone(...args),
+  chinaMissingListOf: (...args) => context.chinaMissingListOf(...args),
+  chinaFullyCost: (...args) => context.chinaFullyCost(...args),
+  chinaLedgerContext: (...args) => context.chinaLedgerContext(...args),
+  chinaRecostAll: (...args) => context.chinaRecostAll(...args),
+  chinaMergeLots: (...args) => context.chinaMergeLots(...args),
+  dumpChinaReports() { return this.dumpChinaSheet('Отчёты'); },
   vm
 };

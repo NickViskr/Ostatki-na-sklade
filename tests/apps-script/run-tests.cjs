@@ -3840,8 +3840,9 @@ function batch27() {
 (function () {
   const h = withChina();
   const names = h.targetSheetNames();
-  check('81a: setup creates exactly the five sheets of the module',
-    JSON.stringify(names) === JSON.stringify(['Партии', 'Строки партий', 'Расходы партии', 'Платежи', 'Справочник']),
+  check('81a: setup creates exactly the sheets of the module (81g-1 adds three: report ledger)',
+    JSON.stringify(names) === JSON.stringify(['Партии', 'Строки партий', 'Расходы партии', 'Платежи', 'Справочник',
+      'Отчёты', 'Поступления', 'Движения заказов']),
     names.join(', '));
 
   const batchHead = h.getTargetSheet('Партии').__dump()[0];
@@ -3857,7 +3858,7 @@ function batch27() {
   // Idempotence: the module is set up on every entry into the tab.
   h.setupChinaSpreadsheet();
   h.setupChinaSpreadsheet();
-  check('81a: a repeated setup adds no sixth sheet', h.targetSheetNames().length === 5, h.targetSheetNames().join(', '));
+  check('81a: a repeated setup adds no extra sheet', h.targetSheetNames().length === 8, h.targetSheetNames().join(', '));
   check('81a: a repeated setup adds no second directory row',
     h.dumpChinaSheet('Справочник').length === 1, JSON.stringify(h.dumpChinaSheet('Справочник')));
 
@@ -3915,7 +3916,7 @@ function batch27() {
   h.setChinaSpreadsheet('https://docs.google.com/spreadsheets/d/' + h.CHINA_SPREADSHEET_ID + '/edit#gid=0');
   h.setupChinaSpreadsheet();
   check('81a: the module sets itself up from a link pasted whole',
-    h.targetSheetNames().length === 5, h.targetSheetNames().join(', '));
+    h.targetSheetNames().length === 8, h.targetSheetNames().join(', '));
 })();
 
 // ---- 81a: splitting an amount ----
@@ -4891,10 +4892,10 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
   check('81e: on an old batch sheet the new columns are appended at the end',
     batchHead.slice(0, PRE_81E_BATCH_HEADERS.length).join('|') === PRE_81E_BATCH_HEADERS.join('|') &&
     // Owner, 2026-09-24: the ruble-equivalents block ends at «Курс взят из партии», followed
-    // by the freight-per-kilogram block this task adds — the sheet's own header order.
-    batchHead[batchHead.length - 5] === 'Курс взят из партии' &&
-    batchHead[batchHead.length - 1] === 'Тариф карго ₽',
-    batchHead.slice(-5).join(' | '));
+    // by the freight-per-kilogram block, then (81g-1) the report-driven rate/missing schema.
+    batchHead[batchHead.indexOf('Тариф карго ₽') - 4] === 'Курс взят из партии' &&
+    batchHead[batchHead.length - 1] === 'Проверка: детали',
+    batchHead.slice(-11).join(' | '));
   check('81e: same for the lines sheet',
     lineHead.slice(0, PRE_81E_LINE_HEADERS.length).join('|') === PRE_81E_LINE_HEADERS.join('|') &&
     lineHead[lineHead.length - 1] === 'Перевозка ₽',
@@ -5417,6 +5418,831 @@ function withChinaArchive() {
   check('trash: the columns missing from the old header row are appended and filled in by the recost',
     after.freightPerKgUsd === 2.43 && after.freightPerKgBase === 'накладной' && after.tariffRub === 199.64,
     after.freightPerKgUsd + ' / ' + after.freightPerKgBase + ' / ' + after.tariffRub);
+})();
+
+// ================= Item 81g-1: the Chinese financial report — ingestion + goods pool =========
+//
+// The scenario below uses REAL numbers from the owner's own report (docs/OZON_PLAN.md, 81g
+// dossier): the 结转 carry-over 17 402 ¥ and the goods transfers dated 2026-01-15 (34 304 ¥),
+// 2026-01-29 (6 300 ¥), 2026-03-05 (6 955 ¥), 2026-06-08 (11 559 ¥), 2026-06-19 (7 359 ¥). Every
+// expected figure below was derived independently in Python first (chinaAllocate's own rounding
+// rule ported line for line) — see the report for the script and its output.
+
+function chinaReportOf(id, reportDate, orders) {
+  return { id: id, reportDate: reportDate, orders: orders };
+}
+function chinaReceiptOf(id, date, goodsCny, status, reportId) {
+  return { id: id, date: date, goodsCny: goodsCny, status: status || 'ждёт оплату', reportId: reportId };
+}
+
+// ---- pure function: baseline consumes FIFO exactly, no shortfall ----
+(function () {
+  const h = withChina();
+  const receipts = [
+    chinaReceiptOf('R0', h.CHINA_CARRYOVER_RECEIPT_DATE, 17402, 'история', 'CR1'),
+    chinaReceiptOf('R1', '2026-01-15', 34304, 'история', 'CR1'),
+    chinaReceiptOf('R2', '2026-01-29', 6300, 'история', 'CR1'),
+    chinaReceiptOf('R3', '2026-03-05', 6955, 'история', 'CR1')
+  ];
+  const report1 = chinaReportOf('CR1', '2026-08-20', [
+    { orderNo: '28', date: '2026-01-01', receivedCny: 51706 },
+    { orderNo: '29', date: '2026-01-25', receivedCny: 6300 },
+    { orderNo: '30', date: '2026-03-01', receivedCny: 6955 }
+  ]);
+  const result = h.chinaAllocateGoodsLedger([report1], receipts);
+  check('81g-1: baseline order 28 takes 结转+R1 exactly (carry-over + first receipt)',
+    result.orders['28'].totalCny === 51706 && result.orders['28'].historyCny === 51706 &&
+    JSON.stringify(result.orders['28'].lots) === JSON.stringify([{ receiptId: 'R0', cny: 17402 }, { receiptId: 'R1', cny: 34304 }]),
+    JSON.stringify(result.orders['28']));
+  check('81g-1: baseline order 29 takes exactly R2, order 30 exactly R3',
+    result.orders['29'].totalCny === 6300 && JSON.stringify(result.orders['29'].lots) === JSON.stringify([{ receiptId: 'R2', cny: 6300 }]) &&
+    result.orders['30'].totalCny === 6955 && JSON.stringify(result.orders['30'].lots) === JSON.stringify([{ receiptId: 'R3', cny: 6955 }]),
+    JSON.stringify(result.orders['29']) + ' / ' + JSON.stringify(result.orders['30']));
+  check('81g-1: nothing left in the pool and no warnings — an exact baseline',
+    result.pool.totalCny === 0 && result.warnings.length === 0, result.pool.totalCny + ' / ' + JSON.stringify(result.warnings));
+
+  // ---- second report: order 29 loses 1000 ¥ to order 30 (owner's own example), two new
+  // receipts join the pool the same report. Python: shares taken by order30 from the pool
+  // {r2:1000, rJun08:11559, rJun19:7359} for 1000 ¥ = [50.21, 580.33, 369.46] (remainder on the
+  // largest lot, rJun08), pool left with [949.79, 10978.67, 6989.54] = 18918 ¥ total.
+  const receipts2 = receipts.concat([
+    chinaReceiptOf('R4', '2026-06-08', 11559, 'ждёт оплату', 'CR2'),
+    chinaReceiptOf('R5', '2026-06-19', 7359, 'ждёт оплату', 'CR2')
+  ]);
+  const report2 = chinaReportOf('CR2', '2026-09-16', [
+    { orderNo: '28', date: '2026-01-01', receivedCny: 51706 }, // unchanged
+    { orderNo: '29', date: '2026-01-25', receivedCny: 5300 },  // Δ = -1000
+    { orderNo: '30', date: '2026-03-01', receivedCny: 7955 }   // Δ = +1000
+  ]);
+  const result2 = h.chinaAllocateGoodsLedger([report1, report2], receipts2);
+  check('81g-1: order 29 keeps its own lot, reduced by the 1000 ¥ that moved',
+    result2.orders['29'].totalCny === 5300 &&
+    JSON.stringify(result2.orders['29'].lots) === JSON.stringify([{ receiptId: 'R2', cny: 5300 }]),
+    JSON.stringify(result2.orders['29']));
+  check('81g-1: order 30 takes the 1000 ¥ at the pool\'s AVERAGE composition — three lots, not one',
+    result2.orders['30'].totalCny === 7955 &&
+    JSON.stringify(result2.orders['30'].lots) === JSON.stringify([
+      { receiptId: 'R3', cny: 6955 }, { receiptId: 'R2', cny: 50.21 }, { receiptId: 'R4', cny: 580.33 }, { receiptId: 'R5', cny: 369.46 }
+    ]),
+    JSON.stringify(result2.orders['30']));
+  check('81g-1: the pool keeps exactly what neither order took, split the same way',
+    result2.pool.totalCny === 18918 &&
+    JSON.stringify(result2.pool.lots) === JSON.stringify([{ receiptId: 'R2', cny: 949.79 }, { receiptId: 'R4', cny: 10978.67 }, { receiptId: 'R5', cny: 6989.54 }]),
+    JSON.stringify(result2.pool));
+  check('81g-1: a receipt matched LATER retroactively moves every order and the pool that hold it',
+    (function () {
+      const matched = receipts2.map(function (r) { return r.id === 'R4' ? Object.assign({}, r, { status: 'сопоставлено' }) : r; });
+      const again = h.chinaAllocateGoodsLedger([report1, report2], matched);
+      // R4's 11559 ¥ is split between order 30 (580.33) and the pool (10978.67) — both must
+      // move from pendingCny to knownCny, and NOTHING else (order 28/29 untouched, and R2/R3
+      // are dated before tracking so they stay «история», not «pending», either way).
+      return again.orders['30'].knownCny === 580.33 && again.orders['30'].pendingCny === 369.46 &&
+        again.orders['30'].historyCny === 6955 + 50.21 &&
+        again.pool.knownCny === 10978.67 && again.orders['28'].historyCny === 51706;
+    })(), JSON.stringify(h.chinaAllocateGoodsLedger([report1, report2], receipts2.map(function (r) { return r.id === 'R4' ? Object.assign({}, r, { status: 'сопоставлено' }) : r; })).orders['30']));
+})();
+
+// ---- pure function: shortfalls are capped and reported, never silently swallowed ----
+(function () {
+  const h = withChina();
+  // Order X releases more than it has: its own lots (500 ¥) cannot cover a Δ of -800.
+  const reportA = chinaReportOf('CR1', '2026-01-01', [{ orderNo: 'X', date: '2026-01-01', receivedCny: 500 }]);
+  const reportB = chinaReportOf('CR2', '2026-01-02', [{ orderNo: 'X', date: '2026-01-01', receivedCny: -300 }]);
+  const receiptsA = [chinaReceiptOf('RX', '2026-01-01', 500, 'история', 'CR1')];
+  const shortRelease = h.chinaAllocateGoodsLedger([reportA, reportB], receiptsA);
+  check('81g-1: an order releasing more than its own composition is capped, not negative, and warned',
+    shortRelease.orders['X'].lots.length === 0 &&
+    shortRelease.warnings.some(function (w) { return w.indexOf('больше известного состава') !== -1; }),
+    JSON.stringify(shortRelease.orders['X']) + ' / ' + JSON.stringify(shortRelease.warnings));
+
+  // Order Y wants more than the pool holds: the pool has only 2000 ¥, order Y's Δ is +5000.
+  const reportC = chinaReportOf('CR1', '2026-01-01', [
+    { orderNo: 'A', date: '2026-01-01', receivedCny: 2000 }, { orderNo: 'Y', date: '2026-01-02', receivedCny: 0 }
+  ]);
+  const reportD = chinaReportOf('CR2', '2026-01-02', [
+    { orderNo: 'A', date: '2026-01-01', receivedCny: 0 }, { orderNo: 'Y', date: '2026-01-02', receivedCny: 5000 }
+  ]);
+  const receiptsC = [chinaReceiptOf('RA', '2026-01-01', 2000, 'история', 'CR1')];
+  const shortTake = h.chinaAllocateGoodsLedger([reportC, reportD], receiptsC);
+  check('81g-1: an order wanting more than the whole pool holds gets an UNKNOWN lot for the rest, and a warning',
+    JSON.stringify(shortTake.orders['Y'].lots) === JSON.stringify([{ receiptId: 'RA', cny: 2000 }, { receiptId: 'UNKNOWN', cny: 3000 }]) &&
+    shortTake.orders['Y'].unknownCny === 3000 && shortTake.pool.totalCny === 0 &&
+    shortTake.warnings.some(function (w) { return w.indexOf('не хватает') !== -1; }),
+    JSON.stringify(shortTake.orders['Y']) + ' / ' + JSON.stringify(shortTake.warnings));
+})();
+
+// ---- pure function: a receipt whose introducing report has since been pruned is not lost ----
+(function () {
+  const h = withChina();
+  // Only report2 is handed in (report1 was pruned away) but R0/R1 still say reportId 'CR1' —
+  // they must be treated as introduced by the OLDEST report still given, not dropped.
+  const receipts = [
+    chinaReceiptOf('R0', '2026-01-01', 1000, 'история', 'CR1'),
+    chinaReceiptOf('R1', '2026-01-05', 2000, 'ждёт оплату', 'CR2')
+  ];
+  const report2Only = chinaReportOf('CR2', '2026-02-01', [{ orderNo: 'Z', date: '2026-01-01', receivedCny: 3000 }]);
+  const result = h.chinaAllocateGoodsLedger([report2Only], receipts);
+  check('81g-1: a receipt orphaned by pruning still feeds the baseline of the oldest report kept',
+    result.orders['Z'].totalCny === 3000 &&
+    JSON.stringify(result.orders['Z'].lots) === JSON.stringify([{ receiptId: 'R0', cny: 1000 }, { receiptId: 'R1', cny: 2000 }]),
+    JSON.stringify(result.orders['Z']));
+})();
+
+// ---- saveChinaReport: validation, refusal, no-op, upsert, movements, pruning ----
+(function () {
+  const h = withChina();
+  let msg = '';
+  try { h.saveChinaReport({ reportDate: '2026-08-20', source: 'скрипт', orders: [{ orderNo: '' }], receipts: [] }, 'Николай'); }
+  catch (e) { msg = e.message; }
+  check('81g-1: a report with an order missing its number is refused',
+    msg.indexOf('номер заказа') !== -1, msg);
+
+  msg = '';
+  try {
+    h.saveChinaReport({
+      reportDate: '2026-08-20', source: 'скрипт', orders: [],
+      receipts: [{ date: '2026-01-01', goodsCny: 10 }, { date: '2026-01-01', goodsCny: 20 }]
+    }, 'Николай');
+  } catch (e) { msg = e.message; }
+  check('81g-1: two receipts on the same date in one report is refused (the browser must group them)',
+    msg.indexOf('одну дату') !== -1, msg);
+
+  const firstPayload = {
+    reportDate: '2026-08-20', source: 'скрипт', carriedOverCny: 17402,
+    orders: [
+      { orderNo: '28', date: '2026-01-01', receivedCny: 51706 },
+      { orderNo: '29', date: '2026-01-25', receivedCny: 6300 },
+      { orderNo: '30', date: '2026-03-01', receivedCny: 6955 }
+    ],
+    receipts: [
+      { date: '2026-01-15', goodsCny: 34304 }, { date: '2026-01-29', goodsCny: 6300 }, { date: '2026-03-05', goodsCny: 6955 }
+    ]
+  };
+  const first = h.saveChinaReport(firstPayload, 'Николай');
+  check('81g-1: the first report warns nothing (an exact baseline)', first.warnings.length === 0, JSON.stringify(first.warnings));
+
+  const reports = h.dumpChinaSheet('Отчёты');
+  check('81g-1: the report itself is stored, one row', reports.length === 1, JSON.stringify(reports));
+  const receiptRows = h.dumpChinaSheet('Поступления');
+  check('81g-1: 结转 plus the three grouped receipts, four rows total, история before tracking',
+    receiptRows.length === 4 && receiptRows.every(function (r) { return r['Статус'] === 'история'; }),
+    JSON.stringify(receiptRows));
+  check('81g-1: chinaReceiptStatus() at the exact boundary — 2026-08-01 itself already counts as tracked',
+    h.context.chinaReceiptStatus('2026-08-01') === 'ждёт оплату' && h.context.chinaReceiptStatus('2026-07-31') === 'история',
+    h.context.chinaReceiptStatus('2026-08-01') + ' / ' + h.context.chinaReceiptStatus('2026-07-31'));
+  const movementRows = h.dumpChinaSheet('Движения заказов');
+  check('81g-1: the first report\'s movements are its orders\' own baselines, from 0',
+    movementRows.length === 3 && movementRows.every(function (r) { return String(r['Отчёт']) === reports[0]['ID']; }),
+    JSON.stringify(movementRows));
+
+  // Refusal of an older report.
+  msg = '';
+  try { h.saveChinaReport({ reportDate: '2026-08-19', source: 'скрипт', orders: [], receipts: [] }, 'Николай'); }
+  catch (e) { msg = e.message; }
+  check('81g-1: a report older than the newest stored one is refused', msg.indexOf('старше') !== -1, msg);
+
+  // No-op on the TRULY identical report (same date AND same content).
+  const before = h.dumpChinaSheet('Поступления').length;
+  const again = h.saveChinaReport(firstPayload, 'Николай');
+  check('81g-1: a report identical in content to the newest is a no-op, no warnings',
+    h.dumpChinaSheet('Поступления').length === before && again.warnings.length === 0 &&
+    h.dumpChinaSheet('Отчёты').length === 1,
+    JSON.stringify(again.warnings));
+  // A true no-op must not touch the sheet AT ALL — proven by advancing the fake clock and
+  // checking the report's own «Загружен» stamp stayed put, not merely that the row count did.
+  const loadedBefore = h.dumpChinaSheet('Отчёты')[0]['Загружен'];
+  h.setNow('2026-01-06T09:00:00Z');
+  h.saveChinaReport(firstPayload, 'Николай');
+  check('81g-1: a true no-op does not even rewrite the report row (its «Загружен» stays put)',
+    h.dumpChinaSheet('Отчёты')[0]['Загружен'] === loadedBefore, h.dumpChinaSheet('Отчёты')[0]['Загружен']);
+  h.setNow('2026-01-05T09:00:00Z');
+
+  // Coordinator review, 2026-09-25: the SAME reportDate with DIFFERENT content — the Chinese
+  // side moved 1000 ¥ from order 29 to order 30 with NO new report date at all, exactly the
+  // owner's own case — must be APPLIED (a revision), not dropped as a no-op.
+  const revised = h.saveChinaReport({
+    reportDate: '2026-08-20', source: 'скрипт', carriedOverCny: 17402,
+    orders: [
+      { orderNo: '28', date: '2026-01-01', receivedCny: 51706 },
+      { orderNo: '29', date: '2026-01-25', receivedCny: 5300 },  // Δ = -1000
+      { orderNo: '30', date: '2026-03-01', receivedCny: 7955 }   // Δ = +1000
+    ],
+    receipts: [
+      { date: '2026-01-15', goodsCny: 34304 }, { date: '2026-01-29', goodsCny: 6300 }, { date: '2026-03-05', goodsCny: 6955 }
+    ]
+  }, 'Николай');
+  check('81g-1: same-date content change is APPLIED, not dropped as a no-op',
+    h.dumpChinaSheet('Отчёты').length === 1 && revised.warnings.length === 0, JSON.stringify(revised));
+  const revisedMovements = h.dumpChinaSheet('Движения заказов');
+  check('81g-1: the revision\'s own movement is the 1000 ¥ that moved, not measured against itself',
+    revisedMovements.length === 2 &&
+    revisedMovements.some(function (r) { return r['Номер заказа'] === '29' && r['Изменение ¥'] === -1000; }) &&
+    revisedMovements.some(function (r) { return r['Номер заказа'] === '30' && r['Изменение ¥'] === 1000; }),
+    JSON.stringify(revisedMovements));
+  check('81g-1: the goods pool allocation reflects the revised content immediately',
+    (function () {
+      const ar = h.dumpChinaSheet('Отчёты').map(function (r) {
+        const parsed = JSON.parse(r['Данные (JSON)']);
+        return { id: r['ID'], reportDate: r['Дата отчёта'], orders: parsed.orders };
+      });
+      const rc = h.dumpChinaSheet('Поступления').map(function (r) {
+        return { id: r['ID'], date: r['Дата'], goodsCny: r['Товар ¥'], status: r['Статус'], reportId: r['Отчёт'] };
+      });
+      const alloc = h.chinaAllocateGoodsLedger(ar, rc);
+      return alloc.orders['29'].totalCny === 5300 && alloc.orders['30'].totalCny === 7955;
+    })(), JSON.stringify(h.dumpChinaSheet('Отчёты')));
+
+  // Second report (a genuinely NEW date, after the same-date revision above already settled
+  // 29/30 at 5300/7955): a changed amount on a known date warns; a new grouped date joins the
+  // pool; a FURTHER 500 ¥ moves from order 30 back to order 29.
+  const second = h.saveChinaReport({
+    reportDate: '2026-09-16', source: 'ИИ', aiReason: 'файл не читался парсером',
+    orders: [
+      { orderNo: '28', date: '2026-01-01', receivedCny: 51706 },
+      { orderNo: '29', date: '2026-01-25', receivedCny: 5800 },
+      { orderNo: '30', date: '2026-03-01', receivedCny: 7455 }
+    ],
+    receipts: [
+      { date: '2026-01-15', goodsCny: 34305 }, // changed by 1 ¥ from the first report
+      { date: '2026-01-29', goodsCny: 6300 }, { date: '2026-03-05', goodsCny: 6955 },
+      { date: '2026-06-08', goodsCny: 11559 }, { date: '2026-06-19', goodsCny: 7359 }
+    ]
+  }, 'Николай');
+  check('81g-1: a receipt whose amount changed since the last report warns, by name',
+    second.warnings.some(function (w) { return w.indexOf('2026-01-15') !== -1 && w.indexOf('изменилось') !== -1; }),
+    JSON.stringify(second.warnings));
+  check('81g-1: the source and the AI reason of a report are stored',
+    h.dumpChinaSheet('Отчёты')[1]['Источник'] === 'ИИ' && h.dumpChinaSheet('Отчёты')[1]['Причина ИИ'] === 'файл не читался парсером',
+    JSON.stringify(h.dumpChinaSheet('Отчёты')[1]));
+  check('81g-1: a changed receipt keeps its date and status, only the money moves',
+    h.dumpChinaSheet('Поступления').filter(function (r) { return r['Дата'] === '2026-01-15'; })[0]['Товар ¥'] === 34305,
+    JSON.stringify(h.dumpChinaSheet('Поступления')));
+
+  const movementRows2 = h.dumpChinaSheet('Движения заказов').filter(function (r) { return r['Дата отчёта'] === '2026-09-16'; });
+  check('81g-1: the second report records only orders that actually moved (28 stayed put)',
+    movementRows2.length === 2 &&
+    movementRows2.some(function (r) { return r['Номер заказа'] === '29' && r['Изменение ¥'] === 500; }) &&
+    movementRows2.some(function (r) { return r['Номер заказа'] === '30' && r['Изменение ¥'] === -500; }),
+    JSON.stringify(movementRows2));
+
+  // Keep-3 pruning: two more reports push the total to 4 stored — only the 3 newest survive.
+  h.saveChinaReport({ reportDate: '2026-09-20', source: 'скрипт', orders: [], receipts: [] }, 'Николай');
+  h.saveChinaReport({ reportDate: '2026-09-24', source: 'скрипт', orders: [], receipts: [] }, 'Николай');
+  const kept = h.dumpChinaSheet('Отчёты').map(function (r) { return r['Дата отчёта']; }).sort();
+  check('81g-1: only the 3 newest reports are kept',
+    JSON.stringify(kept) === JSON.stringify(['2026-09-16', '2026-09-20', '2026-09-24']), JSON.stringify(kept));
+
+  // The receipts sheet, unlike the reports sheet, is NEVER pruned — the ledger the allocation
+  // depends on has to survive even after its introducing report is gone.
+  check('81g-1: pruning the reports sheet never touches the receipts ledger',
+    h.dumpChinaSheet('Поступления').length === 6, JSON.stringify(h.dumpChinaSheet('Поступления')));
+})();
+
+// ---- new columns of «Партии»/«Платежи» are schema-only: an unrelated save preserves them ----
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  // Poking the raw cell is the only way to give it a value in 81g-1 — no action writes
+  // «Проверка» yet (that is 81g-3); this proves the schema survives until it does.
+  const batchSheet = h.getTargetSheet('Партии');
+  const batchHead = h.headerRowOf(batchSheet);
+  const checkCol = batchHead.indexOf('Проверка') + 1;
+  batchSheet.getRange(2, checkCol, 1, 1).setValues([['скрипт']]);
+  h.saveChinaBatchCost({ batchId: 'CB1', kind: 'Разгрузка', amountRub: 500, date: '2026-09-20' }, 'Николай');
+  check('81g-1: a Russian-side cost recost does not blank «Проверка» set by hand',
+    h.getChinaBatches().batches[0].checkMark === 'скрипт', JSON.stringify(h.getChinaBatches().batches[0].checkMark));
+
+  h.saveChinaPayment({ date: '2026-09-01', amountRub: 10000, rate: 12.4, orderNo: '28' }, 'Николай');
+  const paySheet = h.getTargetSheet('Платежи');
+  const payHead = h.headerRowOf(paySheet);
+  const statusCol = payHead.indexOf('Статус') + 1;
+  paySheet.getRange(2, statusCol, 1, 1).setValues([['сопоставлено']]);
+  h.saveChinaPayment({ id: 'CP1', date: '2026-09-01', amountRub: 10000, rate: 12.4, orderNo: '28', comment: 'правка' }, 'Николай');
+  const payments = h.getChinaBatches().payments;
+  check('81g-1: editing an existing payment does not blank «Статус» set by hand',
+    payments[0].status === 'сопоставлено' && payments[0].comment === 'правка',
+    JSON.stringify(payments[0]));
+})();
+
+// ================= Item 81g-2: payment matching, freight FIFO, getChinaMoney() =================
+//
+// Real numbers from the owner's own report (2026-09-24, docs/OZON_PLAN.md 81g dossier): goods
+// and freight ¥ grouped by date, the 结转 carry-over 17 402 ¥, and the two real batches'
+// freight bills (NV-0825-2 order 28: 1 636,75 $ at 7; NV-0923-4 order 30: 2 645,85 $ at 7).
+// Every figure below was derived independently in Python first (china81g2.py) — see the report.
+// Order dates/receivedCny groupings are this test's OWN construction (the FIFO baseline that
+// exactly exhausts every real receipt with 0 shortfall — proof the money in and the money out
+// of the pool conserve exactly), not lifted verbatim from the fixture.
+
+(function () {
+  const h = withChina();
+  const report = h.saveChinaReport({
+    reportDate: '2026-09-24', source: 'скрипт', carriedOverCny: 17402,
+    orders: [
+      { orderNo: '28', date: '2026-01-01', receivedCny: 51706, totalCny: 51706 },
+      { orderNo: '29', date: '2026-01-20', receivedCny: 6300, totalCny: 25000 },
+      { orderNo: '30', date: '2026-02-01', receivedCny: 31291, totalCny: 31291 },
+      { orderNo: '31', date: '2026-04-10', receivedCny: 97841, totalCny: 97841 }
+    ],
+    receipts: [
+      { date: '2026-01-15', goodsCny: 34304, freightCny: 37491 },
+      { date: '2026-01-29', goodsCny: 6300, freightCny: 11321 },
+      { date: '2026-03-05', goodsCny: 6955 },
+      { date: '2026-04-02', goodsCny: 24336, freightCny: 20601 },
+      { date: '2026-05-22', goodsCny: 37468, freightCny: 16103 },
+      { date: '2026-06-08', goodsCny: 11559, freightCny: 17262 },
+      { date: '2026-06-19', goodsCny: 7359 },
+      { date: '2026-07-21', goodsCny: 5668 },
+      { date: '2026-07-24', goodsCny: 352, freightCny: 8606 },
+      { date: '2026-08-04', goodsCny: 4819 },
+      { date: '2026-08-20', goodsCny: 10415, freightCny: 16303 },
+      { date: '2026-08-27', goodsCny: 12226, freightCny: 10416 },
+      { date: '2026-09-03', goodsCny: 2974 },
+      { date: '2026-09-16', goodsCny: 5001, freightCny: 2462 },
+      { date: '2026-09-18', freightCny: 9328 }
+    ],
+    freights: [
+      { code: 'NV-0825-2', orderNo: '28', amountUsd: 1636.75, cargoRate: 7 },
+      { code: 'NV-0923-4', orderNo: '30', amountUsd: 2645.85, cargoRate: 7 }
+    ]
+  }, 'Николай');
+  check('81g-2: the whole real receipt set is consumed with 0 shortfall — a clean baseline',
+    report.warnings.length === 0, JSON.stringify(report.warnings));
+
+  // Three payments that match a real receipt EXACTLY (the report's own text even shows the
+  // arithmetic: 08-20 26 718 ¥, 09-16 7 463 ¥, 09-18 9 328 ¥), and one 1 ¥ rounding case
+  // (08-27's receipt totals 22 642 ¥; the payment implies 22 641 ¥, 12,4 typed).
+  h.saveChinaPayment({ id: '', date: '2026-08-20', amountRub: 331303.20, rate: 12.4, comment: 'P1' }, 'Николай');
+  h.saveChinaPayment({ date: '2026-09-16', amountRub: 92541.20, rate: 12.4, comment: 'P2' }, 'Николай');
+  h.saveChinaPayment({ date: '2026-08-27', amountRub: 280748.40, rate: 12.4, comment: 'P4 rounding' }, 'Николай');
+  h.saveChinaPayment({ date: '2026-09-18', amountRub: 116600, rate: 12.5, comment: 'P3' }, 'Николай');
+
+  const money = h.getChinaMoney();
+  check('81g-2: all four payments auto-matched, none left «не распределена»',
+    money.payments.every(function (p) { return p.status === 'сопоставлено'; }),
+    JSON.stringify(money.payments.map(function (p) { return p.status; })));
+
+  const p1 = money.payments.filter(function (p) { return p.comment === 'P1'; })[0];
+  check('81g-2: P1 — actual rate and the exact ₽ split (goods/freight sum to amountRub)',
+    p1.actualRate === 12.4 && p1.reportCny === 26718 &&
+    money.receipts.filter(function (r) { return r.id === p1.receiptId; })[0].rubGoods === 129146 &&
+    money.receipts.filter(function (r) { return r.id === p1.receiptId; })[0].rubFreight === 202157.2,
+    JSON.stringify(p1) + ' / ' + JSON.stringify(money.receipts.filter(function (r) { return r.id === p1.receiptId; })[0]));
+
+  const p4 = money.payments.filter(function (p) { return p.comment === 'P4 rounding'; })[0];
+  check('81g-2: P4 — the 1 ¥ rounding case matches anyway, actual rate reflects the real ¥',
+    p4.actualRate === 12.3995 && p4.reportCny === 22642,
+    JSON.stringify(p4));
+
+  const p3 = money.payments.filter(function (p) { return p.comment === 'P3'; })[0];
+  check('81g-2: P3 — an all-freight receipt (no goods that day) puts everything into rubFreight',
+    p3.actualRate === 12.5 &&
+    money.receipts.filter(function (r) { return r.id === p3.receiptId; })[0].rubGoods === 0 &&
+    money.receipts.filter(function (r) { return r.id === p3.receiptId; })[0].rubFreight === 116600,
+    JSON.stringify(money.receipts.filter(function (r) { return r.id === p3.receiptId; })[0]));
+
+  const order31 = money.orders.filter(function (o) { return o.orderNo === '31'; })[0];
+  check('81g-2: order 31 — known/pending/history sum to its own receivedCny, rate 12,3998',
+    order31.knownCny === 27642 && order31.knownRub === 342754.1 && order31.rate === 12.3998 &&
+    // history = 05-22..07-24 (before 2026-08-01 tracking start); pending = 08-04 + 09-03
+    // (after tracking start, no payment matched them) — 08-04 is easy to place in the wrong
+    // bucket by eye since it LOOKS like the others, but the boundary is the date, not the group.
+    order31.historyCny === 62406 && order31.pendingCny === 7793 &&
+    order31.knownCny + order31.historyCny + order31.pendingCny === order31.receivedCny,
+    JSON.stringify(order31));
+  check('81g-2: orders 28/29/30 touch none of the matched receipts — pure history, rate 0',
+    money.orders.filter(function (o) { return ['28', '29', '30'].indexOf(o.orderNo) !== -1; })
+      .every(function (o) { return o.knownCny === 0 && o.rate === 0 && o.historyCny === o.receivedCny; }),
+    JSON.stringify(money.orders));
+  check('81g-2: order 29 (no bill, 6 300 of 25 000 = 25,2 %) is flagged below the 30 % advance',
+    order31.advanceWarning === false &&
+    money.orders.filter(function (o) { return o.orderNo === '29'; })[0].advanceWarning === true &&
+    money.orders.filter(function (o) { return o.orderNo === '28'; })[0].advanceWarning === false,
+    JSON.stringify(money.orders.map(function (o) { return o.orderNo + ':' + o.advanceWarning; })));
+
+  check('81g-2: the goods pool is empty — every ¥ landed on an order, nothing left «у китайцев»',
+    money.pool.cny === 0, JSON.stringify(money.pool));
+
+  // Freight FIFO is tested separately below, in $ — see «Item 81g-2 review» further down: the
+  // coordinator found the ¥-based FIFO here wrong (bills are billed in $, and the report's own
+  // per-transfer $ credits do not reduce to one batch-wide cargo rate).
+})();
+
+// ================= Item 81g-2 review (2026-09-25): freight FIFO runs in DOLLARS =============
+//
+// Root cause the coordinator found: bills are billed in $ (amountUsd) and every freight
+// payment ROW of the report credits an EXPLICIT $ amount of its own (not `freightCny / one
+// cargo rate` — the carrier's own notes divide by DIFFERENT rates row to row, e.g.
+// "37491/7.25=5171", "2466*7=17262"). The FIFO must consume $ against $, in report list order
+// for bills and receipt DATE order for payments; a slice's ¥ (and, once matched, ₽) is that
+// receipt's OWN freight ¥/₽ pro rata to the $ share taken. The opening balance's SIGN decides
+// what it is: negative = a CREDIT (an extra payment before everything, always history);
+// positive = a DEBT (an unresolved bill from before tracking, paid off first, ahead of every
+// real bill). Reproduced first with a failing check on the OLD (¥, one rate) behavior, then
+// fixed; independent numbers below are the coordinator's own (not re-derivable by me from the
+// dossier's paraphrased carrier notes, which is why this scenario states its $ figures as
+// GIVEN rather than parsed from ¥ figures — china81g2_freight_fix.py, scratchpad).
+(function () {
+  const h = withChina();
+  const receipts = [
+    { date: '2026-07-24', goodsCny: 0, freightCny: 8606, freightUsd: 109 },
+    { date: '2026-08-20', goodsCny: 0, freightCny: 16303, freightUsd: 2329 },
+    { date: '2026-08-27', goodsCny: 0, freightCny: 10416, freightUsd: 1488 },
+    { date: '2026-09-16', goodsCny: 0, freightCny: 2462, freightUsd: 351 },
+    { date: '2026-09-18', goodsCny: 0, freightCny: 9328, freightUsd: 1332 }
+  ];
+  const freights = [
+    { code: 'NV-0716-3', orderNo: '27', amountUsd: 2438, cargoRate: 7 },
+    { code: 'NV-0703-23', orderNo: '26', amountUsd: 1488, cargoRate: 7 },
+    { code: 'NV-0825-2', orderNo: '28', amountUsd: 1637, cargoRate: 7 },
+    { code: 'NV-0916-24', orderNo: '29', amountUsd: 1109, cargoRate: 7 },
+    { code: 'NV-0923-4', orderNo: '30', amountUsd: 2646, cargoRate: 7 }
+  ];
+  h.saveChinaReport({
+    reportDate: '2026-09-24', source: 'скрипт',
+    orders: [{ orderNo: '27', date: '2026-01-01', receivedCny: 1 }],
+    receipts: receipts, freights: freights
+  }, 'Николай');
+  const reportRow = h.dumpChinaSheet('Отчёты')[0];
+  const parsed = JSON.parse(reportRow['Данные (JSON)']);
+  const receiptRows = h.dumpChinaSheet('Поступления').map(function (r) {
+    return {
+      id: r['ID'], date: r['Дата'], goodsCny: r['Товар ¥'], freightCny: r['Доставка ¥'],
+      freightUsd: r['Доставка $'], status: r['Статус'], rubFreight: r['₽ доставка']
+    };
+  });
+
+  const alloc = h.chinaAllocateFreightLedger(parsed.freights, receiptRows, 0);
+  check('81g-2 review: every $ bill is accounted for — 3 709 $ unpaid in total, matching the report\'s own 总计',
+    Object.keys(alloc.bills).length === 5 &&
+    roundToTwoLocal(Object.keys(alloc.bills).reduce(function (s, c) { return s + alloc.bills[c].unpaidUsd; }, 0)) === 3709,
+    JSON.stringify(Object.keys(alloc.bills).map(function (c) { return c + ':' + alloc.bills[c].unpaidUsd; })));
+  check('81g-2 review: NV-0716-3 and NV-0703-23 are fully paid, 0 $ left owing',
+    alloc.bills['NV-0716-3'].unpaidUsd === 0 && alloc.bills['NV-0703-23'].unpaidUsd === 0,
+    JSON.stringify([alloc.bills['NV-0716-3'], alloc.bills['NV-0703-23']]));
+  check('81g-2 review: NV-0825-2 closes from TWO payments (09-16 + part of 09-18), 0 $ left owing',
+    alloc.bills['NV-0825-2'].unpaidUsd === 0 && alloc.bills['NV-0825-2'].paidUsd === 1637 &&
+    alloc.bills['NV-0825-2'].slices.length === 2,
+    JSON.stringify(alloc.bills['NV-0825-2']));
+  check('81g-2 review: NV-0916-24 gets only the 46 $ left over from 09-18, 1 063 $ still unpaid',
+    alloc.bills['NV-0916-24'].paidUsd === 46 && alloc.bills['NV-0916-24'].unpaidUsd === 1063,
+    JSON.stringify(alloc.bills['NV-0916-24']));
+  check('81g-2 review: NV-0923-4 gets NOTHING — the exact defect the coordinator caught',
+    alloc.bills['NV-0923-4'].paidUsd === 0 && alloc.bills['NV-0923-4'].unpaidUsd === 2646,
+    JSON.stringify(alloc.bills['NV-0923-4']));
+
+  // ¥ of a slice is that receipt's OWN freight ¥ pro rata to the $ taken: 09-18 gives NV-0825-2
+  // 1 286 of its 1 332 $ (9 328 ¥) → round2(9328 × 1286/1332) = 9 005,86 ¥; the rest (46 $) goes
+  // to NV-0916-24 → round2(9328 × 46/1332) = 322,14 ¥ — the two happen to sum to exactly 9 328
+  // here (no rounding drift this time, unlike the goods-side example elsewhere in this module).
+  const nv0825slice0918 = alloc.bills['NV-0825-2'].slices.filter(function (s) { return s.receiptId === receiptRows[4].id; })[0];
+  const nv0916slice = alloc.bills['NV-0916-24'].slices[0];
+  check('81g-2 review: a slice\'s ¥ is pro rata to its $ share of the RECEIPT, not the bill',
+    nv0825slice0918.usd === 1286 && nv0825slice0918.cny === 9005.86 &&
+    nv0916slice.usd === 46 && nv0916slice.cny === 322.14,
+    JSON.stringify({ nv0825slice0918: nv0825slice0918, nv0916slice: nv0916slice }));
+})();
+
+// ---- opening balance sign: negative = credit (extra payment, history); positive = debt ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт', openingFreightUsd: -85,
+    orders: [{ orderNo: 'A', date: '2026-01-01', receivedCny: 1 }],
+    freights: [{ code: 'B1', orderNo: 'A', amountUsd: 85, cargoRate: 7 }]
+  }, 'Николай');
+  const alloc = h.chinaAllocateFreightLedger([{ code: 'B1', orderNo: 'A', amountUsd: 85, cargoRate: 7 }], [], -85);
+  check('81g-2 review: a NEGATIVE opening balance is a credit that pays a bill with no receipts at all',
+    alloc.bills['B1'].paidUsd === 85 && alloc.bills['B1'].unpaidUsd === 0 && alloc.bills['B1'].historyCny === 0,
+    JSON.stringify(alloc.bills['B1']));
+
+  const allocDebt = h.chinaAllocateFreightLedger(
+    [{ code: 'B2', orderNo: 'A', amountUsd: 50, cargoRate: 7 }],
+    [{ id: 'RX', date: '2026-01-01', freightCny: 700, freightUsd: 100, status: 'история' }],
+    30 // POSITIVE — a debt, consumed before bill B2
+  );
+  check('81g-2 review: a POSITIVE opening balance is a debt, paid off BEFORE the real bill',
+    // The receipt provides 100 $; 30 $ pays the opening debt FIRST, leaving 70 $ for bill B2 —
+    // which only wants 50 $, so it is fully paid with 20 $ left over, never touched here.
+    allocDebt.bills['B2'].paidUsd === 50 && allocDebt.bills['B2'].unpaidUsd === 0,
+    JSON.stringify(allocDebt.bills['B2']));
+})();
+
+// ---- advanceWarning: exactly 30 %, not 50 % — and only while no carrier bill exists yet ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [
+      { orderNo: 'U', date: '2026-01-01', receivedCny: 4000, totalCny: 10000 }, // 40 %: unbilled, 30–50 % gap
+      { orderNo: 'B', date: '2026-01-01', receivedCny: 1000, totalCny: 10000 }  // 10 %, but BILLED already
+    ],
+    receipts: [{ date: '2026-01-01', goodsCny: 5000 }],
+    freights: [{ code: 'NVX', orderNo: 'B', amountUsd: 100, cargoRate: 7 }]
+  }, 'Николай');
+  const money = h.getChinaMoney();
+  const u = money.orders.filter(function (o) { return o.orderNo === 'U'; })[0];
+  const b = money.orders.filter(function (o) { return o.orderNo === 'B'; })[0];
+  check('81g-2: 40 % of goods paid is ABOVE the 30 % advance floor — no warning',
+    u.advanceWarning === false, JSON.stringify(u));
+  check('81g-2: 10 % of goods paid would warn, but a carrier bill already exists for this order',
+    b.advanceWarning === false, JSON.stringify(b));
+})();
+
+// ---- chinaAutoMatchPending processes payments oldest-first: an earlier payment claims a
+// contested receipt before a later, equally valid, payment gets to compete for it ----
+(function () {
+  const h = withChina();
+  // Both payments are created BEFORE any receipt exists at all — each auto-match on its own
+  // creation finds 0 candidates and stays pending. Only saveChinaReport's OWN sweep (below),
+  // which considers BOTH of them together, can put the "process oldest first" rule to the test.
+  h.saveChinaPayment({ date: '2026-01-01', amountRub: 12400, rate: 12.4, comment: 'later' }, 'Николай');
+  h.saveChinaPayment({ date: '2025-12-30', amountRub: 12400, rate: 12.4, comment: 'earlier' }, 'Николай');
+  const result = h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [{ orderNo: 'Z', date: '2026-01-01', receivedCny: 1000 }],
+    receipts: [{ date: '2026-01-01', goodsCny: 1000 }]
+  }, 'Николай');
+  const earlier = result.payments.filter(function (p) { return p.comment === 'earlier'; })[0];
+  const later = result.payments.filter(function (p) { return p.comment === 'later'; })[0];
+  check('81g-2: the OLDER payment claims the contested receipt, the newer stays pending',
+    earlier.status === 'сопоставлено' && later.status === 'не распределена',
+    JSON.stringify({ earlier: earlier.status, later: later.status }));
+})();
+
+// ---- getChinaMoney lists reports NEWEST first ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({ reportDate: '2026-01-01', source: 'скрипт', orders: [], receipts: [] }, 'Николай');
+  h.saveChinaReport({ reportDate: '2026-02-01', source: 'скрипт', orders: [], receipts: [] }, 'Николай');
+  const reports = h.getChinaMoney().reports;
+  check('81g-2: getChinaMoney lists reports newest-first',
+    reports.length === 2 && reports[0].reportDate === '2026-02-01' && reports[1].reportDate === '2026-01-01',
+    JSON.stringify(reports));
+})();
+
+// ---- chinaMatchInternal: rubFreight is the REMAINDER, never a second independent rounding —
+// found by search (china81g2.py): 8 631 ₽ over 7 116,78/836,34 ¥ rounds rubGoods and an
+// independent freight rounding to 907,63 while the true remainder is 907,62; the two must
+// always sum to amountRub exactly, whichever direction the kopeck falls. ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [{ orderNo: 'X', date: '2026-01-01', receivedCny: 7953.12 }],
+    receipts: [{ date: '2026-01-01', goodsCny: 7116.78, freightCny: 836.34 }]
+  }, 'Николай');
+  h.saveChinaPayment({ date: '2026-01-01', amountRub: 8631, rate: 1.0855054, comment: 'split' }, 'Николай');
+  const r = h.dumpChinaSheet('Поступления')[0];
+  check('81g-2: rubGoods + rubFreight sum to amountRub EXACTLY, even where independent rounding would not',
+    Number(r['₽ товар']) === 7723.38 && Number(r['₽ доставка']) === 907.62 &&
+    roundToTwoLocal(Number(r['₽ товар']) + Number(r['₽ доставка'])) === 8631,
+    JSON.stringify(r));
+})();
+function roundToTwoLocal(x) { return Math.round(x * 100) / 100; }
+
+// ---- tolerance is max(1 ¥, 1 %), not just 1 % — a small receipt needs the floor ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [{ orderNo: 'S', date: '2026-01-01', receivedCny: 50 }],
+    receipts: [{ date: '2026-01-01', goodsCny: 50 }] // 1 % of 50 ¥ is 0,5 — the floor of 1 ¥ is what actually matters
+  }, 'Николай');
+  // implies 50,8 ¥ against a 50 ¥ receipt — 0,8 ¥ off, inside max(1, 0.5)=1 but outside 0,5 alone
+  const result = h.saveChinaPayment({ date: '2026-01-01', amountRub: 630, rate: 12.4, comment: 'floor' }, 'Николай');
+  check('81g-2: the 1 ¥ FLOOR of the tolerance lets a small receipt match despite exceeding its own 1 %',
+    result.payments[0].status === 'сопоставлено', JSON.stringify(result.payments[0]));
+})();
+
+// ---- the matching window is [date, +3 DAYS] inclusive, not +2 ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [{ orderNo: 'W', date: '2026-01-01', receivedCny: 1000 }],
+    receipts: [{ date: '2026-01-04', goodsCny: 1000 }] // exactly +3 days from the payment
+  }, 'Николай');
+  const result = h.saveChinaPayment({ date: '2026-01-01', amountRub: 12400, rate: 12.4, comment: 'window' }, 'Николай');
+  check('81g-2: a receipt dated exactly payment date + 3 days still matches',
+    result.payments[0].status === 'сопоставлено', JSON.stringify(result.payments[0]));
+})();
+
+// ---- chinaPaymentCandidates itself excludes an already-matched receipt, not just its callers ----
+(function () {
+  const h = withChina();
+  const payment = { date: '2026-01-01', amountRub: 12400, rate: 12.4 };
+  const receipts = [{ id: 'R1', date: '2026-01-01', goodsCny: 1000, status: 'сопоставлено' }];
+  check('81g-2: chinaPaymentCandidates itself refuses a receipt already «сопоставлено» — not merely its callers',
+    h.chinaPaymentCandidates(payment, receipts).length === 0,
+    JSON.stringify(h.chinaPaymentCandidates(payment, receipts)));
+})();
+
+// ---- a payment never dangles on an already-matched receipt as a "candidate" ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [{ orderNo: 'M', date: '2026-01-01', receivedCny: 1000 }],
+    receipts: [{ date: '2026-01-01', goodsCny: 1000 }]
+  }, 'Николай');
+  // The first payment claims the only receipt outright.
+  h.saveChinaPayment({ date: '2026-01-01', amountRub: 12400, rate: 12.4, comment: 'first' }, 'Николай');
+  // A second payment that would ALSO fit that same receipt must NOT list it as a candidate —
+  // it is already spoken for — and so must stay pending with an EMPTY candidate list.
+  const money = h.saveChinaPayment({ date: '2026-01-01', amountRub: 12400, rate: 12.4, comment: 'second' }, 'Николай');
+  const second = money.payments.filter(function (p) { return p.comment === 'second'; })[0];
+  check('81g-2: a payment competing for an ALREADY MATCHED receipt gets no candidates at all',
+    second.status === 'не распределена' && h.getChinaMoney().payments.filter(function (p) { return p.comment === 'second'; })[0].candidates.length === 0,
+    JSON.stringify(second));
+})();
+
+// ---- two candidates for one payment stays pending (the contract's own tie-break rule) ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [{ orderNo: 'A', date: '2026-01-01', receivedCny: 20000 }],
+    receipts: [{ date: '2026-08-05', goodsCny: 10000 }, { date: '2026-08-07', goodsCny: 10010 }]
+  }, 'Николай');
+  // Both receipts (¥ 10 000 and 10 010) fall inside the payment's [date, +3 days] window and
+  // both are within 1 % of the implied ¥ (10 005) — genuinely ambiguous.
+  const result = h.saveChinaPayment({ date: '2026-08-05', amountRub: 124062, rate: 12.4, comment: 'ambiguous' }, 'Николай');
+  const payment = result.payments[0];
+  check('81g-2: a payment with two equally good candidates stays «не распределена»',
+    payment.status === 'не распределена', JSON.stringify(payment));
+  const money = h.getChinaMoney();
+  check('81g-2: getChinaMoney lists both candidates for the still-pending payment',
+    money.payments[0].candidates.length === 2, JSON.stringify(money.payments[0].candidates));
+
+  // The owner resolves it by hand.
+  const matched = h.matchChinaPayment({ paymentId: payment.id, receiptId: money.payments[0].candidates[0] }, 'Николай');
+  check('81g-2: matchChinaPayment resolves the ambiguity by hand',
+    matched.payments[0].status === 'сопоставлено', JSON.stringify(matched.payments[0]));
+  const unmatched = h.unmatchChinaPayment({ paymentId: payment.id }, 'Николай');
+  check('81g-2: unmatchChinaPayment puts it right back to pending, with both candidates again',
+    unmatched.payments[0].status === 'не распределена' &&
+    h.getChinaMoney().payments[0].candidates.length === 2,
+    JSON.stringify(unmatched.payments[0]));
+})();
+
+// ---- deleteChinaPayment unmatches first; old orderNo/purpose rows still load ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-01-01', source: 'скрипт',
+    orders: [{ orderNo: 'A', date: '2026-01-01', receivedCny: 5000 }],
+    receipts: [{ date: '2026-01-01', goodsCny: 5000 }]
+  }, 'Николай');
+  h.saveChinaPayment({ date: '2026-01-01', amountRub: 62000, rate: 12.4, comment: 'exact' }, 'Николай');
+  const before = h.getChinaMoney();
+  check('81g-2: setup — the payment matched the only receipt', before.payments[0].status === 'сопоставлено', JSON.stringify(before.payments[0]));
+
+  h.deleteChinaPayment({ id: before.payments[0].id }, 'Николай');
+  const after = h.getChinaMoney();
+  check('81g-2: deleteChinaPayment unmatches first — the receipt is free again, not orphaned',
+    after.payments.length === 0 && after.receipts[0].status !== 'сопоставлено' && after.receipts[0].paymentId === '',
+    JSON.stringify(after.receipts[0]));
+
+  // An OLD payment row (orderNo/purpose, no matching columns at all) must still load.
+  h.getTargetSheet('Платежи').appendRow(['CPOLD', '2026-01-01', 1000, 12.4, 80.65, 'Товар', 'A', '', '', 'Николай']);
+  const withOld = h.getChinaMoney();
+  check('81g-2: an old orderNo/purpose payment row (no 81g-2 columns at all) still loads',
+    withOld.payments.some(function (p) { return p.id === 'CPOLD' && p.orderNo === 'A' && p.status === ''; }),
+    JSON.stringify(withOld.payments));
+})();
+
+// ================= Item 81g-3: rates into chinaBatchCost, missing/closed/history ===============
+//
+// One order (40), one receipt (2026-09-05, 8 000 ¥ goods + 2 000 ¥ freight = 10 000 ¥ total),
+// one payment (124 000 ₽ at 12.4 implies exactly 10 000 ¥ — an exact match), one freight bill
+// (BATCH40, wants exactly the 200 $ that receipt's freightUsd provides — fully paid). Python:
+// rubGoods = round2(124000×8000/10000) = 99 200, rubFreight = 24 800; order 40's known rate =
+// 99200/8000 = 12.4; the bill's known rate = 24800/2000 = 12.4 (both rates equal on purpose —
+// the SAME-rate code path is what most real batches hit). The batch itself: goods 1 000 ¥
+// (12 400 ₽), freight 200 $ ×7 = 1 400 ¥ (17 360 ₽) → 29 760 ₽ total.
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-09-24', source: 'скрипт',
+    // receivedCny is the order's GOODS ¥ only (8 000) — the goods pool allocation never sees
+    // the receipt's freight ¥ part at all, that is a separate ledger (chinaAllocateFreightLedger).
+    orders: [{ orderNo: '40', date: '2026-01-01', receivedCny: 8000, totalCny: 8000, unpaidCny: 0 }],
+    receipts: [{ date: '2026-09-05', goodsCny: 8000, freightCny: 2000, freightUsd: 200 }],
+    freights: [{ code: 'BATCH40', orderNo: '40', amountUsd: 200, cargoRate: 7 }]
+  }, 'Николай');
+  h.saveChinaPayment({ date: '2026-09-05', amountRub: 124000, rate: 12.4, comment: 'order 40' }, 'Николай');
+
+  h.saveChinaBatch({
+    orderNo: '40', code: 'BATCH40', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-20',
+    weightKg: 100, freightUsd: 200, cargoRate: 7, ratePerKgUsd: 2,
+    lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }]
+  }, 'Николай');
+
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'BATCH40'; })[0];
+  check('81g-3: goods rate resolved from the order\'s known ¥/₽ (ledger), source «оплаты»',
+    batch.goodsRate === 12.4 && batch.goodsRateSource === 'оплаты', JSON.stringify({ goodsRate: batch.goodsRate, src: batch.goodsRateSource }));
+  check('81g-3: freight rate resolved from the BILL\'s known ¥/₽ (ledger), source «оплаты»',
+    batch.freightRate === 12.4 && batch.freightRateSource === 'оплаты', JSON.stringify({ freightRate: batch.freightRate, src: batch.freightRateSource }));
+  check('81g-3: rubRate/rubRateSource stay the goods rate/source (backward compatibility)',
+    batch.rubRate === 12.4 && batch.rubRateSource === 'оплаты', JSON.stringify({ rubRate: batch.rubRate, src: batch.rubRateSource }));
+  check('81g-3: the batch itself costs 29 760 ₽ (goods 12 400 + freight 17 360)',
+    batch.goodsRub === 12400 && batch.freightRub === 17360 && batch.totalRub === 29760,
+    JSON.stringify({ goodsRub: batch.goodsRub, freightRub: batch.freightRub, totalRub: batch.totalRub }));
+  check('81g-3: not history — the order/bill actually have known money',
+    batch.history === false, JSON.stringify(batch.history));
+  check('81g-3: not closed yet — Russian costs are not confirmed',
+    batch.closed === false && batch.missing.indexOf('расходы РФ не подтверждены') !== -1,
+    JSON.stringify(batch.missing));
+
+  const after = h.setChinaRubCostsDone({ batchId: batch.id, done: true }, 'Николай');
+  const batch2 = after.batches.filter(function (b) { return b.code === 'BATCH40'; })[0];
+  check('81g-3: setChinaRubCostsDone closes the batch once nothing else is missing',
+    batch2.rubCostsDone === true && batch2.closed === true && batch2.missing.length === 0,
+    JSON.stringify({ rubCostsDone: batch2.rubCostsDone, closed: batch2.closed, missing: batch2.missing }));
+
+  // checkMark/checkNote round trip through saveChinaBatch, and survive an unrelated recost.
+  h.saveChinaBatch({ id: batch.id, orderNo: '40', code: 'BATCH40', status: 'Прибыла',
+    shippedAt: '2026-09-01', arrivedAt: '2026-09-20', weightKg: 100, freightUsd: 200, cargoRate: 7,
+    ratePerKgUsd: 2, lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }],
+    checkMark: 'скрипт+ИИ', checkNote: 'проверено ИИ, расхождений нет' }, 'Николай');
+  const marked = h.getChinaBatches().batches.filter(function (b) { return b.code === 'BATCH40'; })[0];
+  check('81g-3: checkMark/checkNote round-trip through saveChinaBatch',
+    marked.checkMark === 'скрипт+ИИ' && marked.checkNote === 'проверено ИИ, расхождений нет', JSON.stringify(marked));
+
+  let badMark = '';
+  try { h.saveChinaBatch({ id: batch.id, orderNo: '40', code: 'BATCH40', checkMark: 'ерунда', lines: [{ marking: 'M1', qty: 1, priceCny: 1 }] }, 'Николай'); }
+  catch (e) { badMark = e.message; }
+  check('81g-3: an unknown checkMark value is refused',
+    badMark.indexOf('Неизвестная отметка') !== -1, badMark);
+
+  // Editing the SAME batch WITHOUT sending checkMark at all must preserve it — the key must be
+  // absent from the write, not sent as an empty/undefined value that would overwrite it.
+  h.saveChinaBatch({ id: batch.id, orderNo: '40', code: 'BATCH40', status: 'Прибыла',
+    shippedAt: '2026-09-01', arrivedAt: '2026-09-20', weightKg: 100, freightUsd: 200, cargoRate: 7,
+    ratePerKgUsd: 2, lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }] }, 'Николай');
+  const stillMarked = h.getChinaBatches().batches.filter(function (b) { return b.code === 'BATCH40'; })[0];
+  check('81g-3: an edit that never mentions checkMark leaves it exactly as it was',
+    stillMarked.checkMark === 'скрипт+ИИ' && stillMarked.checkNote === 'проверено ИИ, расхождений нет',
+    JSON.stringify(stillMarked));
+
+  h.saveChinaReport({ reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [] }, 'Николай');
+  const afterReport = h.getChinaBatches().batches.filter(function (b) { return b.code === 'BATCH40'; })[0];
+  check('81g-3: an unrelated saveChinaReport recost preserves checkMark/checkNote and rubCostsDone',
+    afterReport.checkMark === 'скрипт+ИИ' && afterReport.checkNote === 'проверено ИИ, расхождений нет' && afterReport.rubCostsDone === true,
+    JSON.stringify(afterReport));
+  // chinaRecostAll actually RAN: BATCH40 has no bill in the empty report above, so its freight
+  // rate is lost and the total falls back to goods-only (12 400 ₽) — proves this batch, which
+  // no OTHER mechanism (chinaRecostBorrowers) would have touched, was genuinely re-costed.
+  check('81g-3: saveChinaReport genuinely re-costs EVERY batch, not just the borrowers',
+    afterReport.freightRate === 0 && afterReport.freightRateSource === '' && afterReport.totalRub === 12400,
+    JSON.stringify({ freightRate: afterReport.freightRate, totalRub: afterReport.totalRub }));
+})();
+
+// ---- history: a batch shipped before tracking, with no money anywhere, is exempt from «missing» ----
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    orderNo: '99', code: 'OLDBATCH', status: 'Черновик', shippedAt: '2026-05-01',
+    lines: [{ marking: 'M1', name: 'x', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 10 }]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+  check('81g-3: a batch with no rate anywhere, shipped long before tracking, is «история»',
+    batch.history === true && batch.missing.length === 0 && batch.closed === true,
+    JSON.stringify({ history: batch.history, missing: batch.missing, closed: batch.closed }));
+
+  // The SAME "no rate anywhere" batch, but shipped AFTER tracking started — this is NOT
+  // history (there is no excuse for having no money on a batch that shipped in-era), and it
+  // must show up in `missing`, not be silently waved through.
+  h.saveChinaBatch({
+    orderNo: '98', code: 'NEWBATCH', status: 'Черновик', shippedAt: '2026-08-15',
+    lines: [{ marking: 'M1', name: 'x', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 10 }]
+  }, 'Николай');
+  const newBatch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NEWBATCH'; })[0];
+  check('81g-3: the SAME "no rate anywhere" but shipped AFTER tracking is NOT history',
+    newBatch.history === false && newBatch.closed === false && newBatch.missing.length > 0,
+    JSON.stringify({ history: newBatch.history, missing: newBatch.missing }));
+})();
+
+// ---- freight/goods at genuinely DIFFERENT rates: each line component uses its OWN rate ----
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    orderNo: '41', code: 'DIFFRATE', status: 'Прибыла', shippedAt: '2026-09-01',
+    weightKg: 100, freightUsd: 100, cargoRate: 7, ratePerKgUsd: 1, rubRate: 10,
+    lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }]
+  }, 'Николай');
+  // Manually poke a DIFFERENT freight rate directly onto the row (no ledger bill exists for
+  // this code, and the typed rate would otherwise apply to both — this proves the SPLIT
+  // computation, not just that a fallback rate happens to match).
+  const h2 = h; // same instance, direct sheet poke to simulate a resolved freight-only rate
+  const calc = h2.chinaBatchCost(
+    { goodsRate: 10, freightRate: 15, weightKg: 100, freightUsd: 100, cargoRate: 7, ratePerKgUsd: 1 },
+    [{ marking: 'M1', qty: 50, priceCny: 20, boxes: 10 }], 0, { cargoRateCnyPerUsd: 7 });
+  // goods 1 000 ¥ × 10 = 10 000 ₽; freight 700 ¥ (100$×7) × 15 = 10 500 ₽ → 20 500 ₽ total.
+  check('81g-3: goods and freight at DIFFERENT rates are each costed directly, summing exactly',
+    calc.goodsRub === 10000 && calc.freightRub === 10500 && calc.totalRub === 20500,
+    JSON.stringify({ goodsRub: calc.goodsRub, freightRub: calc.freightRub, totalRub: calc.totalRub }));
 })();
 
 // ================= Итог =================

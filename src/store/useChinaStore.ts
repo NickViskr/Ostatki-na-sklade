@@ -9,19 +9,27 @@
 
 import { create } from 'zustand';
 import { toast } from 'sonner';
-import { ChinaBatch, ChinaPayment } from '../types';
+import { ChinaBatch, ChinaMoney, ChinaPayment } from '../types';
 import { useWarehouseStore } from './useWarehouseStore';
 
 interface ChinaAnswer {
   status: string;
   message?: string;
-  data?: { batches?: ChinaBatch[]; payments?: ChinaPayment[]; settings?: Record<string, number | string> };
+  data?: {
+    batches?: ChinaBatch[];
+    payments?: ChinaPayment[];
+    settings?: Record<string, number | string>;
+    warnings?: string[];
+  } & Partial<ChinaMoney>;
 }
 
 interface ChinaState {
   batches: ChinaBatch[];
   payments: ChinaPayment[];
   settings: Record<string, number | string>;
+  /** Item 81g: the picture `getChinaMoney` answers with — payments, receipts and orders of the
+   * financial report, kept apart from `batches` because the payments card reads it, not them. */
+  money: ChinaMoney | null;
   isLoading: boolean;
   isSaving: boolean;
   /** Empty until the first answer arrives, so an empty list is not shown as «нет партий». */
@@ -29,6 +37,7 @@ interface ChinaState {
   /** The last refusal of the script, shown on the tab itself and not only in a toast. */
   error: string;
   fetchChinaBatches: () => Promise<void>;
+  fetchChinaMoney: () => Promise<void>;
   setupChinaSpreadsheet: () => Promise<boolean>;
   saveChinaBatch: (payload: Record<string, unknown>) => Promise<boolean>;
   deleteChinaBatch: (id: string) => Promise<boolean>;
@@ -36,6 +45,11 @@ interface ChinaState {
   deleteChinaCost: (id: string) => Promise<boolean>;
   saveChinaPayment: (payload: Record<string, unknown>) => Promise<boolean>;
   deleteChinaPayment: (id: string) => Promise<boolean>;
+  /** Item 81g: the financial report, parsed in the browser and grouped by `chinaReportPayload`. */
+  saveChinaReport: (payload: Record<string, unknown>) => Promise<string[] | null>;
+  matchChinaPayment: (paymentId: string, receiptId: string) => Promise<boolean>;
+  unmatchChinaPayment: (paymentId: string) => Promise<boolean>;
+  setChinaRubCostsDone: (batchId: string, done: boolean) => Promise<boolean>;
 }
 
 const callChina = async (action: string, data?: Record<string, unknown>): Promise<ChinaAnswer> => {
@@ -47,6 +61,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
   batches: [],
   payments: [],
   settings: {},
+  money: null,
   isLoading: false,
   isSaving: false,
   loaded: false,
@@ -68,6 +83,18 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return;
     }
     set({ isLoading: false, loaded: true, error: result.message || 'Не удалось прочитать заказы в Китае' });
+  },
+
+  // Item 81g: the payments card reads this, not `batches` — the two are refreshed together
+  // after every write, so a payment matched against a receipt is reflected in both at once.
+  fetchChinaMoney: async () => {
+    if (!useWarehouseStore.getState().sessionToken) return;
+    const result = await callChina('getChinaMoney');
+    if (result.status === 'success' && result.data) {
+      set({ money: result.data as ChinaMoney });
+      return;
+    }
+    toast.error(result.message || 'Не удалось прочитать оплаты китайцам');
   },
 
   setupChinaSpreadsheet: async () => {
@@ -95,6 +122,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     set({ batches: result.data.batches || [], payments: result.data.payments || get().payments,
       settings: result.data.settings || get().settings, loaded: true, error: '' });
     toast.success('Партия сохранена, себестоимость пересчитана');
+    await get().fetchChinaMoney();
     return true;
   },
 
@@ -108,6 +136,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
     toast.success('Оплата учтена, курс партий пересчитан');
+    await get().fetchChinaMoney();
     return true;
   },
 
@@ -121,6 +150,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
     toast.success('Оплата удалена, курс партий пересчитан');
+    await get().fetchChinaMoney();
     return true;
   },
 
@@ -134,6 +164,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
     toast.success('Партия удалена');
+    await get().fetchChinaMoney();
     return true;
   },
 
@@ -147,6 +178,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
     toast.success('Расход учтён в себестоимости партии');
+    await get().fetchChinaMoney();
     return true;
   },
 
@@ -160,6 +192,64 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
     toast.success('Расход удалён, себестоимость пересчитана');
+    await get().fetchChinaMoney();
+    return true;
+  },
+
+  // Item 81g: a report file alone is a valid import — nothing about money is computed in the
+  // browser, `chinaReportPayload` only groups what the parser already read. The server's own
+  // warnings (about payments it could not place, say) are handed back for a toast.
+  saveChinaReport: async (payload) => {
+    set({ isSaving: true });
+    const result = await callChina('saveChinaReport', payload);
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось сохранить отчёт');
+      return null;
+    }
+    set({ batches: result.data.batches || get().batches, loaded: true, error: '' });
+    toast.success('Отчёт загружен, партии пересчитаны');
+    await get().fetchChinaMoney();
+    return result.data.warnings || [];
+  },
+
+  matchChinaPayment: async (paymentId, receiptId) => {
+    set({ isSaving: true });
+    const result = await callChina('matchChinaPayment', { paymentId, receiptId });
+    set({ isSaving: false });
+    if (result.status !== 'success') {
+      toast.error(result.message || 'Не удалось сопоставить оплату');
+      return false;
+    }
+    toast.success('Оплата сопоставлена с поступлением из отчёта');
+    await get().fetchChinaMoney();
+    await get().fetchChinaBatches();
+    return true;
+  },
+
+  unmatchChinaPayment: async (paymentId) => {
+    set({ isSaving: true });
+    const result = await callChina('unmatchChinaPayment', { paymentId });
+    set({ isSaving: false });
+    if (result.status !== 'success') {
+      toast.error(result.message || 'Не удалось отменить сопоставление');
+      return false;
+    }
+    toast.success('Сопоставление отменено');
+    await get().fetchChinaMoney();
+    await get().fetchChinaBatches();
+    return true;
+  },
+
+  setChinaRubCostsDone: async (batchId, done) => {
+    set({ isSaving: true });
+    const result = await callChina('setChinaRubCostsDone', { batchId, done });
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось отметить расходы в РФ');
+      return false;
+    }
+    set({ batches: result.data.batches || get().batches, loaded: true, error: '' });
     return true;
   }
 }));

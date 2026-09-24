@@ -249,7 +249,9 @@ function doPost(e) {
       'getOzonSyncStatus',
       // Item 81b: a pure read of the module's own spreadsheet. It writes nothing, and
       // queueing it behind a commit would make the tab wait for the warehouse.
-      'getChinaBatches'
+      'getChinaBatches',
+      // Item 81g-2: same reasoning — getChinaMoney only reads «Отчёты»/«Поступления»/«Платежи».
+      'getChinaMoney'
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();
@@ -478,6 +480,17 @@ function doPost(e) {
       case 'deleteChinaBatchCost': assertAdmin(currentUser); result = deleteChinaBatchCost(data, currentUser.username); break;
       case 'saveChinaPayment': assertAdmin(currentUser); result = saveChinaPayment(data, currentUser.username); break;
       case 'deleteChinaPayment': assertAdmin(currentUser); result = deleteChinaPayment(data, currentUser.username); break;
+      // Item 81g-1: the Chinese financial report — sheets «Отчёты»/«Поступления»/«Движения
+      // заказов» and the goods pool allocation. Matching/freight/rates stay 81g-2/3.
+      case 'saveChinaReport': assertAdmin(currentUser); result = saveChinaReport(data, currentUser.username); break;
+      // Item 81g-2: payment matching (receipt-driven, not order-driven) and the read that
+      // shows it — getChinaMoney is a pure read of the module's own spreadsheet, same as
+      // getChinaBatches, so it goes lock-free below.
+      case 'getChinaMoney': assertAdmin(currentUser); result = getChinaMoney(); break;
+      case 'matchChinaPayment': assertAdmin(currentUser); result = matchChinaPayment(data, currentUser.username); break;
+      case 'unmatchChinaPayment': assertAdmin(currentUser); result = unmatchChinaPayment(data, currentUser.username); break;
+      // Item 81g-3.
+      case 'setChinaRubCostsDone': assertAdmin(currentUser); result = setChinaRubCostsDone(data, currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }

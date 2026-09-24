@@ -10,14 +10,14 @@ import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import {
-  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaFormFromArrival,
+  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark, chinaFormFromArrival,
   chinaFormFromFiles, chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes, chinaMarkingMatches,
   chinaMatchArrivalBatch, chinaMatchFinalBatch, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor,
   chinaTariffRateUnit
 } from '../lib/chinaBatchForm';
 import {
-  ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaArrivalFile,
-  parseChinaBatchFile, parseChinaReportFile
+  ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, chinaReportPayload, detectChinaFile,
+  parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile
 } from '../lib/chinaFileParse';
 import { chinaSheetsFromFile } from '../lib/chinaXlsx';
 import { chinaArticleOptions } from '../lib/chinaArticles';
@@ -52,6 +52,8 @@ export const ChinaOrdersTab: React.FC = () => {
   const deleteChinaBatch = useChinaStore((s) => s.deleteChinaBatch);
   const saveChinaCost = useChinaStore((s) => s.saveChinaCost);
   const deleteChinaCost = useChinaStore((s) => s.deleteChinaCost);
+  const saveChinaReportAction = useChinaStore((s) => s.saveChinaReport);
+  const setChinaRubCostsDone = useChinaStore((s) => s.setChinaRubCostsDone);
   const setConfirmDialog = useUIStore((s) => s.setConfirmDialog);
   const skus = useWarehouseStore((s) => s.skus);
 
@@ -165,7 +167,14 @@ export const ChinaOrdersTab: React.FC = () => {
     setIsReading(false);
     if (fileInput.current) fileInput.current.value = '';
 
+    // Item 81g: a report file alone is now a valid import — the browser groups nothing but its
+    // own dates, all the money is worked out by the script.
     if (foundBatches.length === 0 && foundArrivals.length === 0) {
+      if (report) {
+        const warnings = await saveChinaReportAction(chinaReportPayload(report) as unknown as Record<string, unknown>);
+        if (warnings && warnings.length > 0) toast.warning(warnings.join('; '));
+        return;
+      }
       toast.error(problems[0] || 'Файл партии в выбранных файлах не нашёлся');
       return;
     }
@@ -183,6 +192,13 @@ export const ChinaOrdersTab: React.FC = () => {
     } else {
       const parsed = foundArrivals[0];
       result = chinaFormFromArrival(parsed, chinaMatchArrivalBatch(parsed.draftCode, parsed.lines, batches));
+    }
+    // A report picked ALONGSIDE a batch or arrival file is saved too, on its own — the batch
+    // form still opens for the owner to check, but the money of the report does not wait for it.
+    if (report) {
+      saveChinaReportAction(chinaReportPayload(report) as unknown as Record<string, unknown>).then((warnings) => {
+        if (warnings && warnings.length > 0) toast.warning(warnings.join('; '));
+      });
     }
     setImportForm(result.form);
     setImportNotes(result.notes.concat(problems));
@@ -265,7 +281,7 @@ export const ChinaOrdersTab: React.FC = () => {
         </div>
       )}
 
-      {loaded && !error && <ChinaPaymentsCard batches={batches} />}
+      {loaded && !error && <ChinaPaymentsCard />}
 
       {loaded && batches.length === 0 && !error && (
         <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
@@ -279,6 +295,7 @@ export const ChinaOrdersTab: React.FC = () => {
           const levelledLines = chinaLevelledIndexes(batch.lines);
           const conflicts = chinaArticleConflicts(batch.lines);
           const hasBoxData = batch.lines.some((l) => l.boxVolumeM3 > 0 || l.factoryBoxKg > 0);
+          const checkMark = chinaCheckMark(batch.checkMark || '', batch.checkNote || '');
           return (
             <div key={batch.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <button
@@ -289,8 +306,15 @@ export const ChinaOrdersTab: React.FC = () => {
                 <div className="grow">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-bold">{batch.code || '(без кода)'}</span>
+                    {checkMark && <span className={`font-bold ${checkMark.className}`} title={checkMark.title}>{checkMark.glyph}</span>}
                     {batch.orderNo && <span className="text-sm text-slate-400">заказ №{batch.orderNo}</span>}
                     <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${statusColour(batch.status)}`}>{batch.status}</span>
+                    {batch.history && (
+                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">история без курса</span>
+                    )}
+                    {batch.closed && (
+                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Расчёт закрыт</span>
+                    )}
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">
                     {batch.shippedAt && <>отгружена {batch.shippedAt} </>}
@@ -325,10 +349,17 @@ export const ChinaOrdersTab: React.FC = () => {
                     </div>
                     <div><div className="text-xs text-slate-400 uppercase font-bold">Расходы РФ</div>{money(batch.rubCosts, '₽')}</div>
                     <div>
-                      <div className="text-xs text-slate-400 uppercase font-bold">Курс ₽/¥</div>
+                      <div className="text-xs text-slate-400 uppercase font-bold">Курс товара</div>
                       {batch.rubRate || '—'}
                       {batch.rubRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.rubRateSource, batch.rubRateFrom || '')}</span>}
                     </div>
+                    {batch.freightRate !== undefined && (
+                      <div>
+                        <div className="text-xs text-slate-400 uppercase font-bold">Курс перевозки</div>
+                        {batch.freightRate || '—'}
+                        {batch.freightRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.freightRateSource, batch.rubRateFrom || '')}</span>}
+                      </div>
+                    )}
                     {chinaShowWeightFactor(batch.weightFactor, batch.lines) && (
                       <div>
                         <div className="text-xs text-slate-400 uppercase font-bold">Коэффициент веса</div>
@@ -354,6 +385,24 @@ export const ChinaOrdersTab: React.FC = () => {
                       {conflicts.map((c, i) => <p key={i}>{c}</p>)}
                     </div>
                   )}
+
+                  {!batch.closed && batch.missing && batch.missing.length > 0 && (
+                    <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      <p className="font-bold">Чего не хватает для закрытого расчёта</p>
+                      <ul className="list-disc list-inside">
+                        {batch.missing.map((m, i) => <li key={i}>{m}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  <label className="flex items-center gap-2 text-sm text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={!!batch.rubCostsDone}
+                      onChange={(e) => setChinaRubCostsDone(batch.id, e.target.checked)}
+                    />
+                    Расходы в РФ внесены полностью
+                  </label>
 
                   {batch.goodsKg > 0 && (
                     <div className="bg-slate-50 rounded-xl p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">

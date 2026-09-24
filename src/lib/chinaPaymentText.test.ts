@@ -88,39 +88,50 @@ describe('дата из текста', () => {
   });
 });
 
-// Item 81d. Wiring guards: the payments card, the store, the proxy and the script agree.
+// Item 81d/81g. Wiring guards: the payments card and the store agree on the CONTRACT's own
+// action names — server.ts and ChinaOrders.gs are built in parallel and are not read here.
 describe('подключение оплат', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
   const card = read('src/components/ChinaPaymentsCard.tsx');
   const tab = read('src/components/ChinaOrdersTab.tsx');
   const store = read('src/store/useChinaStore.ts');
-  const server = read('server.ts');
-  const script = read('ChinaOrders.gs');
 
-  it('the card reads the owner\u2019s sentence and sends the payment as one action', () => {
+  it('the card reads the owner’s sentence and sends the payment as one action', () => {
     expect(card).toContain('parseChinaPaymentText(text)');
     expect(card).toContain('btn-china-payment-parse');
     expect(card).toContain('btn-china-payment-add');
     expect(card).toContain('savePayment({');
     expect(store).toContain("callChina('saveChinaPayment'");
-    expect(script).toContain('function saveChinaPayment(');
   });
 
-  it('a payment is tied to an order, because that is what gives a batch its rate', () => {
-    expect(card).toContain('select-china-payment-order');
-    expect(card).toContain('orderNo: orderNo.trim()');
-    expect(script).toContain('function chinaRateFromPayments(');
-    expect(script).toContain('recalcChinaOrders(ss, [orderNo, previousOrder]');
+  it('item 81g: a payment carries no order and no purpose any more, only date, rubles, rate and comment', () => {
+    const add = (card.split('const add = async () => {')[1] || '').split('const match = async')[0];
+    expect(add).toContain('date: date.trim()');
+    expect(add).toContain('amountRub: chinaNumber(amountRub)');
+    expect(add).toContain('rate: chinaNumber(rate)');
+    expect(add).toContain('comment: comment.trim()');
+    expect(add).not.toMatch(/purpose|orderNo|confirmed/);
   });
 
-  it('the proxy drops the read after a payment is written', () => {
-    expect(server).toContain("saveChinaPayment: ['getChinaBatches']");
-    expect(server).toContain("deleteChinaPayment: ['getChinaBatches']");
+  it('item 81g: matching a payment to a receipt, and undoing it, go through the store', () => {
+    expect(card).toContain('matchChinaPayment');
+    expect(card).toContain('unmatchChinaPayment');
+    expect(store).toContain("callChina('matchChinaPayment'");
+    expect(store).toContain("callChina('unmatchChinaPayment'");
   });
 
-  it('the card works out no cost of its own \u2014 only the wallet total it shows', () => {
+  it('item 81g: a report file alone imports through the same store action a batch import uses', () => {
+    expect(store).toContain("callChina('saveChinaReport'");
+    expect(tab).toContain('saveChinaReportAction(chinaReportPayload(');
+  });
+
+  it('item 81g: the store reads getChinaMoney and refreshes it after every write', () => {
+    expect(store).toContain("callChina('getChinaMoney')");
+    expect(store).toContain('fetchChinaMoney()');
+  });
+
+  it('the card works out no cost of its own — only the pool figures the script sent back', () => {
     expect(card).not.toMatch(/costRub|unitRub|freightShareCny/);
-    expect(card).toContain('rub / cny');
   });
 
   it('a sentence without a date does not inherit the date of the payment before (review)', () => {
@@ -129,23 +140,16 @@ describe('подключение оплат', () => {
     expect(card).toContain("setText(''); setDate('');");
   });
 
-  it('a payment already made can be put against its order when the report confirms it (review)', () => {
-    expect(card).toContain('select-china-payment-reassign');
-    expect(card).toContain('reassign(p, { orderNo: e.target.value })');
-    expect(card).toContain('reassign(p, { confirmed: e.target.checked })');
-    // The edit goes by id and carries the money unchanged: only its order and its mark move.
-    const reassign = card.split('const reassign = ')[1] || '';
-    expect(reassign).toContain('id: p.id');
-    expect(reassign).toContain('amountRub: p.amountRub');
-    expect(reassign).toContain('amountCny: p.amountCny');
-  });
-
   it('the batch card says where its rate came from and what the report says about the order', () => {
     expect(tab).toContain('batch.rubRateSource');
     expect(tab).toContain('По отчёту китайцев по заказу');
-    // Item 82: the sentence about the rate is worked out by chinaRateStatusText, keyed on
-    // rubRateSource alone — no rate at all is no longer confused with «оплаты не внесены».
     expect(tab).toContain('chinaRateStatusText(batch.rubRateSource');
-    expect(tab).toContain('<ChinaPaymentsCard batches={batches} />');
+    expect(tab).toContain('<ChinaPaymentsCard />');
+  });
+
+  it('item 81g: the batch card shows the two rates and the owner’s own mark of closed RF costs', () => {
+    expect(tab).toContain('Курс перевозки');
+    expect(tab).toContain('setChinaRubCostsDone(batch.id');
+    expect(tab).toContain('chinaCheckMark(batch.checkMark');
   });
 });

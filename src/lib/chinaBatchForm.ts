@@ -317,9 +317,30 @@ export function chinaMarkingMatches(lines: { marking: string }[], marking: strin
 }
 
 /** Item 81f: 'предыдущая партия' names the batch the rate was borrowed from, so the owner sees
- * at a glance that it is provisional rather than the order's own. */
+ * at a glance that it is provisional rather than the order's own.
+ * Item 81g: 'история' names a batch or receipt from before tracking started in August 2026 — no
+ * rate is missing, none was ever expected, so it reads as its own sentence rather than a bare
+ * word. */
 export function chinaRateSourceLabel(source: string, rubRateFrom: string): string {
+  if (source === 'история') return 'история без курса';
   return source === 'предыдущая партия' && rubRateFrom ? `курс из партии ${rubRateFrom}` : source;
+}
+
+export interface ChinaCheckMark { glyph: string; className: string; title: string }
+
+/**
+ * Item 81g: the tick beside a batch's code. One green check when the parser read the file alone
+ * and every sum check passed; two when the owner's «Проверить ИИ» agreed; a yellow warning when
+ * the script itself had to call AI to fill a gap; a red cross when AI saw a discrepancy the
+ * script did not — `checkNote` carries AI's own words in every case but the first. A batch that
+ * predates the check (`checkMark: ''`) gets no badge at all.
+ */
+export function chinaCheckMark(checkMark: string, checkNote: string): ChinaCheckMark | null {
+  if (checkMark === 'скрипт') return { glyph: '✓', className: 'text-emerald-600', title: 'прочитано скриптом, все проверки сошлись' };
+  if (checkMark === 'скрипт+ИИ') return { glyph: '✓✓', className: 'text-emerald-600', title: checkNote || 'ИИ подтвердил проверку скрипта' };
+  if (checkMark === 'ИИ') return { glyph: '⚠', className: 'text-amber-600', title: checkNote || 'часть партии дочитал ИИ' };
+  if (checkMark === 'расхождение ИИ') return { glyph: '✗', className: 'text-red-600', title: checkNote || 'ИИ увидел расхождение' };
+  return null;
 }
 
 /**

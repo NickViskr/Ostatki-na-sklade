@@ -273,12 +273,20 @@ async function startServer() {
     // Item 81: the module «Заказы в Китае». Its writes touch nothing but its own
     // spreadsheet, so only its own read has to be dropped.
     setupChinaSpreadsheet: ['getChinaBatches'],
-    saveChinaBatch: ['getChinaBatches'],
-    deleteChinaBatch: ['getChinaBatches'],
-    saveChinaBatchCost: ['getChinaBatches'],
-    deleteChinaBatchCost: ['getChinaBatches'],
-    saveChinaPayment: ['getChinaBatches'],
-    deleteChinaPayment: ['getChinaBatches']
+    saveChinaBatch: ['getChinaBatches', 'getChinaMoney'],
+    deleteChinaBatch: ['getChinaBatches', 'getChinaMoney'],
+    saveChinaBatchCost: ['getChinaBatches', 'getChinaMoney'],
+    deleteChinaBatchCost: ['getChinaBatches', 'getChinaMoney'],
+    saveChinaPayment: ['getChinaBatches', 'getChinaMoney'],
+    deleteChinaPayment: ['getChinaBatches', 'getChinaMoney'],
+    // Item 81g-1: the report touches only its own spreadsheet's read, same as every other
+    // China write above.
+    saveChinaReport: ['getChinaBatches', 'getChinaMoney'],
+    // Item 81g-2: matching moves money between a payment and a receipt — both reads must drop.
+    matchChinaPayment: ['getChinaBatches', 'getChinaMoney'],
+    unmatchChinaPayment: ['getChinaBatches', 'getChinaMoney'],
+    // Item 81g-3.
+    setChinaRubCostsDone: ['getChinaBatches', 'getChinaMoney']
   };
 
   function invalidateCacheFor(writeAction: string): void {
@@ -386,7 +394,9 @@ async function startServer() {
     'getOzonCostExport',
     // Item 81: a pure read of the module's own spreadsheet. Deliberately given no cache
     // lifetime below — every write of the module answers with the whole state anyway.
-    'getChinaBatches'
+    'getChinaBatches',
+    // Item 81g-2: same reasoning.
+    'getChinaMoney'
   ];
 
   // API Endpoint to proxy GAS requests

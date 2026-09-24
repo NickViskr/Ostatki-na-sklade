@@ -246,6 +246,88 @@ export interface ChinaPayment {
   user: string;
 }
 
+/**
+ * Item 81g: money the owner paid, matched (or not yet) against a receipt of the Chinese
+ * financial report — no order, no purpose any more, `saveChinaPayment` takes only date, rubles,
+ * rate and comment, and `matchChinaPayment`/`unmatchChinaPayment` decide which order it feeds.
+ */
+export interface ChinaMoneyPayment {
+  id: string;
+  date: string;
+  amountRub: number;
+  rate: number;
+  amountCny: number;
+  comment: string;
+  user: string;
+  status: 'не распределена' | 'распределена';
+  receiptId: string;
+  /** What the matched receipt says the payment bought, in yuan; 0 until matched. */
+  reportCny: number;
+  /** amountRub / reportCny of the matched receipt; 0 until matched. */
+  actualRate: number;
+  /** Human sentences describing an unmatched receipt this payment could be — for the picker. */
+  candidates: string[];
+}
+
+/** Item 81g: one date's worth of goods and freight the report says arrived, grouped exactly as
+ * the Chinese side wrote it — the goods log and the freight settlement keep no other link. */
+export interface ChinaMoneyReceipt {
+  id: string;
+  date: string;
+  goodsCny: number;
+  freightCny: number;
+  freightUsd: number;
+  cargoRate: number;
+  totalCny: number;
+  status: 'история' | 'ждёт оплату' | 'сопоставлено';
+  paymentId: string;
+  rubGoods: number;
+  rubFreight: number;
+}
+
+/** Item 81g: per order, what the report says was received and what of that is backed by an
+ * actual payment at a known rate, versus history from before tracking started in August 2026. */
+export interface ChinaMoneyOrder {
+  orderNo: string;
+  date: string;
+  totalCny: number;
+  receivedCny: number;
+  unpaidCny: number;
+  knownCny: number;
+  knownRub: number;
+  rate: number;
+  pendingCny: number;
+  historyCny: number;
+  /** The owner's own rule: an advance under 30 % of the goods is worth a second look. */
+  advanceWarning: boolean;
+}
+
+export interface ChinaMoneyPool {
+  cny: number;
+  knownCny: number;
+  knownRub: number;
+  pendingCny: number;
+  historyCny: number;
+}
+
+export interface ChinaMoneyReportEntry {
+  id: string;
+  loadedAt: string;
+  reportDate: string;
+  source: string;
+  aiReason: string;
+}
+
+/** Item 81g: the whole answer of `getChinaMoney`. */
+export interface ChinaMoney {
+  payments: ChinaMoneyPayment[];
+  receipts: ChinaMoneyReceipt[];
+  orders: ChinaMoneyOrder[];
+  pool: ChinaMoneyPool;
+  reports: ChinaMoneyReportEntry[];
+  warnings: string[];
+}
+
 export interface ChinaBatch {
   id: string;
   orderNo: string;
@@ -321,4 +403,25 @@ export interface ChinaBatch {
   packagingShareFreight: number;
   packagingShareCost: number;
   goodsFreightShareCost: number;
+  /** Item 81g: the two rates that used to be one — `rubRate`/`rubRateSource` above stay the
+   * goods rate, kept for old code that reads them; these are the same pair for the goods and,
+   * separately, for the freight, since a move between orders can leave them at different rates. */
+  goodsRate?: number;
+  goodsRateSource?: string;
+  freightRate?: number;
+  freightRateSource?: string;
+  /** Item 81g: the owner's own mark that the RF-side costs (which the script cannot verify) are
+   * all in. */
+  rubCostsDone?: boolean;
+  /** What the batch still needs for a closed cost — empty once `closed` is true. */
+  missing?: string[];
+  closed?: boolean;
+  /** True for a batch predating the report's tracking (August 2026): no rate is missing, none
+   * was ever expected. */
+  history?: boolean;
+  /** 'скрипт' (one tick), 'скрипт+ИИ' (two), 'ИИ' (a warning) or 'расхождение ИИ' (a cross);
+   * '' when the batch predates the check. */
+  checkMark?: string;
+  /** The AI's own words for `checkMark` of 'ИИ' or 'расхождение ИИ'. */
+  checkNote?: string;
 }

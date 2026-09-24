@@ -6,6 +6,7 @@ import {
   chinaFormCounts, chinaGroupIds, chinaLevelledIndexes, chinaArticleConflicts, validateChinaBatchForm, chinaFilledLines,
   chinaFormFromFiles, chinaFormFromArrival, ChinaBatchForm, chinaMatchFinalBatch, chinaMatchArrivalBatch,
   chinaMarkingMatches, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor, chinaFreightPerKgLabel,
+  chinaCheckMark,
   chinaTariffRateUnit
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
@@ -377,7 +378,11 @@ describe('подключение модуля «Заказы в Китае»', (
   it('the proxy treats the read as a read and drops it after every write', () => {
     expect(server).toContain("'getChinaBatches'");
     ['setupChinaSpreadsheet', 'saveChinaBatch', 'deleteChinaBatch', 'saveChinaBatchCost', 'deleteChinaBatchCost']
-      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches']`));
+      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches'`));
+    // Item 81g: a write can change the money of every order, so the batch writes drop the
+    // money read as well.
+    ['saveChinaBatch', 'deleteChinaBatch', 'saveChinaBatchCost', 'deleteChinaBatchCost']
+      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches', 'getChinaMoney']`));
   });
 
   it('every write replaces the whole state with what the script answered', () => {
@@ -804,6 +809,44 @@ describe('item 81f: the source of the ₽/¥ rate, in words', () => {
 
   it('with no source batch named, the label is left untranslated rather than saying "из партии "', () => {
     expect(chinaRateSourceLabel('предыдущая партия', '')).toBe('предыдущая партия');
+  });
+
+  it("item 81g: 'история' reads as its own sentence, not a bare word", () => {
+    expect(chinaRateSourceLabel('история', '')).toBe('история без курса');
+  });
+});
+
+describe('item 81g: the tick beside a batch\'s code', () => {
+  it('one green check for the script alone', () => {
+    expect(chinaCheckMark('скрипт', '')).toEqual({
+      glyph: '✓', className: 'text-emerald-600', title: 'прочитано скриптом, все проверки сошлись'
+    });
+  });
+
+  it('two green checks once AI agreed on a re-check', () => {
+    expect(chinaCheckMark('скрипт+ИИ', 'сверил суммы отчёта')).toEqual({
+      glyph: '✓✓', className: 'text-emerald-600', title: 'сверил суммы отчёта'
+    });
+  });
+
+  it('a yellow warning when the script itself called AI', () => {
+    expect(chinaCheckMark('ИИ', 'не разобрал шапку листа')).toEqual({
+      glyph: '⚠', className: 'text-amber-600', title: 'не разобрал шапку листа'
+    });
+  });
+
+  it('a red cross when AI saw a discrepancy the script did not', () => {
+    expect(chinaCheckMark('расхождение ИИ', 'суммы расходятся на 400 ¥')).toEqual({
+      glyph: '✗', className: 'text-red-600', title: 'суммы расходятся на 400 ¥'
+    });
+  });
+
+  it('no note at all still gives a title, never a blank one', () => {
+    expect(chinaCheckMark('ИИ', '')!.title).toBe('часть партии дочитал ИИ');
+  });
+
+  it('a batch that predates the check gets no badge', () => {
+    expect(chinaCheckMark('', '')).toBeNull();
   });
 });
 

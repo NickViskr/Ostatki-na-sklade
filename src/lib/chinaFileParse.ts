@@ -125,6 +125,9 @@ export interface ChinaParsedReport {
   transfers: ChinaReportTransfer[];
   freights: ChinaReportFreight[];
   payments: ChinaReportPayment[];
+  /** Item 81g: the freight sheet's own opening row, with no date and no ticket of its own — a
+   * balance carried in from before this report, in dollars, negative when the carrier owes it. */
+  openingFreightUsd: number;
   warnings: string[];
 }
 
@@ -514,6 +517,7 @@ export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | n
   const freightSheet = sheetWith(sheets, ['票号', '总金额']);
   const freights: ChinaReportFreight[] = [];
   const payments: ChinaReportPayment[] = [];
+  let openingFreightUsd = 0;
   if (freightSheet) {
     const fHead = findHeaderRow(freightSheet, ['票号', '总金额']);
     const fRow = freightSheet[fHead] || [];
@@ -534,6 +538,12 @@ export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | n
       const ticket = fCol.ticket === -1 ? '' : str(row[fCol.ticket]);
       const summary = fCol.summary === -1 ? '' : str(row[fCol.summary]);
       const amount = fCol.amount === -1 ? 0 : num(row[fCol.amount]);
+      // The very first data row can be a balance carried in from before this report — no date,
+      // no ticket, no 国外收 summary, just a dollar figure.
+      if (r === fHead + 1 && !ticket && !summary && amount !== 0) {
+        openingFreightUsd = amount;
+        continue;
+      }
       if (summary.indexOf('国外收') !== -1) {
         payments.push({
           date: fCol.shipped === -1 ? '' : str(row[fCol.shipped]),
@@ -579,7 +589,7 @@ export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | n
   }
 
   if (orders.length === 0) warnings.push('В отчёте не нашлось ни одного заказа');
-  return { kind: 'report', orders, transfers, freights, payments, warnings };
+  return { kind: 'report', orders, transfers, freights, payments, openingFreightUsd, warnings };
 }
 
 /** What the report knows about a batch of the given code. */
@@ -595,4 +605,141 @@ export function chinaOrderOf(report: ChinaParsedReport | null, orderNo: string):
   if (!report || !orderNo) return null;
   const found = report.orders.filter((o) => o.orderNo === String(orderNo).trim());
   return found.length > 0 ? found[found.length - 1] : null;
+}
+
+/**
+ * Item 81g: `saveChinaReport`'s payload, built from what the parser read — no money computed
+ * here, only grouped and converted, exactly the way the owner reads the report by hand.
+ */
+export interface ChinaReportReceiptPayload {
+  date: string;
+  goodsCny: number;
+  freightCny: number;
+  freightUsd: number;
+  cargoRate: number;
+  note: string;
+}
+
+export interface ChinaReportOrderPayload {
+  orderNo: string;
+  date: string;
+  totalCny: number;
+  receivedCny: number;
+  depositCny: number;
+  unpaidCny: number;
+}
+
+export interface ChinaReportPayload {
+  reportDate: string;
+  source: 'скрипт';
+  aiReason: string;
+  carriedOverCny: number;
+  openingFreightUsd: number;
+  orders: ChinaReportOrderPayload[];
+  receipts: ChinaReportReceiptPayload[];
+  freights: ChinaReportFreight[];
+  warnings: string[];
+}
+
+const DOT_DATE = /^(\d{1,2})\.(\d{1,2})\.(\d{1,2})$/;
+
+/** The carrier's own date, «26.9.16» — a two-digit year, then month, then day; a date already
+ * given as 'yyyy-mm-dd' (the freight sheet's own payment rows) passes straight through. */
+function reportDateToIso(text: string): string {
+  if (MONTH_DAY.test(text)) return text;
+  const match = text.match(DOT_DATE);
+  if (!match) return '';
+  const year = 2000 + Number(match[1]);
+  const month = match[2].padStart(2, '0');
+  const day = match[3].padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * The freight yuan of one «国外收» row, out of the carrier's own arithmetic in its note text —
+ * three shapes seen in the real report: «(A-B)/rate» when one payment settles two batches at
+ * once (the yuan is A-B), «A/rate[=usd]» the usual shape (the yuan is A, before the slash), and
+ * «usd*rate=A» when the yuan is written last, after the dollar side is multiplied by the rate.
+ * A note the parser cannot read at all falls back to the dollar amount at the batch's own rate,
+ * and says so, rather than silently making a number up.
+ */
+export function chinaReceiptFreightCny(note: string, amountUsd: number, cargoRate: number): { cny: number; estimated: boolean } {
+  const text = String(note || '');
+  const minus = text.match(/[（(]?\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*[）)]?\s*\//);
+  if (minus) return { cny: round2(Number(minus[1]) - Number(minus[2])), estimated: false };
+  const times = text.match(/^(\d+(?:\.\d+)?)\s*\*\s*\d+(?:\.\d+)?\s*=\s*(\d+(?:\.\d+)?)/);
+  if (times) return { cny: Number(times[2]), estimated: false };
+  const divide = text.match(/^(\d+(?:\.\d+)?)\s*\//);
+  if (divide) return { cny: Number(divide[1]), estimated: false };
+  return { cny: round2(amountUsd * cargoRate), estimated: true };
+}
+
+/**
+ * Item 81g: receipts grouped by date exactly the way the owner reads the report — the goods log
+ * (transfers, keyed on its own dates) and the freight settlement's «国外收» payments have no
+ * other link between them, ONE payment is ONE date, and «结转» is history carried over, not a
+ * receipt of its own.
+ */
+export function chinaReportPayload(parsed: ChinaParsedReport): ChinaReportPayload {
+  const warnings = parsed.warnings.slice();
+  let carriedOverCny = 0;
+  const goodsByDate: Record<string, number> = {};
+  const allDates: string[] = [];
+
+  parsed.transfers.forEach((t) => {
+    if (t.date === '结转') { carriedOverCny = t.amountCny; return; }
+    const date = reportDateToIso(t.date);
+    if (!date) { warnings.push(`Не разобрана дата перевода «${t.date}»`); return; }
+    goodsByDate[date] = round2((goodsByDate[date] || 0) + t.amountCny);
+    allDates.push(date);
+  });
+
+  const freightByDate: Record<string, { cny: number; usd: number; rate: number; note: string }> = {};
+  parsed.payments.forEach((p) => {
+    const result = chinaReceiptFreightCny(p.note, p.amountUsd, p.cargoRate);
+    if (result.estimated) {
+      warnings.push(`Оплата от ${p.date}: сумма в юанях не разобрана в тексте «${p.note}», взята по курсу`);
+    }
+    const bucket = freightByDate[p.date] || { cny: 0, usd: 0, rate: 0, note: '' };
+    bucket.cny = round2(bucket.cny + result.cny);
+    bucket.usd = round2(bucket.usd + p.amountUsd);
+    if (p.cargoRate > 0) bucket.rate = p.cargoRate;
+    bucket.note = bucket.note ? `${bucket.note}; ${p.note}` : p.note;
+    freightByDate[p.date] = bucket;
+    allDates.push(p.date);
+  });
+
+  const dates = Array.from(new Set(Object.keys(goodsByDate).concat(Object.keys(freightByDate)))).sort();
+  const receipts: ChinaReportReceiptPayload[] = dates.map((date) => ({
+    date,
+    goodsCny: goodsByDate[date] || 0,
+    freightCny: freightByDate[date] ? freightByDate[date].cny : 0,
+    freightUsd: freightByDate[date] ? freightByDate[date].usd : 0,
+    cargoRate: freightByDate[date] ? freightByDate[date].rate : 0,
+    note: freightByDate[date] ? freightByDate[date].note : ''
+  }));
+
+  // The report's own date is the latest date it names anywhere — an order just opened, a batch
+  // just shipped or a payment just made, whichever is newest.
+  parsed.orders.forEach((o) => { if (o.date) allDates.push(o.date); });
+  parsed.freights.forEach((f) => {
+    if (f.shippedAt) allDates.push(f.shippedAt);
+    if (f.arrivedAt) allDates.push(f.arrivedAt);
+  });
+  const reportDate = allDates.length > 0 ? allDates.reduce((a, b) => (b > a ? b : a)) : '';
+
+  return {
+    reportDate,
+    source: 'скрипт',
+    aiReason: '',
+    carriedOverCny,
+    openingFreightUsd: parsed.openingFreightUsd,
+    orders: parsed.orders.map((o) => ({
+      orderNo: o.orderNo, date: o.date, totalCny: o.totalCny, receivedCny: o.receivedCny,
+      depositCny: o.depositCny, unpaidCny: o.unpaidCny
+    })),
+    receipts,
+    freights: parsed.freights,
+    warnings
+  };
 }

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE, ChinaSheetGrid } from './chinaFiles.fixture';
 import {
   detectChinaFile, parseChinaBatchFile, parseChinaArrivalFile, parseChinaReportFile, cargoRateFromNote,
-  orderNoFromTicket, chinaFreightOf, chinaOrderOf, ChinaSheets
+  orderNoFromTicket, chinaFreightOf, chinaOrderOf, chinaReportPayload, chinaReceiptFreightCny, ChinaSheets
 } from './chinaFileParse';
 
 const copy = (sheets: ChinaSheets): ChinaSheets => {
@@ -377,6 +377,125 @@ describe('курс юаней за доллар из текста оплаты',
     expect(cargoRateFromNote('оплата по договору')).toBe(0);
     expect(cargoRateFromNote('12345/1000')).toBe(0);
     expect(cargoRateFromNote('')).toBe(0);
+  });
+});
+
+describe('юани перевозки из текста оплаты (81g)', () => {
+  it('takes the difference when the carrier settles two batches at once', () => {
+    expect(chinaReceiptFreightCny('（17621-6300）/7.25', 1562, 7.25)).toEqual({ cny: 11321, estimated: false });
+    expect(chinaReceiptFreightCny('（53571-37468）/7', 2300, 7)).toEqual({ cny: 16103, estimated: false });
+  });
+
+  it('takes the number before the slash of a plain division', () => {
+    expect(chinaReceiptFreightCny('37491/7.25=5171＄', 5171, 7.25)).toEqual({ cny: 37491, estimated: false });
+    expect(chinaReceiptFreightCny('9328/7=1332', 1332, 7)).toEqual({ cny: 9328, estimated: false });
+    expect(chinaReceiptFreightCny('8606/7=1229.', 1229, 7)).toEqual({ cny: 8606, estimated: false });
+    expect(chinaReceiptFreightCny('35273/7', 5039, 7)).toEqual({ cny: 35273, estimated: false });
+  });
+
+  it('takes the number after "=" when the dollars come first, multiplied by the rate', () => {
+    expect(chinaReceiptFreightCny('832*7.25=6032', 832, 7.25)).toEqual({ cny: 6032, estimated: false });
+    expect(chinaReceiptFreightCny('2466*7=17262', 2466, 7)).toEqual({ cny: 17262, estimated: false });
+  });
+
+  it('falls back to the dollar amount at the batch rate, and says so, on a note it cannot read', () => {
+    expect(chinaReceiptFreightCny('оплата без цифр', 100, 7)).toEqual({ cny: 700, estimated: true });
+  });
+});
+
+describe('платёж китайской стороне, распределённый по отчёту (81g)', () => {
+  const report = parseChinaReportFile(REPORT_FILE)!;
+  const payload = chinaReportPayload(report);
+
+  it('carries the 结转 line over rather than treating it as a receipt', () => {
+    expect(payload.carriedOverCny).toBe(17402);
+  });
+
+  it('reads the freight sheet\'s own opening balance, which the freight/order parsing never sees', () => {
+    expect(payload.openingFreightUsd).toBe(-85);
+  });
+
+  it('takes the report date as the latest date named anywhere in the report', () => {
+    expect(payload.reportDate).toBe('2026-09-24');
+  });
+
+  it('groups goods and freight by date exactly as the owner reads the report by hand', () => {
+    expect(payload.receipts.map((r) => [r.date, r.goodsCny, r.freightCny])).toEqual([
+      ['2026-01-15', 34304, 37491],
+      ['2026-01-22', 17241, 0],
+      ['2026-01-29', 6300, 11321],
+      ['2026-02-03', 0, 8718],
+      ['2026-02-26', 0, 13100],
+      ['2026-03-05', 6955, 6032],
+      ['2026-03-26', 24732, 0],
+      ['2026-04-02', 24336, 20601],
+      ['2026-04-09', 0, 21739],
+      ['2026-05-22', 37468, 16103],
+      ['2026-05-27', 0, 35273],
+      ['2026-06-08', 11559, 17262],
+      ['2026-06-19', 7359, 0],
+      ['2026-07-21', 5668, 0],
+      ['2026-07-24', 352, 8606],
+      ['2026-08-04', 4819, 0],
+      ['2026-08-20', 10415, 16303],
+      ['2026-08-27', 12226, 10416],
+      ['2026-09-03', 2974, 0],
+      ['2026-09-16', 5001, 2462],
+      ['2026-09-18', 0, 9328]
+    ]);
+  });
+
+  it('the goods receipts plus the carried-over balance equal every order\'s "получено" total', () => {
+    const sumGoods = payload.receipts.reduce((sum, r) => sum + r.goodsCny, 0);
+    expect(sumGoods + payload.carriedOverCny).toBe(229111);
+    expect(report.orders.reduce((sum, o) => sum + o.receivedCny, 0)).toBe(229111);
+  });
+
+  it('passes the orders and freights of the report straight through, only the money grouped', () => {
+    expect(payload.orders).toHaveLength(13);
+    expect(payload.orders[payload.orders.length - 1]).toEqual({
+      orderNo: '31', date: '2026-09-24', totalCny: 6000, receivedCny: 0, depositCny: 1800, unpaidCny: 6000
+    });
+    expect(payload.freights).toBe(report.freights);
+  });
+
+  it('has nothing to complain about in the owner\'s own report', () => {
+    expect(payload.warnings).toEqual([]);
+  });
+
+  it('reports an unreadable transfer date rather than silently dropping the money', () => {
+    const broken = chinaReportPayload({
+      kind: 'report', orders: [], freights: [], payments: [], openingFreightUsd: 0,
+      transfers: [{ date: 'непонятная дата', amountCny: 100 }],
+      warnings: []
+    });
+    expect(broken.warnings.join(' ')).toContain('Не разобрана дата перевода');
+  });
+
+  it('keeps a known rate rather than losing it to a later payment of the same date with none', () => {
+    const grouped = chinaReportPayload({
+      kind: 'report', orders: [], freights: [], openingFreightUsd: 0, transfers: [],
+      payments: [
+        { date: '2026-01-01', note: '700/7=100', amountUsd: 100, cargoRate: 7 },
+        { date: '2026-01-01', note: 'без цифр', amountUsd: 50, cargoRate: 0 }
+      ],
+      warnings: []
+    });
+    expect(grouped.receipts[0].cargoRate).toBe(7);
+    // 700 ¥ read from the first note («700/7=100» — the yuan is the number before the slash),
+    // plus the second payment's own fallback of 50 $ x 0 (it states no rate of its own) — the
+    // two payments of one date must ADD, not replace one other.
+    expect(grouped.receipts[0].freightCny).toBe(700);
+  });
+
+  it('reports a payment note it could not read, once, at the fallback estimate', () => {
+    const broken = chinaReportPayload({
+      kind: 'report', orders: [], freights: [], openingFreightUsd: 0, transfers: [],
+      payments: [{ date: '2026-01-01', note: 'без цифр', amountUsd: 100, cargoRate: 7 }],
+      warnings: []
+    });
+    expect(broken.receipts).toEqual([{ date: '2026-01-01', goodsCny: 0, freightCny: 700, freightUsd: 100, cargoRate: 7, note: 'без цифр' }]);
+    expect(broken.warnings.join(' ')).toContain('сумма в юанях не разобрана');
   });
 });
 
