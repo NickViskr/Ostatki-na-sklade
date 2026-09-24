@@ -11,18 +11,27 @@ import {
 interface ChinaBatchModalProps {
   /** The batch being edited, or null for a new one. */
   batch: ChinaBatch | null;
+  /** Item 81c: a form already filled from the files of the Chinese side. */
+  initialForm?: ChinaBatchForm | null;
+  /** Where the imported fields came from — for the owner to check, not to trust. */
+  notes?: string[];
+  /** What does not add up in the file itself. */
+  warnings?: string[];
   onClose: () => void;
 }
 
 const field = 'w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200';
 const cell = 'px-2 py-1 border border-slate-200 rounded text-sm w-full';
 
-export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, onClose }) => {
+export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initialForm, notes, warnings, onClose }) => {
   const saveChinaBatch = useChinaStore((s) => s.saveChinaBatch);
   const isSaving = useChinaStore((s) => s.isSaving);
   const settings = useChinaStore((s) => s.settings);
 
-  const [form, setForm] = useState<ChinaBatchForm>(() => (batch ? chinaBatchToForm(batch) : emptyChinaBatchForm()));
+  const [form, setForm] = useState<ChinaBatchForm>(() => {
+    if (initialForm) return initialForm;
+    return batch ? chinaBatchToForm(batch) : emptyChinaBatchForm();
+  });
 
   const set = (patch: Partial<ChinaBatchForm>) => setForm((f) => ({ ...f, ...patch }));
   const setLine = (index: number, patch: Partial<ChinaLineForm>) => setForm((f) => ({
@@ -58,6 +67,22 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, onClose
         </div>
 
         <div className="p-6 space-y-6 overflow-y-auto grow">
+          {warnings && warnings.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+              <p className="text-sm font-bold text-amber-800">В файле не сходятся суммы — проверьте перед сохранением</p>
+              <ul className="mt-1 text-sm text-amber-700 list-disc list-inside">
+                {warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            </div>
+          )}
+          {notes && notes.length > 0 && (
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+              <p className="text-sm font-bold text-slate-600">Что заполнено из файлов</p>
+              <ul className="mt-1 text-sm text-slate-500 list-disc list-inside">
+                {notes.map((n, i) => <li key={i}>{n}</li>)}
+              </ul>
+            </div>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Код партии</span>

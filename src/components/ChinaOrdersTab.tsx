@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Plus, RefreshCw, Loader2, Trash2, Pencil, ChevronDown, ChevronRight, AlertTriangle, Save
+  Plus, RefreshCw, Loader2, Trash2, Pencil, ChevronDown, ChevronRight, AlertTriangle, Save, FileUp
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
@@ -8,8 +8,11 @@ import { useUIStore } from '../store/useUIStore';
 import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import {
-  CHINA_COST_TYPES, chinaBatchToForm, chinaFormToPayload, chinaGroupLabel, chinaLevelledGroups
+  CHINA_COST_TYPES, ChinaBatchForm, chinaBatchToForm, chinaFormFromFiles, chinaFormToPayload,
+  chinaGroupLabel, chinaLevelledGroups
 } from '../lib/chinaBatchForm';
+import { ChinaParsedBatch, ChinaParsedReport, detectChinaFile, parseChinaBatchFile, parseChinaReportFile } from '../lib/chinaFileParse';
+import { chinaSheetsFromFile } from '../lib/chinaXlsx';
 
 const money = (value: number, currency: string): string =>
   `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
@@ -41,6 +44,11 @@ export const ChinaOrdersTab: React.FC = () => {
   const [editing, setEditing] = useState<ChinaBatch | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [labels, setLabels] = useState<Record<string, LabelDraft>>({});
+  const [importForm, setImportForm] = useState<ChinaBatchForm | null>(null);
+  const [importNotes, setImportNotes] = useState<string[]>([]);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  const [isReading, setIsReading] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [costKind, setCostKind] = useState(CHINA_COST_TYPES[0]);
   const [costAmount, setCostAmount] = useState('');
   const [costComment, setCostComment] = useState('');
@@ -91,6 +99,52 @@ export const ChinaOrdersTab: React.FC = () => {
     if (ok) { setCostAmount(''); setCostComment(''); }
   };
 
+  // Item 81c: the owner picks the files the Chinese side sent — the batch file and, beside
+  // it, the running account, which is the only place the order number, the arrival date and
+  // the carrier's yuan-per-dollar rate are written. The parser fills the form, the owner
+  // checks it and saves; the script does the money.
+  const readFiles = async (picked: FileList | null) => {
+    if (!picked || picked.length === 0) return;
+    setIsReading(true);
+    const problems: string[] = [];
+    const found: ChinaParsedBatch[] = [];
+    let report: ChinaParsedReport | null = null;
+    for (const file of Array.from(picked)) {
+      try {
+        const sheets = await chinaSheetsFromFile(file);
+        const kind = detectChinaFile(sheets);
+        if (kind === 'report') {
+          report = parseChinaReportFile(sheets);
+        } else if (kind === 'batch') {
+          const parsed = parseChinaBatchFile(sheets);
+          if (parsed) found.push(parsed);
+        } else {
+          problems.push(`${file.name}: не похоже ни на файл партии, ни на финансовый отчёт`);
+        }
+      } catch (e) {
+        problems.push(`${file.name}: не удалось прочитать — ${(e as Error).message}`);
+      }
+    }
+    setIsReading(false);
+    if (fileInput.current) fileInput.current.value = '';
+
+    if (found.length === 0) {
+      toast.error(problems[0] || 'Файл партии в выбранных файлах не нашёлся');
+      return;
+    }
+    if (found.length > 1) {
+      problems.push(`Файлов партий выбрано ${found.length}; открыт первый (${found[0].code}), остальные загрузите после`);
+    }
+    const parsed = found[0];
+    const already = batches.filter((b) => b.code.trim().toLowerCase() === parsed.code.trim().toLowerCase());
+    const result = chinaFormFromFiles(parsed, report, already.length > 0 ? already[0] : null);
+    setImportForm(result.form);
+    setImportNotes(result.notes.concat(problems));
+    setImportWarnings(result.warnings);
+    setEditing(null);
+    setShowModal(true);
+  };
+
   const askDeleteBatch = (batch: ChinaBatch) => {
     setConfirmDialog({
       show: true,
@@ -120,6 +174,23 @@ export const ChinaOrdersTab: React.FC = () => {
           >
             {isLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Обновить
+          </button>
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".xlsx,.xls"
+            multiple
+            className="hidden"
+            onChange={(e) => readFiles(e.target.files)}
+          />
+          <button
+            data-testid="btn-import-china-files"
+            onClick={() => fileInput.current?.click()}
+            disabled={isReading}
+            className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:text-indigo-600 disabled:opacity-50"
+          >
+            {isReading ? <Loader2 size={16} className="animate-spin" /> : <FileUp size={16} />}
+            Загрузить файлы китайцев
           </button>
           <button
             data-testid="btn-new-china-batch"
@@ -354,7 +425,19 @@ export const ChinaOrdersTab: React.FC = () => {
       </div>
 
       {showModal && (
-        <ChinaBatchModal batch={editing} onClose={() => { setShowModal(false); setEditing(null); }} />
+        <ChinaBatchModal
+          batch={editing}
+          initialForm={importForm}
+          notes={importNotes}
+          warnings={importWarnings}
+          onClose={() => {
+            setShowModal(false);
+            setEditing(null);
+            setImportForm(null);
+            setImportNotes([]);
+            setImportWarnings([]);
+          }}
+        />
       )}
     </div>
   );

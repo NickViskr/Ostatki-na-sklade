@@ -4,8 +4,10 @@ import path from 'path';
 import {
   chinaNumber, emptyChinaBatchForm, emptyChinaLine, chinaBatchToForm, chinaFormToPayload,
   chinaFormCounts, chinaGroupLabel, chinaLevelledGroups, validateChinaBatchForm, chinaFilledLines,
-  ChinaBatchForm
+  chinaFormFromFiles, ChinaBatchForm
 } from './chinaBatchForm';
+import { parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
+import { BATCH_FILE_28, BATCH_FILE_27, REPORT_FILE } from './chinaFiles.fixture';
 import { ChinaBatch } from '../types';
 
 const filledForm = (): ChinaBatchForm => ({
@@ -165,6 +167,97 @@ describe('what the form refuses before the round trip', () => {
   });
 });
 
+describe('партия, собранная из файлов китайцев', () => {
+  const parsed = parseChinaBatchFile(BATCH_FILE_28)!;
+  const report = parseChinaReportFile(REPORT_FILE)!;
+
+  it('fills the batch from the waybill and the three missing fields from the report', () => {
+    const { form, notes } = chinaFormFromFiles(parsed, report, null);
+    expect(form.code).toBe('NV-0825-2');
+    expect(form.shippedAt).toBe('2026-08-27');
+    expect(form.weightKg).toBe('672.5');
+    expect(form.volumeM3).toBe('4.92');
+    expect(form.ratePerKgUsd).toBe('2.3');
+    expect(form.packingUsd).toBe('90');
+    expect(form.freightUsd).toBe('1636.75');
+    expect(form.chinaDeliveryCny).toBe('700');
+    // From the running account, nowhere else:
+    expect(form.orderNo).toBe('28');
+    expect(form.arrivedAt).toBe('2026-09-17');
+    expect(form.cargoRate).toBe('7');
+    expect(form.status).toBe('Прибыла');
+    expect(notes.join(' ')).toContain('Из отчёта: заказ №28, прибытие 2026-09-17, курс 7 ¥/$');
+  });
+
+  it('fills the three lines of the file and leaves our articles to the owner', () => {
+    const { form } = chinaFormFromFiles(parsed, report, null);
+    expect(form.lines.map((l) => [l.marking, l.boxes, l.qty, l.priceCny, l.palletWeightKg])).toEqual([
+      ['NV-99', '30', '240', '20.3', '339'],
+      ['NV-99', '15', '120', '20.3', ''],
+      ['NV-98', '15', '120', '20.3', '333.5']
+    ]);
+    expect(form.lines.every((l) => l.article === '' && l.group === '')).toBe(true);
+  });
+
+  it('asks for the ruble rate, which no file of theirs can know', () => {
+    const { form, notes } = chinaFormFromFiles(parsed, report, null);
+    expect(form.rubRate).toBe('');
+    expect(notes.join(' ')).toContain('Курс ₽/¥ не заполнен');
+  });
+
+  it('is a batch in transit while the report has no arrival date', () => {
+    const fresh = parseChinaBatchFile(BATCH_FILE_27)!;
+    const noArrival = { ...report, freights: report.freights.map((f) => ({ ...f, arrivedAt: '' })) };
+    const { form } = chinaFormFromFiles(fresh, noArrival, null);
+    expect(form.arrivedAt).toBe('');
+    expect(form.status).toBe('В пути');
+  });
+
+  it('says what it could not fill without the report', () => {
+    const { form, notes } = chinaFormFromFiles(parsed, null, null);
+    expect(form.orderNo).toBe('');
+    expect(form.cargoRate).toBe('');
+    expect(notes.join(' ')).toContain('Финансовый отчёт не загружен');
+  });
+
+  it('says so when the report knows nothing about this batch', () => {
+    const { notes } = chinaFormFromFiles({ ...parsed, code: 'NV-9999-9' }, report, null);
+    expect(notes.join(' ')).toContain('В отчёте нет партии NV-9999-9');
+  });
+
+  // The whole point of a re-import: the file is the same, the owner's work on it is not.
+  it('updates the batch already saved instead of creating a second one', () => {
+    const saved = {
+      id: 'CB7', orderNo: '28', code: 'NV-0825-2', shippedAt: '2026-08-27', arrivedAt: '2026-09-17',
+      status: 'Прибыла', goodsCny: 9744, chinaDeliveryCny: 700, weightKg: 672.5, volumeM3: 4.92,
+      ratePerKgUsd: 2.3, packingUsd: 90, otherCargoUsd: 0, freightUsd: 1636.75, cargoRate: 7,
+      freightCny: 11457.25, rubCosts: 0, rubRate: 12.4, totalRub: 271575.49, weightFactor: 0.7987,
+      comment: 'первая партия коробов', user: 'Николай', updatedAt: '2026-09-24 10:00:00',
+      lines: [
+        { id: 'CB7-1', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 30, pcsPerBox: 8, qty: 240, priceCny: 20.3, sumCny: 4872, pallet: '', palletWeightKg: 339, boxWeightKg: 11.2, weightKg: 336, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт' },
+        { id: 'CB7-2', batchId: 'CB7', marking: 'NV-99', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 0, boxWeightKg: 0, weightKg: 168, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-WHITE', group: 'короб 8 шт' },
+        { id: 'CB7-3', batchId: 'CB7', marking: 'NV-98', name: '', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, pallet: '', palletWeightKg: 333.5, boxWeightKg: 10.93, weightKg: 164, weightSource: 'вручную', chinaShareCny: 0, freightShareCny: 0, rubShare: 0, costRub: 0, unitRub: 0, article: 'BOX-GREY', group: 'короб 8 шт' }
+      ],
+      costs: []
+    } as ChinaBatch;
+    const { form, notes } = chinaFormFromFiles(parsed, report, saved);
+    expect(form.id).toBe('CB7');
+    expect(form.rubRate).toBe('12.4');
+    expect(form.comment).toBe('первая партия коробов');
+    expect(form.lines.map((l) => l.article)).toEqual(['BOX-WHITE', 'BOX-WHITE', 'BOX-GREY']);
+    expect(form.lines.map((l) => l.group)).toEqual(['короб 8 шт', 'короб 8 шт', 'короб 8 шт']);
+    // The box weight the owner measured himself survives too.
+    expect(form.lines[2].boxWeightKg).toBe('10.93');
+    expect(notes.join(' ')).toContain('будет обновлена');
+  });
+
+  it('passes on what does not add up in the file', () => {
+    const broken = { ...parsed, warnings: ['Вес: паллеты в сумме 500 кг, в накладной 672,5 кг'] };
+    const { warnings } = chinaFormFromFiles(broken, report, null);
+    expect(warnings).toEqual(['Вес: паллеты в сумме 500 кг, в накладной 672,5 кг']);
+  });
+});
+
 // Item 81b. Wiring guards: the screen, the store, the proxy and the script speak about the
 // same module, and the browser never works out money of its own.
 describe('подключение модуля «Заказы в Китае»', () => {
@@ -229,6 +322,31 @@ describe('подключение модуля «Заказы в Китае»', (
   it('the window refuses a batch before sending it', () => {
     expect(modal).toContain('validateChinaBatchForm(form)');
     expect(modal).toContain('btn-save-china-batch');
+  });
+
+  it('the tab reads the files of the Chinese side and fills the form from them', () => {
+    expect(tab).toContain('btn-import-china-files');
+    expect(tab).toContain('chinaSheetsFromFile(file)');
+    expect(tab).toContain('detectChinaFile(sheets)');
+    expect(tab).toContain('parseChinaBatchFile(sheets)');
+    expect(tab).toContain('parseChinaReportFile(sheets)');
+    expect(tab).toContain('chinaFormFromFiles(parsed, report');
+    expect(tab).toContain("accept=\".xlsx,.xls\"");
+  });
+
+  it('a file picked twice in a row is read twice', () => {
+    // A file input keeps its value, and picking the same file again fires no change event
+    // unless the value is cleared — the owner would think the import broke.
+    expect(tab).toContain("fileInput.current.value = ''");
+  });
+
+  it('the import opens the same window the owner edits by hand, with its sources named', () => {
+    expect(tab).toContain('initialForm={importForm}');
+    expect(tab).toContain('notes={importNotes}');
+    expect(tab).toContain('warnings={importWarnings}');
+    expect(modal).toContain('Что заполнено из файлов');
+    expect(modal).toContain('В файле не сходятся суммы');
+    expect(modal).toContain('if (initialForm) return initialForm;');
   });
 
   it('the tab warns when the estimate of the weights and the waybill disagree', () => {

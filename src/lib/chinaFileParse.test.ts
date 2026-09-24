@@ -1,0 +1,294 @@
+import { describe, it, expect } from 'vitest';
+import { BATCH_FILE_28, BATCH_FILE_27, REPORT_FILE, ChinaSheetGrid } from './chinaFiles.fixture';
+import {
+  detectChinaFile, parseChinaBatchFile, parseChinaReportFile, cargoRateFromNote,
+  orderNoFromTicket, chinaFreightOf, chinaOrderOf, ChinaSheets
+} from './chinaFileParse';
+
+const copy = (sheets: ChinaSheets): ChinaSheets => {
+  const out: ChinaSheets = {};
+  Object.keys(sheets).forEach((name) => { out[name] = sheets[name].map((row) => row.slice()) as ChinaSheetGrid; });
+  return out;
+};
+
+describe('какой файл прислали', () => {
+  it('recognises the batch file and the running account', () => {
+    expect(detectChinaFile(BATCH_FILE_28)).toBe('batch');
+    expect(detectChinaFile(BATCH_FILE_27)).toBe('batch');
+    expect(detectChinaFile(REPORT_FILE)).toBe('report');
+  });
+
+  it('says so plainly about a file it does not know', () => {
+    expect(detectChinaFile({ 'Лист1': [['Остатки', 'Артикул'], ['', 'A-1']] })).toBe('unknown');
+    expect(parseChinaBatchFile({ 'Лист1': [['ничего']] })).toBeNull();
+    expect(parseChinaReportFile({ 'Лист1': [['ничего']] })).toBeNull();
+  });
+});
+
+describe('файл партии NV-0825-2 (заказ 28)', () => {
+  const parsed = parseChinaBatchFile(BATCH_FILE_28)!;
+
+  it('reads the waybill of the carrier', () => {
+    expect(parsed.code).toBe('NV-0825-2');
+    expect(parsed.shippedAt).toBe('2026-08-27');
+    expect(parsed.places).toBe(2);
+    expect(parsed.weightKg).toBe(672.5);
+    expect(parsed.volumeM3).toBe(4.92);
+    expect(parsed.ratePerKgUsd).toBe(2.3);
+    expect(parsed.packingUsd).toBe(90);
+    expect(parsed.otherCargoUsd).toBe(0);
+  });
+
+  it('adds the freight up to the 1 636,75 $ the carrier itself states', () => {
+    expect(parsed.freightUsd).toBe(1636.75);
+  });
+
+  it('keeps the delivery inside China apart from the goods', () => {
+    // The 货值 of the waybill is 10 444 ¥ — the goods AND the 700 ¥ of local delivery.
+    expect(parsed.chinaDeliveryCny).toBe(700);
+    expect(parsed.declaredValueCny).toBe(10444);
+    const goods = parsed.lines.reduce((sum, l) => sum + l.sumCny, 0);
+    expect(goods).toBe(9744);
+  });
+
+  it('reads the three lines with the weight of the pallets they start', () => {
+    expect(parsed.lines).toEqual([
+      { marking: 'NV-99', name: '收纳盒', boxes: 30, pcsPerBox: 8, qty: 240, priceCny: 20.3, sumCny: 4872, palletWeightKg: 339 },
+      { marking: 'NV-99', name: '收纳盒', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, palletWeightKg: 0 },
+      { marking: 'NV-98', name: '收纳盒', boxes: 15, pcsPerBox: 8, qty: 120, priceCny: 20.3, sumCny: 2436, palletWeightKg: 333.5 }
+    ]);
+  });
+
+  it('is not fooled by the carrier contract, which names 票号, 重量 and 体积 in its own text', () => {
+    // A row of the agreement mentions all three words in one paragraph; the weight must still
+    // come from the goods row of the waybill.
+    const legal = BATCH_FILE_28['运单表'].some((row) => row.some((c) => String(c).indexOf('票号、重量、体积') !== -1));
+    expect(legal).toBe(true);
+    expect(parsed.weightKg).toBe(672.5);
+  });
+
+  it('has nothing to complain about in a file nobody edited', () => {
+    expect(parsed.warnings).toEqual([]);
+  });
+});
+
+describe('файл партии NV-0716-3 (заказ 27)', () => {
+  const parsed = parseChinaBatchFile(BATCH_FILE_27)!;
+
+  it('reads five lines over three pallets, two of them packed into an earlier pallet', () => {
+    expect(parsed.lines.map((l) => [l.marking, l.boxes, l.qty, l.priceCny, l.palletWeightKg])).toEqual([
+      ['NV-96', 16, 160, 25, 288.5],
+      ['NV-97', 24, 96, 52, 456],
+      ['NV-96', 4, 40, 25, 0],
+      ['NV-95', 25, 150, 19, 257],
+      ['NV-97', 1, 4, 52, 0]
+    ]);
+  });
+
+  it('reads its money: 13 050 ¥ of goods, 900 ¥ inside China, 2 438,45 $ of freight', () => {
+    expect(parsed.lines.reduce((sum, l) => sum + l.sumCny, 0)).toBe(13050);
+    expect(parsed.chinaDeliveryCny).toBe(900);
+    expect(parsed.declaredValueCny).toBe(13950);
+    expect(parsed.freightUsd).toBe(2438.45);
+    expect(parsed.warnings).toEqual([]);
+  });
+});
+
+describe('что парсер отказывается принять молча', () => {
+  const detailName = '详单';
+
+  it('says when a line sum does not match its own quantity and price', () => {
+    const sheets = copy(BATCH_FILE_28);
+    const grid = sheets[detailName];
+    const header = grid.findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const sumCol = grid[header].findIndex((c) => String(c).indexOf('总额') !== -1);
+    grid[header + 2][sumCol] = 5000; // was 4872
+    const parsed = parseChinaBatchFile(sheets)!;
+    expect(parsed.warnings.join(' ')).toContain('количество на цену');
+  });
+
+  it('says when the pallets do not weigh what the waybill says', () => {
+    const sheets = copy(BATCH_FILE_28);
+    const grid = sheets[detailName];
+    const header = grid.findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const weightCol = grid[header].findIndex((c) => String(c).indexOf('总毛重') !== -1);
+    grid[header + 2][weightCol] = 200; // was 339
+    const parsed = parseChinaBatchFile(sheets)!;
+    expect(parsed.warnings.join(' ')).toContain('Вес: паллеты в сумме');
+  });
+
+  it('says when the goods and the local delivery do not add up to the declared value', () => {
+    const sheets = copy(BATCH_FILE_28);
+    const waybill = sheets['运单表'];
+    const cell = waybill.findIndex((row) => row.some((c) => String(c).indexOf('货值') !== -1));
+    const col = waybill[cell].findIndex((c) => String(c).indexOf('货值') !== -1);
+    waybill[cell][col + 2] = 11000; // was 10444
+    const parsed = parseChinaBatchFile(sheets)!;
+    expect(parsed.warnings.join(' ')).toContain('Стоимость товара');
+  });
+
+  it('says when the rate and the freight of the waybill disagree', () => {
+    const sheets = copy(BATCH_FILE_28);
+    const waybill = sheets['运单表'];
+    const header = waybill.findIndex((row) => row.filter((c) => String(c).indexOf('重量') !== -1).length > 0
+      && row.some((c) => String(c).indexOf('体积') !== -1));
+    const rateCol = waybill[header].findIndex((c) => String(c).indexOf('单价') !== -1);
+    waybill[header + 1][rateCol] = 3; // was 2,3 $/kg
+    const parsed = parseChinaBatchFile(sheets)!;
+    expect(parsed.warnings.join(' ')).toContain('Ставка:');
+  });
+
+  it('says when there is no goods row at all', () => {
+    const sheets = copy(BATCH_FILE_28);
+    const grid = sheets[detailName];
+    const header = grid.findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const markCol = grid[header].findIndex((c) => String(c).indexOf('货号') !== -1);
+    for (let r = header + 1; r < grid.length; r++) grid[r][markCol] = '';
+    const parsed = parseChinaBatchFile(sheets)!;
+    expect(parsed.lines).toHaveLength(0);
+    expect(parsed.warnings.join(' ')).toContain('ни одной строки товара');
+  });
+});
+
+describe('финансовый отчёт 24.09.2026', () => {
+  const report = parseChinaReportFile(REPORT_FILE)!;
+
+  it('reads every order from 19 to 31', () => {
+    expect(report.orders.map((o) => o.orderNo)).toEqual(
+      ['19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31']);
+  });
+
+  it('reads what is paid and what is still owed', () => {
+    expect(chinaOrderOf(report, '28')).toMatchObject({ totalCny: 10444, receivedCny: 10444, unpaidCny: 0 });
+    expect(chinaOrderOf(report, '30')).toMatchObject({ totalCny: 13520, receivedCny: 4056, unpaidCny: 9464 });
+    expect(chinaOrderOf(report, '31')).toMatchObject({ totalCny: 6000, receivedCny: 0, depositCny: 1800, unpaidCny: 6000 });
+  });
+
+  it('reads the log of transfers, which keeps its own dates beside the orders', () => {
+    expect(report.transfers).toHaveLength(17);
+    expect(report.transfers[0]).toEqual({ date: '结转', amountCny: 17402 });
+    expect(report.transfers[report.transfers.length - 1]).toEqual({ date: '26.9.16', amountCny: 5001 });
+  });
+
+  it('reads the freight of every batch, with the arrival date the batch file never has', () => {
+    const freight = chinaFreightOf(report, 'NV-0825-2')!;
+    expect(freight).toMatchObject({
+      orderNo: '28', shippedAt: '2026-08-27', arrivedAt: '2026-09-17',
+      ratePerKgUsd: 2.3, weightKg: 672.5, amountUsd: 1637
+    });
+  });
+
+  it('takes the yuan-per-dollar rate of a batch from the payment that settles it', () => {
+    // The report writes the rate nowhere but inside the text of a payment row: 7,25 at the
+    // beginning of the year, 7 since May.
+    expect(chinaFreightOf(report, 'NV-0825-2')!.cargoRate).toBe(7);
+    expect(chinaFreightOf(report, 'NV-0716-3')!.cargoRate).toBe(7);
+    expect(chinaFreightOf(report, 'NV-1209-7')!.cargoRate).toBe(7.25);
+    expect(chinaFreightOf(report, 'NV-0310-10')!.cargoRate).toBe(7.25);
+    expect(chinaFreightOf(report, 'NV-0424-12')!.cargoRate).toBe(7);
+  });
+
+  it('gives the newest batch, which nobody has paid for yet, the last rate known', () => {
+    // NV-0916-24 and NV-0923-4 sit BELOW the last payment row of the report: there is no
+    // payment after them to read a rate from, so the rate has to come from the one before.
+    expect(chinaFreightOf(report, 'NV-0916-24')!.cargoRate).toBe(7);
+    expect(chinaFreightOf(report, 'NV-0923-4')!.cargoRate).toBe(7);
+    expect(chinaFreightOf(report, 'NV-0923-4')!.arrivedAt).toBe('');
+  });
+
+  it('takes the LAST row when the carrier billed one batch twice', () => {
+    const sheets = copy(REPORT_FILE);
+    const grid = sheets['运费结算'];
+    const row = grid.find((r) => r.some((c) => String(c).indexOf('NV-0825-2') !== -1))!.slice();
+    const weightCol = grid.findIndex(() => false) === -1 ? row.findIndex((c) => c === 672.5) : -1;
+    row[weightCol] = 700;
+    grid.push(row);
+    const again = parseChinaReportFile(sheets)!;
+    expect(chinaFreightOf(again, 'NV-0825-2')!.weightKg).toBe(700);
+  });
+
+  it('a row that is not a batch number is not a batch', () => {
+    const sheets = copy(REPORT_FILE);
+    const grid = sheets['运费结算'];
+    const header = grid.findIndex((r) => r.some((c) => String(c).indexOf('票号') !== -1));
+    const ticketCol = grid[header].findIndex((c) => String(c).indexOf('票号') !== -1);
+    const junk = new Array(grid[header].length).fill('');
+    junk[ticketCol] = 'ИТОГО по перевозкам';
+    grid.push(junk);
+    const again = parseChinaReportFile(sheets)!;
+    expect(again.freights.every((f) => /^NV-/i.test(f.code))).toBe(true);
+    expect(again.freights).toHaveLength(report.freights.length);
+  });
+
+  it('knows nothing about a batch that is not in the report', () => {
+    expect(chinaFreightOf(report, 'NV-9999-9')).toBeNull();
+    expect(chinaOrderOf(report, '404')).toBeNull();
+    expect(chinaFreightOf(null, 'NV-0825-2')).toBeNull();
+  });
+
+  it('reads the payments of the carrier with their rates', () => {
+    expect(report.payments).toHaveLength(15);
+    expect(report.payments[0]).toEqual({ date: '2026-01-15', note: '37491/7.25=5171＄', amountUsd: 5171, cargoRate: 7.25 });
+    expect(report.payments[report.payments.length - 1]).toEqual({ date: '2026-09-18', note: '9328/7=1332', amountUsd: 1332, cargoRate: 7 });
+  });
+
+  it('has nothing to complain about in the owner’s own report', () => {
+    expect(report.warnings).toEqual([]);
+  });
+});
+
+describe('что не должно сойти за шапку таблицы', () => {
+  it('a paragraph naming every heading at once is not a header row', () => {
+    // The parser needs its labels in SEPARATE cells. One cell that happens to mention all of
+    // them — a line of the carrier's agreement, say — must not win over the real header.
+    const sheets: ChinaSheets = {
+      '运单表': [
+        ['货值：', '', 1000],
+        ['请核对：票号、重量、体积、单价、运费'],
+        ['货物品名', '总件数', '体积', '重量', '单价', '保险费', '包装费', '佣金', '运费'],
+        ['收纳盒', 2, 4.92, 672.5, 2.3, 0, 90, 0, 1546.75],
+        ['合计', '', '', '', '', 1636.75]
+      ],
+      '详单': [
+        ['货号', '品名', '件数', '装箱数', '总数量', '单价¥', '总额¥', '总毛重'],
+        ['NV-99', '收纳盒', 30, 8, 240, 20.3, 4872, 339]
+      ]
+    };
+    const parsed = parseChinaBatchFile(sheets)!;
+    expect(parsed.weightKg).toBe(672.5);
+    expect(parsed.freightUsd).toBe(1636.75);
+    expect(parsed.lines).toHaveLength(1);
+  });
+});
+
+describe('курс юаней за доллар из текста оплаты', () => {
+  it('reads both shapes the carrier writes', () => {
+    expect(cargoRateFromNote('9328/7=1332')).toBe(7);
+    expect(cargoRateFromNote('2462/7=351')).toBe(7);
+    expect(cargoRateFromNote('8606/7=1229.')).toBe(7);
+    expect(cargoRateFromNote('35273/7')).toBe(7);
+    expect(cargoRateFromNote('832*7.25=6032')).toBe(7.25);
+    expect(cargoRateFromNote('2466*7=17262')).toBe(7);
+    expect(cargoRateFromNote('（17621-6300）/7.25')).toBe(7.25);
+    expect(cargoRateFromNote('37491/7.25=5171＄')).toBe(7.25);
+  });
+
+  it('ignores a number that could not be a rate', () => {
+    expect(cargoRateFromNote('17621-6300')).toBe(0);
+    expect(cargoRateFromNote('оплата по договору')).toBe(0);
+    expect(cargoRateFromNote('12345/1000')).toBe(0);
+    expect(cargoRateFromNote('')).toBe(0);
+  });
+});
+
+describe('номер заказа из номера билета', () => {
+  it('reads it out of brackets of either alphabet', () => {
+    expect(orderNoFromTicket('NV-0825-2（28）')).toBe('28');
+    expect(orderNoFromTicket('NV-0310-10(22)')).toBe('22');
+  });
+
+  it('is empty when the ticket does not name an order', () => {
+    expect(orderNoFromTicket('NV-1209-7')).toBe('');
+    expect(orderNoFromTicket('')).toBe('');
+  });
+});

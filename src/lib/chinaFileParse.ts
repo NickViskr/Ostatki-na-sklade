@@ -1,0 +1,455 @@
+/**
+ * Item 81c: reading the files the Chinese side sends.
+ *
+ * Two kinds of file, both with a stable shape, so they are read by their own parser and not
+ * guessed at by a language model:
+ *
+ *   the batch file      — sheet 运单表 (the carrier's waybill: code, dates, weight, volume,
+ *                         the rate per kilogram, packing, the total in dollars) and sheet
+ *                         详单 or 箱单 (the goods: marking, boxes, pieces per box, quantity,
+ *                         the price in yuan, the weight of a pallet, and one row at the
+ *                         bottom for the delivery inside China);
+ *   the running account — sheet 货款结算 (per order: the total, what the factory has received,
+ *                         the deposit, what is still owed, and a separate log of transfers)
+ *                         and sheet 运费结算 (per batch: dates, rate, weight, the freight in
+ *                         dollars; and the payment rows, whose own text is the only place the
+ *                         carrier's yuan-per-dollar rate is ever written down).
+ *
+ * The parser states what it read AND what does not add up, so the screen can refuse to save a
+ * batch whose lines do not sum to the total the file itself declares. It works out no cost:
+ * that is the script's job, on the server.
+ */
+
+export type ChinaSheetGrid = (string | number)[][];
+export type ChinaSheets = Record<string, ChinaSheetGrid>;
+
+export interface ChinaParsedLine {
+  marking: string;
+  name: string;
+  boxes: number;
+  pcsPerBox: number;
+  qty: number;
+  priceCny: number;
+  /** The sum the file states for the line; the parser never overwrites it with its own. */
+  sumCny: number;
+  /** Weight of the pallet this line starts; 0 when the line was packed into an earlier one. */
+  palletWeightKg: number;
+}
+
+export interface ChinaParsedBatch {
+  kind: 'batch';
+  code: string;
+  shippedAt: string;
+  weightKg: number;
+  volumeM3: number;
+  places: number;
+  ratePerKgUsd: number;
+  packingUsd: number;
+  /** Insurance and commission of the carrier, which it bills together with the freight. */
+  otherCargoUsd: number;
+  freightUsd: number;
+  chinaDeliveryCny: number;
+  /** 货值 from the waybill — the goods AND the delivery inside China in one figure. */
+  declaredValueCny: number;
+  lines: ChinaParsedLine[];
+  warnings: string[];
+}
+
+export interface ChinaReportOrder {
+  orderNo: string;
+  date: string;
+  summary: string;
+  totalCny: number;
+  receivedCny: number;
+  depositCny: number;
+  unpaidCny: number;
+}
+
+export interface ChinaReportTransfer {
+  date: string;
+  amountCny: number;
+}
+
+export interface ChinaReportFreight {
+  code: string;
+  orderNo: string;
+  shippedAt: string;
+  arrivedAt: string;
+  ratePerKgUsd: number;
+  volumeM3: number;
+  weightKg: number;
+  amountUsd: number;
+  /** Yuan per dollar, taken from the payment that settles this batch. 0 when not stated. */
+  cargoRate: number;
+}
+
+export interface ChinaReportPayment {
+  date: string;
+  note: string;
+  amountUsd: number;
+  cargoRate: number;
+}
+
+export interface ChinaParsedReport {
+  kind: 'report';
+  orders: ChinaReportOrder[];
+  transfers: ChinaReportTransfer[];
+  freights: ChinaReportFreight[];
+  payments: ChinaReportPayment[];
+  warnings: string[];
+}
+
+const str = (cell: string | number | undefined): string =>
+  cell === undefined || cell === null ? '' : String(cell).trim();
+
+const num = (cell: string | number | undefined): number => {
+  if (typeof cell === 'number') return isFinite(cell) ? cell : 0;
+  const text = str(cell).replace(/[￥¥$＄\s]/g, '').replace(',', '.');
+  if (text === '') return 0;
+  const parsed = Number(text);
+  return isFinite(parsed) ? parsed : 0;
+};
+
+const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+const has = (cell: string | number | undefined, needle: string): boolean => str(cell).indexOf(needle) !== -1;
+
+/** The first cell with something in it to the right of a label. */
+const rightOf = (row: (string | number)[], from: number): string => {
+  for (let i = from + 1; i < row.length; i++) {
+    if (str(row[i]) !== '') return str(row[i]);
+  }
+  return '';
+};
+
+const findCell = (grid: ChinaSheetGrid, needle: string): { row: number; col: number } | null => {
+  for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (has(grid[r][c], needle)) return { row: r, col: c };
+    }
+  }
+  return null;
+};
+
+/**
+ * A header row has its labels in SEPARATE cells. The carrier's contract text mentions
+ * «票号、重量、体积» inside one paragraph, and a row must never be taken for a header because
+ * of it.
+ */
+const findHeaderRow = (grid: ChinaSheetGrid, needles: string[]): number => {
+  for (let r = 0; r < grid.length; r++) {
+    const used: number[] = [];
+    const ok = needles.every((needle) => {
+      for (let c = 0; c < grid[r].length; c++) {
+        if (used.indexOf(c) === -1 && has(grid[r][c], needle)) { used.push(c); return true; }
+      }
+      return false;
+    });
+    if (ok) return r;
+  }
+  return -1;
+};
+
+const columnOf = (row: (string | number)[], needle: string): number => {
+  for (let c = 0; c < row.length; c++) {
+    if (has(row[c], needle)) return c;
+  }
+  return -1;
+};
+
+const sheetWith = (sheets: ChinaSheets, needles: string[]): ChinaSheetGrid | null => {
+  const names = Object.keys(sheets);
+  for (let i = 0; i < names.length; i++) {
+    if (findHeaderRow(sheets[names[i]], needles) !== -1) return sheets[names[i]];
+  }
+  return null;
+};
+
+export function detectChinaFile(sheets: ChinaSheets): 'batch' | 'report' | 'unknown' {
+  if (sheetWith(sheets, ['订单号', '汇款金额'])) return 'report';
+  if (sheetWith(sheets, ['货号', '装箱数'])) return 'batch';
+  return 'unknown';
+}
+
+/**
+ * Yuan per dollar, out of the text the carrier writes against a payment: «9328/7=1332»,
+ * «832*7.25=6032», «（17621-6300）/7.25». Anything outside a plausible range is ignored —
+ * the same text also holds sums of tens of thousands.
+ */
+export function cargoRateFromNote(note: string): number {
+  const matches = String(note || '').match(/[/*×]\s*(\d+(?:[.,]\d+)?)/g);
+  if (!matches) return 0;
+  for (let i = 0; i < matches.length; i++) {
+    const value = num(matches[i].replace(/[/*×]/g, ''));
+    if (value >= 5 && value <= 10) return value;
+  }
+  return 0;
+}
+
+/** «NV-0825-2（28）» and «NV-0310-10(22)» both name order 28 and 22. */
+export function orderNoFromTicket(ticket: string): string {
+  const match = String(ticket || '').match(/[（(]\s*(\d+)\s*[）)]/);
+  return match ? match[1] : '';
+}
+
+/** «NV-0825-2/东线» is batch NV-0825-2. */
+const codeFromTransport = (value: string): string => String(value || '').split('/')[0].trim();
+
+export function parseChinaBatchFile(sheets: ChinaSheets): ChinaParsedBatch | null {
+  const detail = sheetWith(sheets, ['货号', '装箱数']);
+  const waybill = sheetWith(sheets, ['体积', '重量', '单价']);
+  if (!detail || !waybill) return null;
+
+  const warnings: string[] = [];
+
+  // ---- the waybill: what the carrier bills for the whole batch ----
+  const codeCell = findCell(waybill, '柜号');
+  const code = codeCell ? codeFromTransport(rightOf(waybill[codeCell.row], codeCell.col)) : '';
+  const shippedCell = findCell(waybill, '发货日期');
+  const shippedAt = shippedCell ? rightOf(waybill[shippedCell.row], shippedCell.col) : '';
+  const valueCell = findCell(waybill, '货值');
+  const declaredValueCny = valueCell ? num(rightOf(waybill[valueCell.row], valueCell.col)) : 0;
+
+  const headRow = findHeaderRow(waybill, ['体积', '重量', '单价']);
+  const head = waybill[headRow] || [];
+  const data = waybill[headRow + 1] || [];
+  const pick = (needle: string): number => {
+    const col = columnOf(head, needle);
+    return col === -1 ? 0 : num(data[col]);
+  };
+  const places = pick('总件数');
+  const volumeM3 = pick('体积');
+  const weightKg = pick('重量');
+  const ratePerKgUsd = pick('单价');
+  const packingUsd = pick('包装费');
+  const insuranceUsd = pick('保险费');
+  const commissionUsd = pick('佣金');
+  const freightBaseUsd = pick('运费');
+  const freightUsd = round2(freightBaseUsd + packingUsd + insuranceUsd + commissionUsd);
+
+  // The carrier also writes the total on its own «Итого» row. If the two disagree, the file
+  // was edited by hand and nothing should be saved silently.
+  const totalRow = waybill[headRow + 2] || [];
+  let statedTotal = 0;
+  for (let c = 0; c < totalRow.length; c++) {
+    const value = num(totalRow[c]);
+    if (value > 0) { statedTotal = value; break; }
+  }
+  if (statedTotal > 0 && Math.abs(statedTotal - freightUsd) > 0.01) {
+    warnings.push(`Перевозка: по строкам ${freightUsd} $, в итоге накладной ${statedTotal} $`);
+  }
+  if (weightKg > 0 && ratePerKgUsd > 0) {
+    const expected = round2(weightKg * ratePerKgUsd);
+    if (Math.abs(expected - freightBaseUsd) > 0.5) {
+      warnings.push(`Ставка: ${weightKg} кг x ${ratePerKgUsd} $ = ${expected} $, в файле ${freightBaseUsd} $`);
+    }
+  }
+
+  // ---- the detail: the goods themselves ----
+  const dHead = findHeaderRow(detail, ['货号', '装箱数']);
+  const dRow = detail[dHead] || [];
+  const col = {
+    marking: columnOf(dRow, '货号'),
+    name: columnOf(dRow, '品名'),
+    boxes: columnOf(dRow, '件数'),
+    pcsPerBox: columnOf(dRow, '装箱数'),
+    qty: columnOf(dRow, '总数量'),
+    price: columnOf(dRow, '单价'),
+    sum: columnOf(dRow, '总额'),
+    weight: columnOf(dRow, '总毛重')
+  };
+
+  const lines: ChinaParsedLine[] = [];
+  let chinaDeliveryCny = 0;
+  for (let r = dHead + 1; r < detail.length; r++) {
+    const row = detail[r];
+    const joined = row.map((c) => str(c)).join(' ');
+    if (joined.indexOf('Стоимость доставки в Китае') !== -1) {
+      chinaDeliveryCny = col.sum === -1 ? 0 : num(row[col.sum]);
+      continue;
+    }
+    // The Russian caption row repeats the header in another language.
+    if (joined.indexOf('маркировка') !== -1) continue;
+    const marking = col.marking === -1 ? '' : str(row[col.marking]);
+    if (!marking) continue;
+    const qty = col.qty === -1 ? 0 : num(row[col.qty]);
+    if (qty <= 0) continue;
+    lines.push({
+      marking,
+      name: col.name === -1 ? '' : str(row[col.name]),
+      boxes: col.boxes === -1 ? 0 : num(row[col.boxes]),
+      pcsPerBox: col.pcsPerBox === -1 ? 0 : num(row[col.pcsPerBox]),
+      qty,
+      priceCny: col.price === -1 ? 0 : num(row[col.price]),
+      sumCny: col.sum === -1 ? 0 : num(row[col.sum]),
+      palletWeightKg: col.weight === -1 ? 0 : num(row[col.weight])
+    });
+  }
+
+  if (lines.length === 0) warnings.push('В файле не нашлось ни одной строки товара');
+
+  let goodsFromLines = 0;
+  let sumFromFile = 0;
+  let palletWeight = 0;
+  lines.forEach((l) => {
+    goodsFromLines = round2(goodsFromLines + round2(l.qty * l.priceCny));
+    sumFromFile = round2(sumFromFile + l.sumCny);
+    palletWeight = round2(palletWeight + l.palletWeightKg);
+  });
+  if (Math.abs(goodsFromLines - sumFromFile) > 0.01) {
+    warnings.push(`Товар: количество на цену даёт ${goodsFromLines} ¥, а суммы строк ${sumFromFile} ¥`);
+  }
+  if (declaredValueCny > 0) {
+    const expected = round2(sumFromFile + chinaDeliveryCny);
+    if (Math.abs(expected - declaredValueCny) > 0.01) {
+      warnings.push(`Стоимость товара: строки и доставка по Китаю дают ${expected} ¥, в накладной ${declaredValueCny} ¥`);
+    }
+  }
+  if (weightKg > 0 && palletWeight > 0 && Math.abs(palletWeight - weightKg) > 0.5) {
+    warnings.push(`Вес: паллеты в сумме ${palletWeight} кг, в накладной ${weightKg} кг`);
+  }
+
+  return {
+    kind: 'batch',
+    code,
+    shippedAt,
+    weightKg,
+    volumeM3,
+    places,
+    ratePerKgUsd,
+    packingUsd,
+    otherCargoUsd: round2(insuranceUsd + commissionUsd),
+    freightUsd,
+    chinaDeliveryCny,
+    declaredValueCny,
+    lines,
+    warnings
+  };
+}
+
+export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | null {
+  const goods = sheetWith(sheets, ['订单号', '汇款金额']);
+  if (!goods) return null;
+  const warnings: string[] = [];
+
+  const gHead = findHeaderRow(goods, ['订单号', '汇款金额']);
+  const gRow = goods[gHead] || [];
+  const gCol = {
+    date: columnOf(gRow, '日期'),
+    orderNo: columnOf(gRow, '订单号'),
+    summary: columnOf(gRow, '摘要'),
+    total: columnOf(gRow, '货款总额'),
+    received: columnOf(gRow, '已收合计'),
+    deposit: columnOf(gRow, '定金'),
+    unpaid: columnOf(gRow, '未收总额'),
+    transferDate: columnOf(gRow, '汇款日期'),
+    transferAmount: columnOf(gRow, '汇款金额')
+  };
+
+  const orders: ChinaReportOrder[] = [];
+  const transfers: ChinaReportTransfer[] = [];
+  for (let r = gHead + 1; r < goods.length; r++) {
+    const row = goods[r];
+    const orderNo = gCol.orderNo === -1 ? '' : str(row[gCol.orderNo]);
+    if (orderNo && /^\d+$/.test(orderNo)) {
+      orders.push({
+        orderNo,
+        date: gCol.date === -1 ? '' : str(row[gCol.date]),
+        summary: gCol.summary === -1 ? '' : str(row[gCol.summary]),
+        totalCny: gCol.total === -1 ? 0 : num(row[gCol.total]),
+        receivedCny: gCol.received === -1 ? 0 : num(row[gCol.received]),
+        depositCny: gCol.deposit === -1 ? 0 : num(row[gCol.deposit]),
+        unpaidCny: gCol.unpaid === -1 ? 0 : num(row[gCol.unpaid])
+      });
+    }
+    // The transfers are a log of their own, beside the orders and never in step with them.
+    const tDate = gCol.transferDate === -1 ? '' : str(row[gCol.transferDate]);
+    const tAmount = gCol.transferAmount === -1 ? 0 : num(row[gCol.transferAmount]);
+    if (tDate && tAmount > 0) transfers.push({ date: tDate, amountCny: tAmount });
+  }
+
+  const freightSheet = sheetWith(sheets, ['票号', '总金额']);
+  const freights: ChinaReportFreight[] = [];
+  const payments: ChinaReportPayment[] = [];
+  if (freightSheet) {
+    const fHead = findHeaderRow(freightSheet, ['票号', '总金额']);
+    const fRow = freightSheet[fHead] || [];
+    const fCol = {
+      shipped: columnOf(fRow, '发货日期'),
+      arrived: columnOf(fRow, '到货日期'),
+      ticket: columnOf(fRow, '票号'),
+      summary: columnOf(fRow, '摘要'),
+      rate: columnOf(fRow, '单价'),
+      volume: columnOf(fRow, '体积'),
+      weight: columnOf(fRow, '重量'),
+      amount: columnOf(fRow, '总金额')
+    };
+    // Which row each batch sat on, so the rate of the payment that follows it can be found.
+    const order: { batch: number; payment: number }[] = [];
+    for (let r = fHead + 1; r < freightSheet.length; r++) {
+      const row = freightSheet[r];
+      const ticket = fCol.ticket === -1 ? '' : str(row[fCol.ticket]);
+      const summary = fCol.summary === -1 ? '' : str(row[fCol.summary]);
+      const amount = fCol.amount === -1 ? 0 : num(row[fCol.amount]);
+      if (summary.indexOf('国外收') !== -1) {
+        payments.push({
+          date: fCol.shipped === -1 ? '' : str(row[fCol.shipped]),
+          note: ticket,
+          amountUsd: Math.abs(amount),
+          cargoRate: cargoRateFromNote(ticket)
+        });
+        order.push({ batch: -1, payment: payments.length - 1 });
+        continue;
+      }
+      if (!/^NV-/i.test(ticket)) continue;
+      freights.push({
+        code: ticket.split(/[（(]/)[0].trim(),
+        orderNo: orderNoFromTicket(ticket) || orderNoFromTicket(fCol.summary === -1 ? '' : str(row[fCol.summary])),
+        shippedAt: fCol.shipped === -1 ? '' : str(row[fCol.shipped]),
+        arrivedAt: fCol.arrived === -1 ? '' : str(row[fCol.arrived]),
+        ratePerKgUsd: fCol.rate === -1 ? 0 : num(row[fCol.rate]),
+        volumeM3: fCol.volume === -1 ? 0 : num(row[fCol.volume]),
+        weightKg: fCol.weight === -1 ? 0 : num(row[fCol.weight]),
+        amountUsd: amount,
+        cargoRate: 0
+      });
+      order.push({ batch: freights.length - 1, payment: -1 });
+    }
+
+    // The rate of a batch is the one written against the payment that settles it: the first
+    // payment below it, and failing that the last one above it.
+    freights.forEach((freight, index) => {
+      const at = order.findIndex((o) => o.batch === index);
+      let rate = 0;
+      for (let i = at + 1; i < order.length && rate === 0; i++) {
+        const p = order[i].payment;
+        if (p !== -1 && payments[p].cargoRate > 0) rate = payments[p].cargoRate;
+      }
+      for (let i = at - 1; i >= 0 && rate === 0; i--) {
+        const p = order[i].payment;
+        if (p !== -1 && payments[p].cargoRate > 0) rate = payments[p].cargoRate;
+      }
+      freight.cargoRate = rate;
+    });
+  } else {
+    warnings.push('В отчёте не нашёлся лист расчётов по перевозке');
+  }
+
+  if (orders.length === 0) warnings.push('В отчёте не нашлось ни одного заказа');
+  return { kind: 'report', orders, transfers, freights, payments, warnings };
+}
+
+/** What the report knows about a batch of the given code. */
+export function chinaFreightOf(report: ChinaParsedReport | null, code: string): ChinaReportFreight | null {
+  if (!report || !code) return null;
+  const wanted = code.trim().toLowerCase();
+  const found = report.freights.filter((f) => f.code.trim().toLowerCase() === wanted);
+  return found.length > 0 ? found[found.length - 1] : null;
+}
+
+/** What the report says about an order: paid, owed, and the goods total the factory counts. */
+export function chinaOrderOf(report: ChinaParsedReport | null, orderNo: string): ChinaReportOrder | null {
+  if (!report || !orderNo) return null;
+  const found = report.orders.filter((o) => o.orderNo === String(orderNo).trim());
+  return found.length > 0 ? found[found.length - 1] : null;
+}

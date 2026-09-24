@@ -8,6 +8,7 @@
  */
 
 import { ChinaBatch, ChinaBatchLine } from '../types';
+import { ChinaParsedBatch, ChinaParsedReport, chinaFreightOf } from './chinaFileParse';
 
 export interface ChinaLineForm {
   marking: string;
@@ -216,4 +217,99 @@ export function validateChinaBatchForm(form: ChinaBatchForm): string[] {
 /** The lines actually sent: the empty tail rows of the form are dropped. */
 export function chinaFilledLines(lines: ChinaLineForm[]): ChinaLineForm[] {
   return lines.filter((l) => l.marking.trim() !== '' || chinaNumber(l.qty) > 0);
+}
+
+/**
+ * Item 81c: a batch form built from the files the Chinese side sent.
+ *
+ * The batch file gives the goods and everything the carrier bills. Three things it never
+ * holds come from the running account: the number of the order, the date the batch arrived and
+ * the carrier's yuan-per-dollar rate, which is written nowhere but inside the text of a
+ * payment row. What the owner had already decided about a batch — our articles, the
+ * same-product markers, the weight of a box he measured himself and the ruble rate — is
+ * carried over from the batch already saved, or a re-import would quietly undo his work.
+ */
+export interface ChinaImportResult {
+  form: ChinaBatchForm;
+  /** Where a field came from, in words, for the owner to check rather than trust. */
+  notes: string[];
+  /** What does not add up in the file itself. */
+  warnings: string[];
+}
+
+export function chinaFormFromFiles(
+  parsed: ChinaParsedBatch,
+  report: ChinaParsedReport | null,
+  existing: ChinaBatch | null
+): ChinaImportResult {
+  const notes: string[] = [];
+  const freight = chinaFreightOf(report, parsed.code);
+
+  const orderNo = freight && freight.orderNo ? freight.orderNo : (existing ? existing.orderNo : '');
+  const arrivedAt = freight && freight.arrivedAt ? freight.arrivedAt : (existing ? existing.arrivedAt : '');
+  const cargoRate = freight && freight.cargoRate > 0 ? freight.cargoRate : 0;
+
+  if (freight) {
+    notes.push(`Из отчёта: заказ №${freight.orderNo || '—'}` +
+      (freight.arrivedAt ? `, прибытие ${freight.arrivedAt}` : ', дата прибытия не указана') +
+      (cargoRate > 0 ? `, курс ${cargoRate} ¥/$` : ', курс ¥/$ в отчёте не найден'));
+    if (freight.weightKg > 0 && Math.abs(freight.weightKg - parsed.weightKg) > 0.5) {
+      notes.push(`Вес в отчёте ${freight.weightKg} кг, в накладной партии ${parsed.weightKg} кг`);
+    }
+  } else if (report) {
+    notes.push(`В отчёте нет партии ${parsed.code}: заказ, дата прибытия и курс ¥/$ не подставлены`);
+  } else {
+    notes.push('Финансовый отчёт не загружен: заказ, дата прибытия и курс ¥/$ не подставлены');
+  }
+
+  // Our articles and the markers belong to the owner, not to the file: they travel by marking.
+  const spare = existing ? existing.lines.slice() : [];
+  const carry = (marking: string) => {
+    const at = spare.findIndex((l) => l.marking === marking);
+    if (at === -1) return null;
+    return spare.splice(at, 1)[0];
+  };
+
+  const lines: ChinaLineForm[] = parsed.lines.map((line) => {
+    const old = carry(line.marking);
+    if (old) notes.push(`Маркировка ${line.marking}: артикул и метки взяты из сохранённой партии`);
+    return {
+      marking: line.marking,
+      name: line.name,
+      boxes: line.boxes ? String(line.boxes) : '',
+      pcsPerBox: line.pcsPerBox ? String(line.pcsPerBox) : '',
+      qty: line.qty ? String(line.qty) : '',
+      priceCny: line.priceCny ? String(line.priceCny) : '',
+      pallet: '',
+      palletWeightKg: line.palletWeightKg ? String(line.palletWeightKg) : '',
+      boxWeightKg: old && old.boxWeightKg ? String(old.boxWeightKg) : '',
+      article: old ? old.article : '',
+      group: old ? old.group : ''
+    };
+  });
+
+  const form: ChinaBatchForm = {
+    id: existing ? existing.id : '',
+    orderNo,
+    code: parsed.code,
+    shippedAt: parsed.shippedAt,
+    arrivedAt,
+    status: arrivedAt ? 'Прибыла' : 'В пути',
+    chinaDeliveryCny: parsed.chinaDeliveryCny ? String(parsed.chinaDeliveryCny) : '',
+    weightKg: parsed.weightKg ? String(parsed.weightKg) : '',
+    volumeM3: parsed.volumeM3 ? String(parsed.volumeM3) : '',
+    ratePerKgUsd: parsed.ratePerKgUsd ? String(parsed.ratePerKgUsd) : '',
+    packingUsd: parsed.packingUsd ? String(parsed.packingUsd) : '',
+    otherCargoUsd: parsed.otherCargoUsd ? String(parsed.otherCargoUsd) : '',
+    freightUsd: parsed.freightUsd ? String(parsed.freightUsd) : '',
+    cargoRate: cargoRate ? String(cargoRate) : '',
+    rubRate: existing && existing.rubRate ? String(existing.rubRate) : '',
+    comment: existing ? existing.comment : '',
+    lines: lines.length > 0 ? lines : [emptyChinaLine()]
+  };
+
+  if (existing) notes.push(`Партия ${parsed.code} уже есть в базе — будет обновлена, а не создана заново`);
+  if (!form.rubRate) notes.push('Курс ₽/¥ не заполнен: впишите курс, по которому купили юани этой партии');
+
+  return { form, notes, warnings: parsed.warnings.slice() };
 }
