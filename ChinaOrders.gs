@@ -154,6 +154,11 @@ const CHINA_SETTINGS_DEFAULTS = [
 
 const CHINA_STATUSES = ['Черновик', 'В пути', 'Прибыла'];
 
+// Item 81g: a payment tied to a receipt of the report. The RECEIPT is then 'сопоставлено'; the
+// payment says 'распределена', the word the screen filters on (the two used to share one word,
+// and a matched payment dropped out of both lists of the payments card).
+const CHINA_PAYMENT_ALLOCATED = 'распределена';
+
 // Kinds of a Russian-side cost. Free text is refused so the sheet stays sortable.
 const CHINA_COST_TYPES = ['Разгрузка', 'Доставка до склада', 'Прочее'];
 
@@ -1797,7 +1802,7 @@ function deleteChinaPayment(data, username) {
   if (!targetRow) throw new Error('Оплата ' + id + ' не найдена');
   // Item 81g-2: a matched payment unmatches first — the receipt it was tied to must go back to
   // waiting for a payment, not vanish along with the payment row.
-  if (status === 'сопоставлено') chinaUnmatchInternal(ss, id, username);
+  if (status === CHINA_PAYMENT_ALLOCATED) chinaUnmatchInternal(ss, id, username);
   ctx.sheet.deleteRow(targetRow);
   recalcChinaOrders(ss, [orderNo], username);
   chinaRecostAll(ss, username);
@@ -2487,7 +2492,7 @@ function chinaMatchInternal(ss, paymentId, receiptId, username) {
   let payRow = null;
   payCtx.rows.forEach(function (r) { if (String(r['ID']).trim() === paymentId) payRow = r; });
   if (!payRow) throw new Error('Оплата ' + paymentId + ' не найдена');
-  if (String(payRow['Статус'] || '').trim() === 'сопоставлено') {
+  if (String(payRow['Статус'] || '').trim() === CHINA_PAYMENT_ALLOCATED) {
     throw new Error('Оплата ' + paymentId + ' уже сопоставлена — сначала отмените сопоставление');
   }
 
@@ -2511,7 +2516,7 @@ function chinaMatchInternal(ss, paymentId, receiptId, username) {
 
   payCtx.sheet.getRange(payRow.__row, 1, 1, payCtx.headers.length).setValues([chinaRowFrom(payCtx.headers,
     Object.assign({}, chinaStripRow(payRow), {
-      'Статус': 'сопоставлено', 'ПоступлениеID': receiptId, 'Юани по отчёту': totalCny, 'Курс фактический': actualRate
+      'Статус': CHINA_PAYMENT_ALLOCATED, 'ПоступлениеID': receiptId, 'Юани по отчёту': totalCny, 'Курс фактический': actualRate
     }))]);
   receiptCtx.sheet.getRange(recRow.__row, 1, 1, receiptCtx.headers.length).setValues([chinaRowFrom(receiptCtx.headers,
     Object.assign({}, chinaStripRow(recRow), {
@@ -2582,7 +2587,7 @@ function chinaAutoMatchPending(ss, username) {
 
   const pending = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS).rows
     .map(chinaPaymentFromRow)
-    .filter(function (p) { return p.status !== 'сопоставлено'; })
+    .filter(function (p) { return p.status !== CHINA_PAYMENT_ALLOCATED; })
     .sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
 
   pending.forEach(function (p) {
@@ -2774,7 +2779,7 @@ function getChinaMoney() {
 
   const unmatchedReceipts = receipts.filter(function (r) { return r.status !== 'сопоставлено'; });
   const paymentsOut = payments.map(function (p) {
-    const candidates = p.status === 'сопоставлено' ? [] : chinaPaymentCandidates(p, unmatchedReceipts);
+    const candidates = p.status === CHINA_PAYMENT_ALLOCATED ? [] : chinaPaymentCandidates(p, unmatchedReceipts);
     return Object.assign({}, p, { candidates: candidates });
   });
 

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Save, Loader2, Plus, Trash2 } from 'lucide-react';
+import { X, Save, Loader2, Plus, Trash2, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -10,6 +10,8 @@ import {
   chinaFormCounts, chinaFormToPayload, chinaMarkingMatches, emptyChinaBatchForm, emptyChinaLine,
   validateChinaBatchForm
 } from '../lib/chinaBatchForm';
+import { ChinaSheets } from '../lib/chinaFileParse';
+import { ChinaAiKind, ChinaAiParsed, chinaAiParse, chinaAiRead, chinaAiVerifyMark, chinaCompareParsed } from '../lib/chinaAiRead';
 
 interface ChinaBatchModalProps {
   /** The batch being edited, or null for a new one. */
@@ -20,22 +22,54 @@ interface ChinaBatchModalProps {
   notes?: string[];
   /** What does not add up in the file itself. */
   warnings?: string[];
+  /** Item 81g, step 7: present only when the script itself found nothing to complain about —
+   * the owner can still press «Проверить ИИ» to have a model read the same grid a second time. */
+  aiCheck?: { kind: ChinaAiKind; sheets: ChinaSheets; scriptParsed: ChinaAiParsed } | null;
   onClose: () => void;
 }
 
 const field = 'w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200';
 const cell = 'px-2 py-1 border border-slate-200 rounded text-sm w-full';
 
-export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initialForm, notes, warnings, onClose }) => {
+export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initialForm, notes, warnings, aiCheck, onClose }) => {
   const saveChinaBatch = useChinaStore((s) => s.saveChinaBatch);
   const isSaving = useChinaStore((s) => s.isSaving);
   const settings = useChinaStore((s) => s.settings);
   const skus = useWarehouseStore((s) => s.skus);
+  const sessionToken = useWarehouseStore((s) => s.sessionToken) || '';
 
   const [form, setForm] = useState<ChinaBatchForm>(() => {
     if (initialForm) return initialForm;
     return batch ? chinaBatchToForm(batch) : emptyChinaBatchForm();
   });
+  const [isCheckingAi, setIsCheckingAi] = useState(false);
+  const [aiDiffs, setAiDiffs] = useState<string[] | null>(null);
+
+  // Item 81g, step 7: the owner's own re-check of a file the script already accepted — reads
+  // the SAME grid a second time through AI and compares it to what the script read, field by
+  // field. Two ticks when they agree, a cross with the differences spelled out when they don't;
+  // the script's own values in the form are never overwritten, the owner edits them by hand.
+  const checkWithAi = async () => {
+    if (!aiCheck) return;
+    setIsCheckingAi(true);
+    try {
+      const raw = await chinaAiRead(sessionToken, aiCheck.kind, aiCheck.sheets);
+      const aiParsed = chinaAiParse(aiCheck.kind, raw);
+      if (!aiParsed) {
+        toast.error('ИИ не смог прочитать файл');
+        return;
+      }
+      const diffs = chinaCompareParsed(aiCheck.kind, aiCheck.scriptParsed, aiParsed);
+      setAiDiffs(diffs);
+      set({ checkMark: chinaAiVerifyMark(diffs), checkNote: diffs.join('; ') });
+      if (diffs.length === 0) toast.success('ИИ подтвердил проверку скрипта');
+      else toast.warning('ИИ увидел расхождение со скриптом — проверьте перед сохранением');
+    } catch (e) {
+      toast.error(`Проверка ИИ не выполнена: ${(e as Error).message}`);
+    } finally {
+      setIsCheckingAi(false);
+    }
+  };
 
   const set = (patch: Partial<ChinaBatchForm>) => setForm((f) => ({ ...f, ...patch }));
   const setLine = (index: number, patch: Partial<ChinaLineForm>) => setForm((f) => ({
@@ -77,6 +111,33 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
         </div>
 
         <div className="p-6 space-y-6 overflow-y-auto grow">
+          {aiCheck && (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 flex items-start justify-between gap-3 flex-wrap">
+              <div>
+                <p className="text-sm font-bold text-indigo-800">Скрипт прочитал файл без замечаний</p>
+                <p className="text-sm text-indigo-700">
+                  Можно дополнительно проверить через ИИ — он прочитает тот же файл ещё раз и сверит цифры со скриптом.
+                </p>
+                {aiDiffs && aiDiffs.length > 0 && (
+                  <ul className="mt-1 text-sm text-red-700 list-disc list-inside">
+                    {aiDiffs.map((d, i) => <li key={i}>{d}</li>)}
+                  </ul>
+                )}
+                {aiDiffs && aiDiffs.length === 0 && (
+                  <p className="mt-1 text-sm text-emerald-700 font-bold">ИИ подтвердил: расхождений не найдено.</p>
+                )}
+              </div>
+              <button
+                data-testid="btn-check-china-ai"
+                onClick={checkWithAi}
+                disabled={isCheckingAi}
+                className="flex items-center gap-2 px-4 py-2 bg-white border border-indigo-200 rounded-lg text-sm font-bold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 shrink-0"
+              >
+                {isCheckingAi ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
+                Проверить ИИ
+              </button>
+            </div>
+          )}
           {warnings && warnings.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
               <p className="text-sm font-bold text-amber-800">В файле не сходятся суммы — проверьте перед сохранением</p>

@@ -122,7 +122,10 @@ describe('подключение оплат', () => {
 
   it('item 81g: a report file alone imports through the same store action a batch import uses', () => {
     expect(store).toContain("callChina('saveChinaReport'");
-    expect(tab).toContain('saveChinaReportAction(chinaReportPayload(');
+    expect(tab).toContain('saveChinaReportAction(');
+    // Item 81g, step 7: the AI safety net may override `source`/`aiReason` of the payload the
+    // parser built — the payload itself still comes from the one shared builder, not a second copy.
+    expect(tab).toContain('chinaReportPayload(report)');
   });
 
   it('item 81g: the store reads getChinaMoney and refreshes it after every write', () => {

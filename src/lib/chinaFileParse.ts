@@ -231,6 +231,57 @@ export function orderNoFromTicket(ticket: string): string {
 /** «NV-0825-2/东线» is batch NV-0825-2. */
 const codeFromTransport = (value: string): string => String(value || '').split('/')[0].trim();
 
+/**
+ * Item 81g, step 7: the goods lines' own arithmetic — qty×price must match the stated line sum,
+ * the lines plus the China-delivery row must match the waybill's own declared value, and the
+ * pallets must weigh what the waybill says. Factored out of `parseChinaBatchFile` so `chinaAiRead`
+ * can run the SAME checks on what an AI read, rather than trusting it on its word.
+ */
+export function chinaBatchLineChecks(batch: {
+  lines: { qty: number; priceCny: number; sumCny: number; palletWeightKg: number }[];
+  chinaDeliveryCny: number;
+  declaredValueCny: number;
+  weightKg: number;
+}): string[] {
+  const warnings: string[] = [];
+  let goodsFromLines = 0;
+  let sumFromFile = 0;
+  let palletWeight = 0;
+  batch.lines.forEach((l) => {
+    goodsFromLines = round2(goodsFromLines + round2(l.qty * l.priceCny));
+    sumFromFile = round2(sumFromFile + l.sumCny);
+    palletWeight = round2(palletWeight + l.palletWeightKg);
+  });
+  if (Math.abs(goodsFromLines - sumFromFile) > 0.01) {
+    warnings.push(`Товар: количество на цену даёт ${goodsFromLines} ¥, а суммы строк ${sumFromFile} ¥`);
+  }
+  if (batch.declaredValueCny > 0) {
+    const expected = round2(sumFromFile + batch.chinaDeliveryCny);
+    if (Math.abs(expected - batch.declaredValueCny) > 0.01) {
+      warnings.push(`Стоимость товара: строки и доставка по Китаю дают ${expected} ¥, в накладной ${batch.declaredValueCny} ¥`);
+    }
+  }
+  if (batch.weightKg > 0 && palletWeight > 0 && Math.abs(palletWeight - batch.weightKg) > 0.5) {
+    warnings.push(`Вес: паллеты в сумме ${palletWeight} кг, в накладной ${batch.weightKg} кг`);
+  }
+  return warnings;
+}
+
+/**
+ * Item 81g, step 7: one marking's boxes×pcsPerBox must match its own stated quantity — the only
+ * arrival check that survives into the typed output (the 合计 row and the per-line volume/weight
+ * checks compare against raw grid figures the parser discards once read, so they stay parser-only).
+ */
+export function chinaArrivalLineChecks(lines: { marking: string; boxes: number; pcsPerBox: number; qty: number }[]): string[] {
+  const warnings: string[] = [];
+  lines.forEach((l) => {
+    if (l.boxes > 0 && l.pcsPerBox > 0 && l.boxes * l.pcsPerBox !== l.qty) {
+      warnings.push(`${l.marking}: коробки на штуки в коробке дают ${l.boxes * l.pcsPerBox} шт, в файле ${l.qty} шт`);
+    }
+  });
+  return warnings;
+}
+
 export function parseChinaBatchFile(sheets: ChinaSheets): ChinaParsedBatch | null {
   const detail = sheetWith(sheets, ['货号', '装箱数']);
   const waybill = sheetWith(sheets, ['体积', '重量', '单价']);
@@ -323,27 +374,7 @@ export function parseChinaBatchFile(sheets: ChinaSheets): ChinaParsedBatch | nul
   }
 
   if (lines.length === 0) warnings.push('В файле не нашлось ни одной строки товара');
-
-  let goodsFromLines = 0;
-  let sumFromFile = 0;
-  let palletWeight = 0;
-  lines.forEach((l) => {
-    goodsFromLines = round2(goodsFromLines + round2(l.qty * l.priceCny));
-    sumFromFile = round2(sumFromFile + l.sumCny);
-    palletWeight = round2(palletWeight + l.palletWeightKg);
-  });
-  if (Math.abs(goodsFromLines - sumFromFile) > 0.01) {
-    warnings.push(`Товар: количество на цену даёт ${goodsFromLines} ¥, а суммы строк ${sumFromFile} ¥`);
-  }
-  if (declaredValueCny > 0) {
-    const expected = round2(sumFromFile + chinaDeliveryCny);
-    if (Math.abs(expected - declaredValueCny) > 0.01) {
-      warnings.push(`Стоимость товара: строки и доставка по Китаю дают ${expected} ¥, в накладной ${declaredValueCny} ¥`);
-    }
-  }
-  if (weightKg > 0 && palletWeight > 0 && Math.abs(palletWeight - weightKg) > 0.5) {
-    warnings.push(`Вес: паллеты в сумме ${palletWeight} кг, в накладной ${weightKg} кг`);
-  }
+  warnings.push(...chinaBatchLineChecks({ lines, chinaDeliveryCny, declaredValueCny, weightKg }));
 
   return {
     kind: 'batch',
@@ -425,9 +456,6 @@ export function parseChinaArrivalFile(sheets: ChinaSheets): ChinaParsedArrival |
     const lineVolume = get(row, col.volume);
     const lineWeight = get(row, col.totalWeight);
 
-    if (boxes > 0 && pcsPerBox > 0 && boxes * pcsPerBox !== qty) {
-      warnings.push(`${marking}: коробки на штуки в коробке дают ${boxes * pcsPerBox} шт, в файле ${qty} шт`);
-    }
     if (boxes > 0 && boxLengthM > 0 && boxWidthM > 0 && boxHeightM > 0 && lineVolume > 0) {
       const expected = boxes * boxLengthM * boxWidthM * boxHeightM;
       if (Math.abs(expected - lineVolume) > 0.001) {
@@ -448,6 +476,7 @@ export function parseChinaArrivalFile(sheets: ChinaSheets): ChinaParsedArrival |
   }
 
   if (lines.length === 0) warnings.push('В файле не нашлось ни одной строки товара');
+  warnings.push(...chinaArrivalLineChecks(lines));
 
   // The 合计 row sits above the header, in the SAME columns as the data rows.
   const totalRow = detail.slice(0, head).find((row) => row.some((c) => has(c, '合计')));

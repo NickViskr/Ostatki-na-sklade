@@ -72,6 +72,11 @@ export interface ChinaBatchForm {
   packagingShareFreight: string;
   packagingShareCost: string;
   goodsFreightShareCost: string;
+  /** Item 81g, step 7: set by the import flow (AUTO fallback or «Проверить ИИ»), never typed by
+   * hand. '' leaves the batch's saved mark untouched — `chinaFormToPayload` omits the field then,
+   * the same way `ChinaOrders.gs` treats an absent key as "not this save's business". */
+  checkMark: string;
+  checkNote: string;
 }
 
 export const CHINA_STATUSES = ['Черновик', 'В пути', 'Прибыла'];
@@ -108,7 +113,8 @@ export function emptyChinaBatchForm(): ChinaBatchForm {
     comment: '', lines: [emptyChinaLine()],
     goodsKg: '', goodsVolumeM3: '', packagingKg: '', packagingM3: '', goodsDensity: '', packedDensity: '',
     tariffBasis: '', packagingUsd: '', goodsFreightUsd: '', packagingRub: '', goodsFreightRub: '',
-    packagingShareFreight: '', packagingShareCost: '', goodsFreightShareCost: ''
+    packagingShareFreight: '', packagingShareCost: '', goodsFreightShareCost: '',
+    checkMark: '', checkNote: ''
   };
 }
 
@@ -171,7 +177,9 @@ export function chinaBatchToForm(batch: ChinaBatch): ChinaBatchForm {
     goodsFreightRub: text(batch.goodsFreightRub),
     packagingShareFreight: text(batch.packagingShareFreight),
     packagingShareCost: text(batch.packagingShareCost),
-    goodsFreightShareCost: text(batch.goodsFreightShareCost)
+    goodsFreightShareCost: text(batch.goodsFreightShareCost),
+    checkMark: batch.checkMark || '',
+    checkNote: batch.checkNote || ''
   };
 }
 
@@ -179,6 +187,9 @@ export function chinaBatchToForm(batch: ChinaBatch): ChinaBatchForm {
 export function chinaFormToPayload(form: ChinaBatchForm): Record<string, unknown> {
   return {
     ...(form.id ? { id: form.id } : {}),
+    // Item 81g, step 7: '' means the import flow set no mark at all — omitted, so a plain edit
+    // never clobbers a mark a previous import or «Проверить ИИ» already earned.
+    ...(form.checkMark ? { checkMark: form.checkMark, checkNote: form.checkNote.trim() } : {}),
     orderNo: form.orderNo.trim(),
     code: form.code.trim(),
     shippedAt: form.shippedAt.trim(),

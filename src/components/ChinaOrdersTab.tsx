@@ -16,11 +16,15 @@ import {
   chinaTariffRateUnit
 } from '../lib/chinaBatchForm';
 import {
-  ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, chinaReportPayload, detectChinaFile,
-  parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile
+  ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, ChinaSheets, chinaReportPayload,
+  detectChinaFile, parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile
 } from '../lib/chinaFileParse';
 import { chinaSheetsFromFile } from '../lib/chinaXlsx';
 import { chinaArticleOptions } from '../lib/chinaArticles';
+import {
+  ChinaAiKind, ChinaAiParsed, chinaAiFallbackMark, chinaAiFallbackNeeded, chinaAiFallbackReason,
+  chinaAiNotice, chinaAiParse, chinaAiPassed, chinaAiRead
+} from '../lib/chinaAiRead';
 
 const money = (value: number, currency: string): string =>
   `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
@@ -56,6 +60,7 @@ export const ChinaOrdersTab: React.FC = () => {
   const setChinaRubCostsDone = useChinaStore((s) => s.setChinaRubCostsDone);
   const setConfirmDialog = useUIStore((s) => s.setConfirmDialog);
   const skus = useWarehouseStore((s) => s.skus);
+  const sessionToken = useWarehouseStore((s) => s.sessionToken) || '';
 
   const [openId, setOpenId] = useState<string>('');
   const [editing, setEditing] = useState<ChinaBatch | null>(null);
@@ -64,6 +69,9 @@ export const ChinaOrdersTab: React.FC = () => {
   const [importForm, setImportForm] = useState<ChinaBatchForm | null>(null);
   const [importNotes, setImportNotes] = useState<string[]>([]);
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  // Item 81g, step 7: the grid of cells and the script's own reading of it, kept ONLY when the
+  // script found nothing to complain about — «Проверить ИИ» in the import window runs on these.
+  const [importAiCheck, setImportAiCheck] = useState<{ kind: ChinaAiKind; sheets: ChinaSheets; scriptParsed: ChinaAiParsed } | null>(null);
   const [isReading, setIsReading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const [costKind, setCostKind] = useState(CHINA_COST_TYPES[0]);
@@ -130,6 +138,27 @@ export const ChinaOrdersTab: React.FC = () => {
     if (ok) { setCostAmount(''); setCostComment(''); }
   };
 
+  // Item 81g, step 7: called for a file whose OWN reading either failed outright (`parsed` is
+  // null) or does not sum to what the file itself states — the owner's own safety net, an AI
+  // reading of the SAME grid. Used only when it is trustworthy on its own terms (no warnings of
+  // its own); otherwise the script's result (however broken) is kept, and both are shown, same
+  // as before this feature existed.
+  const runAiFallback = async <T extends ChinaAiParsed>(kind: ChinaAiKind, sheets: ChinaSheets, scriptParsed: T | null):
+    Promise<{ parsed: T | null; checkMark: string; checkNote: string }> => {
+    const reason = chinaAiFallbackReason(scriptParsed);
+    try {
+      const raw = await chinaAiRead(sessionToken, kind, sheets, reason);
+      const aiParsed = chinaAiParse(kind, raw);
+      if (chinaAiPassed(aiParsed)) {
+        toast.warning(chinaAiNotice(reason));
+        return { parsed: aiParsed as T, checkMark: chinaAiFallbackMark(true), checkNote: reason };
+      }
+    } catch (e) {
+      console.error('China AI fallback failed', e);
+    }
+    return { parsed: scriptParsed, checkMark: chinaAiFallbackMark(false), checkNote: '' };
+  };
+
   // Item 81c: the owner picks the files the Chinese side sent — the batch file and, beside
   // it, the running account, which is the only place the order number, the arrival date and
   // the carrier's yuan-per-dollar rate are written. The parser fills the form, the owner
@@ -138,25 +167,57 @@ export const ChinaOrdersTab: React.FC = () => {
   // Item 81e: a THIRD kind of file, the arrival at the carrier's Yiwu warehouse, comes before
   // the batch has a code of its own — files may be picked in any order, so both kinds are
   // matched against the batches already saved, not against each other.
+  //
+  // Item 81g, step 7: a file the script could not read, or whose own sums did not add up, is
+  // handed to AI before anything else happens — see `runAiFallback`.
   const readFiles = async (picked: FileList | null) => {
     if (!picked || picked.length === 0) return;
     setIsReading(true);
     const problems: string[] = [];
     const foundBatches: ChinaParsedBatch[] = [];
+    const batchMeta: { checkMark: string; checkNote: string; sheets: ChinaSheets }[] = [];
     const foundArrivals: ChinaParsedArrival[] = [];
+    const arrivalMeta: { checkMark: string; checkNote: string; sheets: ChinaSheets }[] = [];
     let report: ChinaParsedReport | null = null;
+    let reportMeta = { checkMark: '', checkNote: '' };
     for (const file of Array.from(picked)) {
       try {
         const sheets = await chinaSheetsFromFile(file);
         const kind = detectChinaFile(sheets);
         if (kind === 'report') {
-          report = parseChinaReportFile(sheets);
+          let parsed = parseChinaReportFile(sheets);
+          let checkMark = parsed && parsed.warnings.length === 0 ? 'скрипт' : '';
+          let checkNote = '';
+          if (chinaAiFallbackNeeded(parsed)) {
+            const outcome = await runAiFallback('report', sheets, parsed);
+            parsed = outcome.parsed;
+            checkMark = outcome.checkMark;
+            checkNote = outcome.checkNote;
+          }
+          report = parsed;
+          reportMeta = { checkMark, checkNote };
         } else if (kind === 'batch') {
-          const parsed = parseChinaBatchFile(sheets);
-          if (parsed) foundBatches.push(parsed);
+          let parsed = parseChinaBatchFile(sheets);
+          let checkMark = parsed && parsed.warnings.length === 0 ? 'скрипт' : '';
+          let checkNote = '';
+          if (chinaAiFallbackNeeded(parsed)) {
+            const outcome = await runAiFallback('batch', sheets, parsed);
+            parsed = outcome.parsed;
+            checkMark = outcome.checkMark;
+            checkNote = outcome.checkNote;
+          }
+          if (parsed) { foundBatches.push(parsed); batchMeta.push({ checkMark, checkNote, sheets }); }
         } else if (kind === 'arrival') {
-          const parsed = parseChinaArrivalFile(sheets);
-          if (parsed) foundArrivals.push(parsed);
+          let parsed = parseChinaArrivalFile(sheets);
+          let checkMark = parsed && parsed.warnings.length === 0 ? 'скрипт' : '';
+          let checkNote = '';
+          if (chinaAiFallbackNeeded(parsed)) {
+            const outcome = await runAiFallback('arrival', sheets, parsed);
+            parsed = outcome.parsed;
+            checkMark = outcome.checkMark;
+            checkNote = outcome.checkNote;
+          }
+          if (parsed) { foundArrivals.push(parsed); arrivalMeta.push({ checkMark, checkNote, sheets }); }
         } else {
           problems.push(`${file.name}: не похоже ни на файл партии, ни на данные приёмки, ни на финансовый отчёт`);
         }
@@ -171,7 +232,11 @@ export const ChinaOrdersTab: React.FC = () => {
     // own dates, all the money is worked out by the script.
     if (foundBatches.length === 0 && foundArrivals.length === 0) {
       if (report) {
-        const warnings = await saveChinaReportAction(chinaReportPayload(report) as unknown as Record<string, unknown>);
+        const payload = {
+          ...chinaReportPayload(report),
+          ...(reportMeta.checkMark === 'ИИ' ? { source: 'ИИ', aiReason: reportMeta.checkNote } : {})
+        };
+        const warnings = await saveChinaReportAction(payload as unknown as Record<string, unknown>);
         if (warnings && warnings.length > 0) toast.warning(warnings.join('; '));
         return;
       }
@@ -186,23 +251,38 @@ export const ChinaOrdersTab: React.FC = () => {
     }
 
     let result: { form: ChinaBatchForm; notes: string[]; warnings: string[] };
+    let aiCheck: { kind: ChinaAiKind; sheets: ChinaSheets; scriptParsed: ChinaAiParsed } | null = null;
     if (foundBatches.length > 0) {
       const parsed = foundBatches[0];
+      const meta = batchMeta[0];
       result = chinaFormFromFiles(parsed, report, chinaMatchFinalBatch(parsed.code, parsed.lines, batches));
+      result.form.checkMark = meta.checkMark;
+      result.form.checkNote = meta.checkNote;
+      if (meta.checkMark === 'скрипт') aiCheck = { kind: 'batch', sheets: meta.sheets, scriptParsed: parsed };
     } else {
       const parsed = foundArrivals[0];
+      const meta = arrivalMeta[0];
       result = chinaFormFromArrival(parsed, chinaMatchArrivalBatch(parsed.draftCode, parsed.lines, batches));
+      result.form.checkMark = meta.checkMark;
+      result.form.checkNote = meta.checkNote;
+      if (meta.checkMark === 'скрипт') aiCheck = { kind: 'arrival', sheets: meta.sheets, scriptParsed: parsed };
     }
+    if (result.form.checkMark === 'ИИ') result.notes.unshift(chinaAiNotice(result.form.checkNote));
     // A report picked ALONGSIDE a batch or arrival file is saved too, on its own — the batch
     // form still opens for the owner to check, but the money of the report does not wait for it.
     if (report) {
-      saveChinaReportAction(chinaReportPayload(report) as unknown as Record<string, unknown>).then((warnings) => {
+      const payload = {
+        ...chinaReportPayload(report),
+        ...(reportMeta.checkMark === 'ИИ' ? { source: 'ИИ', aiReason: reportMeta.checkNote } : {})
+      };
+      saveChinaReportAction(payload as unknown as Record<string, unknown>).then((warnings) => {
         if (warnings && warnings.length > 0) toast.warning(warnings.join('; '));
       });
     }
     setImportForm(result.form);
     setImportNotes(result.notes.concat(problems));
     setImportWarnings(result.warnings);
+    setImportAiCheck(aiCheck);
     setEditing(null);
     setShowModal(true);
   };
@@ -628,12 +708,14 @@ export const ChinaOrdersTab: React.FC = () => {
           initialForm={importForm}
           notes={importNotes}
           warnings={importWarnings}
+          aiCheck={importAiCheck}
           onClose={() => {
             setShowModal(false);
             setEditing(null);
             setImportForm(null);
             setImportNotes([]);
             setImportWarnings([]);
+            setImportAiCheck(null);
           }}
         />
       )}

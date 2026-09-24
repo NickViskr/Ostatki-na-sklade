@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { createRequire } from 'module';
 import { ARRIVAL_FILE_NV0923, BATCH_FILE_27, BATCH_FILE_28, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
-import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
+import { chinaReportPayload, parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { chinaBatchToForm, chinaFormFromArrival, chinaFormFromFiles, chinaFormToPayload, chinaGroupIds } from './chinaBatchForm';
 import { ChinaBatch } from '../types';
 
@@ -239,5 +239,217 @@ describe('партия из файлов китайцев — приёмка н�
     expect(after.lines.map((l: any) => l.factoryBoxKg)).toEqual(before.lines.map((l: any) => l.factoryBoxKg));
     expect(after.lines.map((l: any) => l.boxLengthM)).toEqual(before.lines.map((l: any) => l.boxLengthM));
     assertFinalBatch(after);
+  });
+});
+
+/**
+ * Item 81g: payments distributed by the Chinese financial report, end to end — the owner's real
+ * report through `chinaReportPayload` into `saveChinaReport`, a real batch (NV-0923-4, order 30)
+ * costed against it, two of the owner's own payments matched automatically, the freight FIFO in
+ * dollars, the missing-list and the closing tick, and a second report that moves money between
+ * orders without a new transfer. Every number below was independently derived in Python first —
+ * see the coordinator's report for the script and its output.
+ */
+describe('item 81g: payments distributed by the financial report', () => {
+  it('the report lands in the sheet with the receipts the payload grouped, conserving the money', () => {
+    const stand = freshStand();
+    const payload = chinaReportPayload(report);
+
+    // Σ receivedCny over the orders = Σ goodsCny of the receipts (the carried-over 结转 line
+    // included as its own receipt) — 229 111 ¥, independently derived in Python.
+    const sumOfOrders = payload.orders.reduce((s, o) => s + o.receivedCny, 0);
+    expect(Math.round(sumOfOrders * 100) / 100).toBe(229111);
+
+    const state = stand.saveChinaReport(payload, 'Николай');
+    expect(state.warnings).toEqual([]);
+
+    const money = stand.getChinaMoney();
+    // One receipt per date the payload grouped, PLUS the carried-over line — nothing split,
+    // nothing merged.
+    expect(money.receipts).toHaveLength(payload.receipts.length + 1);
+    const sumOfReceiptGoods = money.receipts.reduce((s: number, r: any) => s + r.goodsCny, 0);
+    expect(Math.round(sumOfReceiptGoods * 100) / 100).toBe(229111);
+    payload.receipts.forEach((r) => {
+      const stored = money.receipts.find((x: any) => x.date === r.date);
+      expect(stored).toBeTruthy();
+      expect([stored.goodsCny, stored.freightCny, stored.freightUsd, stored.cargoRate])
+        .toEqual([r.goodsCny, r.freightCny, r.freightUsd, r.cargoRate]);
+    });
+    const carriedOver = money.receipts.find((x: any) => x.goodsCny === 17402);
+    expect(carriedOver).toBeTruthy();
+    expect(carriedOver.status).toBe('история'); // before CHINA_TRACKING_START_DATE
+  });
+
+  it('the final batch, two owner payments matched automatically, the freight FIFO, missing and closing', () => {
+    const stand = freshStand();
+    const payload = chinaReportPayload(report);
+    stand.saveChinaReport(payload, 'Николай');
+
+    const parsedFinal = parseChinaBatchFile(BATCH_FILE_30)!;
+    const { form } = chinaFormFromFiles(parsedFinal, report, null);
+    form.status = 'Прибыла'; // the owner confirms the goods physically arrived
+    const afterImport = stand.saveChinaBatch(chinaFormToPayload(form), 'Николай');
+    const imported = afterImport.batches[0];
+    expect(imported.code).toBe('NV-0923-4');
+    expect(imported.orderNo).toBe('30');
+
+    // The store's own payload shape — date, rubles, rate, comment; nothing else.
+    stand.saveChinaPayment({ date: '2026-09-16', amountRub: 92541.2, rate: 12.4, comment: 'оплатил 92541.20 по курсу 12,4' }, 'Николай');
+    stand.saveChinaPayment({ date: '2026-09-18', amountRub: 116600, rate: 12.5, comment: 'оплатил 116600 по курсу 12,5' }, 'Николай');
+
+    const moneyAfterPayments = stand.getChinaMoney();
+    const matched1 = moneyAfterPayments.payments.find((p: any) => p.date === '2026-09-16');
+    const matched2 = moneyAfterPayments.payments.find((p: any) => p.date === '2026-09-18');
+    expect(matched1.status).toBe('распределена'); // one candidate each, both auto-matched
+    expect(matched2.status).toBe('распределена');
+    expect(matched1.actualRate).toBe(12.4);
+    expect(matched2.actualRate).toBe(12.5);
+
+    // The whole ChinaMoney shape ChinaPaymentsCard reads, with real values in it — every field
+    // it reads exists and has the type the component expects.
+    const p = matched1;
+    ['id', 'date', 'comment', 'user', 'status', 'receiptId'].forEach((k) => expect(typeof p[k]).toBe('string'));
+    ['amountRub', 'rate', 'amountCny', 'reportCny', 'actualRate'].forEach((k) => expect(typeof p[k]).toBe('number'));
+    expect(Array.isArray(p.candidates)).toBe(true);
+    const r = moneyAfterPayments.receipts.find((x: any) => x.id === p.receiptId);
+    expect(r).toBeTruthy();
+    ['id', 'date', 'goodsCny', 'freightCny', 'freightUsd', 'cargoRate', 'totalCny', 'status', 'paymentId', 'rubGoods', 'rubFreight']
+      .forEach((k) => expect(r).toHaveProperty(k));
+    const o30 = moneyAfterPayments.orders.find((x: any) => x.orderNo === '30');
+    ['orderNo', 'date', 'totalCny', 'receivedCny', 'unpaidCny', 'knownCny', 'knownRub', 'rate', 'pendingCny', 'historyCny', 'advanceWarning']
+      .forEach((k) => expect(o30).toHaveProperty(k));
+    ['cny', 'knownCny', 'knownRub', 'pendingCny', 'historyCny'].forEach((k) => expect(moneyAfterPayments.pool).toHaveProperty(k));
+    ['id', 'loadedAt', 'reportDate', 'source', 'aiReason'].forEach((k) => expect(moneyAfterPayments.reports[0]).toHaveProperty(k));
+
+    // Order 30's known rate — 92541.20 ₽ of the 5001+2462=7463 ¥ receipt of 2026-09-16 bought
+    // its own 4056 ¥ lot at the SAME rate the receipt as a whole was matched at: 12.4.
+    expect([o30.knownCny, o30.knownRub, o30.rate]).toEqual([4056, 50294.4, 12.4]);
+
+    const batch = stand.getChinaBatches().batches[0];
+    expect([batch.rubRate, batch.rubRateSource, batch.goodsRate, batch.goodsRateSource]).toEqual([12.4, 'оплаты', 12.4, 'оплаты']);
+
+    // Freight FIFO in dollars, independently derived in Python: NV-0923-4 is unpaid in full
+    // (the $ queue ran dry before reaching it), NV-0825-2 is paid by 351+1286 across two
+    // receipts, NV-0916-24 gets only 46 of its 1109 — total unpaid 2646+1063 = 3709 $, the
+    // report's own footer figure.
+    expect(batch.missing).toEqual(expect.arrayContaining(['перевозка не оплачена полностью (2646 $)', 'расходы РФ не подтверждены']));
+    expect(batch.missing).not.toEqual(expect.arrayContaining(['статус не «Прибыла»']));
+    expect(batch.missing).not.toEqual(expect.arrayContaining(['не загружен файл партии (нет веса или перевозки)']));
+    expect(batch.missing).not.toEqual(expect.arrayContaining(['в отчёте нет накладной карго на эту партию']));
+    expect(batch.closed).toBe(false);
+
+    // setChinaRubCostsDone round trip: marks the Russian costs confirmed, then back.
+    const done = stand.setChinaRubCostsDone({ batchId: batch.id, done: true }, 'Николай');
+    const doneBatch = done.batches[0];
+    expect(doneBatch.rubCostsDone).toBe(true);
+    expect(doneBatch.missing).not.toEqual(expect.arrayContaining(['расходы РФ не подтверждены']));
+    expect(doneBatch.missing).toEqual(expect.arrayContaining(['перевозка не оплачена полностью (2646 $)']));
+    expect(doneBatch.closed).toBe(false); // the freight is still unpaid
+
+    const undone = stand.setChinaRubCostsDone({ batchId: batch.id, done: false }, 'Николай');
+    expect(undone.batches[0].rubCostsDone).toBe(false);
+    expect(undone.batches[0].missing).toEqual(expect.arrayContaining(['расходы РФ не подтверждены']));
+  });
+
+  it('a second report of the same latest date moving 1 000 ¥ from order 29 to 30 is APPLIED, not a no-op', () => {
+    const stand = freshStand();
+    const payload = chinaReportPayload(report);
+    stand.saveChinaReport(payload, 'Николай');
+
+    const parsedFinal = parseChinaBatchFile(BATCH_FILE_30)!;
+    const { form } = chinaFormFromFiles(parsedFinal, report, null);
+    form.status = 'Прибыла';
+    stand.saveChinaBatch(chinaFormToPayload(form), 'Николай');
+    stand.saveChinaPayment({ date: '2026-09-16', amountRub: 92541.2, rate: 12.4, comment: '' }, 'Николай');
+    stand.saveChinaPayment({ date: '2026-09-18', amountRub: 116600, rate: 12.5, comment: '' }, 'Николай');
+
+    const before = stand.getChinaMoney().orders.find((o: any) => o.orderNo === '30');
+    expect([before.knownCny, before.pendingCny, before.knownRub]).toEqual([4056, 0, 50294.4]);
+
+    const moved: typeof payload = JSON.parse(JSON.stringify(payload));
+    moved.orders = moved.orders.map((o) => {
+      if (o.orderNo === '29') return { ...o, receivedCny: o.receivedCny - 1000 };
+      if (o.orderNo === '30') return { ...o, receivedCny: o.receivedCny + 1000 };
+      return o;
+    });
+    const applied = stand.saveChinaReport(moved, 'Николай');
+    expect(applied).toBeTruthy(); // not the identical-report no-op shape
+
+    const after = stand.getChinaMoney().orders.find((o: any) => o.orderNo === '30');
+    // Independently derived in Python (a same-date revision REPLACES the stored report row, so
+    // `chinaAllocateGoodsLedger` sees only ONE report and re-runs the whole FIFO baseline fresh
+    // against the new receivedCny totals, not an incremental release/take): order 29 keeps only
+    // its 1 974 ¥ from 2026-09-03, and order 30 now takes the REST of that day (55 ¥, still
+    // unpaid) plus the WHOLE 2026-09-16 receipt (5 001 ¥, matched at 12.4) — so its known ¥ grows
+    // from 4 056 to the full 5 001 of that receipt, not just the 1 000 ¥ that moved.
+    expect([after.knownCny, after.pendingCny, after.knownRub, after.rate]).toEqual([5001, 55, 62012.4, 12.4]);
+    expect(Math.round((after.knownRub - before.knownRub) * 100) / 100).toBe(11718);
+  });
+
+  /**
+   * Found by this end-to-end test on 2026-09-25: the script wrote a matched payment's status as
+   * 'сопоставлено' (the RECEIPT's word), while `ChinaMoneyPayment.status` and the payments card
+   * filter on 'распределена', so a matched payment dropped out of both tables of the card. The
+   * script now writes 'распределена' for the payment; this test keeps the two sides in step.
+   */
+  it('a matched payment\'s status is the string ChinaPaymentsCard\'s "allocated" filter expects', () => {
+    const stand = freshStand();
+    const payload = {
+      reportDate: '2026-09-11', source: 'скрипт' as const, aiReason: '', carriedOverCny: 0, openingFreightUsd: 0,
+      orders: [], freights: [], warnings: [],
+      receipts: [{ date: '2026-09-10', goodsCny: 1000, freightCny: 0, freightUsd: 0, cargoRate: 0, note: '' }]
+    };
+    stand.saveChinaReport(payload, 'Николай');
+    stand.saveChinaPayment({ date: '2026-09-10', amountRub: 12400, rate: 12.4, comment: '' }, 'Николай');
+    const matched = stand.getChinaMoney().payments[0];
+    // ChinaPaymentsCard.tsx: `payments.filter((p) => p.status === 'распределена')`.
+    expect(matched.status).toBe('распределена');
+  });
+
+  it('an older report is refused in Russian; the identical report is a no-op', () => {
+    const stand = freshStand();
+    const payload = chinaReportPayload(report);
+    stand.saveChinaReport(payload, 'Николай');
+
+    const older: typeof payload = { ...payload, reportDate: '2026-01-01' };
+    expect(() => stand.saveChinaReport(older, 'Николай')).toThrow(/старше/);
+
+    const before = stand.getChinaMoney();
+    const again = stand.saveChinaReport(payload, 'Николай');
+    expect(again.warnings).toEqual([]);
+    const after = stand.getChinaMoney();
+    expect(after.reports).toHaveLength(before.reports.length);
+    expect(after.orders.find((o: any) => o.orderNo === '30')).toEqual(before.orders.find((o: any) => o.orderNo === '30'));
+  });
+
+  it('a pending payment with two fitting receipts lists both as candidates, and matches the one the owner picks', () => {
+    const stand = freshStand();
+    const payload = {
+      reportDate: '2026-09-11', source: 'скрипт' as const, aiReason: '', carriedOverCny: 0, openingFreightUsd: 0,
+      orders: [], freights: [], warnings: [],
+      receipts: [
+        { date: '2026-09-10', goodsCny: 1000, freightCny: 0, freightUsd: 0, cargoRate: 0, note: '' },
+        { date: '2026-09-11', goodsCny: 1000, freightCny: 0, freightUsd: 0, cargoRate: 0, note: '' }
+      ]
+    };
+    stand.saveChinaReport(payload, 'Николай');
+
+    const state = stand.saveChinaPayment({ date: '2026-09-10', amountRub: 12400, rate: 12.4, comment: '' }, 'Николай');
+    const paymentId = stand.getChinaMoney().payments[0].id;
+    const money = stand.getChinaMoney();
+    const pending = money.payments.find((p: any) => p.id === paymentId);
+    expect(pending.status).toBe('не распределена'); // ambiguous — never auto-matched
+    expect(pending.candidates.sort()).toEqual(money.receipts.map((r: any) => r.id).sort());
+    expect(pending.candidates).toHaveLength(2);
+    money.receipts.forEach((r: any) => expect(pending.candidates).toContain(r.id));
+
+    const chosen = money.receipts[0].id;
+    const matched = stand.matchChinaPayment({ paymentId, receiptId: chosen }, 'Николай');
+    const matchedPayment = stand.getChinaMoney().payments.find((p: any) => p.id === paymentId);
+    expect(matchedPayment.status).toBe('распределена');
+    expect(matchedPayment.receiptId).toBe(chosen);
+    const other = stand.getChinaMoney().receipts.find((r: any) => r.id !== chosen);
+    expect(other.status).toBe('ждёт оплату'); // the one NOT picked stays free
+    expect(matched).toBeTruthy();
   });
 });

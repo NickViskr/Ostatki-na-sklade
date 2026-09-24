@@ -5716,11 +5716,11 @@ function chinaReceiptOf(id, date, goodsCny, status, reportId) {
   const paySheet = h.getTargetSheet('Платежи');
   const payHead = h.headerRowOf(paySheet);
   const statusCol = payHead.indexOf('Статус') + 1;
-  paySheet.getRange(2, statusCol, 1, 1).setValues([['сопоставлено']]);
+  paySheet.getRange(2, statusCol, 1, 1).setValues([['распределена']]);
   h.saveChinaPayment({ id: 'CP1', date: '2026-09-01', amountRub: 10000, rate: 12.4, orderNo: '28', comment: 'правка' }, 'Николай');
   const payments = h.getChinaBatches().payments;
   check('81g-1: editing an existing payment does not blank «Статус» set by hand',
-    payments[0].status === 'сопоставлено' && payments[0].comment === 'правка',
+    payments[0].status === 'распределена' && payments[0].comment === 'правка',
     JSON.stringify(payments[0]));
 })();
 
@@ -5779,7 +5779,7 @@ function chinaReceiptOf(id, date, goodsCny, status, reportId) {
 
   const money = h.getChinaMoney();
   check('81g-2: all four payments auto-matched, none left «не распределена»',
-    money.payments.every(function (p) { return p.status === 'сопоставлено'; }),
+    money.payments.every(function (p) { return p.status === 'распределена'; }),
     JSON.stringify(money.payments.map(function (p) { return p.status; })));
 
   const p1 = money.payments.filter(function (p) { return p.comment === 'P1'; })[0];
@@ -5966,7 +5966,7 @@ function chinaReceiptOf(id, date, goodsCny, status, reportId) {
   const earlier = result.payments.filter(function (p) { return p.comment === 'earlier'; })[0];
   const later = result.payments.filter(function (p) { return p.comment === 'later'; })[0];
   check('81g-2: the OLDER payment claims the contested receipt, the newer stays pending',
-    earlier.status === 'сопоставлено' && later.status === 'не распределена',
+    earlier.status === 'распределена' && later.status === 'не распределена',
     JSON.stringify({ earlier: earlier.status, later: later.status }));
 })();
 
@@ -6012,7 +6012,7 @@ function roundToTwoLocal(x) { return Math.round(x * 100) / 100; }
   // implies 50,8 ¥ against a 50 ¥ receipt — 0,8 ¥ off, inside max(1, 0.5)=1 but outside 0,5 alone
   const result = h.saveChinaPayment({ date: '2026-01-01', amountRub: 630, rate: 12.4, comment: 'floor' }, 'Николай');
   check('81g-2: the 1 ¥ FLOOR of the tolerance lets a small receipt match despite exceeding its own 1 %',
-    result.payments[0].status === 'сопоставлено', JSON.stringify(result.payments[0]));
+    result.payments[0].status === 'распределена', JSON.stringify(result.payments[0]));
 })();
 
 // ---- the matching window is [date, +3 DAYS] inclusive, not +2 ----
@@ -6025,7 +6025,7 @@ function roundToTwoLocal(x) { return Math.round(x * 100) / 100; }
   }, 'Николай');
   const result = h.saveChinaPayment({ date: '2026-01-01', amountRub: 12400, rate: 12.4, comment: 'window' }, 'Николай');
   check('81g-2: a receipt dated exactly payment date + 3 days still matches',
-    result.payments[0].status === 'сопоставлено', JSON.stringify(result.payments[0]));
+    result.payments[0].status === 'распределена', JSON.stringify(result.payments[0]));
 })();
 
 // ---- chinaPaymentCandidates itself excludes an already-matched receipt, not just its callers ----
@@ -6078,7 +6078,7 @@ function roundToTwoLocal(x) { return Math.round(x * 100) / 100; }
   // The owner resolves it by hand.
   const matched = h.matchChinaPayment({ paymentId: payment.id, receiptId: money.payments[0].candidates[0] }, 'Николай');
   check('81g-2: matchChinaPayment resolves the ambiguity by hand',
-    matched.payments[0].status === 'сопоставлено', JSON.stringify(matched.payments[0]));
+    matched.payments[0].status === 'распределена', JSON.stringify(matched.payments[0]));
   const unmatched = h.unmatchChinaPayment({ paymentId: payment.id }, 'Николай');
   check('81g-2: unmatchChinaPayment puts it right back to pending, with both candidates again',
     unmatched.payments[0].status === 'не распределена' &&
@@ -6096,7 +6096,7 @@ function roundToTwoLocal(x) { return Math.round(x * 100) / 100; }
   }, 'Николай');
   h.saveChinaPayment({ date: '2026-01-01', amountRub: 62000, rate: 12.4, comment: 'exact' }, 'Николай');
   const before = h.getChinaMoney();
-  check('81g-2: setup — the payment matched the only receipt', before.payments[0].status === 'сопоставлено', JSON.stringify(before.payments[0]));
+  check('81g-2: setup — the payment matched the only receipt', before.payments[0].status === 'распределена', JSON.stringify(before.payments[0]));
 
   h.deleteChinaPayment({ id: before.payments[0].id }, 'Николай');
   const after = h.getChinaMoney();

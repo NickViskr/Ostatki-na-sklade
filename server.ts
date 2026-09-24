@@ -16,6 +16,81 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/** Item 81g, step 7: how large a grid of cells the China AI safety net will read at all — the
+ * files are small spreadsheets, and anything past this is either the wrong kind of file or an
+ * attempt to spend the Gemini key on something else. */
+const CHINA_AI_MAX_BYTES = 500 * 1024;
+
+/**
+ * Item 81g, step 7: the prompt for `/api/china/ai-read` — the model reads the SAME grid of
+ * cells (`ChinaSheets`, one two-dimensional array per sheet name) the script's own parser reads,
+ * and must return EXACTLY the shape that parser's own output has: cell values only, never a sum,
+ * a share or a rate the script itself works out. `chinaAiRead.ts` normalises and re-checks
+ * whatever comes back, so the prompt only has to describe the shape, not police it.
+ */
+function chinaAiPrompt(kind: "batch" | "arrival" | "report", sheetsJson: string, reason?: string): string {
+  const shape = kind === "batch"
+    ? `{
+  "code": "код партии, из ячейки 柜号 листа с 体积/重量/单价 (текст до символа /)",
+  "shippedAt": "дата отгрузки 发货日期, в формате ГГГГ-ММ-ДД",
+  "weightKg": "重量 из строки данных под шапкой 体积/重量/单价 — число",
+  "volumeM3": "体积 — число",
+  "places": "总件数 — число",
+  "ratePerKgUsd": "单价 — число",
+  "packingUsd": "包装费 — число",
+  "otherCargoUsd": "保险费 + 佣金 — число",
+  "freightUsd": "运费 + 包装费 + 保险费 + 佣金 — число",
+  "chinaDeliveryCny": "сумма строки «Стоимость доставки в Китае» на листе с 货号/装箱数 — число",
+  "declaredValueCny": "货值 — число",
+  "lines": [
+    { "marking": "货号", "name": "品名", "boxes": "件数 — число", "pcsPerBox": "装箱数 — число",
+      "qty": "总数量 — число", "priceCny": "单价 — число", "sumCny": "总额 — число",
+      "palletWeightKg": "总毛重 — число, 0 если строка не начинает новую паллету" }
+  ]
+}`
+    : kind === "arrival"
+    ? `{
+  "receivedAt": "入库日期 — самая поздняя дата на листе, в формате ГГГГ-ММ-ДД",
+  "customer": "客户 первой строки с товаром",
+  "draftCode": "клиент + '-' + месяц и день даты приёмки без разделителя, например NV-0923",
+  "lines": [
+    { "marking": "货号", "name": "品名", "boxes": "件数 — число", "pcsPerBox": "装箱数 — число",
+      "qty": "总数量 — число", "boxLengthM": "长 — число", "boxWidthM": "宽 — число",
+      "boxHeightM": "高 — число", "factoryBoxKg": "单毛重 — число" }
+  ]
+}`
+    : `{
+  "orders": [
+    { "orderNo": "订单号 — только цифры", "date": "日期, формат ГГГГ-ММ-ДД", "summary": "摘要",
+      "totalCny": "货款总额 — число", "receivedCny": "已收合计 — число",
+      "depositCny": "定金 — число", "unpaidCny": "未收总额 — число" }
+  ],
+  "transfers": [ { "date": "汇款日期 (или '结转' для переносимого остатка)", "amountCny": "汇款金额 — число" } ],
+  "freights": [
+    { "code": "票号 до скобки с номером заказа", "orderNo": "номер заказа из скобок в 票号 или 摘要",
+      "shippedAt": "发货日期", "arrivedAt": "到货日期", "ratePerKgUsd": "单价 — число",
+      "volumeM3": "体积 — число", "weightKg": "重量 — число", "amountUsd": "总金额 — число",
+      "cargoRate": "0, курс не читается на этом листе" }
+  ],
+  "payments": [
+    { "date": "发货日期 строки с 摘要, содержащим 国外收", "note": "票号 этой строки",
+      "amountUsd": "|总金额| этой строки — число", "cargoRate": "0" }
+  ],
+  "openingFreightUsd": "总金额 самой первой строки данных листа перевозки, если у неё нет ни 票号, ни 摘要 — иначе 0"
+}`;
+
+  const reasonText = reason ? `\n\nСкрипт уже пытался прочитать этот файл и сообщил: ${reason}` : "";
+
+  return `Ты читаешь один файл китайской транспортной компании для складского учёта — файл вида «${kind}».
+Тебе даны данные листов книги Excel как двумерные массивы ячеек (JSON, ключ — имя листа):
+
+${sheetsJson}
+
+Верни СТРОГО такой JSON (без пояснений и markdown), заполнив в точности эти поля значениями ИЗ ЯЧЕЕК.
+Никогда не считай сумму, долю или курс сам — только то, что написано в самих ячейках; поле,
+которого в файле нет, оставь пустым (строка '') или нулём (число). Формат: ${shape}${reasonText}`;
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
@@ -67,6 +142,7 @@ async function startServer() {
 
   app.use("/api/gas", rateLimitMiddleware);
   app.use("/api/parse-invoice", rateLimitMiddleware);
+  app.use("/api/china/ai-read", rateLimitMiddleware);
   app.use("/api/models", rateLimitMiddleware);
   app.use("/api/ozon/check", rateLimitMiddleware);
 
@@ -2951,6 +3027,65 @@ ${wbDictStr}`;
           rawError
         }
       });
+    }
+  });
+
+  // Item 81g, step 7: the AI safety net for the module «Заказы в Китае» — reads the SAME grid of
+  // cells (`ChinaSheets`) the browser's own parser reads, either because that parser could not
+  // (a fallback, `kind`+`reason` say why) or because the owner pressed «Проверить ИИ» to double
+  // check a file the parser already accepted. Every byte read into a number here is checked
+  // again in `chinaAiRead.ts` — this endpoint hands back raw JSON and nothing else.
+  app.post("/api/china/ai-read", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const { kind, sheets, reason } = req.body || {};
+      if (kind !== "batch" && kind !== "arrival" && kind !== "report") {
+        return res.status(400).json({ status: "error", message: "Неизвестный тип файла для проверки ИИ" });
+      }
+      if (!sheets || typeof sheets !== "object" || Array.isArray(sheets)) {
+        return res.status(400).json({ status: "error", message: "Не переданы данные листов" });
+      }
+      const sheetsJson = JSON.stringify(sheets);
+      if (Buffer.byteLength(sheetsJson, "utf8") > CHINA_AI_MAX_BYTES) {
+        return res.status(413).json({ status: "error", message: "Файл слишком велик для проверки ИИ" });
+      }
+
+      const apiKey = await getApiKey();
+      if (!apiKey) {
+        return res.status(500).json({ status: "error", message: "GEMINI_API_KEY не настроен на сервере" });
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = chinaAiPrompt(kind, sheetsJson, typeof reason === "string" ? reason : undefined);
+
+      let result: any;
+      try {
+        result = await ai.models.generateContent({
+          model: "gemini-flash-latest",
+          contents: prompt,
+          config: { responseMimeType: "application/json" }
+        });
+      } catch (error: any) {
+        console.error("China AI read: Gemini call failed:", error?.message || error);
+        return res.status(500).json({ status: "error", message: "Не удалось получить ответ от ИИ" });
+      }
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(result?.text || "{}");
+      } catch (parseErr: any) {
+        console.error("China AI read: response was not JSON:", parseErr?.message || parseErr);
+        return res.status(500).json({ status: "error", message: "ИИ вернул ответ не в формате JSON" });
+      }
+
+      res.json({ status: "success", data: parsed });
+    } catch (error: any) {
+      console.error("China AI read failed:", error?.message || error);
+      res.status(500).json({ status: "error", message: error?.message || String(error) });
     }
   });
 
