@@ -330,18 +330,20 @@
 Status on 2026-09-22. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
-- **Items:** 77 of 81 closed. OPEN: 53, 81 (81a built, next 81b). Also 27 (optional) and 37 (deferred: not reproducible on production data).
-- **Live:** Cloud Run `sklad-00079-7l8` (build label 2026-09-22 16:52 МСК, commit `5e7ae80`:
-  item 80 with the scrollable window and per-unit packaging; verified byte for byte on the main
-  chunk). Previous: `sklad-00078-tpb` 22.09 16:36 (`055cf68`), `sklad-00077-px5` 22.09 13:09
-  (`774a21b`), `sklad-00076-dd6` 22.09 11:59 (`59f1413`).
-- **Code.gs:** version 183 (2026-09-22 20:40 local, item 81a: the script now holds TWO files,
-  `Code.gs` and `ChinaOrders.gs`, and `clasp push` reports three; 182 — item 80 per-unit
-  packaging; 181 — item 80 shipment extras; 180 — 78e GMROI thresholds), deployed by the
-  owner with `clasp push` + `clasp deploy -i`, verified with `clasp clone-script` + `cmp`.
+- **Items:** 77 of 81 closed. OPEN: 53, 81 (81a and 81b deployed, next 81c: import of a batch file through Gemini). Also 27 (optional) and 37 (deferred: not reproducible on production data).
+- **Live:** Cloud Run `sklad-00080-8hk` (build label 2026-09-24 12:56 МСК, commit `8e3c365`:
+  item 81b, the tab «Заказы в Китае»; the main chunk and `ChinaOrdersTab` verified byte for byte
+  against the local build of the same export, modulo hashes and the label; `getChinaBatches`
+  answers 401 without a session). Previous: `sklad-00079-7l8` 22.09 16:52 (`5e7ae80`),
+  `sklad-00078-tpb` 22.09 16:36 (`055cf68`), `sklad-00077-px5` 22.09 13:09 (`774a21b`).
+- **Code.gs:** version 184 (2026-09-24 14:44 local, item 81b: `getChinaBatches` reads without
+  the global lock; 183 — item 81a, where the script grew a SECOND file, `ChinaOrders.gs`, so
+  `clasp push` reports three; 182 — item 80 per-unit packaging; 181 — item 80 shipment
+  extras), deployed by the owner with `clasp push` + `clasp deploy -i`, verified with
+  `clasp clone-script` + `cmp`.
   Script Property `kan_mcpToken` set 2026-09-22; trigger `kanTurnoverDaily` daily at 05:00 script
   time. Rollback point «before clasp»: version 171.
-- **Checks:** Apps Script stand 488 checks; frontend 755 tests in 33 files; `tsc --noEmit`
+- **Checks:** Apps Script stand 574 checks; frontend 782 tests in 34 files; `tsc --noEmit`
   clean; `vite build` passes.
 - **Production contour:** the auto-poll writes to the production DB (Script Property
   `ozon_autoSyncTarget = 'prod'`); the dev-mode toggle switches only the browser to the
