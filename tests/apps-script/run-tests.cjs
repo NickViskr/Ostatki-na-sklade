@@ -1,9 +1,15 @@
 'use strict';
 
 const results = [];
+// Owner, 2026-09-25: less output while working. GAS_ONLY=<text> prints only the checks whose
+// name contains <text>; GAS_QUIET=1 prints none. Every check still runs and a failure is
+// ALWAYS printed, so a mutation that breaks something elsewhere is never hidden.
+const GAS_ONLY = process.env.GAS_ONLY || '';
+const GAS_QUIET = process.env.GAS_QUIET === '1';
 function check(name, condition, details) {
   results.push({ name, ok: !!condition, details });
-  console.log((condition ? 'OK    ' : 'ПРОВАЛ') + '  ' + name + (details ? ('  -- ' + details) : ''));
+  const shown = !condition || (!GAS_QUIET && (!GAS_ONLY || String(name).indexOf(GAS_ONLY) !== -1));
+  if (shown) console.log((condition ? 'OK    ' : 'ПРОВАЛ') + '  ' + name + (details ? ('  -- ' + details) : ''));
 }
 
 // Собирает finalRows/headers в формате листа "Остатки Ozon" (OZON_STOCKS_HEADERS)

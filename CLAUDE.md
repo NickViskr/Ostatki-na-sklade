@@ -40,6 +40,14 @@ not translated back; files drift to English as they are edited.
   - While working, run only the tests of the changed module; the full set (`npx vitest run`,
     the Yekaterinburg run, `npm run test:gas`, `tsc`, build) runs once before deployment.
   - When unsure which tier a change is, treat it as money-critical.
+  - Mutations scale with the change (owner, 2026-09-25): 3–5 for a fix, 10+ only for a new
+    module. While mutating, run the stand as `GAS_QUIET=1 npm run test:gas` (or
+    `GAS_ONLY=<name part>`) — every check still runs, only failures and the total are printed.
+  - The `TZ=Asia/Yekaterinburg` run only when the change touches dates.
+  - `npx vite build` is not run by the coder/tester: the deployment export builds anyway.
+  - The orchestrator does not repeat the agent's final run; it reads the diff and re-derives
+    one or two key figures itself.
+  - Every brief states the expected test volume (e.g. «≈5 checks, 3 mutations»), never «≥N».
 - All numeric calculations are executed as code, never mental arithmetic.
 - `npm audit fix` must not be run. The classifier refuses `rm -rf node_modules` — the owner
   does that.
