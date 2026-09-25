@@ -7941,6 +7941,77 @@ function byKeySuffix(rows, needle) {
     JSON.stringify({ goodsCny: batch.goodsCny, missing: batch.missing }));
 })();
 
+// ================= Owner, 2026-09-25: faster saveChinaBatch (per-execution read cache) ========
+//
+// Real Apps Script bills time for every Spreadsheet service call; one saveChinaBatch used to
+// cost 18-21 s because the same sheets were read several times over as the module recomputed
+// rates and synced «Заказы на фабрике». These three checks prove the fix without touching the
+// costing logic itself: a ceiling on how many Spreadsheet calls one save may cost (so a
+// regression that brings back a duplicate read is caught), that a write always invalidates the
+// cache of ITS OWN sheet (a read right after a write must see the new value, never a stale one),
+// and that the answer already carries the same money picture getChinaMoney() would.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch(batch28Payload({}), 'Николай');
+  h.saveChinaPayment({ date: '2026-08-27', amountRub: 100000, rate: 12.4, orderNo: '28' }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-10', source: 'скрипт',
+    orders: [{ orderNo: '28', date: '2026-08-27', receivedCny: 5000, totalCny: 5000 }],
+    receipts: [{ date: '2026-08-27', goodsCny: 5000 }]
+  }, 'Николай');
+
+  h.resetApiCallCounts();
+  const answer = h.saveChinaBatch(batch28Payload({ weightKg: 700 }), 'Николай');
+  const total = h.totalApiCalls();
+  check('faster saveChinaBatch: one save (existing batch, report and payment already present) ' +
+    'costs well under half of the pre-cache baseline\'s ~96 Spreadsheet calls',
+    total > 0 && total <= 55, 'total Spreadsheet calls: ' + total + ' -- ' + JSON.stringify(h.apiCallCounts()));
+
+  check('faster saveChinaBatch: the answer already carries the money picture, equal to a separate getChinaMoney()',
+    answer.money && JSON.stringify(answer.money) === JSON.stringify(h.getChinaMoney()),
+    JSON.stringify(answer.money));
+})();
+
+(function () {
+  // Read-after-write, inside ONE execution: chinaBatchesPicture(ss) is called straight after
+  // writeChinaBatch() writes the very sheet it is about to re-read — if the write did not
+  // invalidate this execution's cache, the answer would show the batch's PREVIOUS weight.
+  const h = withChina();
+  const first = h.saveChinaBatch(batch28Payload({ comment: 'первая версия' }), 'Николай').batches[0];
+  const answer = h.saveChinaBatch(batch28Payload({ id: first.id, comment: 'вторая версия' }), 'Николай');
+  check('faster saveChinaBatch: a write invalidates this sheet\'s cache — the very next read sees the new value',
+    answer.batches[0].comment === 'вторая версия', JSON.stringify(answer.batches[0].comment));
+})();
+
+(function () {
+  // The per-execution reset (chinaResetCache() as the first statement of every top-level
+  // action) matters separately from write-invalidation: it is what protects a sheet a write
+  // action READS but does not itself WRITE. saveChinaBatch reads «Платежи» (for the
+  // «последняя оплата» rate fallback) without writing it — so a rate change made by something
+  // OTHER than this execution's own writes (here: a raw poke of the sheet, standing in for the
+  // Apps Script container-reuse trap the reset guards against) must still be picked up by the
+  // NEXT saveChinaBatch call, not served from a cache an earlier action in this same session
+  // left warm.
+  const h = withChina();
+  h.saveChinaPayment({ date: '2026-08-20', amountRub: 100000, rate: 12.4, comment: 'unmatched' }, 'Николай');
+  const first = h.saveChinaBatch(china923Payload({ rubRate: 0 }), 'Николай').batches[0];
+  check('faster saveChinaBatch: sets up with the last-payment rate as expected (12.4)',
+    first.goodsRateSource === 'последняя оплата' && first.goodsRate === 12.4,
+    JSON.stringify({ source: first.goodsRateSource, rate: first.goodsRate }));
+
+  // Raw poke of «Платежи» — bypasses every write helper in ChinaOrders.gs, so only the
+  // PER-ACTION RESET (not the write-time invalidation) can make the next read see it.
+  const payCtxSheet = h.getTargetSheet('Платежи');
+  const dump = payCtxSheet.__dump();
+  dump[1][3] = 20; // 'Курс ₽/¥' column of the one payment row
+  payCtxSheet.__setData(dump);
+
+  const again = h.saveChinaBatch(china923Payload({ id: first.id, rubRate: 0, weightKg: 968 }), 'Николай').batches[0];
+  check('faster saveChinaBatch: the per-action reset picks up a rate changed since the last action, not a stale cache',
+    again.goodsRateSource === 'последняя оплата' && again.goodsRate === 20,
+    JSON.stringify({ source: again.goodsRateSource, rate: again.goodsRate }));
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

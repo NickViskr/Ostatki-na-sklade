@@ -20,6 +20,10 @@ interface ChinaAnswer {
     payments?: ChinaPayment[];
     settings?: Record<string, number | string>;
     warnings?: string[];
+    /** Owner, 2026-09-25: every China write now folds the same picture `getChinaMoney` answers
+     * with into its own answer (server-side, ChinaOrders.gs), so the browser can skip the extra
+     * ~6 s request that used to follow every save. */
+    money?: ChinaMoney;
   } & Partial<ChinaMoney> & Partial<ChinaForecastData> & Partial<ChinaForecastResult>;
 }
 
@@ -145,15 +149,14 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], payments: result.data.payments || get().payments,
       settings: result.data.settings || get().settings, loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money });
     toast.success('Партия сохранена, себестоимость пересчитана');
-    // Item 84: refreshes run in the background, not awaited — the owner watches the modal
-    // close right after the save answers, not after two more requests (~10 s together).
-    void Promise.all([
-      get().fetchChinaMoney(),
-      // Item 83c: the batch save may have changed «Заказы на фабрике» (syncChinaFactoryOrders
-      // on the server) — refresh the warehouse's own copy so the pipeline sees it right away.
-      useWarehouseStore.getState().fetchFactoryOrders()
-    ]).catch(() => {});
+    // Item 84/owner 2026-09-25: the save's own answer already carries the money picture, so
+    // only «Заказы на фабрике» still needs a background refresh (syncChinaFactoryOrders on the
+    // server may have changed it) — the owner watches the modal close right after the save
+    // answers, not after another request.
+    if (!result.data.money) void get().fetchChinaMoney().catch(() => {});
+    void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
     return true;
   },
 
@@ -166,8 +169,8 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success('Оплата учтена, курс партий пересчитан');
-    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -180,8 +183,8 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success('Оплата удалена, курс партий пересчитан');
-    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -194,13 +197,12 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money });
     toast.success('Партия удалена');
-    // Item 84: same reasoning as saveChinaBatch above — do not make the caller wait.
-    void Promise.all([
-      get().fetchChinaMoney(),
-      // Item 83c: same reasoning as saveChinaBatch above.
-      useWarehouseStore.getState().fetchFactoryOrders()
-    ]).catch(() => {});
+    // Item 84/owner 2026-09-25: same reasoning as saveChinaBatch above — money comes with the
+    // answer, «Заказы на фабрике» still needs its own background refresh.
+    if (!result.data.money) void get().fetchChinaMoney().catch(() => {});
+    void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
     return true;
   },
 
@@ -213,8 +215,8 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success('Расход учтён в себестоимости партии');
-    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -227,8 +229,8 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success('Расход удалён, себестоимость пересчитана');
-    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -244,8 +246,8 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return null;
     }
     set({ batches: result.data.batches || get().batches, loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success('Отчёт загружен, партии пересчитаны');
-    void get().fetchChinaMoney().catch(() => {});
     return result.data.warnings || [];
   },
 
@@ -253,12 +255,13 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     set({ isSaving: true });
     const result = await callChina('matchChinaPayment', { paymentId, receiptId });
     set({ isSaving: false });
-    if (result.status !== 'success') {
+    if (result.status !== 'success' || !result.data) {
       toast.error(result.message || 'Не удалось сопоставить оплату');
       return false;
     }
+    set({ batches: result.data.batches || get().batches, payments: result.data.payments || get().payments });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success('Оплата сопоставлена с поступлением из отчёта');
-    void Promise.all([get().fetchChinaMoney(), get().fetchChinaBatches()]).catch(() => {});
     return true;
   },
 
@@ -266,12 +269,13 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     set({ isSaving: true });
     const result = await callChina('unmatchChinaPayment', { paymentId });
     set({ isSaving: false });
-    if (result.status !== 'success') {
+    if (result.status !== 'success' || !result.data) {
       toast.error(result.message || 'Не удалось отменить сопоставление');
       return false;
     }
+    set({ batches: result.data.batches || get().batches, payments: result.data.payments || get().payments });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success('Сопоставление отменено');
-    void Promise.all([get().fetchChinaMoney(), get().fetchChinaBatches()]).catch(() => {});
     return true;
   },
 
@@ -279,12 +283,13 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     set({ isSaving: true });
     const result = await callChina('setChinaReceiptHistory', { receiptId, history });
     set({ isSaving: false });
-    if (result.status !== 'success') {
+    if (result.status !== 'success' || !result.data) {
       toast.error(result.message || 'Не удалось отметить поступление');
       return false;
     }
+    set({ batches: result.data.batches || get().batches, payments: result.data.payments || get().payments });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
     toast.success(history ? 'Поступление отмечено историей' : 'Поступление возвращено из истории');
-    void Promise.all([get().fetchChinaMoney(), get().fetchChinaBatches()]).catch(() => {});
     return true;
   },
 

@@ -217,7 +217,69 @@ function chinaIdFromSetting(raw) {
 // spreadsheet sits east of it. Set every time the spreadsheet is opened.
 let _chinaTimeZone = '';
 
+/**
+ * Per-execution read cache for the module «Заказы в Китае» (owner, 2026-09-25: one save took
+ * 18-21 s in Apps Script, almost all of it Spreadsheet service calls — openById/getSheetByName/
+ * getRange().getValues()/setValues, each 0.1-1 s). A single top-level action (saveChinaBatch and
+ * the like) reads the same sheets several times over as it recomputes rates and syncs
+ * «Заказы на фабрике» — this cache remembers the spreadsheet handle and each sheet's raw
+ * getRange().getValues() result for the rest of that ONE action.
+ *
+ * `chinaResetCache()` is the first statement of every top-level action below. Without it — or
+ * if a container reuses global state across separate calls, a known Apps Script trap — a write
+ * left over from an earlier action could hide behind a cached read from this one, and money
+ * would be computed from a number already overwritten on the sheet.
+ *
+ * A stale read after a write is exactly that money bug, so invalidation is NOT left to every
+ * write call site to remember: `chinaSheet()` hands out a wrapped sheet handle
+ * (chinaCachedSheetHandle) whose write methods — setValues/setValue/appendRow/deleteRow/
+ * clearContent(s), including through getRange() — invalidate this sheet's cached values the
+ * moment they fire. Whatever helper in this file writes a row, it writes through that one
+ * choke point, so a read that follows a write inside the same action always sees the new value.
+ *
+ * `_chinaCache` is null between actions (and whenever a helper is called directly, as the test
+ * stand's per-function exports do) — every cached path below falls back to the exact same
+ * uncached behaviour the module had before this cache existed.
+ */
+let _chinaCache = null;
+
+function chinaResetCache() {
+  _chinaCache = { ss: null, sheets: {}, values: {} };
+}
+
+function chinaCacheInvalidate(name) {
+  if (_chinaCache) delete _chinaCache.values[name];
+}
+
+// Wraps a live sheet so every write through it — whichever of this file's write helpers made
+// it — drops this execution's cached read of that sheet. See chinaResetCache above.
+function chinaCachedSheetHandle(sheet, name) {
+  const handle = {
+    getName: function () { return sheet.getName(); },
+    getLastRow: function () { return sheet.getLastRow(); },
+    getLastColumn: function () { return sheet.getLastColumn(); },
+    appendRow: function (row) { chinaCacheInvalidate(name); return sheet.appendRow(row); },
+    deleteRow: function (rowNumber) { chinaCacheInvalidate(name); return sheet.deleteRow(rowNumber); },
+    getRange: function () {
+      const range = sheet.getRange.apply(sheet, arguments);
+      return {
+        getValues: function () { return range.getValues(); },
+        setValues: function (values) { chinaCacheInvalidate(name); return range.setValues(values); },
+        setValue: function (value) { chinaCacheInvalidate(name); return range.setValue(value); },
+        clearContent: function () { chinaCacheInvalidate(name); return range.clearContent(); }
+      };
+    }
+  };
+  if (typeof sheet.setFrozenRows === 'function') handle.setFrozenRows = function () { return sheet.setFrozenRows.apply(sheet, arguments); };
+  if (typeof sheet.getSheetId === 'function') handle.getSheetId = function () { return sheet.getSheetId(); };
+  if (typeof sheet.clearContents === 'function') {
+    handle.clearContents = function () { chinaCacheInvalidate(name); return sheet.clearContents(); };
+  }
+  return handle;
+}
+
 function chinaSpreadsheet() {
+  if (_chinaCache && _chinaCache.ss) return _chinaCache.ss;
   const id = chinaIdFromSetting(PropertiesService.getScriptProperties().getProperty(CHINA_PROPERTY));
   if (!id) {
     throw new Error('Таблица «Заказы в Китае» не настроена: в свойствах скрипта нет ' + CHINA_PROPERTY);
@@ -229,18 +291,24 @@ function chinaSpreadsheet() {
     throw new Error('Таблица «Заказы в Китае» недоступна: ' + errorMessage(e));
   }
   _chinaTimeZone = typeof ss.getSpreadsheetTimeZone === 'function' ? String(ss.getSpreadsheetTimeZone() || '') : '';
+  if (_chinaCache) _chinaCache.ss = ss;
   return ss;
 }
 
 function chinaSheet(ss, name, headers) {
+  if (_chinaCache && _chinaCache.sheets[name]) return _chinaCache.sheets[name];
   const sheet = getOrCreateSheet(ss, name, headers);
   ensureColumns(sheet, headers);
-  return sheet;
+  if (!_chinaCache) return sheet;
+  const handle = chinaCachedSheetHandle(sheet, name);
+  _chinaCache.sheets[name] = handle;
+  return handle;
 }
 
 // Creates every sheet of the module, seeds the directory and throws out the empty sheet
 // Google puts into a brand new spreadsheet. Idempotent: running it twice changes nothing.
 function setupChinaSpreadsheet() {
+  chinaResetCache();
   const ss = chinaSpreadsheet();
   const plan = [
     { name: CHINA_BATCHES_SHEET, headers: CHINA_BATCH_HEADERS },
@@ -320,12 +388,32 @@ function nameChinaSpreadsheet(ss) {
 // (Review of 2026-09-24: writing in the order of the constants shifted every value of a
 // batch on the live spreadsheet, and its cost read back as 0.)
 function chinaReadSheet(ss, name, headers) {
+  return chinaReadSheetImpl(ss, name, headers, false);
+}
+
+// Owner-facing settings ('Справочник') are small, cheap to read and — unlike a batch's own
+// data — can plausibly be edited by hand in the live sheet between two calls that this
+// execution's cache has no way to see (getChinaSettings is never itself a top-level action, so
+// nothing resets the cache just for it). `forceFresh` always re-reads the sheet while still
+// refreshing the cache entry, so any OTHER read of the same sheet later in this execution still
+// benefits from it.
+function chinaReadSheetFresh(ss, name, headers) {
+  return chinaReadSheetImpl(ss, name, headers, true);
+}
+
+function chinaReadSheetImpl(ss, name, headers, forceFresh) {
   const sheet = chinaSheet(ss, name, headers);
-  const lastRow = sheet.getLastRow();
-  const lastCol = Math.max(sheet.getLastColumn(), headers.length);
-  const values = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+  let values;
+  if (!forceFresh && _chinaCache && _chinaCache.values[name]) {
+    values = _chinaCache.values[name];
+  } else {
+    const lastRow = sheet.getLastRow();
+    const lastCol = Math.max(sheet.getLastColumn(), headers.length);
+    values = sheet.getRange(1, 1, Math.max(lastRow, 1), lastCol).getValues();
+    if (_chinaCache) _chinaCache.values[name] = values;
+  }
   const head = values[0].map(function (h) { return String(h).trim(); });
-  if (lastRow <= 1) return { sheet: sheet, headers: head, rows: [] };
+  if (values.length <= 1) return { sheet: sheet, headers: head, rows: [] };
   const rows = [];
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
@@ -340,7 +428,7 @@ function chinaReadSheet(ss, name, headers) {
 
 function getChinaSettings() {
   const ss = chinaSpreadsheet();
-  const ctx = chinaReadSheet(ss, CHINA_SETTINGS_SHEET, CHINA_SETTINGS_HEADERS);
+  const ctx = chinaReadSheetFresh(ss, CHINA_SETTINGS_SHEET, CHINA_SETTINGS_HEADERS);
   const out = {};
   CHINA_SETTINGS_DEFAULTS.forEach(function (d) { out[d.key] = d.value; });
   ctx.rows.forEach(function (r) {
@@ -636,8 +724,20 @@ function chinaRemainingOf(ledger, batch) {
   };
 }
 
+/**
+ * The full-state answer of the module — split the same way getChinaMoney()/chinaMoneyPicture
+ * is (owner, 2026-09-25): `chinaBatchesPicture(ss)` does the actual work and reuses whatever
+ * this execution's read cache already holds, so every China write that ends its own action with
+ * `return chinaBatchesPicture(ss);` gets this answer WITHOUT throwing away the reads it already
+ * paid for. `getChinaBatches()` itself resets the cache first — it is also dispatched on its
+ * own, as a plain read with no write before it, so it must not trust a leftover cache.
+ */
 function getChinaBatches() {
-  const ss = chinaSpreadsheet();
+  chinaResetCache();
+  return chinaBatchesPicture(chinaSpreadsheet());
+}
+
+function chinaBatchesPicture(ss) {
   const batches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows.map(chinaBatchFromRow);
   const lines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows.map(chinaLineFromRow);
   const costs = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS).rows.map(chinaCostFromRow);
@@ -653,7 +753,10 @@ function getChinaBatches() {
   });
   lines.forEach(function (l) { if (byId[l.batchId]) byId[l.batchId].lines.push(l); });
   costs.forEach(function (c) { if (byId[c.batchId]) byId[c.batchId].costs.push(c); });
-  return { batches: batches, payments: payments, settings: getChinaSettings() };
+  // Owner, 2026-09-25: the same picture getChinaMoney() answers with, folded in here so every
+  // China write (saveChinaBatch and the rest) hands the browser its money update in the SAME
+  // response, instead of a second ~6 s getChinaMoney request.
+  return { batches: batches, payments: payments, settings: getChinaSettings(), money: chinaMoneyPicture(ss) };
 }
 
 // ---------------------------------------------------------------- costing (no sheets here)
@@ -1127,6 +1230,7 @@ function chinaRowFrom(headers, values) {
 }
 
 function saveChinaBatch(data, username) {
+  chinaResetCache();
   if (!data || typeof data !== 'object') throw new Error('Некорректные данные партии');
   const code = String(data.code || '').trim();
   if (!code) throw new Error('Не указан код партии');
@@ -1252,7 +1356,7 @@ function saveChinaBatch(data, username) {
   // Item 83c: every save (a new batch, an arrival/final-file update, a status change) keeps
   // «Заказы на фабрике» in step — split lines summed, one row per (batch, our article).
   syncChinaFactoryOrders(username);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 /**
@@ -2142,6 +2246,7 @@ function chinaStripRow(r) {
 }
 
 function deleteChinaBatch(data, username) {
+  chinaResetCache();
   const id = String((data || {}).id || '').trim();
   if (!id) throw new Error('Не указана партия для удаления');
   const ss = chinaSpreadsheet();
@@ -2186,7 +2291,7 @@ function deleteChinaBatch(data, username) {
   Logger.log('Заказы в Китае: партия ' + id + ' удалена пользователем ' + (username || '—'));
   // Item 83c: an active row of the deleted batch is removed; a 'received' one stays as history.
   syncChinaFactoryOrders(username);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 /**
@@ -2203,6 +2308,10 @@ function deleteChinaBatch(data, username) {
  * owner to sort out by hand (the caller must not delete it when this throws).
  */
 function restoreChinaBatch(payload, username) {
+  // Reached from Code.gs's restoreArchivedItem/restoreMultipleArchivedItems, not from a
+  // 'case' of its own in the dispatcher — still a top-level entry into this module's writes,
+  // so it resets the read cache exactly like every function above.
+  chinaResetCache();
   const ss = chinaSpreadsheet();
   const p = payload || {};
   const originalBatch = p.batch || {};
@@ -2325,6 +2434,7 @@ function chinaReplaceBatchCosts(ss, batchId, incoming, username) {
  * more is coming. Column 'Расходы РФ внесены'; feeds straight into `missing`/`closed` on recost.
  */
 function setChinaRubCostsDone(data, username) {
+  chinaResetCache();
   const batchId = String((data || {}).batchId || '').trim();
   if (!batchId) throw new Error('Не указана партия');
   const done = !!(data || {}).done;
@@ -2337,10 +2447,11 @@ function setChinaRubCostsDone(data, username) {
   ctx.sheet.getRange(targetRow, col, 1, 1).setValues([[done ? 'да' : '']]);
   recalcChinaBatch(ss, batchId, username);
   chinaRecostBorrowers(ss, username, [batchId]);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 function saveChinaBatchCost(data, username) {
+  chinaResetCache();
   if (!data || typeof data !== 'object') throw new Error('Некорректные данные расхода');
   const batchId = String(data.batchId || '').trim();
   if (!batchId) throw new Error('Не указана партия расхода');
@@ -2381,10 +2492,11 @@ function saveChinaBatchCost(data, username) {
 
   recalcChinaBatch(ss, batchId, username);
   chinaRecostBorrowers(ss, username, [batchId]);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 function saveChinaPayment(data, username) {
+  chinaResetCache();
   if (!data || typeof data !== 'object') throw new Error('Некорректные данные оплаты');
   const purpose = String(data.purpose || '').trim() || CHINA_PAYMENT_PURPOSES[0];
   if (CHINA_PAYMENT_PURPOSES.indexOf(purpose) === -1) {
@@ -2442,10 +2554,11 @@ function saveChinaPayment(data, username) {
   // Item 81g-3: any payment write can move a rate somewhere in the ledger — every batch is
   // re-costed, not just the ones the old orderNo path touched.
   chinaRecostAll(ss, username);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 function deleteChinaPayment(data, username) {
+  chinaResetCache();
   const id = String((data || {}).id || '').trim();
   if (!id) throw new Error('Не указана оплата для удаления');
   const ss = chinaSpreadsheet();
@@ -2465,7 +2578,7 @@ function deleteChinaPayment(data, username) {
   ctx.sheet.deleteRow(targetRow);
   recalcChinaOrders(ss, [orderNo], username);
   chinaRecostAll(ss, username);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 /** Every batch of the given orders is costed again: their rate has just moved. */
@@ -2487,6 +2600,7 @@ function recalcChinaOrders(ss, orderNumbers, username) {
 }
 
 function deleteChinaBatchCost(data, username) {
+  chinaResetCache();
   const id = String((data || {}).id || '').trim();
   if (!id) throw new Error('Не указан расход для удаления');
   const ss = chinaSpreadsheet();
@@ -2501,7 +2615,7 @@ function deleteChinaBatchCost(data, username) {
     recalcChinaBatch(ss, batchId, username);
     chinaRecostBorrowers(ss, username, [batchId]);
   }
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 // ================================================================================
@@ -2947,6 +3061,7 @@ function chinaAllocateGoodsLedger(reports, receipts) {
  * returns getChinaBatches() unchanged, plus the warnings.
  */
 function saveChinaReport(data, username) {
+  chinaResetCache();
   const parsed = chinaValidateReportPayload(data);
   const ss = chinaSpreadsheet();
 
@@ -2972,7 +3087,7 @@ function saveChinaReport(data, username) {
   if (isRevision) {
     const same = chinaReportCanonical(orders, parsed.receipts, freights, carriedOverCnyRaw, openingFreightUsdRaw) ===
       chinaReportCanonical(newest.orders, newest.receipts, newest.freights, newest.carriedOverCny, newest.openingFreightUsd);
-    if (same) return Object.assign(getChinaBatches(), { warnings: [] });
+    if (same) return Object.assign(chinaBatchesPicture(ss), { warnings: [] });
   }
 
   // Movements are the difference against whatever the LAST SAVED state was: for an ordinary
@@ -3102,7 +3217,7 @@ function saveChinaReport(data, username) {
   const allocation = chinaAllocateGoodsLedger(allReports, allReceipts);
   warnings.push.apply(warnings, allocation.warnings);
 
-  return Object.assign(getChinaBatches(), { warnings: warnings });
+  return Object.assign(chinaBatchesPicture(ss), { warnings: warnings });
 }
 
 // ================================================================================
@@ -3226,22 +3341,24 @@ function chinaUnmatchInternal(ss, paymentId, username) {
 }
 
 function matchChinaPayment(data, username) {
+  chinaResetCache();
   const paymentId = String((data || {}).paymentId || '').trim();
   const receiptId = String((data || {}).receiptId || '').trim();
   if (!paymentId || !receiptId) throw new Error('Не указаны оплата и поступление для сопоставления');
   const ss = chinaSpreadsheet();
   chinaMatchInternal(ss, paymentId, receiptId, username);
   chinaRecostAll(ss, username);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 function unmatchChinaPayment(data, username) {
+  chinaResetCache();
   const paymentId = String((data || {}).paymentId || '').trim();
   if (!paymentId) throw new Error('Не указана оплата для отмены сопоставления');
   const ss = chinaSpreadsheet();
   chinaUnmatchInternal(ss, paymentId, username);
   chinaRecostAll(ss, username);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 /**
@@ -3257,6 +3374,7 @@ function unmatchChinaPayment(data, username) {
  * is resolved against.
  */
 function setChinaReceiptHistory(data, username) {
+  chinaResetCache();
   const receiptId = String((data || {}).receiptId || '').trim();
   if (!receiptId) throw new Error('Не указано поступление');
   const history = !!(data || {}).history;
@@ -3283,7 +3401,7 @@ function setChinaReceiptHistory(data, username) {
   }
 
   chinaRecostAll(ss, username);
-  return getChinaBatches();
+  return chinaBatchesPicture(ss);
 }
 
 /**
@@ -3447,9 +3565,20 @@ function chinaLotsKnownRub(lots, receiptsById, rubField, cnyField) {
  * Item 81g-2's read: everything the browser needs to show payments, receipts, orders and the
  * pool — lock-free (see Code.gs) and uncached (see server.ts), same reasoning as getChinaBatches
  * before it. Recomputed from the ledger every call, same as chinaAllocateGoodsLedger itself.
+ *
+ * Split into `chinaMoneyPicture(ss)` (pure per-`ss` computation, no cache reset of its own) and
+ * the thin `getChinaMoney()` wrapper below it, so `getChinaBatches()` and every China write can
+ * fold the SAME picture into their own answer (owner, 2026-09-25: the browser no longer has to
+ * follow a save with a separate ~6 s getChinaMoney request) by calling chinaMoneyPicture(ss)
+ * directly, reusing whatever this execution's read cache already holds — a nested
+ * chinaResetCache() here would throw that reuse away and read reports/receipts/payments again.
  */
 function getChinaMoney() {
-  const ss = chinaSpreadsheet();
+  chinaResetCache();
+  return chinaMoneyPicture(chinaSpreadsheet());
+}
+
+function chinaMoneyPicture(ss) {
   const reports = chinaReadSheet(ss, CHINA_REPORTS_SHEET, CHINA_REPORT_HEADERS).rows.map(chinaReportFromRow);
   const receipts = chinaReadSheet(ss, CHINA_RECEIPTS_SHEET, CHINA_RECEIPT_HEADERS).rows.map(chinaReceiptFromRow);
   const payments = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS).rows.map(chinaPaymentFromRow);
@@ -4015,6 +4144,7 @@ function chinaForecastCalc(input, ctx) {
 // The action behind the «посчитать прогноз» button — a pure read of the module's own
 // spreadsheet followed by chinaForecastCalc; it writes nothing.
 function calcChinaForecast(data) {
+  chinaResetCache();
   const ss = chinaSpreadsheet();
   return chinaForecastCalc(data, chinaForecastContext(ss));
 }
@@ -4043,6 +4173,7 @@ function chinaForecastFromRow(r) {
  * with what `chinaForecastCalc` would say about the same input.
  */
 function saveChinaForecast(data, username) {
+  chinaResetCache();
   const d = data || {};
   const lines = Array.isArray(d.lines) ? d.lines : [];
   if (lines.length === 0) throw new Error('В прогнозе нет ни одной строки товара');
@@ -4081,6 +4212,7 @@ function saveChinaForecast(data, username) {
 }
 
 function deleteChinaForecast(data, username) {
+  chinaResetCache();
   const id = String((data || {}).id || '').trim();
   if (!id) throw new Error('Не указан ID прогноза');
   const ss = chinaSpreadsheet();
@@ -4177,6 +4309,7 @@ function chinaTariffSummary(tariffs) {
 }
 
 function getChinaForecastData() {
+  chinaResetCache();
   const ss = chinaSpreadsheet();
   const ctx = chinaForecastContext(ss);
   const forecasts = chinaReadSheet(ss, CHINA_FORECASTS_SHEET, CHINA_FORECAST_HEADERS).rows.map(chinaForecastFromRow);
@@ -4378,6 +4511,7 @@ function syncChinaFactoryOrders(username) {
  * later manual re-run; every regular China write already calls `syncChinaFactoryOrders` itself.
  */
 function syncChinaFactoryOrdersReport(username) {
+  chinaResetCache();
   const today = getTodayDateString();
   const before = factoryPipelineQtyByArticleGs(getFactoryOrders(), today);
   const summary = syncChinaFactoryOrders(username);

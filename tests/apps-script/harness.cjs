@@ -51,6 +51,17 @@ FakeDate.__now = Date.parse('2026-01-05T09:00:00Z'); // понедельник, 
 // ---------- Логи ----------
 const logs = [];
 
+// ---------- Item «faster saveChinaBatch»: a global counter of Spreadsheet service calls ----------
+// Real Apps Script bills time for EVERY Spreadsheet service call (openById, getSheetByName,
+// getRange().getValues()/setValues, getLastRow, flush), 0.1-1 s each — the measurement this
+// harness needs to prove a caching change actually cut the call count, not just moved work
+// around. Counted globally (every fake sheet, every openById) rather than per-sheet: a save
+// touches several sheets, and the thing that costs money is the TOTAL number of calls.
+let apiCallCounts = { openById: 0, getSheetByName: 0, getValues: 0, setValues: 0, getLastRow: 0, appendRow: 0, deleteRow: 0, flush: 0 };
+function resetApiCallCounts() {
+  apiCallCounts = { openById: 0, getSheetByName: 0, getValues: 0, setValues: 0, getLastRow: 0, appendRow: 0, deleteRow: 0, flush: 0 };
+}
+
 // ---------- Фальшивый лист (мини-модель Google Sheets) ----------
 // name — необязательное имя листа (для getName(), нужно getSheetByNameRobust из Code.gs,
 // которая ищет лист перебором ss.getSheets(), а не по прямому ключу).
@@ -65,10 +76,12 @@ function makeFakeSheet(headers, name) {
   return {
     getName() { return name; },
     appendRow(row) {
+      apiCallCounts.appendRow++;
       data.push(row.slice());
     },
     setFrozenRows() { /* нет визуального представления в стенде — заглушка */ },
     getLastRow() {
+      apiCallCounts.getLastRow++;
       for (let i = data.length - 1; i >= 0; i--) {
         const row = data[i];
         if (row && row.some(v => String(v).trim() !== '')) return i + 1; // 1-based
@@ -88,6 +101,7 @@ function makeFakeSheet(headers, name) {
       return {
         getValues() {
           getValuesCallCount++;
+          apiCallCounts.getValues++;
           const result = [];
           for (let r = 0; r < numRows; r++) {
             const rowIdx = startRow - 1 + r;
@@ -104,6 +118,7 @@ function makeFakeSheet(headers, name) {
         },
         setValues(values) {
           setValuesCallCount++;
+          apiCallCounts.setValues++;
           for (let r = 0; r < values.length; r++) {
             const rowIdx = startRow - 1 + r;
             while (data.length <= rowIdx) data.push([]);
@@ -135,6 +150,7 @@ function makeFakeSheet(headers, name) {
     // ни удаление — а правка это и есть «удалить и провести заново». Нумерация как в Apps
     // Script: 1-based, строка 1 — заголовки.
     deleteRow(rowNumber) {
+      apiCallCounts.deleteRow++;
       const idx = Number(rowNumber) - 1;
       if (idx <= 0 || idx >= data.length) return;
       data.splice(idx, 1);
@@ -230,13 +246,14 @@ const sandbox = {
     // The payment calendar is a DIFFERENT spreadsheet, opened by id. Only the registered id
     // opens: an unknown id throws, exactly as Apps Script does when access is missing.
     openById: (id) => {
+      apiCallCounts.openById++;
       if (id !== targetSpreadsheetId) throw new Error('Requested entity was not found: ' + id);
       return {
         getId: () => targetSpreadsheetId,
         getName: () => targetSpreadsheetName,
         getSpreadsheetTimeZone: () => targetSpreadsheetTimeZone,
         rename: (name) => { targetSpreadsheetName = name; },
-        getSheetByName: (name) => targetSheets[name] || null,
+        getSheetByName: (name) => { apiCallCounts.getSheetByName++; return targetSheets[name] || null; },
         getSheets: () => Object.keys(targetSheets).map(k => targetSheets[k]),
         insertSheet: (name) => {
           const sheet = makeFakeSheet([], name);
@@ -266,7 +283,7 @@ const sandbox = {
         return sheet;
       }
     }),
-    flush: () => { /* нет очереди отложенной записи в стенде — заглушка */ }
+    flush: () => { apiCallCounts.flush++; /* нет очереди отложенной записи в стенде — заглушка */ }
   }
 };
 const context = vm.createContext(sandbox);
@@ -375,6 +392,9 @@ module.exports = {
     sheetRegistry[name] = sheet;
     return sheet;
   },
+  resetApiCallCounts,
+  apiCallCounts() { return Object.assign({}, apiCallCounts); },
+  totalApiCalls() { return Object.keys(apiCallCounts).reduce((s, k) => s + apiCallCounts[k], 0); },
   clearScriptProperties() { scriptProperties = {}; },
   resetTargetSpreadsheet() { targetSheets = {}; },
   getTargetSheet(name) { return targetSheets[name] || null; },
@@ -716,6 +736,9 @@ module.exports = {
   chinaReportCanonical: (...args) => context.chinaReportCanonical(...args),
   // ---------- Item 81g-2: payment matching, freight FIFO, getChinaMoney ----------
   getChinaMoney: (...args) => context.getChinaMoney(...args),
+  chinaMoneyPicture: (...args) => context.chinaMoneyPicture(...args),
+  chinaBatchesPicture: (...args) => context.chinaBatchesPicture(...args),
+  chinaResetCache: (...args) => context.chinaResetCache(...args),
   matchChinaPayment: (...args) => context.matchChinaPayment(...args),
   unmatchChinaPayment: (...args) => context.unmatchChinaPayment(...args),
   chinaPaymentCandidates: (...args) => context.chinaPaymentCandidates(...args),
