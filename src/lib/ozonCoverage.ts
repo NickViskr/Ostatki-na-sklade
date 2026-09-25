@@ -1,4 +1,4 @@
-import { KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { FactoryOrder, KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
 
 // ===== Модуль планирования поставок Ozon =====
 // Часть 1: недели по МСК, сопоставление артикулов, скорость продаж.
@@ -494,6 +494,94 @@ export function calcSupplyRecommendation(
     partialByMaxDays,
     fullBoxDays
   };
+}
+
+/** Дней, разделяющих две ISO-даты (toDay − fromDay), считается через UTC-полночь. */
+function daysBetweenIso(fromDay: string, toDay: string): number {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  return Math.round((Date.parse(toDay + 'T00:00:00Z') - Date.parse(fromDay + 'T00:00:00Z')) / DAY_MS);
+}
+
+export interface FactoryOnOrderResult {
+  /** Заказано и ещё не получено, шт, по артикулу — то, что входит в ТРУБУ. */
+  qty: Record<string, number>;
+  /** Ручные заказы, скрытые из ТРУБЫ: по их артикулу есть активный заказ из Китая, а
+   * владелец ещё не подтвердил, что это РАЗНЫЕ заказы. */
+  hiddenManual: FactoryOrder[];
+  /** Просроченные заказы из Китая (id → сколько дней просрочки). Ручные просроченные заказы
+   * сюда не попадают — они просто выпадают из ТРУБЫ, как и раньше (пункт 35). */
+  late: Record<string, number>;
+}
+
+/**
+ * Пункт 83d/83e. ЕДИНОЕ правило «что считается заказанным на фабрике и ещё не полученным» —
+ * общее для OzonStocksTab и Dashboard (иначе они неизбежно разойдутся), и зеркалируется на
+ * сервере (Code.gs, `factoryPipelineQtyByArticleGs`) для отчёта до/после синхронизации.
+ *
+ * - 'received' и 'replaced' никогда не считаются: товар либо уже пришёл, либо ручной заказ
+ *   закрыт как дубликат заказа из Китая.
+ * - Ручной заказ (`source === ''`) выпадает из ТРУБЫ, если дата ожидания в прошлом — фабрика
+ *   сорвала срок (правило пункта 35 без изменений).
+ * - Заказ из Китая ('Китай' / 'Китай прогноз') остаётся в ТРУБЕ даже просроченным: недосчёт
+ *   может лишь навести на мысль о лишнем заказе, а перебор — скрыть нехватку. `late` показывает,
+ *   на сколько дней просрочка.
+ * - An active manual row is hidden whenever the SAME article has a China row (active OR
+ *   RECEIVED — a China row never disappears from `orders`, only its status changes) whose
+ *   `orderedAt` (shipping date) is on or after the manual row's own `orderedAt`. From item 83
+ *   on, China orders reach the warehouse only through the China module, so a China shipment
+ *   no older than the manual order is that SAME order — arrival must not un-hide it, or the
+ *   goods are counted twice (as received stock AND as the still-open manual order). Exception:
+ *   `checked` (the owner confirmed «это разные заказы») — then both are counted, in every
+ *   state. Hidden rows are returned separately so the screen keeps offering the two buttons
+ *   even after arrival — the owner still has to close the manual row as 'replaced'.
+ *   A manual row ordered AFTER the China shipment is NOT hidden: it is a later, separate order.
+ */
+export function factoryOnOrderByArticle(orders: FactoryOrder[], todayIso: string): FactoryOnOrderResult {
+  const list = orders || [];
+  // Every China row (active or received — a 'replaced' status is a MANUAL-only state, a China
+  // row is never 'replaced') is a candidate to hide a manual row of the same article, keyed by
+  // article -> the shipping dates of every such row still present in `orders`.
+  const chinaOrderedAtByArticle = new Map<string, string[]>();
+  for (const o of list) {
+    const source = String(o.source || '').trim();
+    if (source !== 'Китай' && source !== 'Китай прогноз') continue;
+    const article = String(o.article || '').trim();
+    if (!article) continue;
+    const list2 = chinaOrderedAtByArticle.get(article) || [];
+    list2.push(String(o.orderedAt || '').trim());
+    chinaOrderedAtByArticle.set(article, list2);
+  }
+
+  const qty: Record<string, number> = {};
+  const late: Record<string, number> = {};
+  const hiddenManual: FactoryOrder[] = [];
+
+  for (const o of list) {
+    const status = String(o.status || '').trim();
+    if (status === 'received' || status === 'replaced') continue;
+    const article = String(o.article || '').trim();
+    if (!article) continue;
+    const source = String(o.source || '').trim();
+    const isChina = source === 'Китай' || source === 'Китай прогноз';
+    const expected = String(o.expectedAt || '').trim();
+
+    if (!isChina) {
+      const manualOrderedAt = String(o.orderedAt || '').trim();
+      const chinaDates = chinaOrderedAtByArticle.get(article) || [];
+      const hiddenByChina = chinaDates.some((d) => d >= manualOrderedAt);
+      if (hiddenByChina && !o.checked) {
+        hiddenManual.push(o);
+        continue;
+      }
+      if (expected && expected < todayIso) continue;
+    } else if (expected && expected < todayIso) {
+      late[o.id] = daysBetweenIso(expected, todayIso);
+    }
+
+    qty[article] = (qty[article] || 0) + (Number(o.qty) || 0);
+  }
+
+  return { qty, hiddenManual, late };
 }
 
 export interface FactorySignal {

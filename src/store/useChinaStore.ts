@@ -66,9 +66,12 @@ interface ChinaState {
   /** Item 82: a pure read+compute, no write — the result is not stored on its own, the caller
    * (the forecast form) holds it until it saves. */
   calcChinaForecast: (lines: { article: string; pieces: number }[]) => Promise<ChinaForecastResult | null>;
-  saveChinaForecast: (payload: { id?: string; orderNo: string; comment?: string; lines: { article: string; pieces: number }[] }) => Promise<boolean>;
+  saveChinaForecast: (payload: { id?: string; orderNo: string; comment?: string; expectedShipAt?: string; lines: { article: string; pieces: number }[] }) => Promise<boolean>;
   deleteChinaForecast: (id: string) => Promise<boolean>;
   setForecastPrefill: (lines: { article: string; pieces: number }[] | null) => void;
+  /** Item 83i: the manual/first-run sync button — reconciles «Заказы на фабрике» and reports
+   * the pipeline qty per article before/after. */
+  syncChinaFactoryOrders: () => Promise<{ added: number; updated: number; removed: number; before: Record<string, number>; after: Record<string, number> } | null>;
 }
 
 const callChina = async (action: string, data?: Record<string, unknown>): Promise<ChinaAnswer> => {
@@ -144,6 +147,9 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       settings: result.data.settings || get().settings, loaded: true, error: '' });
     toast.success('Партия сохранена, себестоимость пересчитана');
     await get().fetchChinaMoney();
+    // Item 83c: the batch save may have changed «Заказы на фабрике» (syncChinaFactoryOrders
+    // on the server) — refresh the warehouse's own copy so the pipeline sees it right away.
+    await useWarehouseStore.getState().fetchFactoryOrders();
     return true;
   },
 
@@ -186,6 +192,8 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     set({ batches: result.data.batches || [], loaded: true, error: '' });
     toast.success('Партия удалена');
     await get().fetchChinaMoney();
+    // Item 83c: same reasoning as saveChinaBatch above.
+    await useWarehouseStore.getState().fetchFactoryOrders();
     return true;
   },
 
@@ -317,6 +325,9 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ forecastData: result.data as ChinaForecastData });
     toast.success('Прогноз сохранён');
+    // Item 83c: a forecast with an order number and expectedShipAt may add/remove rows of
+    // «Заказы на фабрике» (syncChinaFactoryOrders on the server).
+    await useWarehouseStore.getState().fetchFactoryOrders();
     return true;
   },
 
@@ -330,8 +341,23 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ forecastData: result.data as ChinaForecastData });
     toast.success('Прогноз удалён');
+    await useWarehouseStore.getState().fetchFactoryOrders();
     return true;
   },
 
-  setForecastPrefill: (lines) => set({ forecastPrefill: lines })
+  setForecastPrefill: (lines) => set({ forecastPrefill: lines }),
+
+  syncChinaFactoryOrders: async () => {
+    set({ isSaving: true });
+    const result = await callChina('syncChinaFactoryOrders');
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось синхронизировать заказы на фабрике');
+      return null;
+    }
+    const data = result.data as unknown as { summary: { added: number; updated: number; removed: number }; before: Record<string, number>; after: Record<string, number> };
+    toast.success(`Заказы на фабрике синхронизированы: добавлено ${data.summary.added}, обновлено ${data.summary.updated}, удалено ${data.summary.removed}`);
+    await useWarehouseStore.getState().fetchFactoryOrders();
+    return { ...data.summary, before: data.before, after: data.after };
+  }
 }));

@@ -351,8 +351,10 @@ async function startServer() {
     // Item 82: tariffs/boxes/vs-fact all derive from batches, lines, payments and reports, so
     // every China write below also drops getChinaForecastData, not just its own read(s).
     setupChinaSpreadsheet: ['getChinaBatches'],
-    saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    deleteChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    // Item 83c: saveChinaBatch/deleteChinaBatch also sync «Заказы на фабрике» (main spreadsheet),
+    // so both its own read and the composite start-up read must drop too.
+    saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
+    deleteChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
     saveChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     deleteChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     saveChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
@@ -368,9 +370,14 @@ async function startServer() {
     // Owner, 2026-09-25: the owner's own «история» mark on a receipt — same reasoning as every
     // other 81g write, both reads must drop.
     setChinaReceiptHistory: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    // Item 82d: a saved/deleted forecast only ever changes its own read.
-    saveChinaForecast: ['getChinaForecastData'],
-    deleteChinaForecast: ['getChinaForecastData']
+    // Item 82d/83c: a saved/deleted forecast changes its own read, and — once it carries an
+    // order number and a shipping date — «Заказы на фабрике» too.
+    saveChinaForecast: ['getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
+    deleteChinaForecast: ['getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
+    // Item 83i: the manual/first-run sync button — same reads as the writes it reconciles.
+    syncChinaFactoryOrders: ['getFactoryOrders', 'getOzonInitialData'],
+    // Item 83e: the owner's manual/China conflict resolution touches only «Заказы на фабрике».
+    resolveFactoryOrderConflict: ['getFactoryOrders', 'getOzonInitialData']
   };
 
   function invalidateCacheFor(writeAction: string): void {

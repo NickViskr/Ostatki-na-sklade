@@ -13,7 +13,7 @@ import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { canTickCluster } from '../lib/ozonSupplyLines';
 import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
-import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle } from '../lib/ozonCoverage';
+import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
 
@@ -415,24 +415,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return map;
   }, [factoryOrders]);
 
-  // Пункт 35. ТРУБА: в расчёт идёт сумма активных заказов по артикулу.
-  // Просроченный заказ (дата ожидания раньше сегодняшней) в ТРУБУ НЕ входит:
-  // фабрика сроки сорвала, считать этот товар имеющимся нельзя.
-  // Сегодняшняя дата считается здесь же: переменная todayIso объявлена ниже по файлу.
+  // Пункт 35/83. ТРУБА: общее правило factoryOnOrderByArticle (src/lib/ozonCoverage.ts),
+  // общее с Dashboard.tsx. Сегодняшняя дата считается здесь же: переменная todayIso
+  // объявлена ниже по файлу.
   const factoryOnOrder = useMemo(() => {
     const d = new Date();
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    const map: Record<string, number> = {};
-    for (const list of Object.values(factoryOrdersByArticle)) {
-      for (const o of list) {
-        const expected = String(o.expectedAt || '').trim();
-        if (expected && expected < today) continue;
-        const key = String(o.article || '').trim();
-        map[key] = (map[key] || 0) + (Number(o.qty) || 0);
-      }
-    }
-    return map;
-  }, [factoryOrdersByArticle]);
+    return factoryOnOrderByArticle(factoryOrders || [], today).qty;
+  }, [factoryOrders]);
 
   /* ---- «Распределить весь остаток» ------------------------------------------------
    * Кластер попадает в распределение, только если у товара есть скорость продаж именно в

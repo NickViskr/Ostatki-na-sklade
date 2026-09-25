@@ -6,6 +6,7 @@ import {
   buildOzonCoverage,
   calcCoverageDays,
   calcSupplyRecommendation,
+  factoryOnOrderByArticle,
   getLastFullWeeks,
   getMskWeekMonday,
   OzonCoverageInput,
@@ -14,7 +15,7 @@ import {
   parsePriorityClusters,
   resolveOzonArticle
 } from './ozonCoverage';
-import { KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { FactoryOrder, KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
 
 // Фабрика SKU для тестов resolveOzonArticle: заполняет только обязательные поля.
 function makeSku(overrides: Partial<SKUItem> & { sku: string }): SKUItem {
@@ -1511,5 +1512,125 @@ describe('пункт 48: фильтр по магазину на вкладке 
     expect(stocks).not.toContain('Данные по кабинетам');
     expect(stocks).not.toContain('из разных кабинетов');
     expect(stocks).toContain('в личном кабинете Ozon');
+  });
+});
+
+// ================= Item 83: factoryOnOrderByArticle (China batches → pipeline) =============
+describe('factoryOnOrderByArticle', () => {
+  const TODAY = '2026-09-25';
+
+  function order(overrides: Partial<FactoryOrder> & { article: string; qty: number }): FactoryOrder {
+    return {
+      id: overrides.id || 'FO-' + Math.random(),
+      article: overrides.article,
+      orderedAt: overrides.orderedAt || '2026-09-01',
+      qty: overrides.qty,
+      expectedAt: overrides.expectedAt ?? '',
+      comment: overrides.comment || '',
+      user: overrides.user || 'Николай',
+      status: overrides.status || 'active',
+      receivedAt: overrides.receivedAt || '',
+      source: overrides.source ?? '',
+      chinaOrderNo: overrides.chinaOrderNo || '',
+      chinaBatchCode: overrides.chinaBatchCode || '',
+      chinaKey: overrides.chinaKey || '',
+      checked: overrides.checked ?? false
+    };
+  }
+
+  it('просроченный ручной заказ выпадает из трубы (правило пункта 35 без изменений)', () => {
+    const overdue = order({ article: 'ART1', qty: 10, expectedAt: '2026-09-01' });
+    const result = factoryOnOrderByArticle([overdue], TODAY);
+    expect(result.qty.ART1).toBeUndefined();
+  });
+
+  it('просроченный заказ из Китая остаётся в трубе и получает daysLate', () => {
+    const late = order({ id: 'FCH1', article: 'ART1', qty: 10, expectedAt: '2026-09-20', source: 'Китай' });
+    const result = factoryOnOrderByArticle([late], TODAY);
+    expect(result.qty.ART1).toBe(10);
+    expect(result.late.FCH1).toBe(5);
+  });
+
+  it("'replaced' и 'received' никогда не считаются, независимо от источника", () => {
+    const replaced = order({ article: 'ART1', qty: 10, status: 'replaced' });
+    const received = order({ article: 'ART1', qty: 20, status: 'received', source: 'Китай' });
+    const result = factoryOnOrderByArticle([replaced, received], TODAY);
+    expect(result.qty.ART1).toBeUndefined();
+  });
+
+  it('активный ручной заказ скрыт, если по артикулу есть активный заказ из Китая', () => {
+    const manual = order({ id: 'FM1', article: 'ART1', qty: 10 });
+    const china = order({ id: 'FCH1', article: 'ART1', qty: 20, source: 'Китай' });
+    const result = factoryOnOrderByArticle([manual, china], TODAY);
+    expect(result.qty.ART1).toBe(20); // только Китай, без задвоения
+    expect(result.hiddenManual.map((o) => o.id)).toEqual(['FM1']);
+  });
+
+  it("checked=true снимает скрытие — считаются оба заказа как разные", () => {
+    const manual = order({ id: 'FM1', article: 'ART1', qty: 10, checked: true });
+    const china = order({ id: 'FCH1', article: 'ART1', qty: 20, source: 'Китай' });
+    const result = factoryOnOrderByArticle([manual, china], TODAY);
+    expect(result.qty.ART1).toBe(30);
+    expect(result.hiddenManual).toEqual([]);
+  });
+
+  it('две партии из Китая одного артикула суммируются', () => {
+    const a = order({ id: 'FCH1', article: 'ART1', qty: 15, source: 'Китай' });
+    const b = order({ id: 'FCH2', article: 'ART1', qty: 20, source: 'Китай' });
+    const result = factoryOnOrderByArticle([a, b], TODAY);
+    expect(result.qty.ART1).toBe(35);
+  });
+
+  it('владельческий случай, БЕЗ разрешения конфликта: труба = 80 (не 130), а после «Прибыла» = 0 (не 50)', () => {
+    // Партия из Китая младше или того же дня, что ручной заказ — Николаевское правило:
+    // с пункта 83 заказы из Китая попадают в приложение только через модуль, поэтому такая
+    // партия — это ТОТ ЖЕ заказ, пока owner явно не отметил «это разные заказы».
+    const manual = order({ id: 'FM1', article: 'Миска_двойная', qty: 50, orderedAt: '2026-09-01' });
+    const chinaActive = order({
+      id: 'FCH1', article: 'Миска_двойная', qty: 80, source: 'Китай', chinaOrderNo: '29', orderedAt: '2026-09-16'
+    });
+    const step1 = factoryOnOrderByArticle([manual, chinaActive], TODAY);
+    expect(step1.qty['Миска_двойная']).toBe(80); // не 130 — без задвоения
+    expect(step1.hiddenManual.map((o) => o.id)).toEqual(['FM1']);
+
+    // Партия помечена «Прибыла» — статус меняется на 'received', владелец КОНФЛИКТ НЕ РАЗРЕШИЛ
+    // (ручной ряд остаётся 'active', не 'checked'). Раньше здесь труба ошибочно возвращала 50 —
+    // ручной заказ "выныривал" обратно и товар считался дважды (получен + всё ещё заказан).
+    const chinaReceived = { ...chinaActive, status: 'received', receivedAt: '2026-09-24' };
+    const step2 = factoryOnOrderByArticle([manual, chinaReceived], TODAY);
+    expect(step2.qty['Миска_двойная']).toBeUndefined(); // 0, не 50
+    expect(step2.hiddenManual.map((o) => o.id)).toEqual(['FM1']); // кнопки всё ещё нужны
+  });
+
+  it('ручной заказ, оформленный ПОСЛЕ отгрузки из Китая — это другой заказ, считается', () => {
+    const chinaActive = order({
+      id: 'FCH1', article: 'ART-LATER', qty: 80, source: 'Китай', orderedAt: '2026-09-01'
+    });
+    const manualLater = order({ id: 'FM1', article: 'ART-LATER', qty: 20, orderedAt: '2026-09-10' });
+    const result = factoryOnOrderByArticle([chinaActive, manualLater], TODAY);
+    expect(result.qty['ART-LATER']).toBe(100); // оба — разные заказы, без скрытия
+    expect(result.hiddenManual).toEqual([]);
+  });
+
+  it('checked=true — ручной заказ считается независимо от статуса партии из Китая (active и received)', () => {
+    const manual = order({ id: 'FM1', article: 'ART-CHECKED', qty: 50, orderedAt: '2026-09-01', checked: true });
+    const chinaActive = order({ id: 'FCH1', article: 'ART-CHECKED', qty: 80, source: 'Китай', orderedAt: '2026-09-16' });
+    const activeResult = factoryOnOrderByArticle([manual, chinaActive], TODAY);
+    expect(activeResult.qty['ART-CHECKED']).toBe(130);
+
+    // A RECEIVED China row never counts itself (it's already stock, not "on order") — but the
+    // checked manual row must still count on its own, not vanish along with it.
+    const chinaReceived = { ...chinaActive, status: 'received', receivedAt: '2026-09-24' };
+    const receivedResult = factoryOnOrderByArticle([manual, chinaReceived], TODAY);
+    expect(receivedResult.qty['ART-CHECKED']).toBe(50);
+  });
+
+  it('оба места вызова (OzonStocksTab, Dashboard) импортируют общую функцию, не свою копию', () => {
+    const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const dashboard = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
+    expect(stocks).toMatch(/factoryOnOrderByArticle/);
+    expect(dashboard).toMatch(/factoryOnOrderByArticle/);
+    expect(stocks).toMatch(/import \{[^}]*factoryOnOrderByArticle[^}]*\} from '..\/lib\/ozonCoverage'/);
+    expect(dashboard).toMatch(/import \{[^}]*factoryOnOrderByArticle[^}]*\} from '..\/lib\/ozonCoverage'/);
   });
 });

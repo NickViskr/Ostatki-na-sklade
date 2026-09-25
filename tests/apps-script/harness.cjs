@@ -285,6 +285,7 @@ this.OZON_COST_HEADERS = OZON_COST_HEADERS;
 this.EXTERNAL_SHIPMENTS_HEADERS = EXTERNAL_SHIPMENTS_HEADERS;
 this.KAN_DAYS_HEADERS = KAN_DAYS_HEADERS;
 this.STOCK_SNAPSHOT_HEADERS = STOCK_SNAPSHOT_HEADERS;
+this.FACTORY_ORDERS_HEADERS = FACTORY_ORDERS_HEADERS;
 `;
 vm.runInContext(src + exportLine, context, { filename: 'Code.gs' });
 
@@ -760,5 +761,28 @@ module.exports = {
   getChinaForecastData: (...args) => context.getChinaForecastData(...args),
   dumpChinaTariffs() { return this.dumpChinaSheet('Тарифы карго'); },
   dumpChinaForecasts() { return this.dumpChinaSheet('Прогнозы'); },
+  // ---------- Item 83: «Заказы на фабрике» (main spreadsheet) and its China module rows ----------
+  FACTORY_ORDERS_HEADERS: context.FACTORY_ORDERS_HEADERS,
+  getFactoryOrders: (...args) => context.getFactoryOrders(...args),
+  saveFactoryOrder: (...args) => context.saveFactoryOrder(...args),
+  cancelFactoryOrder: (...args) => context.cancelFactoryOrder(...args),
+  setFactoryOrderReceived: (...args) => context.setFactoryOrderReceived(...args),
+  resolveFactoryOrderConflict: (...args) => context.resolveFactoryOrderConflict(...args),
+  factoryPipelineQtyByArticleGs: (...args) => context.factoryPipelineQtyByArticleGs(...args),
+  syncChinaFactoryOrders: (...args) => context.syncChinaFactoryOrders(...args),
+  syncChinaFactoryOrdersReport: (...args) => context.syncChinaFactoryOrdersReport(...args),
+  chinaFactoryDesiredRows: (...args) => context.chinaFactoryDesiredRows(...args),
+  // Same object-per-row shape as dumpChinaSheet, but off the MAIN spreadsheet's registry —
+  // assertions read 'Заказ Китай'/'Ключ Китай' by name, not by column position.
+  dumpFactoryOrders() {
+    const sheet = sheetRegistry['Заказы на фабрике'];
+    if (!sheet) return [];
+    const data = sheet.__dump();
+    const headers = (data[0] || []).map(h => String(h).trim());
+    const last = sheet.getLastRow();
+    return data.slice(1, Math.max(last, 1))
+      .filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => { const o = {}; headers.forEach((h, i) => { if (h) o[h] = r[i]; }); return o; });
+  },
   vm
 };

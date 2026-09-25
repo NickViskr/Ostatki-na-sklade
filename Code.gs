@@ -465,6 +465,8 @@ function doPost(e) {
       case 'setFactoryOrderReceived': assertAdmin(currentUser); result = setFactoryOrderReceived(data, currentUser.username); break;
       case 'getLastPurchasePrices': result = getLastPurchasePrices(); break;
       case 'cancelFactoryOrder': assertAdmin(currentUser); result = cancelFactoryOrder(data, currentUser.username); break;
+      // Item 83e: the owner's answer to a manual/China conflict on the same article.
+      case 'resolveFactoryOrderConflict': assertAdmin(currentUser); result = resolveFactoryOrderConflict(data, currentUser.username); break;
       case 'checkSupplyAvailability': result = checkSupplyAvailability(data); break;
       case 'saveOzonSupplyRequest': assertAdmin(currentUser); result = saveOzonSupplyRequest(data, currentUser.username); break;
       case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
@@ -503,6 +505,9 @@ function doPost(e) {
       case 'calcChinaForecast': assertAdmin(currentUser); result = calcChinaForecast(data); break;
       case 'saveChinaForecast': assertAdmin(currentUser); result = saveChinaForecast(data, currentUser.username); break;
       case 'deleteChinaForecast': assertAdmin(currentUser); result = deleteChinaForecast(data, currentUser.username); break;
+      // Item 83i: the manual/first-run sync button — reconciles «Заказы на фабрике» with the
+      // module's own batches/forecasts and shows the pipeline qty per article before/after.
+      case 'syncChinaFactoryOrders': assertAdmin(currentUser); result = syncChinaFactoryOrdersReport(currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -562,7 +567,12 @@ const OZON_SALES_HEADERS = ['Неделя', 'Кабинет', 'Артикул', 
 const OZON_SALES_ARCHIVE_SHEET_NAME = 'Продажи Ozon Архив';
 const OZON_SETTINGS_HEADERS = ['Ключ', 'Значение', 'Описание'];
 const OZON_CLUSTERS_HEADERS = ['КластерID', 'Название', 'Добавлен', 'Уведомлён'];
-const FACTORY_ORDERS_HEADERS = ['ID', 'Артикул', 'Дата заказа', 'Количество', 'Ожидаемое прибытие', 'Комментарий', 'Кто', 'Статус', 'Дата получения'];
+// Item 83: appended by ensureColumns to the LIVE sheet, at the end — a China batch/forecast
+// row is told apart from a manual one by 'Источник' ('' manual / 'Китай' / 'Китай прогноз'),
+// see syncChinaFactoryOrders in ChinaOrders.gs. 'Ключ Китай' is the stable key that lets a
+// second sync tell "this is the same row" from "this key is new".
+const FACTORY_ORDERS_HEADERS = ['ID', 'Артикул', 'Дата заказа', 'Количество', 'Ожидаемое прибытие', 'Комментарий', 'Кто', 'Статус', 'Дата получения',
+  'Источник', 'Заказ Китай', 'Партия Китай', 'Ключ Китай', 'Проверено'];
 
 /**
  * Item 47, stage 1. The cost of the goods sitting on Ozon, kept as a journal.
@@ -8250,10 +8260,54 @@ function getFactoryOrders() {
       comment: String(row[ctx.idx['Комментарий']] || '').trim(),
       user: String(row[ctx.idx['Кто']] || '').trim(),
       status: String(row[ctx.idx['Статус']] || '').trim() || 'active',
-      receivedAt: normalizeFactoryDate(row[ctx.idx['Дата получения']])
+      receivedAt: normalizeFactoryDate(row[ctx.idx['Дата получения']]),
+      source: String(row[ctx.idx['Источник']] || '').trim(),
+      chinaOrderNo: String(row[ctx.idx['Заказ Китай']] || '').trim(),
+      chinaBatchCode: String(row[ctx.idx['Партия Китай']] || '').trim(),
+      chinaKey: String(row[ctx.idx['Ключ Китай']] || '').trim(),
+      checked: String(row[ctx.idx['Проверено']] || '').trim() === 'да'
     });
   }
   return result;
+}
+
+/**
+ * Item 83: server-side mirror of `factoryOnOrderByArticle` (src/lib/ozonCoverage.ts) — used
+ * ONLY for the before/after report of `syncChinaFactoryOrders`, never for the app's own pipeline
+ * (the browser computes that itself). Kept deliberately tiny and NOT exported to the frontend.
+ */
+function factoryPipelineQtyByArticleGs(orders, todayIso) {
+  const list = orders || [];
+  // Every China row (active or received — its status changing never removes it from `orders`)
+  // is a candidate to hide a manual row of the same article, keyed by article -> shipping dates.
+  const chinaOrderedAtByArticle = {};
+  list.forEach(function (o) {
+    const source = String(o.source || '').trim();
+    if (source !== 'Китай' && source !== 'Китай прогноз') return;
+    const article = String(o.article || '').trim();
+    if (!article) return;
+    if (!chinaOrderedAtByArticle[article]) chinaOrderedAtByArticle[article] = [];
+    chinaOrderedAtByArticle[article].push(String(o.orderedAt || '').trim());
+  });
+  const qty = {};
+  list.forEach(function (o) {
+    const status = String(o.status || '').trim();
+    if (status === 'received' || status === 'replaced') return;
+    const article = String(o.article || '').trim();
+    if (!article) return;
+    const source = String(o.source || '').trim();
+    const isChina = source === 'Китай' || source === 'Китай прогноз';
+    const expected = String(o.expectedAt || '').trim();
+    if (!isChina) {
+      const manualOrderedAt = String(o.orderedAt || '').trim();
+      const chinaDates = chinaOrderedAtByArticle[article] || [];
+      const hiddenByChina = chinaDates.some(function (d) { return d >= manualOrderedAt; });
+      if (hiddenByChina && !o.checked) return;
+      if (expected && expected < todayIso) return;
+    }
+    qty[article] = (qty[article] || 0) + (Number(o.qty) || 0);
+  });
+  return qty;
 }
 
 function saveFactoryOrder(data, username) {
@@ -8279,11 +8333,22 @@ function saveFactoryOrder(data, username) {
     } else {
       const rowArticle = String(row[ctx.idx['Артикул']] || '').trim();
       const rowStatus = String(row[ctx.idx['Статус']] || '').trim() || 'active';
-      if (rowArticle === article && rowStatus === 'active') { targetRow = i + 1; break; }
+      // Item 83f: a save without an id merges only into a MANUAL active row of the same
+      // article — a China row of the same article must never be silently overwritten.
+      const rowSource = String(row[ctx.idx['Источник']] || '').trim();
+      if (rowArticle === article && rowStatus === 'active' && rowSource === '') { targetRow = i + 1; break; }
     }
   }
 
   if (requestedId && targetRow === -1) throw new Error('Заказ на фабрике не найден: ' + requestedId);
+
+  // Item 83f: a China row cannot be edited from the warehouse side — only its own module.
+  if (requestedId && targetRow !== -1) {
+    const targetSource = String(ctx.values[targetRow - 1][ctx.idx['Источник']] || '').trim();
+    if (targetSource === 'Китай' || targetSource === 'Китай прогноз') {
+      throw new Error('Этот заказ создан модулем «Заказы в Китае» — меняйте партию или прогноз там');
+    }
+  }
 
   if (targetRow === -1) {
     const width = Math.max(ctx.values[0].length, FACTORY_ORDERS_HEADERS.length);
@@ -8328,15 +8393,21 @@ function cancelFactoryOrder(data, username) {
   const ctx = readFactoryOrdersSheet();
   let targetRow = -1;
   let status = '';
+  let source = '';
   for (let i = 1; i < ctx.values.length; i++) {
     const rowId = String(ctx.values[i][ctx.idx['ID']] || '').trim();
     if (rowId === id) {
       targetRow = i + 1;
       status = String(ctx.values[i][ctx.idx['Статус']] || '').trim();
+      source = String(ctx.values[i][ctx.idx['Источник']] || '').trim();
       break;
     }
   }
   if (targetRow === -1) throw new Error('Заказ на фабрике не найден: ' + id);
+  // Item 83f: a China row cannot be cancelled from the warehouse side.
+  if (source === 'Китай' || source === 'Китай прогноз') {
+    throw new Error('Этот заказ создан модулем «Заказы в Китае» — меняйте партию или прогноз там');
+  }
   if (status === 'received') throw new Error('Полученный заказ отменить нельзя: партия уже пришла на склад');
   ctx.sheet.deleteRow(targetRow);
   SpreadsheetApp.flush();
@@ -8410,8 +8481,62 @@ function setFactoryOrderReceived(data, username) {
     if (rowId === id) { targetRow = i + 1; break; }
   }
   if (targetRow === -1) throw new Error('Заказ на фабрике не найден: ' + id);
+  // Item 83f: a China row is marked received automatically when its batch gets «Прибыла» —
+  // this endpoint stays for manual rows only.
+  const source = String(ctx.values[targetRow - 1][ctx.idx['Источник']] || '').trim();
+  if (source === 'Китай' || source === 'Китай прогноз') {
+    throw new Error('Этот заказ создан модулем «Заказы в Китае» — меняйте партию или прогноз там');
+  }
   ctx.sheet.getRange(targetRow, ctx.idx['Статус'] + 1).setValue('received');
   ctx.sheet.getRange(targetRow, ctx.idx['Дата получения'] + 1).setValue(getTodayDateString());
+  SpreadsheetApp.flush();
+  return getFactoryOrders();
+}
+
+/**
+ * Item 83e: the owner's answer to «ручной заказ скрыт: по артикулу есть заказ из Китая» — only
+ * for an ACTIVE manual row (source ''). same=true: the manual row is the SAME order as the
+ * China one, closed as 'replaced' with a note of which China row it duplicates. same=false:
+ * they are DIFFERENT orders, so the manual row is kept and marked 'Проверено' — both are then
+ * counted in the pipeline (factoryOnOrderByArticle, src/lib/ozonCoverage.ts).
+ */
+function resolveFactoryOrderConflict(data, username) {
+  const id = data ? String(data.id || '').trim() : '';
+  if (!id) throw new Error('Не указан идентификатор заказа на фабрике');
+  const same = !!(data || {}).same;
+  const ctx = readFactoryOrdersSheet();
+  let targetRow = -1;
+  for (let i = 1; i < ctx.values.length; i++) {
+    if (String(ctx.values[i][ctx.idx['ID']] || '').trim() === id) { targetRow = i + 1; break; }
+  }
+  if (targetRow === -1) throw new Error('Заказ на фабрике не найден: ' + id);
+  const row = ctx.values[targetRow - 1];
+  const source = String(row[ctx.idx['Источник']] || '').trim();
+  const status = String(row[ctx.idx['Статус']] || '').trim() || 'active';
+  if (source !== '') throw new Error('Разрешать конфликт можно только для ручного заказа');
+  if (status !== 'active') throw new Error('Заказ уже не активен');
+  const article = String(row[ctx.idx['Артикул']] || '').trim();
+
+  if (same) {
+    let chinaLabel = '';
+    for (let i = 1; i < ctx.values.length; i++) {
+      const r = ctx.values[i];
+      const rSource = String(r[ctx.idx['Источник']] || '').trim();
+      const rStatus = String(r[ctx.idx['Статус']] || '').trim() || 'active';
+      if ((rSource === 'Китай' || rSource === 'Китай прогноз') && rStatus === 'active'
+          && String(r[ctx.idx['Артикул']] || '').trim() === article) {
+        const orderNo = String(r[ctx.idx['Заказ Китай']] || '').trim();
+        chinaLabel = rSource + (orderNo ? ' · заказ ' + orderNo : '');
+        break;
+      }
+    }
+    const prevComment = String(row[ctx.idx['Комментарий']] || '').trim();
+    const note = 'заменён (' + (chinaLabel || 'заказ из Китая') + ')';
+    ctx.sheet.getRange(targetRow, ctx.idx['Комментарий'] + 1).setValue(prevComment ? prevComment + ' | ' + note : note);
+    ctx.sheet.getRange(targetRow, ctx.idx['Статус'] + 1).setValue('replaced');
+  } else {
+    ctx.sheet.getRange(targetRow, ctx.idx['Проверено'] + 1).setValue('да');
+  }
   SpreadsheetApp.flush();
   return getFactoryOrders();
 }

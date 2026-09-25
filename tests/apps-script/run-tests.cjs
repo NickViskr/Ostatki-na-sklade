@@ -7076,6 +7076,339 @@ function roundTest(x) { return Math.round((x + Number.EPSILON) * 100) / 100; }
     msg.indexOf('не найден') !== -1, msg);
 })();
 
+// ================= Item 83: China batches/forecasts become «Заказы на фабрике» rows =========
+//
+// «Заказы на фабрике» lives in the MAIN spreadsheet (sheetRegistry, getRegistrySheet/
+// dumpFactoryOrders), a DIFFERENT fake spreadsheet from the China module's own (targetSheets) —
+// syncChinaFactoryOrders crosses between the two exactly as the live app does.
+
+function byKeySuffix(rows, needle) {
+  return rows.filter(function (r) { return String(r['Ключ Китай'] || '').indexOf(needle) !== -1; });
+}
+
+// ---- 83a: batch save -> rows, split lines summed, skip rules, expected date ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83A';
+
+  // History batch (shipped before 2026-08-01): must give NO row at all.
+  h.saveChinaBatch({
+    orderNo: '39', code: 'NV-0701-1', status: 'В пути', shippedAt: '2026-07-01',
+    lines: [{ marking: 'H1', boxes: 1, pcsPerBox: 5, qty: 5, priceCny: 5, article: article }]
+  }, 'Николай');
+  check('83a: a history batch (shipped before tracking start) gives no factory row',
+    byKeySuffix(h.dumpFactoryOrders(), ':' + article).length === 0, JSON.stringify(h.dumpFactoryOrders()));
+
+  // Order 40: two split lines of the SAME article (summed to 15) plus one line with no our
+  // article (skipped outright). No arrival date -> expected = shipped + transitDays (30).
+  h.saveChinaBatch({
+    orderNo: '40', code: 'NV-0901-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [
+      { marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article },
+      { marking: 'M2', boxes: 1, pcsPerBox: 5, qty: 5, priceCny: 5, article: article },
+      { marking: 'M3', boxes: 1, pcsPerBox: 7, qty: 7, priceCny: 5, article: '' }
+    ]
+  }, 'Николай');
+  let rows = h.dumpFactoryOrders();
+  const row40 = byKeySuffix(rows, ':' + article).filter(function (r) { return r['Заказ Китай'] === '40'; })[0];
+  check('83a: split lines of the same article are summed into ONE row (10+5=15), the line without our article skipped',
+    !!row40 && Number(row40['Количество']) === 15, JSON.stringify(row40));
+  check('83a: no arrival date -> expected = shipped + transitDays (2026-09-01 + 30 = 2026-10-01)',
+    row40 && row40['Ожидаемое прибытие'] === '2026-10-01', JSON.stringify(row40));
+  check('83a: the row carries the batch code, order number, source and a stable key',
+    row40 && row40['Партия Китай'] === 'NV-0901-1' && row40['Источник'] === 'Китай' && row40['Статус'] === 'active',
+    JSON.stringify(row40));
+
+  // Order 41, SAME article, a DIFFERENT batch -> a SECOND row (two batches, two rows).
+  h.saveChinaBatch({
+    orderNo: '41', code: 'NV-0905-1', status: 'Черновик', shippedAt: '2026-09-05',
+    lines: [{ marking: 'M4', boxes: 1, pcsPerBox: 20, qty: 20, priceCny: 5, article: article }]
+  }, 'Николай');
+  rows = byKeySuffix(h.dumpFactoryOrders(), ':' + article);
+  check('83a: the same article in two different batches gives TWO rows',
+    rows.length === 2 && rows.some(function (r) { return r['Заказ Китай'] === '40'; }) && rows.some(function (r) { return r['Заказ Китай'] === '41'; }),
+    JSON.stringify(rows));
+
+  // An arrival date on the batch overrides the shipped+transitDays estimate.
+  h.saveChinaBatch({
+    id: h.getChinaBatches().batches.filter(function (b) { return b.orderNo === '40'; })[0].id,
+    orderNo: '40', code: 'NV-0901-1', status: 'В пути', shippedAt: '2026-09-01', arrivedAt: '2026-09-20',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article },
+      { marking: 'M2', boxes: 1, pcsPerBox: 5, qty: 5, priceCny: 5, article: article }]
+  }, 'Николай');
+  const row40b = byKeySuffix(h.dumpFactoryOrders(), ':' + article).filter(function (r) { return r['Заказ Китай'] === '40'; })[0];
+  check('83a: a known arrival date wins over the shipped+transitDays estimate',
+    row40b['Ожидаемое прибытие'] === '2026-09-20', JSON.stringify(row40b));
+})();
+
+// ---- 83d: status «Прибыла» -> received, and a status taken back reopens the row ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83D';
+  const saved = h.saveChinaBatch({
+    orderNo: '42', code: 'NV-0902-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай');
+  const batchId = saved.batches[0].id;
+
+  h.saveChinaBatch({ id: batchId, orderNo: '42', code: 'NV-0902-1', status: 'Прибыла',
+    shippedAt: '2026-09-01', arrivedAt: '2026-09-25',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай');
+  let row = byKeySuffix(h.dumpFactoryOrders(), ':' + article)[0];
+  check('83d: «Прибыла» marks the row received, with the arrival date',
+    row['Статус'] === 'received' && row['Дата получения'] === '2026-09-25', JSON.stringify(row));
+
+  // Status taken back (owner corrects a mistaken «Прибыла») -> the row reopens.
+  h.saveChinaBatch({ id: batchId, orderNo: '42', code: 'NV-0902-1', status: 'В пути',
+    shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай');
+  row = byKeySuffix(h.dumpFactoryOrders(), ':' + article)[0];
+  check('83d: a status taken back reopens the row — active again, no received date',
+    row['Статус'] === 'active' && row['Дата получения'] === '', JSON.stringify(row));
+})();
+
+// ---- 83c: delete/restore a batch ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83C';
+  const saved = h.saveChinaBatch({
+    orderNo: '43', code: 'NV-0903-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай');
+  const batchId = saved.batches[0].id;
+  check('83c: an active batch gives exactly one row before deletion',
+    byKeySuffix(h.dumpFactoryOrders(), ':' + article).length === 1, '');
+
+  h.deleteChinaBatch({ id: batchId }, 'Николай');
+  check('83c: deleting an active batch removes its factory row',
+    byKeySuffix(h.dumpFactoryOrders(), ':' + article).length === 0, JSON.stringify(h.dumpFactoryOrders()));
+
+  const archived = h.getArchivedItems().filter(function (a) { return a.type === 'ChinaBatch'; })[0];
+  h.restoreArchivedItem(archived.archiveId, 'Николай');
+  check('83c: restoring the batch brings its factory row back',
+    byKeySuffix(h.dumpFactoryOrders(), ':' + article).length === 1, JSON.stringify(h.dumpFactoryOrders()));
+})();
+
+// ---- 83b: forecast rows — appear with expectedShipAt, vanish once a real batch exists ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83B';
+  h.saveChinaBatch({
+    orderNo: '44', code: 'NV-BOX-1', status: 'Прибыла', shippedAt: '2026-01-01', arrivedAt: '2026-02-01',
+    lines: [{ marking: 'NVX', name: 'x', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 20,
+      boxLengthM: 0.3, boxWidthM: 0.2, boxHeightM: 0.1, factoryBoxKg: 5, article: article }]
+  }, 'Николай'); // gives the box directory an entry for `article`, history batch (2026-01)
+
+  h.saveChinaForecast({
+    orderNo: '45', lines: [{ article: article, pieces: 55 }], expectedShipAt: '2026-09-01'
+  }, 'Николай');
+  let rows = byKeySuffix(h.dumpFactoryOrders(), ':' + article).filter(function (r) { return r['Заказ Китай'] === '45'; });
+  check('83b: a forecast with an order number and a shipping date gives a factory row (55 pcs)',
+    rows.length === 1 && Number(rows[0]['Количество']) === 55 && rows[0]['Источник'] === 'Китай прогноз',
+    JSON.stringify(rows));
+  check('83b: the forecast row\'s expected date is expectedShipAt + transitDays (30)',
+    rows[0]['Ожидаемое прибытие'] === '2026-10-01', JSON.stringify(rows[0]));
+
+  // A real batch of the SAME order number appears -> the forecast row must vanish.
+  h.saveChinaBatch({
+    orderNo: '45', code: 'NV-0905-2', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай');
+  rows = byKeySuffix(h.dumpFactoryOrders(), ':' + article).filter(function (r) { return r['Заказ Китай'] === '45'; });
+  check('83b: once a real batch of the same order exists, the forecast row is gone (one row, the batch\'s)',
+    rows.length === 1 && rows[0]['Источник'] === 'Китай', JSON.stringify(rows));
+
+  // A forecast with no expectedShipAt gives no row at all.
+  h.saveChinaForecast({ orderNo: '46', lines: [{ article: article, pieces: 10 }] }, 'Николай');
+  check('83b: a forecast with no expectedShipAt gives no factory row',
+    byKeySuffix(h.dumpFactoryOrders(), ':' + article).filter(function (r) { return r['Заказ Китай'] === '46'; }).length === 0, '');
+})();
+
+// ---- 83c: idempotence — a second sync in a row changes nothing ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83IDEM';
+  h.saveChinaBatch({
+    orderNo: '47', code: 'NV-0906-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай'); // already synced once, by the save itself
+  const again = h.syncChinaFactoryOrders('Николай');
+  check('83c: a second sync right after the first writes nothing (idempotent)',
+    again.added === 0 && again.updated === 0 && again.removed === 0, JSON.stringify(again));
+})();
+
+// ---- 83f: manual rows are byte-for-byte untouched by China writes ----
+(function () {
+  const h = withChina();
+  h.saveFactoryOrder({ article: 'ART-MANUAL', qty: 7, expectedAt: '2026-12-01', comment: 'ручной' }, 'Николай');
+  const before = h.dumpRegistrySheet('Заказы на фабрике');
+
+  h.saveChinaBatch({
+    orderNo: '48', code: 'NV-0907-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: 'ART-83OTHER' }]
+  }, 'Николай');
+  h.syncChinaFactoryOrders('Николай');
+  const after = h.dumpRegistrySheet('Заказы на фабрике');
+  const manualRowBefore = before.filter(function (r) { return r[1] === 'ART-MANUAL'; })[0];
+  const manualRowAfter = after.filter(function (r) { return r[1] === 'ART-MANUAL'; })[0];
+  check('83f: a manual row is byte-for-byte untouched by an unrelated China write and a manual sync',
+    JSON.stringify(manualRowBefore) === JSON.stringify(manualRowAfter), JSON.stringify(manualRowBefore) + ' vs ' + JSON.stringify(manualRowAfter));
+})();
+
+// ---- 83f: guards — a China row cannot be edited/cancelled/received from the warehouse side ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83GUARD';
+  h.saveChinaBatch({
+    orderNo: '49', code: 'NV-0908-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай');
+  const chinaRow = h.getFactoryOrders().filter(function (o) { return o.article === article; })[0];
+
+  let msg = '';
+  try { h.saveFactoryOrder({ id: chinaRow.id, article: article, qty: 99, expectedAt: '' }, 'Николай'); } catch (e) { msg = e.message; }
+  check('83f: saveFactoryOrder with the id of a China row is refused',
+    msg.indexOf('Заказы в Китае') !== -1, msg);
+
+  msg = '';
+  try { h.cancelFactoryOrder({ id: chinaRow.id }, 'Николай'); } catch (e) { msg = e.message; }
+  check('83f: cancelFactoryOrder on a China row is refused',
+    msg.indexOf('Заказы в Китае') !== -1, msg);
+
+  msg = '';
+  try { h.setFactoryOrderReceived({ id: chinaRow.id }, 'Николай'); } catch (e) { msg = e.message; }
+  check('83f: setFactoryOrderReceived on a China row is refused',
+    msg.indexOf('Заказы в Китае') !== -1, msg);
+
+  // A manual save WITHOUT an id must never merge into the China row of the same article —
+  // it creates a NEW manual row instead.
+  const beforeCount = h.getFactoryOrders().length;
+  h.saveFactoryOrder({ article: article, qty: 3, expectedAt: '' }, 'Николай');
+  const afterOrders = h.getFactoryOrders();
+  check('83f: a merge without an id skips a China row of the same article and creates a new manual one',
+    afterOrders.length === beforeCount + 1 &&
+    afterOrders.filter(function (o) { return o.article === article && o.source === ''; }).length === 1,
+    JSON.stringify(afterOrders));
+})();
+
+// ---- 83e: conflict resolution — 'это тот же заказ' / 'это разные заказы' ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83E';
+  h.saveChinaBatch({
+    orderNo: '50', code: 'NV-0909-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
+  }, 'Николай');
+
+  // same = true: the manual row is closed as 'replaced'.
+  const manual1 = h.saveFactoryOrder({ article: article, qty: 5, expectedAt: '' }, 'Николай')
+    .filter(function (o) { return o.source === ''; })[0];
+  h.resolveFactoryOrderConflict({ id: manual1.id, same: true }, 'Николай');
+  let after = h.getFactoryOrders().filter(function (o) { return o.id === manual1.id; })[0];
+  check("83e: same=true closes the manual row as 'replaced', noting the China order",
+    after.status === 'replaced' && after.comment.indexOf('50') !== -1, JSON.stringify(after));
+
+  // same = false: the manual row is kept active, marked 'Проверено' — a different order.
+  const manual2 = h.saveFactoryOrder({ article: article, qty: 8, expectedAt: '' }, 'Николай')
+    .filter(function (o) { return o.source === '' && o.status === 'active'; })[0];
+  h.resolveFactoryOrderConflict({ id: manual2.id, same: false }, 'Николай');
+  after = h.getFactoryOrders().filter(function (o) { return o.id === manual2.id; })[0];
+  check("83e: same=false keeps the manual row active and marks it 'Проверено'",
+    after.status === 'active' && after.checked === true, JSON.stringify(after));
+
+  let msg = '';
+  try { h.resolveFactoryOrderConflict({ id: 'no-such-id', same: true }, 'Николай'); } catch (e) { msg = e.message; }
+  check('83e: resolving a non-existent order is refused, not silently ok',
+    msg.indexOf('не найден') !== -1, msg);
+})();
+
+// ---- 83i: the admin sync action reports the pipeline qty per article before/after ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83I';
+  h.saveFactoryOrder({ article: article, qty: 5, expectedAt: '' }, 'Николай');
+  const report = h.syncChinaFactoryOrdersReport('Николай');
+  check('83i: the report carries a summary and a before/after qty per article',
+    report.summary && typeof report.summary.added === 'number' &&
+    report.before[article] === 5 && report.after[article] === 5,
+    JSON.stringify(report));
+
+  h.saveChinaBatch({
+    orderNo: '51', code: 'NV-0910-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 30, priceCny: 5, article: article }]
+  }, 'Николай'); // saveChinaBatch already synced once — the manual row is now hidden
+  const report2 = h.syncChinaFactoryOrdersReport('Николай');
+  check('83i: after a China batch shadows the manual row, before/after both read the China qty only',
+    report2.before[article] === 30 && report2.after[article] === 30, JSON.stringify(report2));
+})();
+
+// ---- The owner's real case: «Миска_двойная» / order 29 must not double-count, and 0 on arrival ----
+(function () {
+  const h = withChina();
+  const article = 'Миска_двойная';
+  h.setNow('2026-09-25T09:00:00Z');
+  // The manual row was recorded BEFORE the China shipment went out — exactly the real timeline
+  // (owner entered «Миска_двойная» by hand, then the China batch of order 29 followed later).
+  const manual = h.saveFactoryOrder({ article: article, qty: 50, orderedAt: '2026-09-10', expectedAt: '' }, 'Николай')[0];
+  h.saveChinaBatch({
+    orderNo: '29', code: 'NV-0916-24', status: 'В пути', shippedAt: '2026-09-16',
+    lines: [{ marking: 'MD1', boxes: 1, pcsPerBox: 80, qty: 80, priceCny: 5, article: article }]
+  }, 'Николай');
+
+  let today = h.factoryPipelineQtyByArticleGs(h.getFactoryOrders(), '2026-09-25');
+  check("owner's case: an active manual order is hidden by a China batch shipped later — pipeline reads only 80, not 130",
+    today[article] === 80, JSON.stringify(today));
+
+  // The batch arrives («Прибыла») — the owner has NOT resolved the conflict (the manual row is
+  // still 'active', not 'checked'). Before the fix this un-hid the manual row and the pipeline
+  // read 50: the goods were counted as received stock AND as the still-open manual order.
+  const batchId = h.getChinaBatches().batches.filter(function (b) { return b.orderNo === '29'; })[0].id;
+  h.saveChinaBatch({
+    id: batchId, orderNo: '29', code: 'NV-0916-24', status: 'Прибыла',
+    shippedAt: '2026-09-16', arrivedAt: '2026-09-24',
+    lines: [{ marking: 'MD1', boxes: 1, pcsPerBox: 80, qty: 80, priceCny: 5, article: article }]
+  }, 'Николай');
+  today = h.factoryPipelineQtyByArticleGs(h.getFactoryOrders(), '2026-09-25');
+  check("owner's case, conflict NOT resolved: after «Прибыла» the pipeline reads 0, not 50 — no double count on arrival",
+    today[article] === undefined || today[article] === 0, JSON.stringify(today));
+
+  // The owner can still close the manual row as the same order even after arrival.
+  h.resolveFactoryOrderConflict({ id: manual.id, same: true }, 'Николай');
+  today = h.factoryPipelineQtyByArticleGs(h.getFactoryOrders(), '2026-09-25');
+  check("owner's case: resolving the conflict after arrival still reads 0 (the manual row is now 'replaced')",
+    today[article] === undefined || today[article] === 0, JSON.stringify(today));
+})();
+
+// ---- 83e fix: a manual order placed AFTER the China shipment is a DIFFERENT order, counted ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83E-LATER';
+  h.saveChinaBatch({
+    orderNo: '52', code: 'NV-0911-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 80, priceCny: 5, article: article }]
+  }, 'Николай');
+  h.saveFactoryOrder({ article: article, qty: 20, orderedAt: '2026-09-10', expectedAt: '' }, 'Николай');
+  const today = h.factoryPipelineQtyByArticleGs(h.getFactoryOrders(), '2026-09-25');
+  check('a manual order dated AFTER the China shipment is a separate order, not hidden — pipeline reads 100 (80+20)',
+    today[article] === 100, JSON.stringify(today));
+})();
+
+// ---- 83e fix: SAME-DAY boundary — a China shipment dated exactly on the manual order's own date still hides it ----
+(function () {
+  const h = withChina();
+  const article = 'ART-83E-SAMEDAY';
+  h.saveFactoryOrder({ article: article, qty: 20, orderedAt: '2026-09-10', expectedAt: '' }, 'Николай');
+  h.saveChinaBatch({
+    orderNo: '53', code: 'NV-0910-1', status: 'В пути', shippedAt: '2026-09-10',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 80, priceCny: 5, article: article }]
+  }, 'Николай');
+  const today = h.factoryPipelineQtyByArticleGs(h.getFactoryOrders(), '2026-09-25');
+  check("a China shipment dated the SAME day as the manual order (>=, not just >) still hides it — pipeline reads 80, not 100",
+    today[article] === 80, JSON.stringify(today));
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

@@ -163,7 +163,10 @@ const CHINA_TARIFF_HEADERS = [
 // (never a browser-sent one) so a later change of tariffs/settings does not retroactively move
 // what was actually predicted at the time.
 const CHINA_FORECAST_HEADERS = [
-  'ID', 'Номер заказа', 'Создан', 'Кто', 'Комментарий', 'Ввод (JSON)', 'Результат (JSON)', 'Обновлено'
+  'ID', 'Номер заказа', 'Создан', 'Кто', 'Комментарий', 'Ввод (JSON)', 'Результат (JSON)', 'Обновлено',
+  // Item 83b: with an order number, this date (+ transitDays) is what lets a forecast become
+  // rows of «Заказы на фабрике» (syncChinaFactoryOrders) before its batch even exists.
+  'Ожидаемая отгрузка с фабрики'
 ];
 
 // Everything before this date is «история без курса» (owner, 2026-09-24) — the 结转
@@ -1190,6 +1193,9 @@ function saveChinaBatch(data, username) {
   const calc = chinaFullyCost(rated, lines, rubTotal, getChinaSettings());
   writeChinaBatch(ss, batchCtx, rated, lines, calc, username);
   chinaRecostBorrowers(ss, username, [batchId]);
+  // Item 83c: every save (a new batch, an arrival/final-file update, a status change) keeps
+  // «Заказы на фабрике» in step — split lines summed, one row per (batch, our article).
+  syncChinaFactoryOrders(username);
   return getChinaBatches();
 }
 
@@ -1794,6 +1800,8 @@ function deleteChinaBatch(data, username) {
   chinaRecostBorrowers(ss, username, []);
 
   Logger.log('Заказы в Китае: партия ' + id + ' удалена пользователем ' + (username || '—'));
+  // Item 83c: an active row of the deleted batch is removed; a 'received' one stays as history.
+  syncChinaFactoryOrders(username);
   return getChinaBatches();
 }
 
@@ -1867,6 +1875,8 @@ function restoreChinaBatch(payload, username) {
   chinaRecostBorrowers(ss, username, [batchId]);
 
   Logger.log('Заказы в Китае: партия ' + batchId + ' восстановлена из архива пользователем ' + (username || '—'));
+  // Item 83c: the restored batch's rows come back into «Заказы на фабрике» too.
+  syncChinaFactoryOrders(username);
   return { batchId: batchId, reKeyed: reKeyed };
 }
 
@@ -3572,7 +3582,8 @@ function chinaForecastFromRow(r) {
     comment: String(r['Комментарий'] || '').trim(),
     lines: Array.isArray(input.lines) ? input.lines : [],
     result: result,
-    updatedAt: String(r['Обновлено'] || '').trim()
+    updatedAt: String(r['Обновлено'] || '').trim(),
+    expectedShipAt: chinaDateText(r['Ожидаемая отгрузка с фабрики'], 'Ожидаемая отгрузка с фабрики')
   };
 }
 
@@ -3605,13 +3616,18 @@ function saveChinaForecast(data, username) {
     'Комментарий': String(d.comment || '').trim(),
     'Ввод (JSON)': JSON.stringify({ lines: lines }),
     'Результат (JSON)': JSON.stringify(result),
-    'Обновлено': chinaStamp()
+    'Обновлено': chinaStamp(),
+    // Item 83b.
+    'Ожидаемая отгрузка с фабрики': chinaDateText(d.expectedShipAt, 'Ожидаемая отгрузка с фабрики')
   });
   if (existing) {
     ctx.sheet.getRange(existing.__row, 1, 1, ctx.headers.length).setValues([values]);
   } else {
     ctx.sheet.appendRow(values);
   }
+  // Item 83c: a forecast with an order number and a shipping date feeds «Заказы на фабрике»;
+  // its rows must vanish again once the forecast/order number/date changes underneath them.
+  syncChinaFactoryOrders(username);
   return getChinaForecastData();
 }
 
@@ -3625,6 +3641,7 @@ function deleteChinaForecast(data, username) {
   if (!targetRow) throw new Error('Прогноз ' + id + ' не найден');
   ctx.sheet.deleteRow(targetRow);
   Logger.log('Заказы в Китае: прогноз ' + id + ' удалён пользователем ' + (username || '—'));
+  syncChinaFactoryOrders(username);
   return getChinaForecastData();
 }
 
@@ -3721,4 +3738,200 @@ function getChinaForecastData() {
     forecasts: forecasts.map(function (f) { return Object.assign({}, f, { fact: chinaForecastVsFact(f, ctx.batches) }); }),
     settings: ctx.settings
   };
+}
+
+// ================= Item 83: China batches/forecasts become «Заказы на фабрике» rows =========
+//
+// «Заказы на фабрике» is the MAIN spreadsheet's own sheet (getFactoryOrdersSheet/
+// readFactoryOrdersSheet in Code.gs); this module never opens it directly and reuses those
+// helpers instead, exactly the way a manual save through Code.gs does. Only rows whose
+// 'Источник' is 'Китай'/'Китай прогноз' are ever touched here — a manual row (source '') is
+// never read for its own fields and never written.
+
+const CHINA_FACTORY_SOURCE_BATCH = 'Китай';
+const CHINA_FACTORY_SOURCE_FORECAST = 'Китай прогноз';
+
+/**
+ * Item 83a–83b: the desired set of «Заказы на фабрике» rows this module owns, freshly computed
+ * from the batches/lines/forecasts as they stand RIGHT NOW. One entry per (batch, our article)
+ * — split lines of the same article summed, the same article in two different batches gives
+ * two entries — plus one per (forecast, our article) for a forecast that has BOTH an order
+ * number and «Ожидаемая отгрузка с фабрики», provided no batch of that same order number exists
+ * yet (one order ships as one batch, so its forecast rows step aside the moment the real batch
+ * appears). History batches (`b.history`, set by `chinaBatchFromRow` from the tracking-start
+ * cutoff) and lines with no our-article are skipped outright.
+ */
+function chinaFactoryDesiredRows(ss) {
+  const settings = getChinaSettings();
+  const transitDays = Number(settings.transitDays) || 0;
+
+  const batches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows.map(chinaBatchFromRow);
+  const lines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows.map(chinaLineFromRow);
+  const linesByBatch = {};
+  lines.forEach(function (l) {
+    if (!linesByBatch[l.batchId]) linesByBatch[l.batchId] = [];
+    linesByBatch[l.batchId].push(l);
+  });
+
+  const desired = [];
+  const orderNosWithBatch = {};
+  batches.forEach(function (b) { if (b.orderNo) orderNosWithBatch[b.orderNo] = true; });
+
+  batches.forEach(function (b) {
+    if (b.history) return;
+    const byArticle = {};
+    (linesByBatch[b.id] || []).forEach(function (l) {
+      const article = String(l.article || '').trim();
+      if (!article) return;
+      byArticle[article] = (byArticle[article] || 0) + (Number(l.qty) || 0);
+    });
+    // A status taken back (Прибыла -> В пути) reopens the row: `received` is recomputed from
+    // the batch's CURRENT status every time, never remembered from a previous sync.
+    const received = String(b.status || '').trim() === 'Прибыла';
+    Object.keys(byArticle).forEach(function (article) {
+      const qty = byArticle[article];
+      if (!(qty > 0)) return;
+      const expectedAt = b.arrivedAt ? b.arrivedAt : (b.shippedAt ? chinaAddDaysText(b.shippedAt, transitDays) : '');
+      desired.push({
+        key: 'B:' + b.id + ':' + article,
+        source: CHINA_FACTORY_SOURCE_BATCH,
+        chinaOrderNo: b.orderNo,
+        chinaBatchCode: b.code,
+        article: article,
+        qty: qty,
+        orderedAt: b.shippedAt,
+        expectedAt: expectedAt,
+        status: received ? 'received' : 'active',
+        receivedAt: received ? b.arrivedAt : ''
+      });
+    });
+  });
+
+  const forecasts = chinaReadSheet(ss, CHINA_FORECASTS_SHEET, CHINA_FORECAST_HEADERS).rows.map(chinaForecastFromRow);
+  forecasts.forEach(function (f) {
+    const orderNo = String(f.orderNo || '').trim();
+    if (!orderNo || orderNosWithBatch[orderNo]) return;
+    const expectedShipAt = String(f.expectedShipAt || '').trim();
+    if (!expectedShipAt) return;
+    const expectedAt = chinaAddDaysText(expectedShipAt, transitDays);
+    // The saved SNAPSHOT (chinaForecastCalc's own result) already tells which lines resolved
+    // to a box (`pieces`/`article` with no `warning`) — a line without one is not a forecast of
+    // anything shippable and is skipped, same as the forecast screen itself skips it.
+    const resultLines = (f.result && Array.isArray(f.result.lines)) ? f.result.lines : [];
+    resultLines.forEach(function (l) {
+      if (!l || l.warning) return;
+      const article = String(l.article || '').trim();
+      const qty = Number(l.pieces) || 0;
+      if (!article || !(qty > 0)) return;
+      desired.push({
+        key: 'F:' + f.id + ':' + article,
+        source: CHINA_FACTORY_SOURCE_FORECAST,
+        chinaOrderNo: orderNo,
+        chinaBatchCode: '',
+        article: article,
+        qty: qty,
+        orderedAt: '',
+        expectedAt: expectedAt,
+        status: 'active',
+        receivedAt: ''
+      });
+    });
+  });
+
+  return desired;
+}
+
+// Which «Заказы на фабрике» column each field of a desired row belongs to — shared by both the
+// "new row" and "update existing row" branches of syncChinaFactoryOrders so the two can never
+// drift apart on which columns are this module's to write.
+const CHINA_FACTORY_FIELD_COLUMN = {
+  article: 'Артикул', orderedAt: 'Дата заказа', qty: 'Количество', expectedAt: 'Ожидаемое прибытие',
+  source: 'Источник', chinaOrderNo: 'Заказ Китай', chinaBatchCode: 'Партия Китай', key: 'Ключ Китай',
+  status: 'Статус', receivedAt: 'Дата получения'
+};
+
+/**
+ * Item 83c: reconciles «Заказы на фабрике» with `chinaFactoryDesiredRows` — adds a row for a
+ * new key, updates one whose fields changed, removes one whose key vanished UNLESS it is
+ * already 'received' (a received row is history and outlives the batch it came from). Writes
+ * only the cells that actually differ, so calling this twice in a row leaves the second call
+ * with nothing to do (idempotent). Manual rows (source '') are never read or written here.
+ * Returns `{ added, updated, removed }`.
+ */
+function syncChinaFactoryOrders(username) {
+  const ss = chinaSpreadsheet();
+  const desired = chinaFactoryDesiredRows(ss);
+  const desiredByKey = {};
+  desired.forEach(function (d) { desiredByKey[d.key] = d; });
+
+  const ctx = readFactoryOrdersSheet();
+  const existingRowByKey = {};
+  for (let i = 1; i < ctx.values.length; i++) {
+    const row = ctx.values[i];
+    if (row.join('').trim() === '') continue;
+    const source = String(row[ctx.idx['Источник']] || '').trim();
+    if (source !== CHINA_FACTORY_SOURCE_BATCH && source !== CHINA_FACTORY_SOURCE_FORECAST) continue;
+    const key = String(row[ctx.idx['Ключ Китай']] || '').trim();
+    if (key) existingRowByKey[key] = i + 1; // 1-based sheet row
+  }
+
+  let added = 0, updated = 0, removed = 0;
+
+  Object.keys(desiredByKey).forEach(function (key) {
+    const d = desiredByKey[key];
+    const rowNum = existingRowByKey[key];
+    if (!rowNum) {
+      const width = Math.max(ctx.values[0].length, FACTORY_ORDERS_HEADERS.length);
+      const newRow = [];
+      for (let c = 0; c < width; c++) newRow.push('');
+      newRow[ctx.idx['ID']] = Utilities.getUuid();
+      Object.keys(CHINA_FACTORY_FIELD_COLUMN).forEach(function (field) {
+        newRow[ctx.idx[CHINA_FACTORY_FIELD_COLUMN[field]]] = d[field];
+      });
+      newRow[ctx.idx['Кто']] = username || '';
+      ctx.sheet.appendRow(newRow);
+      added++;
+      return;
+    }
+    let changed = false;
+    Object.keys(CHINA_FACTORY_FIELD_COLUMN).forEach(function (field) {
+      const col = CHINA_FACTORY_FIELD_COLUMN[field];
+      const want = d[field] === undefined || d[field] === null ? '' : d[field];
+      const have = ctx.values[rowNum - 1][ctx.idx[col]];
+      const haveText = have === undefined || have === null ? '' : have;
+      if (String(haveText) !== String(want)) {
+        ctx.sheet.getRange(rowNum, ctx.idx[col] + 1).setValue(want);
+        changed = true;
+      }
+    });
+    if (changed) updated++;
+  });
+
+  const rowsToRemove = [];
+  Object.keys(existingRowByKey).forEach(function (key) {
+    if (desiredByKey[key]) return;
+    const rowNum = existingRowByKey[key];
+    const status = String(ctx.values[rowNum - 1][ctx.idx['Статус']] || '').trim() || 'active';
+    if (status === 'received') return; // history, keep
+    rowsToRemove.push(rowNum);
+  });
+  rowsToRemove.sort(function (a, b) { return b - a; }); // bottom-up so row numbers stay valid
+  rowsToRemove.forEach(function (rowNum) { ctx.sheet.deleteRow(rowNum); removed++; });
+
+  if (added || updated || removed) SpreadsheetApp.flush();
+  return { added: added, updated: updated, removed: removed };
+}
+
+/**
+ * Item 83i: the admin-facing «синхронизировать» action — the reconciliation itself plus the
+ * pipeline quantity per article (factoryPipelineQtyByArticleGs, Code.gs) before and after, so
+ * the owner can see what one run actually changed. Used for the module's FIRST sync and for any
+ * later manual re-run; every regular China write already calls `syncChinaFactoryOrders` itself.
+ */
+function syncChinaFactoryOrdersReport(username) {
+  const today = getTodayDateString();
+  const before = factoryPipelineQtyByArticleGs(getFactoryOrders(), today);
+  const summary = syncChinaFactoryOrders(username);
+  const after = factoryPipelineQtyByArticleGs(getFactoryOrders(), today);
+  return { summary: summary, before: before, after: after };
 }

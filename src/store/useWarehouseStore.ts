@@ -201,6 +201,8 @@ interface WarehouseState {
   setFactoryOrderReceived: (id: string) => Promise<boolean>;
   /** Пункт 35. Отмена заказа на фабрике: строка удаляется на сервере безвозвратно. */
   cancelFactoryOrder: (id: string) => Promise<boolean>;
+  /** Item 83e: the owner's answer to a manual/China conflict of the same article. */
+  resolveFactoryOrderConflict: (id: string, same: boolean) => Promise<boolean>;
   /** Пункт 35. Цена и дата последнего поступления по артикулу. Ключ — артикул. */
   lastPurchasePrices: Record<string, { price: number; date: string }>;
   fetchLastPurchasePrices: () => Promise<void>;
@@ -1945,6 +1947,25 @@ export const useWarehouseStore = create<WarehouseState>()(
       return false;
     } catch (e: any) {
       toast.error('Ошибка при отмене заказа: ' + (e?.message || e));
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  resolveFactoryOrderConflict: async (id, same) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('resolveFactoryOrderConflict', { data: { id, same } });
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ factoryOrders: result.data });
+        toast.success(same ? 'Ручной заказ закрыт как дубликат' : 'Заказы отмечены как разные');
+        return true;
+      }
+      toast.error(result.message || 'Не удалось разрешить конфликт заказов');
+      return false;
+    } catch (e: any) {
+      toast.error('Ошибка разрешения конфликта заказов: ' + (e?.message || e));
       return false;
     } finally {
       set({ isProcessing: false });

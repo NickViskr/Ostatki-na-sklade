@@ -164,10 +164,24 @@ export interface FactoryOrder {
   expectedAt: string;
   comment: string;
   user: string;
-  /** 'active' — партия в пути; 'received' — партия получена. */
+  /** 'active' — партия в пути; 'received' — партия получена; 'replaced' (item 83e) — ручной
+   * заказ закрыт как ДУБЛИКАТ существующего заказа из Китая того же артикула. */
   status: string;
   /** Дата отметки о получении, 'yyyy-MM-dd'. */
   receivedAt: string;
+  /** Item 83: '' — ручной заказ; 'Китай' — из партии; 'Китай прогноз' — из сохранённого
+   * прогноза с номером заказа, пока для него нет своей партии. */
+  source: string;
+  /** Item 83: номер заказа в Китае, если этот ряд создан модулем «Заказы в Китае». */
+  chinaOrderNo: string;
+  /** Item 83: код партии в Китае (пусто у строки прогноза — у прогноза партии ещё нет). */
+  chinaBatchCode: string;
+  /** Item 83: стабильный ключ строки ('B:<batchId>:<article>' / 'F:<forecastId>:<article>'),
+   * по которому syncChinaFactoryOrders узнаёт СВОИ строки при повторном запуске. */
+  chinaKey: string;
+  /** Item 83e: владелец подтвердил, что ручной заказ — ДРУГОЙ заказ, не тот же China-заказ
+   * того же артикула ('это разные заказы') — тогда оба считаются в трубе. */
+  checked: boolean;
 }
 
 
@@ -511,6 +525,9 @@ export interface ChinaSavedForecast {
   result: ChinaForecastResult;
   updatedAt: string;
   fact: ChinaForecastFact[];
+  /** Item 83b: ожидаемая дата отгрузки с фабрики, 'yyyy-MM-dd' — вместе с орденом заказа
+   * позволяет forecast-строке попасть в «Заказы на фабрике» (см. syncChinaFactoryOrders). */
+  expectedShipAt: string;
 }
 
 /** Coordinator fix, 2026-09-25: the switch density/medians the tariff chart needs, computed by
