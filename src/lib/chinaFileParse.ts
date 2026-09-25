@@ -439,15 +439,18 @@ export function parseChinaArrivalFile(sheets: ChinaSheets): ChinaParsedArrival |
     // The Russian caption row repeats the header in another language.
     if (joined.indexOf('маркировка') !== -1) continue;
     const marking = col.marking === -1 ? '' : str(row[col.marking]);
-    if (!marking) continue;
     const qty = get(row, col.qty);
-    if (qty <= 0) continue;
+    const boxes = get(row, col.boxes);
+    // Item 81h: an empty 货号 is not itself a reason to drop a real product line — the owner's
+    // «NV-0916» arrival file has exactly one line, and it never got a marking. Only rows with
+    // nothing in them (no qty, no boxes) are the caption/total rows this loop already skips by
+    // other means.
+    if (qty <= 0 && boxes <= 0) continue;
 
     const dateText = col.date === -1 ? '' : str(row[col.date]);
     if (dateText && dateText > receivedAt) receivedAt = dateText;
     if (!customer && col.customer !== -1) customer = str(row[col.customer]);
 
-    const boxes = get(row, col.boxes);
     const pcsPerBox = get(row, col.pcsPerBox);
     const boxLengthM = get(row, col.length);
     const boxWidthM = get(row, col.width);

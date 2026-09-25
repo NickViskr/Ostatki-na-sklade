@@ -730,7 +730,7 @@ export function chinaFormFromArrival(
   // The batch file already exists (shipped, or still a draft of its own): fill its lines with
   // the box measurements BY MARKING, keep everything the owner already entered.
   const arrivalByMarking = new Map<string, ChinaParsedArrival['lines'][number]>();
-  parsed.lines.forEach((line) => arrivalByMarking.set(line.marking, line));
+  parsed.lines.forEach((line) => { if (line.marking.trim()) arrivalByMarking.set(line.marking, line); });
   const arrivalBoxesByMarking = new Map<string, number>();
   parsed.lines.forEach((line) => arrivalBoxesByMarking.set(line.marking, (arrivalBoxesByMarking.get(line.marking) || 0) + line.boxes));
   const batchBoxesByMarking = new Map<string, number>();
@@ -742,10 +742,25 @@ export function chinaFormFromArrival(
     }
   });
 
+  // Item 81h: a carrier's line with NO marking at all can only be matched to a batch line by
+  // POSITION, and only when that position is not a guess — exactly one markingless line on the
+  // arrival side and exactly one on the batch side. Anything else (either side has more than
+  // one, or only one side has any) stays unmatched, with a warning rather than a silent mix-up
+  // of two different products.
+  const arrivalNoMarking = parsed.lines.filter((l) => !l.marking.trim());
+  const batchNoMarking = existing.lines.filter((l) => !l.marking.trim());
+  const singleEmptyMatch = arrivalNoMarking.length === 1 && batchNoMarking.length === 1
+    ? arrivalNoMarking[0]
+    : null;
+  const warnings = parsed.warnings.slice();
+  if (!singleEmptyMatch && (arrivalNoMarking.length > 0 || batchNoMarking.length > 0)) {
+    warnings.push('строка без маркировки — сопоставьте вручную');
+  }
+
   const form = chinaBatchToForm(existing);
   form.receivedAt = parsed.receivedAt || form.receivedAt;
   form.lines = form.lines.map((line) => {
-    const a = arrivalByMarking.get(line.marking);
+    const a = line.marking.trim() ? arrivalByMarking.get(line.marking) : singleEmptyMatch;
     if (!a) return line;
     return {
       ...line,
@@ -757,7 +772,7 @@ export function chinaFormFromArrival(
   });
   notes.push(`Партия ${existing.code} дополнена данными приёмки — будет обновлена, а не создана заново`);
 
-  return { form, notes, warnings: parsed.warnings.slice() };
+  return { form, notes, warnings };
 }
 
 const normalizedMarkingSet = (lines: { marking: string }[]): Set<string> => {

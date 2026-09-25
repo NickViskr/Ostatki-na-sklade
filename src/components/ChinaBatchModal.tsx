@@ -157,11 +157,11 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Код партии</span>
-              <input className={field} value={form.code} onChange={(e) => set({ code: e.target.value })} placeholder="NV-0825-2" />
+              <input className={field} value={form.code} onChange={(e) => set({ code: e.target.value })} />
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Номер заказа</span>
-              <input className={field} value={form.orderNo} onChange={(e) => set({ orderNo: e.target.value })} placeholder="28" />
+              <input className={field} value={form.orderNo} onChange={(e) => set({ orderNo: e.target.value })} />
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Дата отгрузки</span>
@@ -186,26 +186,26 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Доставка по Китаю, ¥</span>
-              <input className={field} value={form.chinaDeliveryCny} onChange={(e) => set({ chinaDeliveryCny: e.target.value })} placeholder="700" />
+              <input className={field} value={form.chinaDeliveryCny} onChange={(e) => set({ chinaDeliveryCny: e.target.value })} />
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Вес накладной, кг</span>
-              <input className={field} value={form.weightKg} onChange={(e) => set({ weightKg: e.target.value })} placeholder="672,5" />
+              <input className={field} value={form.weightKg} onChange={(e) => set({ weightKg: e.target.value })} />
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Объём, м³</span>
-              <input className={field} value={form.volumeM3} onChange={(e) => set({ volumeM3: e.target.value })} placeholder="4,92" />
+              <input className={field} value={form.volumeM3} onChange={(e) => set({ volumeM3: e.target.value })} />
             </label>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Ставка, $/кг</span>
-              <input className={field} value={form.ratePerKgUsd} onChange={(e) => set({ ratePerKgUsd: e.target.value })} placeholder="2,3" />
+              <input className={field} value={form.ratePerKgUsd} onChange={(e) => set({ ratePerKgUsd: e.target.value })} />
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Упаковка, $</span>
-              <input className={field} value={form.packingUsd} onChange={(e) => set({ packingUsd: e.target.value })} placeholder="90" />
+              <input className={field} value={form.packingUsd} onChange={(e) => set({ packingUsd: e.target.value })} />
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Прочее карго, $</span>
@@ -213,7 +213,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Итого перевозка, $</span>
-              <input className={field} value={form.freightUsd} onChange={(e) => set({ freightUsd: e.target.value })} placeholder="1636,75" />
+              <input className={field} value={form.freightUsd} onChange={(e) => set({ freightUsd: e.target.value })} />
               <span className="text-[11px] text-slate-400">Сумма из накладной. Пусто — посчитается по ставке.</span>
             </label>
           </div>
@@ -226,7 +226,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
             </label>
             <label className="block">
               <span className="text-xs font-bold text-slate-500 uppercase">Курс ₽/¥</span>
-              <input className={field} value={form.rubRate} onChange={(e) => set({ rubRate: e.target.value })} placeholder="12,4" />
+              <input className={field} value={form.rubRate} onChange={(e) => set({ rubRate: e.target.value })} />
               <span className="text-[11px] text-slate-400">Курс, вписанный вручную. Когда к заказу привязаны оплаты, партия считается по их курсу, а этот остаётся запасным.</span>
             </label>
             <label className="block md:col-span-2">
@@ -263,7 +263,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                 <tbody>
                   {form.lines.map((line, i) => (
                     <tr key={i} className="border-t border-slate-100">
-                      <td className="py-1 pr-2"><input className={cell} value={line.marking} onChange={(e) => setLine(i, { marking: e.target.value })} placeholder="NV-99" /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.marking} onChange={(e) => setLine(i, { marking: e.target.value })} placeholder="впишите маркировку" /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.name} onChange={(e) => setLine(i, { name: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.boxes} onChange={(e) => setLine(i, { boxes: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.pcsPerBox} onChange={(e) => setLine(i, { pcsPerBox: e.target.value })} /></td>
@@ -285,7 +285,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                           ))}
                         </select>
                       </td>
-                      <td className="py-1 pr-2"><input className={cell} value={line.group} onChange={(e) => setLine(i, { group: e.target.value })} placeholder="одна метка" /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.group} onChange={(e) => setLine(i, { group: e.target.value })} /></td>
                       <td className="py-1 pr-2 text-right">
                         <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-red-500"><Trash2 size={16} /></button>
                       </td>

@@ -110,6 +110,22 @@ export const ARRIVAL_FILE_NV0923: Record<string, ChinaSheetGrid> = {
   ],
 };
 
+/**
+ * Item 81h: arrival at the Yiwu warehouse of 2026-09-16, ONE product line whose 货号
+ * (marking) the carrier left empty — the shape of the owner's real file
+ * «NV-0916-24件宠物碗到货数据.xlsx», with the supplier's own numbers kept, that
+ * `parseChinaArrivalFile` used to drop entirely because it required a marking.
+ */
+export const ARRIVAL_FILE_NV0916: Record<string, ChinaSheetGrid> = {
+  'Sheet2': [
+    ['169 Карго 到货数据', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+    ['合计', '', '', '', '', '', 24, '', '', '', '', '', 4.0392, '', 408, ''],
+    ['入库日期', '客户', '图片', '材质', '货号', '品名', '件数', '装箱数', '总数量', '长', '宽', '高', '立方', '单毛重', '总毛重', '密度'],
+    ['Дата хранения', 'Покупатель', 'фото', 'материал', 'маркировка', 'наименование товара ', 'кол-во коробок', 'PCS', 'Общее        кол-во', 'длинный', 'ширина', 'высокая', 'объем', 'вес    (kг)', 'общ.вес', 'Плотность'],
+    ['2026-09-16', 'NV', '', '', '', '宠物碗', 24, 42, 1008, 0.55, 0.68, 0.45, 4.0392, 17, 408, '']
+  ],
+};
+
 /** Batch NV-0923-4, order 30: the same 4 markings as ARRIVAL_FILE_NV0923, split over 2 pallets. */
 export const BATCH_FILE_30: Record<string, ChinaSheetGrid> = {
   '运单表': [

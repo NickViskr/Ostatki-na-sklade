@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE, ChinaSheetGrid } from './chinaFiles.fixture';
+import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE, ChinaSheetGrid } from './chinaFiles.fixture';
 import {
   detectChinaFile, parseChinaBatchFile, parseChinaArrivalFile, parseChinaReportFile, cargoRateFromNote,
   orderNoFromTicket, chinaFreightOf, chinaOrderOf, chinaReportPayload, chinaReceiptFreightCny, ChinaSheets
@@ -183,13 +183,64 @@ describe('файл приёмки на складе в Иу (партия NV-092
   });
 
   it('says when there is no goods row at all', () => {
+    // Item 81h: an empty marking no longer means an empty row (see below) — zero every
+    // quantity and box count instead, the way a truly empty sheet looks.
     const sheets: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
     const header = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
-    const markCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('货号') !== -1);
-    for (let r = header + 1; r < sheets['Sheet2'].length; r++) sheets['Sheet2'][r][markCol] = '';
+    const qtyCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('总数量') !== -1);
+    const boxCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('件数') !== -1);
+    for (let r = header + 1; r < sheets['Sheet2'].length; r++) {
+      sheets['Sheet2'][r][qtyCol] = 0;
+      sheets['Sheet2'][r][boxCol] = 0;
+    }
     const empty = parseChinaArrivalFile(sheets)!;
     expect(empty.lines).toHaveLength(0);
     expect(empty.warnings.join(' ')).toContain('ни одной строки товара');
+  });
+
+  it('keeps a product row whose marking (货号) is empty, per item 81h', () => {
+    const sheets: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
+    const header = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const markCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('货号') !== -1);
+    sheets['Sheet2'][header + 2][markCol] = ''; // only the FIRST product line loses its marking
+    const withEmptyMarking = parseChinaArrivalFile(sheets)!;
+    expect(withEmptyMarking.lines).toHaveLength(4);
+    expect(withEmptyMarking.lines[0].marking).toBe('');
+    expect(withEmptyMarking.lines[0].boxes).toBe(30);
+    expect(withEmptyMarking.lines[0].factoryBoxKg).toBe(8.4);
+  });
+
+  it('keeps a line with boxes but zero 总数量, and one with 总数量 but zero boxes — either alone is enough', () => {
+    const sheets: ChinaSheets = { 'Sheet2': ARRIVAL_FILE_NV0923['Sheet2'].map((row) => row.slice()) as ChinaSheetGrid };
+    const header = sheets['Sheet2'].findIndex((row) => row.some((c) => String(c).indexOf('货号') !== -1));
+    const qtyCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('总数量') !== -1);
+    const boxCol = sheets['Sheet2'][header].findIndex((c) => String(c).indexOf('件数') !== -1);
+    sheets['Sheet2'][header + 2][qtyCol] = 0; // NV-101: boxes 30, no total quantity
+    sheets['Sheet2'][header + 3][boxCol] = 0; // NV-102: no boxes, total quantity 150
+    const parsed = parseChinaArrivalFile(sheets)!;
+    expect(parsed.lines.map((l) => l.marking)).toEqual(['NV-101', 'NV-102', 'NV-103', 'NV-104']);
+  });
+});
+
+describe('item 81h: arrival file of a single product the carrier gave no marking (货号) at all', () => {
+  const parsed = parseChinaArrivalFile(ARRIVAL_FILE_NV0916)!;
+
+  it('keeps the line instead of dropping it, box data intact', () => {
+    expect(parsed.lines).toHaveLength(1);
+    expect(parsed.lines[0]).toEqual({
+      marking: '', name: '宠物碗', boxes: 24, pcsPerBox: 42, qty: 1008,
+      boxLengthM: 0.55, boxWidthM: 0.68, boxHeightM: 0.45, factoryBoxKg: 17
+    });
+  });
+
+  it('agrees with the 合计 row and needs no warning', () => {
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it('names the draft after the customer and the day it reached the warehouse', () => {
+    expect(parsed.receivedAt).toBe('2026-09-16');
+    expect(parsed.customer).toBe('NV');
+    expect(parsed.draftCode).toBe('NV-0916');
   });
 });
 

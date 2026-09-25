@@ -11,7 +11,7 @@ import {
   chinaGroupThousands, chinaRemainingText, chinaEtaText
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
-import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
+import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
 import { ChinaBatch, ChinaBatchLine } from '../types';
 
 /** A saved batch, filled in only where the test needs it — item 81e added 12 fields to the shape. */
@@ -606,6 +606,71 @@ describe('партия, собранная из файла приёмки в К�
     });
     const { notes } = chinaFormFromArrival(arrival, existing);
     expect(notes.join(' ')).toContain('NV-101: коробок в приёмке 30, в партии 29');
+  });
+});
+
+// Item 81h: the carrier can leave 货号 (marking) empty on a real product line — matching it to
+// an existing batch line by POSITION is only safe when there is exactly one such line on each
+// side; otherwise the owner sorts it out by hand.
+describe('приёмка приносит одну строку без маркировки', () => {
+  const singleLineArrival = parseChinaArrivalFile(ARRIVAL_FILE_NV0916)!;
+
+  it('flow a: opens a new draft carrying the empty marking through, box data intact', () => {
+    const { form, notes, warnings } = chinaFormFromArrival(singleLineArrival, null);
+    expect(form.code).toBe('NV-0916');
+    expect(form.lines).toHaveLength(1);
+    expect(form.lines[0].marking).toBe('');
+    expect(form.lines[0].boxLengthM).toBe('0.55');
+    expect(form.lines[0].factoryBoxKg).toBe('17');
+    expect(warnings).toEqual([]);
+    expect(notes.join(' ')).toContain('Черновик NV-0916 создан');
+  });
+
+  it('flow b: 1↔1 — the single unmarked arrival line matches the single unmarked batch line', () => {
+    const existing = makeBatch({
+      id: 'CB16', code: 'NV-0916',
+      lines: [makeLine({ id: 'L1', marking: '', boxes: 24 })]
+    });
+    const { form, warnings } = chinaFormFromArrival(singleLineArrival, existing);
+    expect(form.lines[0].boxLengthM).toBe('0.55');
+    expect(form.lines[0].factoryBoxKg).toBe('17');
+    expect(warnings).toEqual([]);
+  });
+
+  it('flow b: two unmarked batch lines — no position match, a warning instead of a guess', () => {
+    const existing = makeBatch({
+      id: 'CB16', code: 'NV-0916',
+      lines: [
+        makeLine({ id: 'L1', marking: '', boxes: 12 }),
+        makeLine({ id: 'L2', marking: '', boxes: 12 })
+      ]
+    });
+    const { form, warnings } = chinaFormFromArrival(singleLineArrival, existing);
+    expect(form.lines.every((l) => l.boxLengthM === '')).toBe(true);
+    expect(warnings).toContain('строка без маркировки — сопоставьте вручную');
+  });
+
+  it('flow b: the batch has no unmarked line at all — nothing to attach the arrival data to, still a warning', () => {
+    const existing = makeBatch({
+      id: 'CB16', code: 'NV-0916',
+      lines: [makeLine({ id: 'L1', marking: 'NV-1', boxes: 24 })]
+    });
+    const { form, warnings } = chinaFormFromArrival(singleLineArrival, existing);
+    expect(form.lines[0].boxLengthM).toBe('');
+    expect(warnings).toContain('строка без маркировки — сопоставьте вручную');
+  });
+
+  it('flow b: TWO unmarked arrival lines against one unmarked batch line — still ambiguous', () => {
+    // A second unmarked product line added to the same arrival file.
+    const twoLineSheet = singleLineArrival.lines.concat(singleLineArrival.lines[0]);
+    const arrivalWithTwo = { ...singleLineArrival, lines: twoLineSheet };
+    const existing = makeBatch({
+      id: 'CB16', code: 'NV-0916',
+      lines: [makeLine({ id: 'L1', marking: '', boxes: 24 })]
+    });
+    const { form, warnings } = chinaFormFromArrival(arrivalWithTwo, existing);
+    expect(form.lines[0].boxLengthM).toBe('');
+    expect(warnings).toContain('строка без маркировки — сопоставьте вручную');
   });
 });
 
