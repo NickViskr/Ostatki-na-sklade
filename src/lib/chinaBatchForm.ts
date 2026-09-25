@@ -95,6 +95,26 @@ export function chinaNumber(value: string | number): number {
   return isFinite(num) ? num : 0;
 }
 
+const roundTo = (value: number, decimals: number): number => {
+  const factor = 10 ** decimals;
+  return Math.round((value + Number.EPSILON) * factor) / factor;
+};
+
+/**
+ * Item 81i: the box's own dims travel through the form and the script in METRES (as the arrival
+ * file states them), but the owner reads and types centimetres — a plain `value / 100` or
+ * `value * 100` would round-trip 0.55 m into "0.5499999999999999" once it comes back through an
+ * `<input>`, so both directions round to a sane number of decimals instead.
+ */
+export function chinaCmToM(cm: string): string {
+  const value = chinaNumber(cm);
+  return value ? String(roundTo(value / 100, 5)) : '';
+}
+export function chinaMToCm(m: string): string {
+  const value = chinaNumber(m);
+  return value ? String(roundTo(value * 100, 3)) : '';
+}
+
 /**
  * Item 89: «100000 должны выглядеть как 100 000» — groups the integer part of a ruble amount
  * by threes as the owner types it, keeping a decimal comma if he already wrote one. Every
@@ -573,6 +593,10 @@ export interface ChinaImportResult {
   notes: string[];
   /** What does not add up in the file itself. */
   warnings: string[];
+  /** Item 81i: true when the batch's own `weightKg`/`volumeM3` were just filled, in THIS import,
+   * from an arrival file's totals rather than typed or read off a final batch file — a shipment
+   * sent in boxes has no pallets, so the waybill figures ARE the boxes' own totals. */
+  boxesOnly: boolean;
 }
 
 export function chinaFormFromFiles(
@@ -688,7 +712,7 @@ export function chinaFormFromFiles(
   }
   if (!form.rubRate) notes.push('Курс ₽/¥ не заполнен: впишите курс, по которому купили юани этой партии');
 
-  return { form, notes, warnings: parsed.warnings.slice() };
+  return { form, notes, warnings: parsed.warnings.slice(), boxesOnly: false };
 }
 
 /**
@@ -716,15 +740,22 @@ export function chinaFormFromArrival(
       boxHeightM: line.boxHeightM ? String(line.boxHeightM) : '',
       factoryBoxKg: line.factoryBoxKg ? String(line.factoryBoxKg) : ''
     }));
+    // Item 81i: a NEW draft has no waybill of its own yet — a shipment sent in boxes, without
+    // pallets, has its waybill weight/volume equal to the boxes' own totals (the owner's
+    // NV-0916-24 file: 408 kg / 4.0392 m³ in the arrival AND in the batch report alike), so the
+    // arrival totals fill the batch fields straight away rather than leaving them blank.
+    const boxesOnly = parsed.totalWeightKg > 0 || parsed.totalVolumeM3 > 0;
     const form: ChinaBatchForm = {
       ...emptyChinaBatchForm(),
       code: parsed.draftCode,
       status: 'Черновик',
       receivedAt: parsed.receivedAt,
+      weightKg: parsed.totalWeightKg ? String(parsed.totalWeightKg) : '',
+      volumeM3: parsed.totalVolumeM3 ? String(parsed.totalVolumeM3) : '',
       lines: lines.length > 0 ? lines : [emptyChinaLine()]
     };
     notes.push(`Черновик ${parsed.draftCode} создан по данным приёмки в Китае — впишите наши артикулы и сохраните`);
-    return { form, notes, warnings: parsed.warnings.slice() };
+    return { form, notes, warnings: parsed.warnings.slice(), boxesOnly };
   }
 
   // The batch file already exists (shipped, or still a draft of its own): fill its lines with
@@ -770,9 +801,17 @@ export function chinaFormFromArrival(
       factoryBoxKg: a.factoryBoxKg ? String(a.factoryBoxKg) : ''
     };
   });
+
+  // Item 81i: the batch's own waybill weight/volume always win once it has them (a palletised
+  // shipment's final batch file sets them, and re-importing an arrival file must not undo that);
+  // they are only filled here when the batch has none of its own yet.
+  let boxesOnly = false;
+  if (!form.weightKg && parsed.totalWeightKg > 0) { form.weightKg = String(parsed.totalWeightKg); boxesOnly = true; }
+  if (!form.volumeM3 && parsed.totalVolumeM3 > 0) { form.volumeM3 = String(parsed.totalVolumeM3); boxesOnly = true; }
+
   notes.push(`Партия ${existing.code} дополнена данными приёмки — будет обновлена, а не создана заново`);
 
-  return { form, notes, warnings };
+  return { form, notes, warnings, boxesOnly };
 }
 
 const normalizedMarkingSet = (lines: { marking: string }[]): Set<string> => {

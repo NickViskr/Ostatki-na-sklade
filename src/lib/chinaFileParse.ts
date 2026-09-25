@@ -116,6 +116,12 @@ export interface ChinaParsedArrival {
   /** A batch not yet shipped has no code of its own: `${customer}-${MM}${DD}` of receivedAt. */
   draftCode: string;
   lines: ChinaArrivalLine[];
+  /** Item 81i: the waybill weight/volume of a shipment sent in boxes, no pallets — the 合计
+   * row when the file has one, else the sum of the lines. Used to fill the batch's own
+   * `weightKg`/`volumeM3` when nothing more authoritative (a palletised batch's final file)
+   * ever overwrites them. */
+  totalWeightKg: number;
+  totalVolumeM3: number;
   warnings: string[];
 }
 
@@ -483,6 +489,8 @@ export function parseChinaArrivalFile(sheets: ChinaSheets): ChinaParsedArrival |
 
   // The 合计 row sits above the header, in the SAME columns as the data rows.
   const totalRow = detail.slice(0, head).find((row) => row.some((c) => has(c, '合计')));
+  let totalWeightKg = round2(sumWeight);
+  let totalVolumeM3 = sumVolume;
   if (totalRow) {
     const totalBoxes = get(totalRow, col.boxes);
     const totalVolume = get(totalRow, col.volume);
@@ -496,13 +504,16 @@ export function parseChinaArrivalFile(sheets: ChinaSheets): ChinaParsedArrival |
     if (totalWeight > 0 && Math.abs(totalWeight - sumWeight) > 0.01) {
       warnings.push(`Вес: по строкам ${sumWeight} кг, в строке "合计" ${totalWeight} кг`);
     }
+    // The 合计 row is the carrier's own figure — it wins over the lines' sum when it states one.
+    if (totalWeight > 0) totalWeightKg = totalWeight;
+    if (totalVolume > 0) totalVolumeM3 = totalVolume;
   }
 
   let draftCode = '';
   const match = receivedAt.match(MONTH_DAY);
   if (match) draftCode = customer ? `${customer}-${match[1]}${match[2]}` : `${match[1]}${match[2]}`;
 
-  return { kind: 'arrival', receivedAt, customer, draftCode, lines, warnings };
+  return { kind: 'arrival', receivedAt, customer, draftCode, lines, totalWeightKg, totalVolumeM3, warnings };
 }
 
 export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | null {

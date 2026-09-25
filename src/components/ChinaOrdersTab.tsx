@@ -81,6 +81,9 @@ export const ChinaOrdersTab: React.FC = () => {
   const [importForm, setImportForm] = useState<ChinaBatchForm | null>(null);
   const [importNotes, setImportNotes] = useState<string[]>([]);
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  // Item 81i: true when an arrival file just filled the batch's own weight/volume, because the
+  // shipment is boxes with no pallets — the modal shows a note about it under the lines table.
+  const [importBoxesOnly, setImportBoxesOnly] = useState(false);
   // Item 81g, step 7: the grid of cells and the script's own reading of it, kept ONLY when the
   // script found nothing to complain about — «Проверить ИИ» in the import window runs on these.
   const [importAiCheck, setImportAiCheck] = useState<{ kind: ChinaAiKind; sheets: ChinaSheets; scriptParsed: ChinaAiParsed } | null>(null);
@@ -264,7 +267,7 @@ export const ChinaOrdersTab: React.FC = () => {
       problems.push(`Файлов приёмки выбрано ${foundArrivals.length}; открыт первый (${foundArrivals[0].draftCode}), остальные загрузите после`);
     }
 
-    let result: { form: ChinaBatchForm; notes: string[]; warnings: string[] };
+    let result: { form: ChinaBatchForm; notes: string[]; warnings: string[]; boxesOnly: boolean };
     let aiCheck: { kind: ChinaAiKind; sheets: ChinaSheets; scriptParsed: ChinaAiParsed } | null = null;
     if (foundBatches.length > 0) {
       const parsed = foundBatches[0];
@@ -296,6 +299,7 @@ export const ChinaOrdersTab: React.FC = () => {
     setImportForm(result.form);
     setImportNotes(result.notes.concat(problems));
     setImportWarnings(result.warnings);
+    setImportBoxesOnly(result.boxesOnly);
     setImportAiCheck(aiCheck);
     setEditing(null);
     setShowModal(true);
@@ -792,6 +796,7 @@ export const ChinaOrdersTab: React.FC = () => {
           initialForm={importForm}
           notes={importNotes}
           warnings={importWarnings}
+          boxesOnly={importBoxesOnly}
           aiCheck={importAiCheck}
           onClose={() => {
             setShowModal(false);
@@ -799,6 +804,7 @@ export const ChinaOrdersTab: React.FC = () => {
             setImportForm(null);
             setImportNotes([]);
             setImportWarnings([]);
+            setImportBoxesOnly(false);
             setImportAiCheck(null);
           }}
         />

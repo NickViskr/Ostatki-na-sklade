@@ -8,7 +8,7 @@ import {
   chinaMarkingMatches, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor, chinaFreightPerKgLabel,
   chinaCheckMark,
   chinaTariffRateUnit,
-  chinaGroupThousands, chinaRemainingText, chinaEtaText
+  chinaGroupThousands, chinaRemainingText, chinaEtaText, chinaCmToM, chinaMToCm
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
@@ -77,6 +77,25 @@ describe('chinaNumber', () => {
   });
 });
 
+// Item 81i: the box dims travel through the form in metres but the modal shows them in
+// centimetres — round-tripping must not leave float noise like "0.5499999999999999" behind.
+describe('centimetres <-> metres of a box, round-tripped through the modal', () => {
+  it('55 cm <-> 0.55 m', () => {
+    expect(chinaCmToM('55')).toBe('0.55');
+    expect(chinaMToCm('0.55')).toBe('55');
+  });
+
+  it('45.5 cm <-> 0.455 m', () => {
+    expect(chinaCmToM('45.5')).toBe('0.455');
+    expect(chinaMToCm('0.455')).toBe('45.5');
+  });
+
+  it('an empty field stays empty in either direction', () => {
+    expect(chinaCmToM('')).toBe('');
+    expect(chinaMToCm('')).toBe('');
+  });
+});
+
 describe('the payload of a batch', () => {
   it('sends numbers as numbers, so the script parses nothing', () => {
     const payload = chinaFormToPayload(filledForm()) as Record<string, unknown>;
@@ -85,6 +104,19 @@ describe('the payload of a batch', () => {
     const lines = payload.lines as Record<string, unknown>[];
     expect(lines[0].qty).toBe(240);
     expect(lines[0].palletWeightKg).toBe(339);
+  });
+
+  // Item 81i: the box's own dims and the factory's own box weight — read from the arrival file,
+  // shown and editable in the modal — must reach `saveChinaBatch` alongside everything else.
+  it('carries the box dims and the factory box weight of a line', () => {
+    const form = filledForm();
+    form.lines = [{
+      ...emptyChinaLine(), marking: 'NV-101', qty: '10',
+      boxLengthM: '0.32', boxWidthM: '0.59', boxHeightM: '0.43', factoryBoxKg: '8.4'
+    }];
+    const payload = chinaFormToPayload(form) as Record<string, unknown>;
+    const line = (payload.lines as Record<string, unknown>[])[0];
+    expect(line).toMatchObject({ boxLengthM: 0.32, boxWidthM: 0.59, boxHeightM: 0.43, factoryBoxKg: 8.4 });
   });
 
   it('leaves out the id of a batch that does not exist yet', () => {
@@ -581,6 +613,15 @@ describe('партия, собранная из файла приёмки в К�
     expect(notes.join(' ')).toContain('Черновик NV-0923 создан');
   });
 
+  // Item 81i: a shipment in boxes has no pallets — a fresh draft's own weight/volume are the
+  // arrival file's 合计 row totals, so the batch window is never left with them blank.
+  it('flow a: fills the batch weight/volume from the arrival totals, and says so', () => {
+    const { form, boxesOnly } = chinaFormFromArrival(arrival, null);
+    expect(form.weightKg).toBe('847');
+    expect(form.volumeM3).toBe('7.56112');
+    expect(boxesOnly).toBe(true);
+  });
+
   it('flow b: fills the lines of an already-existing batch by marking, keeping what the owner set', () => {
     const existing = makeBatch({
       id: 'CB9', code: 'NV-0923-4', status: 'В пути',
@@ -606,6 +647,31 @@ describe('партия, собранная из файла приёмки в К�
     });
     const { notes } = chinaFormFromArrival(arrival, existing);
     expect(notes.join(' ')).toContain('NV-101: коробок в приёмке 30, в партии 29');
+  });
+
+  // Item 81i, owner: «эта поставка отправлена не на паллете а коробками» — a final batch file's
+  // own waybill figures always win once the batch has them; the arrival totals must never
+  // silently overwrite a weight the batch already carries.
+  it('flow b: a batch that already has its own waybill weight keeps it', () => {
+    const existing = makeBatch({
+      id: 'CB9', code: 'NV-0923-4', weightKg: 967, volumeM3: 9.14,
+      lines: [makeLine({ id: 'L1', marking: 'NV-101', boxes: 30 })]
+    });
+    const { form, boxesOnly } = chinaFormFromArrival(arrival, existing);
+    expect(form.weightKg).toBe('967');
+    expect(form.volumeM3).toBe('9.14');
+    expect(boxesOnly).toBe(false);
+  });
+
+  it('flow b: a batch with no weight/volume of its own yet gets them from the arrival totals', () => {
+    const existing = makeBatch({
+      id: 'CB9', code: 'NV-0923-4', weightKg: 0, volumeM3: 0,
+      lines: [makeLine({ id: 'L1', marking: 'NV-101', boxes: 30 })]
+    });
+    const { form, boxesOnly } = chinaFormFromArrival(arrival, existing);
+    expect(form.weightKg).toBe('847');
+    expect(form.volumeM3).toBe('7.56112');
+    expect(boxesOnly).toBe(true);
   });
 });
 

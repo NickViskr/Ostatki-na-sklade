@@ -106,12 +106,18 @@ export function chinaAiNormaliseArrival(raw: unknown): ChinaParsedArrival | null
   const warnings: string[] = [];
   if (lines.length === 0) warnings.push('В файле не нашлось ни одной строки товара');
   warnings.push(...chinaArrivalLineChecks(lines));
+  // Item 81i: AI reads no 合计 row of its own — the sum of the lines is the same fallback the
+  // parser itself uses when a file has none.
+  const totalWeightKg = lines.reduce((sum, l) => sum + l.boxes * l.factoryBoxKg, 0);
+  const totalVolumeM3 = lines.reduce((sum, l) => sum + l.boxes * l.boxLengthM * l.boxWidthM * l.boxHeightM, 0);
   return {
     kind: 'arrival',
     receivedAt: toDate(r.receivedAt),
     customer: toStr(r.customer),
     draftCode: toStr(r.draftCode),
     lines,
+    totalWeightKg,
+    totalVolumeM3,
     warnings
   };
 }

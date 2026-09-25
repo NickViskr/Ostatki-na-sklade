@@ -6,8 +6,8 @@ import { useWarehouseStore } from '../store/useWarehouseStore';
 import { chinaArticleOptions } from '../lib/chinaArticles';
 import { ChinaBatch } from '../types';
 import {
-  ChinaBatchForm, ChinaLineForm, CHINA_STATUSES, chinaBatchToForm, chinaFilledLines,
-  chinaFormCounts, chinaFormToPayload, chinaMarkingMatches, emptyChinaBatchForm, emptyChinaLine,
+  ChinaBatchForm, ChinaLineForm, CHINA_STATUSES, chinaBatchToForm, chinaCmToM, chinaFilledLines,
+  chinaFormCounts, chinaFormToPayload, chinaMarkingMatches, chinaMToCm, emptyChinaBatchForm, emptyChinaLine,
   validateChinaBatchForm
 } from '../lib/chinaBatchForm';
 import { ChinaSheets } from '../lib/chinaFileParse';
@@ -22,6 +22,9 @@ interface ChinaBatchModalProps {
   notes?: string[];
   /** What does not add up in the file itself. */
   warnings?: string[];
+  /** Item 81i: true when an arrival file just filled the batch's own weight/volume, because it
+   * was shipped in boxes, with no pallets of its own. */
+  boxesOnly?: boolean;
   /** Item 81g, step 7: present only when the script itself found nothing to complain about —
    * the owner can still press «Проверить ИИ» to have a model read the same grid a second time. */
   aiCheck?: { kind: ChinaAiKind; sheets: ChinaSheets; scriptParsed: ChinaAiParsed } | null;
@@ -31,7 +34,7 @@ interface ChinaBatchModalProps {
 const field = 'w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200';
 const cell = 'px-2 py-1 border border-slate-200 rounded text-sm w-full';
 
-export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initialForm, notes, warnings, aiCheck, onClose }) => {
+export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initialForm, notes, warnings, boxesOnly, aiCheck, onClose }) => {
   const saveChinaBatch = useChinaStore((s) => s.saveChinaBatch);
   const isSaving = useChinaStore((s) => s.isSaving);
   const settings = useChinaStore((s) => s.settings);
@@ -256,7 +259,9 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                     <th className="py-1 pr-2">Цена ¥</th>
                     <th className="py-1 pr-2">Паллета</th>
                     <th className="py-1 pr-2">Вес паллеты</th>
-                    <th className="py-1 pr-2">Вес коробки</th>
+                    <th className="py-1 pr-2">Коробка, см</th>
+                    <th className="py-1 pr-2">Вес коробки фабрики, кг</th>
+                    <th className="py-1 pr-2" title="если заполнен — важнее веса из приёмки">Вес коробки вручную</th>
                     <th className="py-1 pr-2">Наш артикул</th>
                     <th className="py-1 pr-2">Один товар</th>
                     <th className="py-1 pr-2"></th>
@@ -272,7 +277,15 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                       <td className="py-1 pr-2"><input className={cell} value={line.priceCny} onChange={(e) => setLine(i, { priceCny: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.pallet} onChange={(e) => setLine(i, { pallet: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.palletWeightKg} onChange={(e) => setLine(i, { palletWeightKg: e.target.value })} /></td>
-                      <td className="py-1 pr-2"><input className={cell} value={line.boxWeightKg} onChange={(e) => setLine(i, { boxWeightKg: e.target.value })} /></td>
+                      <td className="py-1 pr-2">
+                        <div className="flex gap-1">
+                          <input className={cell} style={{ width: '3.5rem' }} placeholder="Д" value={chinaMToCm(line.boxLengthM)} onChange={(e) => setLine(i, { boxLengthM: chinaCmToM(e.target.value) })} />
+                          <input className={cell} style={{ width: '3.5rem' }} placeholder="Ш" value={chinaMToCm(line.boxWidthM)} onChange={(e) => setLine(i, { boxWidthM: chinaCmToM(e.target.value) })} />
+                          <input className={cell} style={{ width: '3.5rem' }} placeholder="В" value={chinaMToCm(line.boxHeightM)} onChange={(e) => setLine(i, { boxHeightM: chinaCmToM(e.target.value) })} />
+                        </div>
+                      </td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.factoryBoxKg} onChange={(e) => setLine(i, { factoryBoxKg: e.target.value })} /></td>
+                      <td className="py-1 pr-2" title="если заполнен — важнее веса из приёмки"><input className={cell} value={line.boxWeightKg} onChange={(e) => setLine(i, { boxWeightKg: e.target.value })} /></td>
                       <td className="py-1 pr-2">
                         <select
                           data-testid="select-china-article"
@@ -300,6 +313,11 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
               Вес коробки заполняйте, если знаете его точно — он важнее оценки по паллетам.
               Артикул выбирается из нашей базы SKU; одинаковым товарам разных цветов ставьте одну метку «Один товар».
             </p>
+            {boxesOnly && (
+              <p className="text-sm text-amber-600 mt-1">
+                Отправка коробками, без паллет: вес и объём накладной взяты из приёмки
+              </p>
+            )}
           </div>
         </div>
 

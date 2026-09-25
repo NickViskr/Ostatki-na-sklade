@@ -141,6 +141,13 @@ describe('файл приёмки на складе в Иу (партия NV-092
     expect(parsed.draftCode).toBe('NV-0923');
   });
 
+  // Item 81i: the 合计 row's own weight/volume, read straight off the file — used to fill a
+  // draft batch shipped in boxes, with no waybill of its own yet.
+  it('carries the 合计 row totals: 847 kg, 7.56112 m³', () => {
+    expect(parsed.totalWeightKg).toBe(847);
+    expect(parsed.totalVolumeM3).toBe(7.56112);
+  });
+
   it('has nothing to complain about in a file nobody edited', () => {
     expect(parsed.warnings).toEqual([]);
   });
@@ -235,6 +242,13 @@ describe('item 81h: arrival file of a single product the carrier gave no marking
 
   it('agrees with the 合计 row and needs no warning', () => {
     expect(parsed.warnings).toEqual([]);
+  });
+
+  // Item 81i, owner's real file: a shipment in boxes has no pallets, so its waybill totals ARE
+  // the 合计 row's own — 408 kg, 4.0392 m³, matching the batch report's own figures for it.
+  it('carries the 合计 row totals: 408 kg, 4.0392 m³', () => {
+    expect(parsed.totalWeightKg).toBe(408);
+    expect(parsed.totalVolumeM3).toBe(4.0392);
   });
 
   it('names the draft after the customer and the day it reached the warehouse', () => {
