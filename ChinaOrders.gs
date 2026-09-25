@@ -90,7 +90,16 @@ const CHINA_BATCH_HEADERS = [
   // unrelated save — a Russian-side cost, a recost after a payment — cannot blank these out
   // before the stage that actually computes them exists).
   'Курс товара ₽/¥', 'Источник курса товара', 'Курс перевозки ₽/¥', 'Источник курса перевозки',
-  'Расходы РФ внесены', 'Чего не хватает', 'Расчёт закрыт', 'История', 'Проверка', 'Проверка: детали'
+  'Расходы РФ внесены', 'Чего не хватает', 'Расчёт закрыт', 'История', 'Проверка', 'Проверка: детали',
+  // Item 84 (stage 1): posting an arrived batch onto «Мой склад» and the automatic cost
+  // correction that follows it. 'Оприходование' is '' | 'уже на остатке' | 'предварительно' |
+  // 'окончательно' — see chinaPostingBlockers/postChinaBatch/chinaApplyCostCorrection.
+  // 'Учёт по артикулам (JSON)' is an array of { article, qty, receiptRub, receiptTxnId,
+  // corrections: [{ amount, txnId, date }] } — the exact per-article record of what THIS batch
+  // has already put on stock, so a correction's diff and cancelChinaBatchPosting's rollback
+  // never have to reconstruct it from the transactions sheet.
+  'Оприходование', 'Дата оприходования', 'Кто оприходовал', 'Операция оприходования',
+  'Учёт по артикулам (JSON)'
 ];
 
 const CHINA_LINE_HEADERS = [
@@ -192,6 +201,17 @@ const CHINA_SETTINGS_DEFAULTS = [
 
 const CHINA_STATUSES = ['Черновик', 'В пути', 'Прибыла'];
 
+// Item 84 (stage 1): posting states of a batch. '' — not posted; 'уже на остатке' — the
+// one-time migration mark for a batch that was already «Прибыла» at deployment (item 8, posted
+// by hand outside the app, never touched again); 'предварительно'/'окончательно' — posted
+// through postChinaBatch, 'окончательно' once chinaApplyCostCorrection has closed the money.
+const CHINA_POSTING_STATE_ON_STOCK = 'уже на остатке';
+const CHINA_POSTING_STATE_PROVISIONAL = 'предварительно';
+const CHINA_POSTING_STATE_FINAL = 'окончательно';
+
+// Guards the one-time migration of item 8 — see chinaEnsureOldBatchesMigrated.
+const CHINA_OLD_BATCHES_MIGRATED_PROPERTY = 'china_oldBatchesMigrated';
+
 // Item 81g: a payment tied to a receipt of the report. The RECEIPT is then 'сопоставлено'; the
 // payment says 'распределена', the word the screen filters on (the two used to share one word,
 // and a matched payment dropped out of both lists of the payments card).
@@ -245,6 +265,63 @@ let _chinaCache = null;
 
 function chinaResetCache() {
   _chinaCache = { ss: null, sheets: {}, values: {} };
+  // Item 84 (stage 1), item 8: the one-time migration that marks every batch already «Прибыла»
+  // at deployment as 'уже на остатке'. Guarded by a Script Property flag so the check is cheap
+  // (one property read) on every call after the first — placed here because chinaResetCache()
+  // is already the first statement of every top-level action in this file (see the class
+  // comment on _chinaCache above), so this runs before any action — including a report upload —
+  // could promote a batch to «Прибыла» after deployment.
+  chinaEnsureOldBatchesMigrated();
+}
+
+/**
+ * Item 84 (stage 1), item 8: marks every batch that is «Прибыла» right now, and not yet posted,
+ * as 'уже на остатке' — the owner posted those by hand before this module could do it itself
+ * (e.g. NV-0825-2). Runs exactly once (Script Property flag): a batch that arrives LATER is
+ * never touched by this function again, only by postChinaBatch.
+ */
+function chinaEnsureOldBatchesMigrated() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty(CHINA_OLD_BATCHES_MIGRATED_PROPERTY) === '1') return;
+  // The property itself is what guards re-entrancy: chinaSpreadsheet()/chinaSheet() below call
+  // back into chinaSheet(), never into chinaResetCache(), so there is no risk of recursion.
+  const ss = chinaSpreadsheet();
+  const batchCtx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
+  batchCtx.rows.forEach(function (r) {
+    const status = String(r['Статус'] || '').trim();
+    const postingState = String(r['Оприходование'] || '').trim();
+    if (status !== 'Прибыла' || postingState !== '') return;
+    chinaSetBatchCell(batchCtx, r.__row, 'Оприходование', CHINA_POSTING_STATE_ON_STOCK);
+  });
+  props.setProperty(CHINA_OLD_BATCHES_MIGRATED_PROPERTY, '1');
+}
+
+// Item 84 (stage 1): a single targeted cell write on the batches sheet, by header name — used
+// by the migration and by postChinaBatch/chinaApplyCostCorrection/cancelChinaBatchPosting so a
+// posting-only write never re-runs the whole costing pipeline (writeChinaBatch) on a batch whose
+// money did not change.
+function chinaSetBatchCell(batchCtx, rowNum, colName, value) {
+  const colIdx = batchCtx.headers.indexOf(colName) + 1;
+  if (colIdx <= 0) return;
+  batchCtx.sheet.getRange(rowNum, colIdx, 1, 1).setValues([[value]]);
+}
+
+// Item 84 (stage 1): writes several posting-only columns at once, by field name (see
+// chinaBatchFromRow for the field <-> column mapping).
+const CHINA_POSTING_FIELD_COLUMN = {
+  postingState: 'Оприходование',
+  postedAt: 'Дата оприходования',
+  postedBy: 'Кто оприходовал',
+  postingOpId: 'Операция оприходования',
+  postingRecords: 'Учёт по артикулам (JSON)'
+};
+
+function chinaWritePostingFields(batchCtx, rowNum, fields) {
+  Object.keys(fields).forEach(function (key) {
+    const col = CHINA_POSTING_FIELD_COLUMN[key];
+    if (!col) return;
+    chinaSetBatchCell(batchCtx, rowNum, col, fields[key]);
+  });
 }
 
 function chinaCacheInvalidate(name) {
@@ -532,8 +609,27 @@ function chinaBatchFromRow(r) {
     closed: String(r['Расчёт закрыт'] || '').trim() === 'да',
     history: String(r['История'] || '').trim() === 'да',
     checkMark: String(r['Проверка'] || '').trim(),
-    checkNote: String(r['Проверка: детали'] || '').trim()
+    checkNote: String(r['Проверка: детали'] || '').trim(),
+    // Item 84 (stage 1): posting state and the per-article record of what is already on stock.
+    postingState: String(r['Оприходование'] || '').trim(),
+    postedAt: String(r['Дата оприходования'] || '').trim(),
+    postedBy: String(r['Кто оприходовал'] || '').trim(),
+    postingOpId: String(r['Операция оприходования'] || '').trim(),
+    postingRecords: chinaParsePostingRecords(r['Учёт по артикулам (JSON)'])
   };
+}
+
+// Item 84 (stage 1): the batch's own per-article posting record — never throws on a damaged or
+// empty cell, since every read path (getChinaBatches included) goes through chinaBatchFromRow.
+function chinaParsePostingRecords(raw) {
+  const text = String(raw === null || raw === undefined ? '' : raw).trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
 }
 
 /**
@@ -753,10 +849,52 @@ function chinaBatchesPicture(ss) {
   });
   lines.forEach(function (l) { if (byId[l.batchId]) byId[l.batchId].lines.push(l); });
   costs.forEach(function (c) { if (byId[c.batchId]) byId[c.batchId].costs.push(c); });
+
+  // Item 84 (stage 1): the posting preview for the browser's «Оприходовать» button — canPost,
+  // the Russian blockers list and a per-article preview (ordered qty, batch cost ₽, provisional
+  // price per unit), money computed SERVER-side. Recomputed only for a batch that could
+  // plausibly be posted right now (arrived, not yet posted) — every other batch gets a cheap,
+  // empty answer instead of paying chinaWithPaymentRate's own sheet reads for nothing.
+  const settings = getChinaSettings();
+  const skus = getSkus();
+  const kits = getKits();
+  batches.forEach(function (b) {
+    if (b.status !== 'Прибыла' || b.postingState) {
+      b.canPost = false;
+      b.postingBlockers = [];
+      b.postingPreview = [];
+      return;
+    }
+    const rated = chinaWithPaymentRate(ss, b);
+    let rubTotal = 0;
+    b.costs.forEach(function (c) { rubTotal = roundToTwo(rubTotal + c.amountRub); });
+    const calc = chinaFullyCost(rated, b.lines, rubTotal, settings);
+    const blockers = chinaPostingBlockers(rated, calc, b.lines, skus, kits);
+    b.canPost = blockers.length === 0;
+    b.postingBlockers = blockers;
+    const costByArticle = {};
+    const qtyByArticle = {};
+    b.lines.forEach(function (l, i) {
+      const article = String(l.article || '').trim();
+      if (!article) return;
+      costByArticle[article] = roundToTwo((costByArticle[article] || 0) + calc.lines[i].costRub);
+      qtyByArticle[article] = (qtyByArticle[article] || 0) + (Number(l.qty) || 0);
+    });
+    b.postingPreview = Object.keys(costByArticle).map(function (article) {
+      const qty = qtyByArticle[article];
+      return {
+        article: article,
+        qty: qty,
+        costRub: costByArticle[article],
+        pricePerUnitRub: qty > 0 ? roundToTwo(costByArticle[article] / qty) : 0
+      };
+    });
+  });
+
   // Owner, 2026-09-25: the same picture getChinaMoney() answers with, folded in here so every
   // China write (saveChinaBatch and the rest) hands the browser its money update in the SAME
   // response, instead of a second ~6 s getChinaMoney request.
-  return { batches: batches, payments: payments, settings: getChinaSettings(), money: chinaMoneyPicture(ss) };
+  return { batches: batches, payments: payments, settings: settings, money: chinaMoneyPicture(ss) };
 }
 
 // ---------------------------------------------------------------- costing (no sheets here)
@@ -1253,6 +1391,29 @@ function saveChinaBatch(data, username) {
   if (requested && !target) throw new Error('Партия ' + requested + ' не найдена');
   const batchId = target ? requested : chinaNextId(batchCtx.rows, 'CB');
 
+  // Item 84 (stage 1), decision 9: a posted batch keeps its articles and quantities fixed —
+  // only its money fields feed the automatic correction below. Compared by marking, since that
+  // is the carrier's own stable key for a line within one batch (chinaGroupIds' own reasoning).
+  if (target) {
+    const postedState = chinaBatchFromRow(target).postingState;
+    if (postedState) {
+      const existingLines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows
+        .map(chinaLineFromRow).filter(function (l) { return l.batchId === batchId; });
+      const byMarking = function (list) {
+        const out = {};
+        list.forEach(function (l) {
+          out[String(l.marking || '').trim()] = { article: String(l.article || '').trim(), qty: Number(l.qty) || 0 };
+        });
+        return out;
+      };
+      const before = byMarking(existingLines);
+      const after = byMarking(incoming);
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        throw new Error('Партия оприходована — менять артикулы и количества строк нельзя, доступны только денежные поля');
+      }
+    }
+  }
+
   const batch = {
     id: batchId,
     orderNo: String(data.orderNo || '').trim(),
@@ -1353,6 +1514,10 @@ function saveChinaBatch(data, username) {
   const calc = chinaFullyCost(rated, lines, rubTotal, getChinaSettings());
   writeChinaBatch(ss, batchCtx, rated, lines, calc, username);
   chinaRecostBorrowers(ss, username, [batchId]);
+  // Item 84 (stage 1), decision 5b: a save of a POSTED batch (money fields only — the guard
+  // above blocks anything else) re-runs the automatic cost correction, so an edit of the goods
+  // price or the RF costs after posting is corrected too, not only the next report upload.
+  chinaApplyCostCorrection(ss, batchId, calc, username);
   // Item 83c: every save (a new batch, an arrival/final-file update, a status change) keeps
   // «Заказы на фабрике» in step — split lines summed, one row per (batch, our article).
   syncChinaFactoryOrders(username);
@@ -1686,6 +1851,10 @@ function chinaFillBatchesFromReport(ss, freights, username) {
   // count too, not just the codes the sheet started this pass with).
   ctx.rows.forEach(function (r) {
     const batch = chinaBatchFromRow(r);
+    // Item 84 (stage 1), decision 6: status/field fill from a report is ONLY for a batch not yet
+    // «Прибыла» — an already-arrived batch (arrived-unposted, posted or 'уже на остатке') never
+    // has its freight fields rewritten by a later report, whatever a newer bill might say.
+    if (batch.status === 'Прибыла') return;
     const otherCodes = ctx.rows
       .filter(function (row) { return row.__row !== r.__row; })
       .map(function (row) { return String(row['Код партии'] || '').trim(); });
@@ -2371,6 +2540,304 @@ function restoreChinaBatch(payload, username) {
   // Item 83c: the restored batch's rows come back into «Заказы на фабрике» too.
   syncChinaFactoryOrders(username);
   return { batchId: batchId, reKeyed: reKeyed };
+}
+
+// ---------------------------------------------------------------- item 84 (stage 1): posting
+
+// The object text a posting receipt/correction lands on «Остатки» under. Checked against every
+// parser that reads destination text (item 84 brief): it has no 'Списание' (isWriteOffDestination),
+// no 'себестоимость обнулена' (isCapitalizationZeroed), no 'Услуги:' block (the additional-costs
+// regex at Code.gs ~997), and getLastPurchasePrices' own skip list ('Излишки', 'Корректировка',
+// 'Услуги') — none of those substrings appear here.
+function chinaPostingDestination(code) {
+  return 'Склад [Китай: партия ' + code + ']';
+}
+
+function chinaPostingCorrectionDestination(code) {
+  return chinaPostingDestination(code) + ' [Доводка себестоимости]';
+}
+
+/**
+ * Item 84 (stage 1), decision 1/9: everything that keeps a batch from being posted, in Russian,
+ * for both the UI's «Оприходовать» button and postChinaBatch's own refusal. Deliberately NOT the
+ * same list as chinaMissingListOf/calc.missing — posting happens BEFORE the final payment, so an
+ * unpaid debt on the order or the freight bill is not a blocker here, only:
+ *   - the batch itself not yet «Прибыла»;
+ *   - the carrier bill unmatched (freight unknown);
+ *   - the goods price in ¥ unknown;
+ *   - «Расходы РФ внесены» not ticked;
+ *   - no rate at all (goods AND freight) resolved yet, from any source;
+ *   - a line with no «Наш артикул», an article missing from the SKU base, or a kit.
+ * `skus`/`kits` are pre-fetched by the caller so a preview (getChinaBatches) can call this once
+ * per batch without re-reading the SKU sheet each time.
+ */
+function chinaPostingBlockers(rated, calc, lines, skus, kits) {
+  const blockers = [];
+  if (String(rated.status || '').trim() !== 'Прибыла') blockers.push('партия ещё не в статусе «Прибыла»');
+  if (!rated.billInfo) blockers.push('не найдена накладная карго — перевозка неизвестна');
+  if (!(Number(calc.goodsCny) > 0)) blockers.push('не известна цена товара в ¥');
+  if (!rated.rubCostsDone) blockers.push('расходы РФ не подтверждены (флажок «Расходы РФ внесены»)');
+  const goodsRateKnown = Number(rated.goodsRate) > 0 || Number(rated.rubRate) > 0;
+  const freightRateKnown = Number(rated.freightRate) > 0;
+  if (!goodsRateKnown || !freightRateKnown) blockers.push('не известен курс ₽/¥ (ни один источник — оплаты, вручную, последняя оплата, предыдущая партия)');
+
+  const skuSet = {};
+  (skus || []).forEach(function (s) { skuSet[String(s.sku || '').trim()] = true; });
+  (lines || []).forEach(function (l) {
+    const marking = String(l.marking || '').trim() || '?';
+    const article = String(l.article || '').trim();
+    if (!article) { blockers.push('строка «' + marking + '»: не указан наш артикул'); return; }
+    if (!skuSet[article]) { blockers.push('артикул ' + article + ' (' + marking + ') не найден в базе SKU'); return; }
+    const kit = (kits || {})[article];
+    if (kit && kit.components && kit.components.length > 0) {
+      blockers.push('артикул ' + article + ' (' + marking + ') — комплект, оприходовать нельзя');
+    }
+  });
+  return blockers;
+}
+
+/**
+ * Item 84 (stage 1). Posts an arrived batch onto «Мой склад» at a PROVISIONAL cost: one
+ * «Приход» per article (decision B), quantity as REQUESTED (decision 2, default ordered — the
+ * browser's job), price = the article's batch cost ₽ ÷ the requested quantity (decision A, a
+ * shortfall divides the same money over fewer units). Idempotent by opId: a double click with
+ * the SAME opId is a no-op; a retry after a crash between the stock write (commitTransaction)
+ * and the China-side mark below completes the mark without re-committing, because
+ * commitTransaction is itself idempotent by opId and hands back the SAME transactions either way.
+ */
+function postChinaBatch(data, username) {
+  chinaResetCache();
+  const id = String((data || {}).id || '').trim();
+  if (!id) throw new Error('Не указана партия для оприходования');
+  const opId = String((data || {}).opId || '').trim();
+  if (!opId) throw new Error('Не передан идентификатор операции оприходования');
+
+  const ss = chinaSpreadsheet();
+  const batchCtx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
+  let target = null;
+  batchCtx.rows.forEach(function (r) { if (String(r['ID']).trim() === id) target = r; });
+  if (!target) throw new Error('Партия ' + id + ' не найдена');
+  const batch = chinaBatchFromRow(target);
+
+  if (batch.postingState) {
+    if (batch.postingOpId && batch.postingOpId === opId) return chinaBatchesPicture(ss); // double click
+    if (batch.postingState === CHINA_POSTING_STATE_ON_STOCK) {
+      throw new Error('Партия отмечена «уже на остатке» — оприходовать через приложение нельзя');
+    }
+    throw new Error('Партия уже оприходована' + (batch.postedAt ? ' (' + batch.postedAt + ')' : ''));
+  }
+
+  const lines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows
+    .map(chinaLineFromRow).filter(function (l) { return l.batchId === id; });
+  const costs = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS).rows
+    .map(chinaCostFromRow).filter(function (c) { return c.batchId === id; });
+  let rubTotal = 0;
+  costs.forEach(function (c) { rubTotal = roundToTwo(rubTotal + c.amountRub); });
+  const rated = chinaWithPaymentRate(ss, batch);
+  const calc = chinaFullyCost(rated, lines, rubTotal, getChinaSettings());
+
+  const skus = getSkus();
+  const kits = getKits();
+  const blockers = chinaPostingBlockers(rated, calc, lines, skus, kits);
+  if (blockers.length > 0) throw new Error('Нельзя оприходовать партию: ' + blockers.join('; '));
+
+  const requested = Array.isArray(data.lines) ? data.lines : [];
+  if (requested.length === 0) throw new Error('Не переданы строки для оприходования');
+  const qtyByArticle = {};
+  requested.forEach(function (l, i) {
+    const article = String((l || {}).article || '').trim();
+    if (!article) throw new Error('В строке ' + (i + 1) + ' запроса не указан артикул');
+    const qty = Number((l || {}).qty);
+    if (!Number.isInteger(qty) || qty < 1) {
+      throw new Error('Количество артикула ' + article + ' должно быть целым числом не меньше 1');
+    }
+    qtyByArticle[article] = (qtyByArticle[article] || 0) + qty;
+  });
+
+  // The batch's own cost per article, from the SAME calc just used for the blockers — one
+  // article split across several lines (decision B) sums here into one number.
+  const costByArticle = {};
+  lines.forEach(function (l, i) {
+    const article = String(l.article || '').trim();
+    if (!article) return;
+    costByArticle[article] = roundToTwo((costByArticle[article] || 0) + calc.lines[i].costRub);
+  });
+  const articles = Object.keys(qtyByArticle);
+  const unknown = articles.filter(function (a) { return !(a in costByArticle); });
+  if (unknown.length > 0) throw new Error('В партии нет строк с артикулом: ' + unknown.join(', '));
+
+  const destination = chinaPostingDestination(batch.code);
+  const items = articles.map(function (a) {
+    const qty = qtyByArticle[a];
+    const price = roundToTwo(costByArticle[a] / qty);
+    return { article: a, quantity: qty, price: price };
+  });
+
+  const commit = commitTransaction(items, 'Приход', destination, '', username, undefined, opId);
+  const created = commit.newTransactions || [];
+
+  const records = articles.map(function (a) {
+    let txn = null;
+    created.forEach(function (t) { if (!txn && String(t.article).trim() === a) txn = t; });
+    return {
+      article: a,
+      qty: qtyByArticle[a],
+      receiptRub: txn ? roundToTwo(Number(txn.total) || 0) : costByArticle[a],
+      receiptTxnId: txn ? txn.id : '',
+      corrections: []
+    };
+  });
+
+  chinaWritePostingFields(batchCtx, target.__row, {
+    postingState: CHINA_POSTING_STATE_PROVISIONAL,
+    postedAt: chinaStamp(),
+    postedBy: username || '',
+    postingOpId: opId,
+    postingRecords: JSON.stringify(records)
+  });
+
+  Logger.log('Заказы в Китае: партия ' + id + ' оприходована пользователем ' + (username || '—'));
+  // Item 84, item 4: the pipeline row of a posted batch becomes 'received' only now.
+  syncChinaFactoryOrders(username);
+  return chinaBatchesPicture(ss);
+}
+
+/**
+ * Item 84 (stage 1), decision 7. Removes every receipt and correction this batch ever posted
+ * through the EXISTING delete path (deleteTransaction — archives to «Удаленное», rolls the
+ * stock back, still guarded by the 30-day edit window like every other «Приход»), all or
+ * nothing: every article is checked against the CURRENT stock before anything is deleted, and a
+ * shortfall (part already shipped) refuses the whole cancellation and deletes nothing.
+ */
+function cancelChinaBatchPosting(data, username) {
+  chinaResetCache();
+  const id = String((data || {}).id || '').trim();
+  if (!id) throw new Error('Не указана партия для отмены оприходования');
+
+  const ss = chinaSpreadsheet();
+  const batchCtx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
+  let target = null;
+  batchCtx.rows.forEach(function (r) { if (String(r['ID']).trim() === id) target = r; });
+  if (!target) throw new Error('Партия ' + id + ' не найдена');
+  const batch = chinaBatchFromRow(target);
+
+  if (!batch.postingState) throw new Error('Партия ещё не оприходована');
+  if (batch.postingState === CHINA_POSTING_STATE_ON_STOCK) {
+    throw new Error('Партия отмечена «уже на остатке» — в приложении нечего отменять, оприходование было ручным');
+  }
+
+  const records = batch.postingRecords || [];
+  const stockByArticle = {};
+  getStock().forEach(function (s) { stockByArticle[String(s.article).trim()] = Number(s.quantity) || 0; });
+
+  const blockers = [];
+  records.forEach(function (rec) {
+    const article = String(rec.article || '').trim();
+    const needed = Number(rec.qty) || 0;
+    const available = stockByArticle[article] || 0;
+    if (needed > 0 && available < needed) {
+      blockers.push('артикул ' + article + ': на складе ' + available + ' шт., для отмены нужно ' + needed + ' шт. — часть уже отгружена');
+    }
+  });
+  if (blockers.length > 0) {
+    throw new Error('Нельзя отменить оприходование — часть товара уже отгружена: ' + blockers.join('; '));
+  }
+
+  records.forEach(function (rec) {
+    (rec.corrections || []).forEach(function (c) {
+      // allowChinaInternal=true: cancelChinaBatchPosting is the ONE caller allowed to delete a
+      // China-posting-owned row (coordinator follow-up to item 84, stage 1).
+      if (c && c.txnId) deleteTransaction(c.txnId, username, false, null, true);
+    });
+    if (rec.receiptTxnId) deleteTransaction(rec.receiptTxnId, username, false, null, true);
+  });
+
+  chinaWritePostingFields(batchCtx, target.__row, {
+    postingState: '',
+    postedAt: '',
+    postedBy: '',
+    postingOpId: '',
+    postingRecords: '[]'
+  });
+
+  Logger.log('Заказы в Китае: оприходование партии ' + id + ' отменено пользователем ' + (username || '—'));
+  // The batch's factory-order row returns to the active pipeline (item 84, item 4).
+  syncChinaFactoryOrders(username);
+  return chinaBatchesPicture(ss);
+}
+
+/**
+ * Item 84 (stage 1), decision 5: the automatic cost correction. Called ONLY from the two places
+ * the owner named — the end of saveChinaBatch (a save of a posted batch) and the report-upload
+ * recost (chinaRecostAndCorrectForReport) — never from a generic recost, so a payment
+ * match/unmatch does not silently move money already sitting on the shelf.
+ *
+ * Idempotent by CONSTRUCTION, not by opId: the diff is «final article cost − what this batch's
+ * own postingRecords say is already on stock (receipts + earlier corrections)», so a repeated
+ * call with nothing new to report always finds diff 0 and writes nothing — a second call after a
+ * no-op save or a re-uploaded report corrects nothing twice.
+ */
+function chinaApplyCostCorrection(ss, batchId, calc, username) {
+  if (!calc || !calc.closed) return null;
+  const batchCtx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
+  let target = null;
+  batchCtx.rows.forEach(function (r) { if (String(r['ID']).trim() === batchId) target = r; });
+  if (!target) return null;
+  const batch = chinaBatchFromRow(target);
+  if (batch.postingState !== CHINA_POSTING_STATE_PROVISIONAL && batch.postingState !== CHINA_POSTING_STATE_FINAL) {
+    return null;
+  }
+
+  const lines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows
+    .map(chinaLineFromRow).filter(function (l) { return l.batchId === batchId; });
+  const finalByArticle = {};
+  lines.forEach(function (l, i) {
+    const article = String(l.article || '').trim();
+    if (!article) return;
+    const c = calc.lines[i];
+    finalByArticle[article] = roundToTwo((finalByArticle[article] || 0) + (c ? c.costRub : 0));
+  });
+
+  const records = batch.postingRecords || [];
+  const destination = chinaPostingCorrectionDestination(batch.code);
+  let changed = false;
+  records.forEach(function (rec) {
+    const article = String(rec.article || '').trim();
+    let onStock = roundToTwo(Number(rec.receiptRub) || 0);
+    (rec.corrections || []).forEach(function (c) { onStock = roundToTwo(onStock + (Number(c.amount) || 0)); });
+    const finalCost = finalByArticle[article] !== undefined ? finalByArticle[article] : onStock;
+    const diff = roundToTwo(finalCost - onStock);
+    if (Math.abs(diff) < 0.01) return;
+    const txn = commitCostCorrection(article, diff, destination,
+      'Доводка себестоимости ' + batch.code, username);
+    if (!rec.corrections) rec.corrections = [];
+    rec.corrections.push({ amount: diff, txnId: txn ? txn.id : '', date: chinaStamp() });
+    changed = true;
+  });
+
+  if (changed) {
+    chinaWritePostingFields(batchCtx, target.__row, { postingRecords: JSON.stringify(records) });
+  }
+  if (batch.postingState === CHINA_POSTING_STATE_PROVISIONAL) {
+    chinaWritePostingFields(batchCtx, target.__row, { postingState: CHINA_POSTING_STATE_FINAL });
+    changed = true;
+  }
+  return { changed: changed, records: records };
+}
+
+/**
+ * Item 84 (stage 1): the report-upload recost. Skips batches 'уже на остатке'/'окончательно'
+ * outright (decision 6/8 — a report never touches them at all, not even a re-read of their own
+ * rate), recosts everything else exactly like chinaRecostAll, and runs the correction above for
+ * a posted batch still 'предварительно'.
+ */
+function chinaRecostAndCorrectForReport(ss, username) {
+  const batches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows.map(chinaBatchFromRow);
+  batches.forEach(function (b) {
+    if (b.postingState === CHINA_POSTING_STATE_ON_STOCK || b.postingState === CHINA_POSTING_STATE_FINAL) return;
+    const calc = recalcChinaBatch(ss, b.id, username);
+    if (b.postingState === CHINA_POSTING_STATE_PROVISIONAL) chinaApplyCostCorrection(ss, b.id, calc, username);
+  });
 }
 
 /**
@@ -3207,8 +3674,10 @@ function saveChinaReport(data, username) {
   // batch instead of a provisional rate.
   chinaFillBatchesFromReport(ss, freights, username);
   // Item 81g-3: the report itself is the ledger every batch's rate is resolved against —
-  // every batch is re-costed, not just the ones whose OWN order/bill changed.
-  chinaRecostAll(ss, username);
+  // every batch is re-costed, not just the ones whose OWN order/bill changed. Item 84 (stage
+  // 1), decision 6/8: chinaRecostAndCorrectForReport skips 'уже на остатке'/'окончательно'
+  // batches outright and runs the automatic cost correction for a posted 'предварительно' one.
+  chinaRecostAndCorrectForReport(ss, username);
   // Item 83c, item 3: an order/arrival just filled in above can turn a factory order 'received'.
   syncChinaFactoryOrders(username);
 
@@ -4367,9 +4836,19 @@ function chinaFactoryDesiredRows(ss) {
       if (!article) return;
       byArticle[article] = (byArticle[article] || 0) + (Number(l.qty) || 0);
     });
-    // A status taken back (Прибыла -> В пути) reopens the row: `received` is recomputed from
-    // the batch's CURRENT status every time, never remembered from a previous sync.
-    const received = String(b.status || '').trim() === 'Прибыла';
+    // Item 84 (stage 1), decision 4: a factory-order row becomes 'received' at POSTING, not at
+    // «Прибыла» — an arrived-but-unposted batch keeps its row ACTIVE in the pipeline. A batch
+    // taken back to unposted (cancelChinaBatchPosting) reopens the row the same way a status
+    // taken back used to: `posted` is recomputed from the batch's CURRENT posting state every
+    // time, never remembered from a previous sync.
+    const posted = b.postingState === CHINA_POSTING_STATE_PROVISIONAL
+      || b.postingState === CHINA_POSTING_STATE_FINAL
+      || b.postingState === CHINA_POSTING_STATE_ON_STOCK;
+    // 'уже на остатке' batches were posted by hand before this module could do it (item 8) and
+    // have no posting date of their own — the arrival date is the best date available for them.
+    const postedDate = b.postingState === CHINA_POSTING_STATE_ON_STOCK
+      ? b.arrivedAt
+      : (String(b.postedAt || '').split(' ')[0] || b.arrivedAt);
     Object.keys(byArticle).forEach(function (article) {
       const qty = byArticle[article];
       if (!(qty > 0)) return;
@@ -4383,8 +4862,8 @@ function chinaFactoryDesiredRows(ss) {
         qty: qty,
         orderedAt: b.shippedAt,
         expectedAt: expectedAt,
-        status: received ? 'received' : 'active',
-        receivedAt: received ? b.arrivedAt : ''
+        status: posted ? 'received' : 'active',
+        receivedAt: posted ? postedDate : ''
       });
     });
   });

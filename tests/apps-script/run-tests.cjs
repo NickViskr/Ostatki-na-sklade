@@ -4902,7 +4902,8 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
     // the report-driven rate/missing schema.
     batchHead[batchHead.indexOf('Тариф карго ₽') - 5] === 'Курс взят из партии' &&
     batchHead[batchHead.indexOf('Тариф карго ₽') - 4] === 'Курс взят из оплаты' &&
-    batchHead[batchHead.length - 1] === 'Проверка: детали',
+    // Item 84 (stage 1): five more columns append after «Проверка: детали».
+    batchHead[batchHead.length - 1] === 'Учёт по артикулам (JSON)',
     batchHead.slice(-12).join(' | '));
   check('81e: same for the lines sheet',
     lineHead.slice(0, PRE_81E_LINE_HEADERS.length).join('|') === PRE_81E_LINE_HEADERS.join('|') &&
@@ -7147,7 +7148,8 @@ function byKeySuffix(rows, needle) {
     row40b['Ожидаемое прибытие'] === '2026-09-20', JSON.stringify(row40b));
 })();
 
-// ---- 83d: status «Прибыла» -> received, and a status taken back reopens the row ----
+// ---- 83d: status «Прибыла» alone does NOT mark the row received (item 84: only POSTING
+// does), and a status taken back still reopens a row that never left active in the first place ----
 (function () {
   const h = withChina();
   const article = 'ART-83D';
@@ -7162,16 +7164,16 @@ function byKeySuffix(rows, needle) {
     lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
   }, 'Николай');
   let row = byKeySuffix(h.dumpFactoryOrders(), ':' + article)[0];
-  check('83d: «Прибыла» marks the row received, with the arrival date',
-    row['Статус'] === 'received' && row['Дата получения'] === '2026-09-25', JSON.stringify(row));
+  check('83d (item 84): «Прибыла» alone keeps the row ACTIVE — it becomes received only at posting',
+    row['Статус'] === 'active' && row['Дата получения'] === '', JSON.stringify(row));
 
-  // Status taken back (owner corrects a mistaken «Прибыла») -> the row reopens.
+  // Status taken back (owner corrects a mistaken «Прибыла») -> the row stays active, as before.
   h.saveChinaBatch({ id: batchId, orderNo: '42', code: 'NV-0902-1', status: 'В пути',
     shippedAt: '2026-09-01',
     lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: article }]
   }, 'Николай');
   row = byKeySuffix(h.dumpFactoryOrders(), ':' + article)[0];
-  check('83d: a status taken back reopens the row — active again, no received date',
+  check('83d: a status taken back leaves the row active, no received date',
     row['Статус'] === 'active' && row['Дата получения'] === '', JSON.stringify(row));
 })();
 
@@ -7368,8 +7370,9 @@ function byKeySuffix(rows, needle) {
     today[article] === 80, JSON.stringify(today));
 
   // The batch arrives («Прибыла») — the owner has NOT resolved the conflict (the manual row is
-  // still 'active', not 'checked'). Before the fix this un-hid the manual row and the pipeline
-  // read 50: the goods were counted as received stock AND as the still-open manual order.
+  // still 'active', not 'checked'). Item 84: the China row stays ACTIVE until POSTED (the goods
+  // are not really on stock yet), so the pipeline still reads 80 — not 50 (no double count with
+  // the still-hidden manual row) and not 0 either (the goods are not on the shelf yet).
   const batchId = h.getChinaBatches().batches.filter(function (b) { return b.orderNo === '29'; })[0].id;
   h.saveChinaBatch({
     id: batchId, orderNo: '29', code: 'NV-0916-24', status: 'Прибыла',
@@ -7377,14 +7380,15 @@ function byKeySuffix(rows, needle) {
     lines: [{ marking: 'MD1', boxes: 1, pcsPerBox: 80, qty: 80, priceCny: 5, article: article }]
   }, 'Николай');
   today = h.factoryPipelineQtyByArticleGs(h.getFactoryOrders(), '2026-09-25');
-  check("owner's case, conflict NOT resolved: after «Прибыла» the pipeline reads 0, not 50 — no double count on arrival",
-    today[article] === undefined || today[article] === 0, JSON.stringify(today));
+  check("owner's case, conflict NOT resolved: after «Прибыла» (still unposted) the pipeline reads 80, not 130 — no double count, but not zeroed either",
+    today[article] === 80, JSON.stringify(today));
 
-  // The owner can still close the manual row as the same order even after arrival.
+  // The owner can still close the manual row as the same order even after arrival — the China
+  // row itself still stays active/80 until it is actually posted (item 84).
   h.resolveFactoryOrderConflict({ id: manual.id, same: true }, 'Николай');
   today = h.factoryPipelineQtyByArticleGs(h.getFactoryOrders(), '2026-09-25');
-  check("owner's case: resolving the conflict after arrival still reads 0 (the manual row is now 'replaced')",
-    today[article] === undefined || today[article] === 0, JSON.stringify(today));
+  check("owner's case: resolving the conflict after arrival still reads 80 (the manual row is now 'replaced', China row still unposted)",
+    today[article] === 80, JSON.stringify(today));
 })();
 
 // ---- 83e fix: a manual order placed AFTER the China shipment is a DIFFERENT order, counted ----
@@ -7581,8 +7585,8 @@ function byKeySuffix(rows, needle) {
     JSON.stringify({ g: after.remainingGoodsKnown, f: after.remainingFreightKnown }));
 
   const row = byKeySuffix(h.dumpFactoryOrders(), ':ART-0825')[0];
-  check('Item 3: the filled-in arrival turns the factory order row «received»',
-    !!row && row['Статус'] === 'received' && row['Дата получения'] === '2026-09-17', JSON.stringify(row));
+  check('Item 3 (item 84): the filled-in arrival alone keeps the row active — only posting marks it received',
+    !!row && row['Статус'] === 'active' && row['Дата получения'] === '', JSON.stringify(row));
 })();
 
 // Item 3: a draft matched to the bill by its code minus the trailing «-N» — order filled, stays
@@ -8010,6 +8014,581 @@ function byKeySuffix(rows, needle) {
   check('faster saveChinaBatch: the per-action reset picks up a rate changed since the last action, not a stale cache',
     again.goodsRateSource === 'последняя оплата' && again.goodsRate === 20,
     JSON.stringify({ source: again.goodsRateSource, rate: again.goodsRate }));
+})();
+
+// ================= Item 84 (stage 1): posting an arrived China batch onto «Мой склад» =========
+//
+// Money-critical (posting/correction move real stock and capitalization) — full check, whole
+// path through the top-level actions (postChinaBatch/cancelChinaBatchPosting/saveChinaBatch/
+// saveChinaReport/getChinaBatches), not just the inner helpers.
+
+// A batch whose carrier bill is matched (a freight entry in the report), goods priced in ¥,
+// «Расходы РФ внесены» set and a manual rate — enough to be POSTABLE, but its freight bill is
+// left unpaid on purpose (chinaMissingListOf's own «Расчёт закрыт» stays false), because
+// posting must work BEFORE the final payment (decision 1).
+function china84PostableFixture(h, over) {
+  h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10], ['ART-POST-2', 10]]);
+  h.setStockSheet([]);
+  h.ensureTransSheet();
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }]
+  }, 'Николай');
+  const payload = Object.assign({
+    orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+    weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+    costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }]
+  }, over || {});
+  return h.saveChinaBatch(payload, 'Николай').batches[0];
+}
+
+// Same as above, but the freight bill is fully credited by a negative opening balance and no
+// order is reported for 'P1' (chinaOrderKnown then defaults every goods figure to 0) — so
+// chinaMissingListOf finds nothing outstanding and calc.closed is TRUE right away. Needed for
+// the automatic-correction scenarios, which only fire on a CLOSED calc.
+function china84ClosableFixture(h, over) {
+  h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10]]);
+  h.setStockSheet([]);
+  h.ensureTransSheet();
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: -50,
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }]
+  }, 'Николай');
+  const payload = Object.assign({
+    orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+    weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+    costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }]
+  }, over || {});
+  return h.saveChinaBatch(payload, 'Николай').batches[0];
+}
+
+function china84Refuses(fn, fragment) {
+  let msg = '';
+  try { fn(); } catch (e) { msg = String(e && e.message || e); }
+  return { threw: !!msg, msg: msg, matches: fragment ? msg.indexOf(fragment) !== -1 : true };
+}
+
+// ---- posting preview (getChinaBatches/chinaBatchesPicture) and the happy path ----
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  check('84: preview says canPost=true for an arrived, unposted, fully-blocked-free batch',
+    batch.canPost === true, JSON.stringify({ canPost: batch.canPost, blockers: batch.postingBlockers }));
+  check('84: preview lists ONE article with the ordered qty and the batch\'s own cost',
+    batch.postingPreview.length === 1 && batch.postingPreview[0].article === 'ART-POST-1'
+    && batch.postingPreview[0].qty === 100 && batch.postingPreview[0].costRub === batch.totalRub,
+    JSON.stringify(batch.postingPreview));
+
+  const opId = 'op-84-1';
+  const posted = h.postChinaBatch({ id: batch.id, opId: opId, lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const postedBatch = posted.batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: posting sets the state to «предварительно» with who/when/opId',
+    postedBatch.postingState === 'предварительно' && postedBatch.postedBy === 'Николай' && postedBatch.postingOpId === opId,
+    JSON.stringify({ state: postedBatch.postingState, by: postedBatch.postedBy, op: postedBatch.postingOpId }));
+
+  const stock = h.stockOf('ART-POST-1');
+  check('84: «Мой склад» gets exactly the ordered quantity, capitalised at the batch\'s own cost',
+    stock && stock.quantity === 100 && Math.abs(stock.capitalization - batch.totalRub) < 0.01,
+    JSON.stringify({ stock: stock, totalRub: batch.totalRub }));
+
+  const rows = h.dumpTransSheet().filter(function (r) { return String(r['Объект'] || '').indexOf('NV-POST-1') !== -1; });
+  check('84: exactly one «Приход» row is written, object names the batch\'s own code',
+    rows.length === 1 && rows[0]['Тип'] === 'Приход' && String(rows[0]['Объект']).indexOf('Китай: партия NV-POST-1') !== -1,
+    JSON.stringify(rows));
+
+  check('84: double click with the SAME opId is a no-op — no second receipt',
+    (function () {
+      h.postChinaBatch({ id: batch.id, opId: opId, lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+      return h.dumpTransSheet().filter(function (r) { return String(r['Объект'] || '').indexOf('NV-POST-1') !== -1; }).length;
+    })() === 1, 'rows after a second click: ' + h.dumpTransSheet().length);
+
+  check('84: posting an already-posted batch with a DIFFERENT opId is refused',
+    china84Refuses(function () { h.postChinaBatch({ id: batch.id, opId: 'op-84-2', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай'); }, 'уже оприходована').threw,
+    'expected a refusal');
+})();
+
+// ---- retry after a crash between the stock write and the China-side mark ----
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  const opId = 'op-84-retry';
+  h.postChinaBatch({ id: batch.id, opId: opId, lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  // Simulate the crash: the stock write (commitTransaction, keyed by opId) already happened,
+  // but the batch's own posting mark did not — poke «Оприходование» back to '' directly.
+  const sheet = h.getTargetSheet('Партии');
+  const dump = sheet.__dump();
+  const headers = dump[0].map(function (x) { return String(x).trim(); });
+  const postingCol = headers.indexOf('Оприходование');
+  dump[1][postingCol] = '';
+  sheet.__setData(dump);
+
+  const retried = h.postChinaBatch({ id: batch.id, opId: opId, lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const retriedBatch = retried.batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: a retry with the same opId completes the China-side mark without re-posting the stock',
+    retriedBatch.postingState === 'предварительно',
+    JSON.stringify(retriedBatch.postingState));
+  const stock = h.stockOf('ART-POST-1');
+  const rows = h.dumpTransSheet().filter(function (r) { return String(r['Объект'] || '').indexOf('NV-POST-1') !== -1; });
+  check('84: the retry does not double the stock or the transaction rows',
+    stock.quantity === 100 && rows.length === 1,
+    JSON.stringify({ stock: stock, rows: rows.length }));
+})();
+
+// ---- shortfall price (decision A) and one Приход per article across several lines (decision B) ----
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h, {
+    lines: [
+      { marking: 'M1', boxes: 5, pcsPerBox: 10, qty: 50, priceCny: 10, article: 'ART-POST-1' },
+      { marking: 'M2', boxes: 5, pcsPerBox: 10, qty: 50, priceCny: 10, article: 'ART-POST-1' }
+    ]
+  });
+  const totalCost = batch.totalRub;
+  const posted = h.postChinaBatch({ id: batch.id, opId: 'op-84-3', lines: [{ article: 'ART-POST-1', qty: 90 }] }, 'Николай');
+  const rows = h.dumpTransSheet().filter(function (r) { return String(r['Объект'] || '').indexOf('NV-POST-1') !== -1; });
+  check('84: two lines of the same article post as ONE «Приход» row',
+    rows.length === 1 && Number(rows[0]['Количество']) === 90,
+    JSON.stringify(rows));
+  // Decision A: price = batch cost ÷ actual qty, rounded to the kopeck — «Сумма» is qty × that
+  // rounded price, same as any other commitTransaction receipt, so it can differ from the
+  // batch's own totalCost by at most a kopeck's worth of rounding (here 90 × 0.0044 = 0.40 ₽);
+  // that residual is exactly what postingRecords.receiptRub captures for the correction step.
+  const expectedPrice = roundToTwoTest(totalCost / 90);
+  check('84: a shortfall (90 of 100) divides the FULL batch cost over the actual quantity, decision A',
+    Number(rows[0]['Цена']) === expectedPrice
+    && Math.abs(Number(rows[0]['Сумма']) - roundToTwoTest(90 * expectedPrice)) < 0.001
+    && Math.abs(Number(rows[0]['Сумма']) - totalCost) < 0.5,
+    JSON.stringify({ row: rows[0], totalCost: totalCost, expectedPrice: expectedPrice }));
+  const postedBatch = posted.batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: postingRecords remembers the ACTUAL posted quantity, not the ordered one',
+    postedBatch.postingState === 'предварительно', JSON.stringify(postedBatch.postingState));
+})();
+
+function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
+
+// ---- blockers (decision 1/9) ----
+(function () {
+  const h = withChina();
+  const noBill = china84PostableFixture(h, { code: 'NV-OTHERCODE' }); // no freight entry for THIS code
+  check('84: no matching carrier bill blocks posting',
+    noBill.canPost === false && noBill.postingBlockers.some(function (m) { return m.indexOf('накладная') !== -1; }),
+    JSON.stringify(noBill.postingBlockers));
+  check('84: postChinaBatch itself refuses the same way',
+    china84Refuses(function () { h.postChinaBatch({ id: noBill.id, opId: 'op-84-4', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай'); }, 'накладная').threw,
+    'expected a refusal');
+})();
+
+(function () {
+  const h = withChina();
+  const noCosts = china84PostableFixture(h, { costs: [] });
+  check('84: «Расходы РФ» not confirmed blocks posting',
+    noCosts.canPost === false && noCosts.postingBlockers.some(function (m) { return m.indexOf('Расходы РФ') !== -1; }),
+    JSON.stringify(noCosts.postingBlockers));
+})();
+
+(function () {
+  const h = withChina();
+  const noRate = china84PostableFixture(h, { rubRate: 0 });
+  check('84: no rate at all (no payments, no manual, no borrow) blocks posting',
+    noRate.canPost === false && noRate.postingBlockers.some(function (m) { return m.indexOf('курс') !== -1; }),
+    JSON.stringify(noRate.postingBlockers));
+})();
+
+(function () {
+  const h = withChina();
+  const noArticle = china84PostableFixture(h, {
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: '' }]
+  });
+  check('84: a line with no «Наш артикул» blocks posting and names the marking',
+    noArticle.canPost === false && noArticle.postingBlockers.some(function (m) { return m.indexOf('M1') !== -1 && m.indexOf('артикул') !== -1; }),
+    JSON.stringify(noArticle.postingBlockers));
+})();
+
+(function () {
+  const h = withChina();
+  h.setSkuSheet(['SKU', 'ШТ/КОР'], []); // SKU base deliberately empty
+  h.setStockSheet([]);
+  h.ensureTransSheet();
+  h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, 'Николай');
+  const unknownArticle = h.saveChinaBatch({
+    orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+    weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-GHOST' }],
+    costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }]
+  }, 'Николай').batches[0];
+  check('84: an article missing from the SKU base blocks posting',
+    unknownArticle.canPost === false && unknownArticle.postingBlockers.some(function (m) { return m.indexOf('ART-GHOST') !== -1; }),
+    JSON.stringify(unknownArticle.postingBlockers));
+})();
+
+(function () {
+  const h = withChina();
+  h.setSkuSheet(['SKU', 'ШТ/КОР'], [['KIT-1', 10]]);
+  h.setKitSheet([{ kitSku: 'KIT-1', componentSku: 'ART-POST-1', quantity: 2, kitType: 'legacy' }]);
+  h.setStockSheet([]);
+  h.ensureTransSheet();
+  h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, 'Николай');
+  const kitBatch = h.saveChinaBatch({
+    orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+    weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'KIT-1' }],
+    costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }]
+  }, 'Николай').batches[0];
+  check('84: a kit article blocks posting',
+    kitBatch.canPost === false && kitBatch.postingBlockers.some(function (m) { return m.indexOf('комплект') !== -1; }),
+    JSON.stringify(kitBatch.postingBlockers));
+})();
+
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  check('84: quantity 0 is refused (money would vanish)',
+    china84Refuses(function () { h.postChinaBatch({ id: batch.id, opId: 'op-84-5', lines: [{ article: 'ART-POST-1', qty: 0 }] }, 'Николай'); }).threw,
+    'expected a refusal');
+  check('84: a non-integer quantity is refused',
+    china84Refuses(function () { h.postChinaBatch({ id: batch.id, opId: 'op-84-6', lines: [{ article: 'ART-POST-1', qty: 1.5 }] }, 'Николай'); }).threw,
+    'expected a refusal');
+})();
+
+// ---- pipeline (decision 4): active while arrived-unposted, received after posting, back after cancel ----
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  h.syncChinaFactoryOrdersReport('Николай');
+  let row = h.dumpFactoryOrders().filter(function (r) { return String(r['Партия Китай']) === 'NV-POST-1'; })[0];
+  check('84: an arrived, UNPOSTED batch keeps its factory-order row active',
+    row && row['Статус'] === 'active', JSON.stringify(row));
+
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-7', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  row = h.dumpFactoryOrders().filter(function (r) { return String(r['Партия Китай']) === 'NV-POST-1'; })[0];
+  check('84: posting turns the factory-order row «received» with the posting date',
+    row && row['Статус'] === 'received' && String(row['Дата получения']).length > 0,
+    JSON.stringify(row));
+
+  h.cancelChinaBatchPosting({ id: batch.id }, 'Николай');
+  row = h.dumpFactoryOrders().filter(function (r) { return String(r['Партия Китай']) === 'NV-POST-1'; })[0];
+  check('84: cancelling posting returns the factory-order row to active',
+    row && row['Статус'] === 'active', JSON.stringify(row));
+})();
+
+// ---- cancel posting: happy path and all-or-nothing refusal ----
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-8', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const cancelled = h.cancelChinaBatchPosting({ id: batch.id }, 'Николай');
+  const cancelledBatch = cancelled.batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: cancelling posting clears the batch\'s posting state',
+    cancelledBatch.postingState === '', JSON.stringify(cancelledBatch.postingState));
+  const stock = h.stockOf('ART-POST-1');
+  check('84: cancelling posting rolls the stock all the way back',
+    stock.quantity === 0 && stock.capitalization === 0, JSON.stringify(stock));
+  const archived = h.dumpArchive().filter(function (a) { return a.type === 'Transaction'; });
+  check('84: the removed receipt is archived to «Удаленное», same as any other deleted «Приход»',
+    archived.length === 1, JSON.stringify(archived.length));
+})();
+
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-9', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  // Part of the posted quantity is already shipped out — an ordinary «Расход», nothing to do
+  // with China at all.
+  h.commitTransaction([{ article: 'ART-POST-1', quantity: 60, price: 0 }], 'Расход', 'Склад [Заказ №1]', '', 'Николай');
+  const before = h.stockOf('ART-POST-1');
+  const refusal = china84Refuses(function () { h.cancelChinaBatchPosting({ id: batch.id }, 'Николай'); }, 'артикул ART-POST-1');
+  check('84: cancelling is refused when part of the posted quantity is already shipped',
+    refusal.threw && refusal.msg.indexOf('40') !== -1 && refusal.msg.indexOf('100') !== -1,
+    refusal.msg);
+  const after = h.stockOf('ART-POST-1');
+  check('84: a refused cancellation deletes NOTHING (all-or-nothing)',
+    after.quantity === before.quantity && after.capitalization === before.capitalization,
+    JSON.stringify({ before: before, after: after }));
+})();
+
+(function () {
+  // All-or-nothing across TWO articles: the FIRST article is fully available (nothing shipped),
+  // the SECOND is short. The pre-check must refuse before touching EITHER article's receipt —
+  // without it, cancelChinaBatchPosting would delete the first article's receipt and only then
+  // hit deleteTransaction's own guard on the second, leaving a half-cancelled batch.
+  const h = withChina();
+  const batch = china84PostableFixture(h, {
+    lines: [
+      { marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' },
+      { marking: 'M2', boxes: 5, pcsPerBox: 10, qty: 50, priceCny: 10, article: 'ART-POST-2' }
+    ]
+  });
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-9b',
+    lines: [{ article: 'ART-POST-1', qty: 100 }, { article: 'ART-POST-2', qty: 50 }] }, 'Николай');
+  h.commitTransaction([{ article: 'ART-POST-2', quantity: 30, price: 0 }], 'Расход', 'Склад [Заказ №9]', '', 'Николай');
+  const before1 = h.stockOf('ART-POST-1');
+  const before2 = h.stockOf('ART-POST-2');
+  const refusal = china84Refuses(function () { h.cancelChinaBatchPosting({ id: batch.id }, 'Николай'); }, 'ART-POST-2');
+  check('84: a shortfall on the SECOND article refuses before touching the FIRST',
+    refusal.threw, refusal.msg);
+  check('84: the first article\'s receipt is untouched when the second blocks the whole cancellation',
+    JSON.stringify(h.stockOf('ART-POST-1')) === JSON.stringify(before1)
+    && JSON.stringify(h.stockOf('ART-POST-2')) === JSON.stringify(before2),
+    JSON.stringify({ before1: before1, after1: h.stockOf('ART-POST-1'), before2: before2, after2: h.stockOf('ART-POST-2') }));
+})();
+
+// ---- automatic cost correction (decision 5) ----
+(function () {
+  const h = withChina();
+  const batch = china84ClosableFixture(h);
+  check('84: the closable fixture is actually closed (calc.closed / «Расчёт закрыт»)',
+    batch.closed === true, JSON.stringify(batch.missing));
+  const posted = h.postChinaBatch({ id: batch.id, opId: 'op-84-10', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const firstCap = h.stockOf('ART-POST-1').capitalization;
+
+  // Raise the RF cost — the batch's total (and so ART-POST-1's cost) goes up by exactly the
+  // RF delta, since it is the batch's only line/article.
+  const raised = h.saveChinaBatch({
+    id: batch.id, orderNo: batch.orderNo, code: batch.code, status: batch.status,
+    shippedAt: batch.shippedAt, arrivedAt: batch.arrivedAt,
+    weightKg: batch.weightKg, ratePerKgUsd: batch.ratePerKgUsd, rubRate: batch.rubRate,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+    costs: [{ type: 'Прочее', amountRub: 800, comment: 'разгрузка' }]
+  }, 'Николай').batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: a save of a posted, closed batch turns it «окончательно»',
+    raised.postingState === 'окончательно', JSON.stringify(raised.postingState));
+  const capAfterRaise = h.stockOf('ART-POST-1').capitalization;
+  check('84: correction UP — capitalization grows by exactly the batch cost delta (300 ₽ of RF costs)',
+    Math.abs((capAfterRaise - firstCap) - 300) < 0.01,
+    JSON.stringify({ firstCap: firstCap, capAfterRaise: capAfterRaise }));
+
+  // Lower it back — correction DOWN.
+  h.saveChinaBatch({
+    id: batch.id, orderNo: batch.orderNo, code: batch.code, status: batch.status,
+    shippedAt: batch.shippedAt, arrivedAt: batch.arrivedAt,
+    weightKg: batch.weightKg, ratePerKgUsd: batch.ratePerKgUsd, rubRate: batch.rubRate,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+    costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }]
+  }, 'Николай');
+  const capAfterLower = h.stockOf('ART-POST-1').capitalization;
+  check('84: correction DOWN — capitalization drops back to the original',
+    Math.abs(capAfterLower - firstCap) < 0.01, JSON.stringify({ firstCap: firstCap, capAfterLower: capAfterLower }));
+
+  const rowsBefore = h.dumpTransSheet().length;
+  // A repeated save with the SAME money must not correct a third time.
+  h.saveChinaBatch({
+    id: batch.id, orderNo: batch.orderNo, code: batch.code, status: batch.status,
+    shippedAt: batch.shippedAt, arrivedAt: batch.arrivedAt,
+    weightKg: batch.weightKg, ratePerKgUsd: batch.ratePerKgUsd, rubRate: batch.rubRate,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+    costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }]
+  }, 'Николай');
+  check('84: a repeated save with nothing new does not correct twice',
+    h.dumpTransSheet().length === rowsBefore, 'rows before/after: ' + rowsBefore + '/' + h.dumpTransSheet().length);
+
+  const replayed = h.replayArticle('ART-POST-1', 0);
+  check('84: the stock verifier/replay still agrees after posting + two corrections',
+    h.replayMatchesFacts(replayed).ok, JSON.stringify(h.replayMatchesFacts(replayed)));
+})();
+
+// ---- a repeated report upload does not correct twice ----
+(function () {
+  const h = withChina();
+  const batch = china84ClosableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-11', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const reportPayload = {
+    reportDate: '2026-09-05', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: -50,
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }]
+  };
+  h.saveChinaReport(reportPayload, 'Николай');
+  const capAfterFirst = h.stockOf('ART-POST-1').capitalization;
+  const rowsAfterFirst = h.dumpTransSheet().length;
+  h.saveChinaReport(Object.assign({}, reportPayload, { reportDate: '2026-09-06' }), 'Николай');
+  check('84: a repeated report upload (nothing new to correct) writes no new correction row',
+    h.dumpTransSheet().length === rowsAfterFirst && h.stockOf('ART-POST-1').capitalization === capAfterFirst,
+    JSON.stringify({ rows: h.dumpTransSheet().length, cap: h.stockOf('ART-POST-1').capitalization }));
+})();
+
+// ---- correction with 0 pcs on stock: the existing «долг себестоимости» mechanism (item 40) ----
+(function () {
+  const h = withChina();
+  const batch = china84ClosableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-12', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  // Ship every posted piece out — the article sits at 0 on stock.
+  h.commitTransaction([{ article: 'ART-POST-1', quantity: 100, price: 0 }], 'Расход', 'Склад [Заказ №2]', '', 'Николай');
+  check('84: the article is at 0 pcs before the correction',
+    h.stockOf('ART-POST-1').quantity === 0, JSON.stringify(h.stockOf('ART-POST-1')));
+
+  h.saveChinaBatch({
+    id: batch.id, orderNo: batch.orderNo, code: batch.code, status: batch.status,
+    shippedAt: batch.shippedAt, arrivedAt: batch.arrivedAt,
+    weightKg: batch.weightKg, ratePerKgUsd: batch.ratePerKgUsd, rubRate: batch.rubRate,
+    lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+    costs: [{ type: 'Прочее', amountRub: 800, comment: 'разгрузка' }]
+  }, 'Николай');
+  const debtStock = h.stockOf('ART-POST-1');
+  check('84: with 0 pcs on stock the correction still lands on capitalization (the долг себестоимости) — quantity stays 0',
+    debtStock.quantity === 0 && Math.abs(debtStock.capitalization - 300) < 0.01,
+    JSON.stringify(debtStock));
+
+  h.commitTransaction([{ article: 'ART-POST-1', quantity: 50, price: 20 }], 'Приход', 'Склад [Обычный приход]', '', 'Николай');
+  const absorbed = h.stockOf('ART-POST-1');
+  check('84: the next ordinary receipt absorbs the debt — avgCost = (debt + new cost) / new qty',
+    Math.abs(absorbed.avgCost - roundToTwoTest((300 + 50 * 20) / 50)) < 0.01,
+    JSON.stringify(absorbed));
+})();
+
+// ---- report upload: arrived batches are never touched, posted 'окончательно'/'уже на остатке' either ----
+(function () {
+  const h = withChina();
+  // volumeM3 is deliberately left UNSET (0) by the fixture — chinaFillOrderFromBill's own
+  // per-field guard only skips a field that is already > 0, so a still-empty field on an
+  // ARRIVED batch is exactly the case that needs the batch.status === 'Прибыла' guard in
+  // chinaFillBatchesFromReport, not the field-level guard (which would otherwise happily fill it).
+  const batch = china84ClosableFixture(h);
+  check('84: sanity — the fixture batch has no volumeM3 of its own yet', batch.volumeM3 === 0, String(batch.volumeM3));
+  h.saveChinaReport({
+    reportDate: '2026-09-10', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: -50,
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 999, cargoRate: 7, volumeM3: 77 }]
+  }, 'Николай');
+  const after = h.getChinaBatches().batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: an already-«Прибыла» batch\'s still-empty field is never touched by a report\'s status/field fill',
+    after.volumeM3 === 0, JSON.stringify({ before: batch.volumeM3, after: after.volumeM3 }));
+})();
+
+(function () {
+  const h = withChina();
+  const batch = china84ClosableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-13', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const closed = h.getChinaBatches().batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: posting a CLOSED batch is promoted to «окончательно» by the next report/save (already verified above); here it starts «предварительно»',
+    closed.postingState === 'предварительно', JSON.stringify(closed.postingState));
+  // Force it to «окончательно» via one report upload, then upload ANOTHER report with a wildly
+  // different bill for the SAME code — an окончательно batch must not be recosted at all.
+  h.saveChinaReport({ reportDate: '2026-09-05', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: -50,
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, 'Николай');
+  const finalBatch = h.getChinaBatches().batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: it is now «окончательно»', finalBatch.postingState === 'окончательно', JSON.stringify(finalBatch.postingState));
+  const totalBefore = finalBatch.totalRub;
+  const capBefore = h.stockOf('ART-POST-1').capitalization;
+  check('84: sanity — the batch is CLOSED before the next report', finalBatch.closed === true, JSON.stringify(finalBatch.missing));
+  // The credit that fully paid the freight bill is gone — recosting would reopen «Расчёт
+  // закрыт» (the bill goes unpaid again). If chinaRecostAndCorrectForReport skips 'окончательно'
+  // batches as it must, `closed`/`missing`/totalRub/capitalization all stay exactly as they were.
+  h.saveChinaReport({ reportDate: '2026-09-06', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: 0,
+    freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 999, cargoRate: 20 }] }, 'Николай');
+  const afterFinal = h.getChinaBatches().batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('84: an «окончательно» batch is not recosted by a report upload at all — closed/missing/money unchanged',
+    afterFinal.closed === true && afterFinal.missing.length === finalBatch.missing.length
+    && afterFinal.totalRub === totalBefore && h.stockOf('ART-POST-1').capitalization === capBefore,
+    JSON.stringify({ before: { closed: finalBatch.closed, total: totalBefore }, after: { closed: afterFinal.closed, total: afterFinal.totalRub, missing: afterFinal.missing } }));
+})();
+
+// ---- migration (decision 8): marks only current «Прибыла» batches, once, a later arrival stays untouched ----
+(function () {
+  const h = freshHarness();
+  h.setChinaSpreadsheet();
+  const headers = h.CHINA_BATCH_HEADERS;
+  const row = headers.map(function (hd) {
+    if (hd === 'ID') return 'CB-OLD-1';
+    if (hd === 'Код партии') return 'OLD-1';
+    if (hd === 'Статус') return 'Прибыла';
+    return '';
+  });
+  h.setTargetSheet('Партии', [headers, row]);
+  const picture = h.getChinaBatches();
+  const migrated = picture.batches.filter(function (b) { return b.id === 'CB-OLD-1'; })[0];
+  check('84: a batch already «Прибыла» at deployment is marked «уже на остатке»',
+    migrated.postingState === 'уже на остатке', JSON.stringify(migrated.postingState));
+
+  check('84: it is never touched again by a second read (runs once)',
+    h.getChinaBatches().batches.filter(function (b) { return b.id === 'CB-OLD-1'; })[0].postingState === 'уже на остатке',
+    'expected the mark to stay');
+
+  h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10]]);
+  h.setStockSheet([]);
+  h.ensureTransSheet();
+  const later = h.saveChinaBatch({
+    orderNo: 'LATE', code: 'NV-LATE-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'ML', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 1, article: 'ART-POST-1' }]
+  }, 'Николай').batches.filter(function (b) { return b.code === 'NV-LATE-1'; })[0];
+  const arrived = h.saveChinaBatch({
+    id: later.id, orderNo: 'LATE', code: 'NV-LATE-1', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-20',
+    lines: [{ marking: 'ML', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 1, article: 'ART-POST-1' }]
+  }, 'Николай').batches.filter(function (b) { return b.code === 'NV-LATE-1'; })[0];
+  check('84: a batch arriving AFTER the migration ran is never marked «уже на остатке»',
+    arrived.postingState === '', JSON.stringify(arrived.postingState));
+  check('84: «уже на остатке» blocks cancellation — nothing to roll back through the app',
+    china84Refuses(function () { h.cancelChinaBatchPosting({ id: migrated.id }, 'Николай'); }).threw,
+    'expected a refusal');
+})();
+
+(function () {
+  // Item 9: a posted batch keeps its articles/quantities fixed — only money fields are editable.
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-84-14', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const refusal = china84Refuses(function () {
+    h.saveChinaBatch({
+      id: batch.id, orderNo: batch.orderNo, code: batch.code, status: batch.status,
+      shippedAt: batch.shippedAt, arrivedAt: batch.arrivedAt,
+      weightKg: batch.weightKg, ratePerKgUsd: batch.ratePerKgUsd, rubRate: batch.rubRate,
+      lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 55, priceCny: 10, article: 'ART-POST-1' }],
+      costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }]
+    }, 'Николай');
+  }, 'нельзя');
+  check('84: editing the quantity of a posted batch\'s line is refused',
+    refusal.threw, refusal.msg);
+})();
+
+// ================= Item 84 follow-up: China-posting-owned rows are locked to cancelChinaBatchPosting =========
+//
+// Money-critical (a bypass would silently drift the batch's own bookkeeping away from the
+// stock) — whole path through the top-level actions, ≈6 checks, 3 mutations.
+(function () {
+  const h = withChina();
+  const batch = china84PostableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-84f-1', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const txnId = h.dumpTransSheet().filter(function (r) { return String(r['Объект'] || '').indexOf('NV-POST-1') !== -1; })[0].ID;
+
+  check('84 follow-up: plain deleteTransaction on a China-posting-owned row is refused, names the batch code',
+    china84Refuses(function () { h.deleteTransaction(txnId, 'Николай'); }, 'NV-POST-1').threw
+    && china84Refuses(function () { h.deleteTransaction(txnId, 'Николай'); }, 'NV-POST-1').msg.indexOf('Заказов в Китае') !== -1,
+    china84Refuses(function () { h.deleteTransaction(txnId, 'Николай'); }).msg);
+
+  check('84 follow-up: updateTransaction (edit) on the same row is refused the same way',
+    china84Refuses(function () {
+      h.updateTransaction(txnId, { type: 'Приход', article: 'ART-POST-1', quantity: 100, price: 1, destination: 'Склад [где угодно]', date: '2026-01-05T00:00:00.000Z' }, 'Николай');
+    }, 'Отмените оприходование').threw, 'expected a refusal');
+
+  check('84 follow-up: an ordinary (non-China) row is unaffected — deleteTransaction still works',
+    (function () {
+      h.commitTransaction([{ article: 'ART-PLAIN', quantity: 5, price: 10 }], 'Приход', 'Склад [обычный]', '', 'Николай');
+      const plainId = h.dumpTransSheet().filter(function (r) { return r['Артикул'] === 'ART-PLAIN'; })[0].ID;
+      h.deleteTransaction(plainId, 'Николай');
+      return h.dumpTransSheet().filter(function (r) { return r['Артикул'] === 'ART-PLAIN'; }).length === 0;
+    })(), 'plain row should delete cleanly');
+
+  // Bulk delete: one China-owned row mixed with an ordinary one — the WHOLE batch is refused,
+  // nothing deleted (same all-or-nothing spirit as cancelChinaBatchPosting itself).
+  h.commitTransaction([{ article: 'ART-PLAIN-2', quantity: 3, price: 10 }], 'Приход', 'Склад [обычный 2]', '', 'Николай');
+  const plainId2 = h.dumpTransSheet().filter(function (r) { return r['Артикул'] === 'ART-PLAIN-2'; })[0].ID;
+  const rowsBeforeBulk = h.dumpTransSheet().length;
+  check('84 follow-up: deleteMultipleTransactions refuses the WHOLE batch when one row is China-owned',
+    china84Refuses(function () { h.deleteMultipleTransactions([txnId, plainId2], 'Николай'); }, 'Заказов в Китае').threw
+    && h.dumpTransSheet().length === rowsBeforeBulk,
+    'rows before/after: ' + rowsBeforeBulk + '/' + h.dumpTransSheet().length);
+
+  // Restore from «Удалённые»: cancelChinaBatchPosting is the ONLY caller allowed to actually
+  // delete/archive the row — a restore of that archived copy must still be refused.
+  h.cancelChinaBatchPosting({ id: batch.id }, 'Николай');
+  const archived = h.dumpArchive().filter(function (a) { return a.type === 'Transaction' && a.data.destination && a.data.destination.indexOf('NV-POST-1') !== -1; })[0];
+  check('84 follow-up: restoring the archived China-owned row is refused',
+    china84Refuses(function () { h.restoreArchivedItem(archived.archiveId, 'Николай'); }, 'Заказов в Китае').threw,
+    'expected a refusal');
+
+  check('84 follow-up: cancelChinaBatchPosting itself is unaffected — regression check',
+    h.stockOf('ART-POST-1').quantity === 0 && h.stockOf('ART-POST-1').capitalization === 0,
+    JSON.stringify(h.stockOf('ART-POST-1')));
 })();
 
 // ================= Итог =================

@@ -508,6 +508,11 @@ function doPost(e) {
       // Item 83i: the manual/first-run sync button — reconciles «Заказы на фабрике» with the
       // module's own batches/forecasts and shows the pipeline qty per article before/after.
       case 'syncChinaFactoryOrders': assertAdmin(currentUser); result = syncChinaFactoryOrdersReport(currentUser.username); break;
+      // Item 84 (stage 1): posting an arrived batch onto «Мой склад» at a provisional cost, and
+      // the admin-only rollback. Both touch the MAIN spreadsheet's «Остатки»/«Транзакции» too,
+      // via commitTransaction/deleteTransaction — not just the module's own spreadsheet.
+      case 'postChinaBatch': assertAdmin(currentUser); result = postChinaBatch(data, currentUser.username); break;
+      case 'cancelChinaBatchPosting': assertAdmin(currentUser); result = cancelChinaBatchPosting(data, currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }
@@ -1584,7 +1589,7 @@ function deleteSku(sku, deletedBy) {
  * рапортует об успехе. Меняется только то, ЧТО она проверяет: не промежуточный остаток, а
  * итоговый. При обычном удалении `replacementQty` не передаётся и поведение прежнее.
  */
-function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = null) {
+function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = null, allowChinaInternal = false) {
   const ss = getSpreadsheet();
   const transSheet = getTransactionSheet(ss);
   
@@ -1628,7 +1633,8 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
   const writeOffCost = Number(transData[6]);
   const total = Number(transData[7]);
   const dest = String(transData[destIdx] || '');
-  
+  assertNotChinaOwnedRow(dest, allowChinaInternal);
+
   let dateStr = '';
   if (transData[1] instanceof Date) {
     dateStr = transData[1].toISOString();
@@ -2240,6 +2246,40 @@ function isWriteOffDestination(dest) {
 }
 
 /**
+ * Item 84 (stage 1, coordinator follow-up): a receipt or correction row written by
+ * postChinaBatch/commitCostCorrection (ChinaOrders.gs) is owned by the batch's own
+ * `postingRecords` JSON — its money is exactly what that JSON says is on the shelf. Deleting,
+ * editing or restoring one of these rows from «История»/«Удалённые» WITHOUT going through
+ * cancelChinaBatchPosting leaves the batch's own bookkeeping pointing at money that no longer
+ * matches the stock, and the next automatic correction computes a wrong diff. Both writers build
+ * their object text through chinaPostingDestination/chinaPostingCorrectionDestination
+ * (ChinaOrders.gs), which both start with this exact prefix — a plain prefix check is enough and
+ * needs no dependency on ChinaOrders.gs actually being loaded.
+ */
+const CHINA_POSTING_DESTINATION_PREFIX = 'Склад [Китай: партия ';
+
+function chinaOwnedBatchCodeFromDestination(dest) {
+  const text = String(dest || '');
+  if (text.indexOf(CHINA_POSTING_DESTINATION_PREFIX) !== 0) return '';
+  const m = text.match(/^Склад \[Китай: партия ([^\]]+)\]/);
+  return m ? m[1] : '';
+}
+
+/**
+ * Refuses a delete/edit/restore of a China-posting-owned row UNLESS the caller explicitly
+ * passes `allowChinaInternal` — set ONLY by cancelChinaBatchPosting's own calls into
+ * deleteTransaction. Every other caller (the History tab's delete/bulk-delete/edit, and a
+ * restore from «Удалённые») keeps the default `false` and is refused.
+ */
+function assertNotChinaOwnedRow(dest, allowChinaInternal) {
+  if (allowChinaInternal) return;
+  const code = chinaOwnedBatchCodeFromDestination(dest);
+  if (!code) return;
+  throw new Error('Эта операция создана оприходованием партии ' + code
+    + ' из «Заказов в Китае». Отмените оприходование там.');
+}
+
+/**
  * Пункт 40, этап A. Списание бывает двух видов, и владелец выбирает вид в момент проведения:
  * либо себестоимость остаётся «долгом» на артикуле (поведение по умолчанию), либо она
  * обнуляется вместе с товаром. Метка «себестоимость обнулена» едет ВНУТРИ строки объекта
@@ -2706,6 +2746,57 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
   return commitResult;
 }
 
+/**
+ * Item 84 (stage 1): a single-article stock correction with NO quantity change — the automatic
+ * cost correction of an already-posted China batch (chinaApplyCostCorrection, ChinaOrders.gs).
+ * Written as its own «Приход» row with quantity 0, price 0 and «Сумма»/«Итого» = diffRub (may be
+ * negative), the exact shape replayStepForward/replayStepBackward already handle for a Приход:
+ * quantity unchanged, capitalization += total. With 0 pcs on stock the diff still lands on
+ * capitalization — the existing «долг себестоимости» mechanism (item 40) — and is absorbed by
+ * the article's next ordinary receipt; NO clamping, so a negative diff that would leave
+ * capitalization negative is still written (money must not vanish either way).
+ * Returns the created transaction (parsed), or null when diffRub rounds to 0 — nothing is
+ * written for a zero correction. Idempotency is the CALLER's job (chinaApplyCostCorrection
+ * derives the diff from the batch's own record of what it already put on stock, so a repeated
+ * call with nothing new always computes 0 and this function is never even reached).
+ */
+function commitCostCorrection(article, diffRub, destination, comment, username) {
+  const diff = roundToTwo(Number(diffRub) || 0);
+  if (diff === 0) return null;
+  const ss = getSpreadsheet();
+  const transSheet = getTransactionSheet(ss);
+  const stockSheet = getSheetByNameRobust(ss, 'Остатки');
+  if (!transSheet || !stockSheet) throw new Error('База данных не инициализирована');
+
+  const stockData = stockSheet.getDataRange().getValues();
+  let rowIdx = -1, quantity = 0, capitalization = 0;
+  for (let i = 1; i < stockData.length; i++) {
+    if (String(stockData[i][0]) === String(article)) {
+      rowIdx = i + 1;
+      quantity = Number(stockData[i][1]) || 0;
+      capitalization = Number(stockData[i][3]) || 0;
+      break;
+    }
+  }
+  const newCap = roundToTwo(capitalization + diff);
+  const newAvg = quantity > 0 ? roundToTwo(newCap / quantity) : 0;
+  if (rowIdx === -1) {
+    stockSheet.appendRow([article, 0, newAvg, newCap, 0, 0]);
+  } else {
+    stockSheet.getRange(rowIdx, 2, 1, 3).setValues([[quantity, newAvg, newCap]]);
+  }
+
+  const id = Utilities.getUuid();
+  const dateStr = new Date().toISOString();
+  const row = buildTransactionRow({
+    id: id, date: dateStr, type: 'Приход', article: article, quantity: 0, price: 0,
+    writeOffCost: 0, total: diff, destination: destination, deliveryDate: '', user: username || ''
+  });
+  transSheet.appendRow(row);
+  SpreadsheetApp.flush();
+  return { id: id, date: dateStr, type: 'Приход', article: article, quantity: 0, price: 0, total: diff, destination: destination, user: username || '' };
+}
+
 // --- User Management & Authentication ---
 
 function verifySession(token) {
@@ -3034,7 +3125,12 @@ function restoreTransaction(payload) {
       throw new Error(`Транзакция ${payload.id} уже присутствует в базе. Удалите её перед восстановлением.`);
     }
   }
-  
+
+  // Item 84 follow-up: restoring a China-owned receipt/correction from «Удалённые» while its
+  // batch is unposted would double the stock on the next postChinaBatch — always refused, no
+  // path through cancelChinaBatchPosting ever restores.
+  assertNotChinaOwnedRow(payload.destination, false);
+
   const type = payload.type;
   const article = payload.article;
   const qty = Number(payload.quantity);
@@ -3196,7 +3292,11 @@ function deleteMultipleTransactions(ids, deletedBy) {
       const writeOffCost = Number(transDataAll[i][6]);
       const total = Number(transDataAll[i][7]);
       const dest = String(transDataAll[i][8] || '');
-      
+      // Item 84 follow-up: bulk delete never goes through cancelChinaBatchPosting, so a
+      // China-owned row among the selected ones refuses the WHOLE batch delete, same as the
+      // 30-day window check right above (nothing is written before this point).
+      assertNotChinaOwnedRow(dest, false);
+
       let dateStr = transDataAll[i][1] instanceof Date ? transDataAll[i][1].toISOString() : String(transDataAll[i][1]);
       let deliveryDateStr = transDataAll[i][9] instanceof Date ? transDataAll[i][9].toISOString() : String(transDataAll[i][9] || '');
 

@@ -353,7 +353,10 @@ async function startServer() {
     setupChinaSpreadsheet: ['getChinaBatches'],
     // Item 83c: saveChinaBatch/deleteChinaBatch also sync «Заказы на фабрике» (main spreadsheet),
     // so both its own read and the composite start-up read must drop too.
-    saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
+    // Item 84 (stage 1): saveChinaBatch can now trigger the automatic cost correction on a
+    // posted batch, which writes «Остатки»/«Транзакции» in the MAIN spreadsheet — the stock and
+    // transaction reads must drop alongside the China ones, same as postChinaBatch below.
+    saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions'],
     deleteChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
     saveChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     deleteChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
@@ -364,7 +367,9 @@ async function startServer() {
     // Item 3: saveChinaReport now also fills batches' order/arrival from the report's bills and
     // syncs «Заказы на фабрике» (chinaFillBatchesFromReport + syncChinaFactoryOrders) — same
     // cache entries as saveChinaBatch, for the same reason.
-    saveChinaReport: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
+    // Item 84 (stage 1): a report upload can now run the automatic cost correction of a posted
+    // 'предварительно' batch — same main-spreadsheet cache entries as saveChinaBatch above.
+    saveChinaReport: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions'],
     // Item 81g-2: matching moves money between a payment and a receipt — both reads must drop.
     matchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     unmatchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
@@ -380,7 +385,13 @@ async function startServer() {
     // Item 83i: the manual/first-run sync button — same reads as the writes it reconciles.
     syncChinaFactoryOrders: ['getFactoryOrders', 'getOzonInitialData'],
     // Item 83e: the owner's manual/China conflict resolution touches only «Заказы на фабрике».
-    resolveFactoryOrderConflict: ['getFactoryOrders', 'getOzonInitialData']
+    resolveFactoryOrderConflict: ['getFactoryOrders', 'getOzonInitialData'],
+    // Item 84 (stage 1): posting/cancelling touches the module's own spreadsheet AND the MAIN
+    // spreadsheet's «Остатки»/«Транзакции» (commitTransaction/deleteTransaction) plus «Заказы
+    // на фабрике» (the posted batch's row moves in the pipeline) — every read any of that
+    // feeds must drop.
+    postChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions'],
+    cancelChinaBatchPosting: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions']
   };
 
   function invalidateCacheFor(writeAction: string): void {

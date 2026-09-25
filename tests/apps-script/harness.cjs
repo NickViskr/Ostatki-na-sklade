@@ -472,6 +472,8 @@ module.exports = {
     return sheet;
   },
   commitTransaction: (...args) => context.commitTransaction(...args),
+  assertNotChinaOwnedRow: (...args) => context.assertNotChinaOwnedRow(...args),
+  chinaOwnedBatchCodeFromDestination: (...args) => context.chinaOwnedBatchCodeFromDestination(...args),
   ensureColumns: (...args) => context.ensureColumns(...args),
   parseAdditionalCostsFromDestination: (...args) => context.parseAdditionalCostsFromDestination(...args),
 
@@ -801,6 +803,13 @@ module.exports = {
   syncChinaFactoryOrders: (...args) => context.syncChinaFactoryOrders(...args),
   syncChinaFactoryOrdersReport: (...args) => context.syncChinaFactoryOrdersReport(...args),
   chinaFactoryDesiredRows: (...args) => context.chinaFactoryDesiredRows(...args),
+  // ---------- Item 84 (stage 1): posting an arrived batch and the automatic cost correction ----------
+  postChinaBatch: (...args) => context.postChinaBatch(...args),
+  cancelChinaBatchPosting: (...args) => context.cancelChinaBatchPosting(...args),
+  chinaPostingBlockers: (...args) => context.chinaPostingBlockers(...args),
+  chinaApplyCostCorrection: (...args) => context.chinaApplyCostCorrection(...args),
+  chinaEnsureOldBatchesMigrated: (...args) => context.chinaEnsureOldBatchesMigrated(...args),
+  commitCostCorrection: (...args) => context.commitCostCorrection(...args),
   // Same object-per-row shape as dumpChinaSheet, but off the MAIN spreadsheet's registry —
   // assertions read 'Заказ Китай'/'Ключ Китай' by name, not by column position.
   dumpFactoryOrders() {
