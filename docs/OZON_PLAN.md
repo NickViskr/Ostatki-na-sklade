@@ -333,19 +333,19 @@ Status on 2026-09-25. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
 - **Items:** 79 of 83 closed. OPEN: 53, 83 (China batches → factory orders and the pipeline: built and deployed 2026-09-25 — Code.gs 193, `sklad-00089-qpg` — in the owner's check; first run of «Обновить заказы на фабрике» is his). Also 27 (optional) and 37 (deferred: not reproducible on production data).
-- **Live:** Cloud Run `sklad-00093-vls` (commit `6824dd2`, after `sklad-00091-m6w`/`sklad-00092-5k4` the same day:
+- **Live:** Cloud Run `sklad-00094-85k` (commit `c5c4e6b`; before it `sklad-00093-vls`, commit `6824dd2`, after `sklad-00091-m6w`/`sklad-00092-5k4` the same day:
   item 83 fixes after the owner's check — markingless lines, shipment in boxes, costs rows, order from bill; `index.html`, the main chunk and `ChinaOrdersTab` verified
   byte for byte against the local build of the same export, modulo hashes and the label).
   Previous: `sklad-00089-qpg` 25.09 14:51 (`57cd6de`), `sklad-00088-lbm` 25.09 13:29 (`8444782`), `sklad-00087-fbf` 25.09 12:17 (`0e87453`), `sklad-00086-lzx` 25.09 10:18 (`42ccbf8`), `sklad-00085-s5m` 25.09 06:43 (`84f3e94`), `sklad-00084-6bq` 24.09 19:42 (`10c3c22`), `sklad-00083-r8j` 24.09 18:59 (`dfb9ac4`), `sklad-00082-6pc` 24.09 18:05 (`223419e`), `sklad-00081-gwg` 24.09 14:34 (`e7247d8`), `sklad-00080-8hk` 24.09 12:56 (`8e3c365`), `sklad-00079-7l8` 22.09 16:52 (`5e7ae80`),
   `sklad-00078-tpb` 22.09 16:36 (`055cf68`), `sklad-00077-px5` 22.09 13:09 (`774a21b`).
-- **Code.gs:** version 194 (2026-09-25, owner's check: Russian costs as rows in one save, order number and arrival from the report's bill, no false «оплачено полностью»; 193 - item 83; 192 - item 82; 191 - remaining to pay, receipts to history; 190 - item 81g fixes; 189 - item 81g; 188 — item 81e trash and freight per kg; 187 — item 81e fixes; 186 — item 81e; 185 — items 81c–81d and the review fixes; 184 — item 81b: `getChinaBatches` reads without
+- **Code.gs:** version 195 (2026-09-25, stored Russian-costs flag on every save, bill matched by code without the pieces suffix, freight and single-product price from the report; 194 - owner's check: Russian costs as rows in one save, order number and arrival from the report's bill, no false «оплачено полностью»; 193 - item 83; 192 - item 82; 191 - remaining to pay, receipts to history; 190 - item 81g fixes; 189 - item 81g; 188 — item 81e trash and freight per kg; 187 — item 81e fixes; 186 — item 81e; 185 — items 81c–81d and the review fixes; 184 — item 81b: `getChinaBatches` reads without
   the global lock; 183 — item 81a, where the script grew a SECOND file, `ChinaOrders.gs`, so
   `clasp push` reports three; 182 — item 80 per-unit packaging; 181 — item 80 shipment
   extras), deployed by the owner with `clasp push` + `clasp deploy -i`, verified with
   `clasp clone-script` + `cmp`.
   Script Property `kan_mcpToken` set 2026-09-22; trigger `kanTurnoverDaily` daily at 05:00 script
   time. Rollback point «before clasp»: version 171.
-- **Checks:** Apps Script stand 949 checks; frontend 1095 tests in 42 files (also green under `TZ=Asia/Yekaterinburg`); `tsc --noEmit`
+- **Checks:** Apps Script stand 968 checks; frontend 1093 tests in 42 files (also green under `TZ=Asia/Yekaterinburg`); `tsc --noEmit`
   clean; `vite build` passes.
 - **Module «Заказы в Китае» (item 81):** its OWN spreadsheet «Заказы в Китае» (Script Property
   `china_spreadsheetId`; the id is never in the repository) and the second script file
