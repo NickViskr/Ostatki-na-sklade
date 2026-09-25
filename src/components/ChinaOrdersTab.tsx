@@ -104,7 +104,8 @@ export const ChinaOrdersTab: React.FC = () => {
   // Item 81f, owner check: an article chosen for one line of a marking belongs to the whole
   // marking — every line of that batch sharing it (case-insensitive, trimmed) gets it too.
   const setArticleByMarking = (batch: ChinaBatch, line: ChinaBatchLine, article: string) => {
-    const indexes = chinaMarkingMatches(batch.lines, line.marking);
+    const matched = chinaMarkingMatches(batch.lines, line.marking);
+    const indexes = matched.length > 0 ? matched : [batch.lines.indexOf(line)];
     setLabels((prev) => {
       const next = { ...prev };
       indexes.forEach((i) => {

@@ -79,7 +79,10 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
   // Item 81f, owner check: an article chosen for one line goes to every line of the SAME
   // marking (case-insensitive, trimmed) — a marking is one product.
   const setLineArticle = (index: number, article: string) => setForm((f) => {
-    const indexes = chinaMarkingMatches(f.lines, f.lines[index].marking);
+    // A line without a marking has no marking-mates: the article goes to that line alone
+    // (owner, 2026-09-25: the article of a markingless line was not kept at all).
+    const matched = chinaMarkingMatches(f.lines, f.lines[index].marking);
+    const indexes = matched.length > 0 ? matched : [index];
     return { ...f, lines: f.lines.map((l, i) => (indexes.indexOf(i) !== -1 ? { ...l, article } : l)) };
   });
   const addLine = () => setForm((f) => ({ ...f, lines: [...f.lines, emptyChinaLine()] }));
@@ -247,7 +250,6 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                 <thead>
                   <tr className="text-[11px] uppercase text-slate-400 text-left">
                     <th className="py-1 pr-2">Маркировка</th>
-                    <th className="py-1 pr-2">Название</th>
                     <th className="py-1 pr-2">Коробок</th>
                     <th className="py-1 pr-2">Шт/кор</th>
                     <th className="py-1 pr-2">Количество</th>
@@ -264,7 +266,6 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                   {form.lines.map((line, i) => (
                     <tr key={i} className="border-t border-slate-100">
                       <td className="py-1 pr-2"><input className={cell} value={line.marking} onChange={(e) => setLine(i, { marking: e.target.value })} placeholder="впишите маркировку" /></td>
-                      <td className="py-1 pr-2"><input className={cell} value={line.name} onChange={(e) => setLine(i, { name: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.boxes} onChange={(e) => setLine(i, { boxes: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.pcsPerBox} onChange={(e) => setLine(i, { pcsPerBox: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.qty} onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
