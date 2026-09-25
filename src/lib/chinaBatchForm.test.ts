@@ -561,7 +561,7 @@ describe('item 82: a China batch in the trash', () => {
   it('restoring one calls fetchChinaBatches, so the China tab needs no reload', () => {
     expect(deleted).toContain('useChinaStore((state) => state.fetchChinaBatches)');
     expect(deleted).toContain("i.type === 'ChinaBatch'");
-    expect(deleted).toContain('if (restoresChinaBatch) fetchChinaBatches();');
+    expect(deleted).toContain('if (restoresChinaBatch) { fetchChinaBatches(); fetchFactoryOrders(); }');
   });
 });
 

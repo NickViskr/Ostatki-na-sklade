@@ -30,6 +30,9 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
   // Item 82: the China store keeps its own copy of the batches, so restoring a batch out of the
   // trash must refresh it too — the warehouse restore actions know nothing about that store.
   const fetchChinaBatches = useChinaStore((state) => state.fetchChinaBatches);
+  // Item 83.5: restoring a batch also brings back its «Заказы на фабрике» rows on the server
+  // (syncChinaFactoryOrders runs on every China write) — refetch so the pipeline is not stale.
+  const fetchFactoryOrders = useWarehouseStore((state) => state.fetchFactoryOrders);
 
   useEffect(() => {
     fetchArchivedItems();
@@ -180,9 +183,12 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
 
   const handleBulkRestore = async () => {
     if (selectedIds.size === 0) return;
+    const restoresChinaBatch = archivedItems.some((i) => selectedIds.has(i.archiveId) && i.type === 'ChinaBatch');
     const success = await handleRestoreMultipleArchivedItems(Array.from(selectedIds));
     if (success) {
       setSelectedIds(new Set());
+      // Item 83: a restored China batch is back in the pipeline — refresh what depends on it.
+      if (restoresChinaBatch) { fetchChinaBatches(); fetchFactoryOrders(); }
     }
     setBulkRestoreConfirm(false);
   };
@@ -484,7 +490,7 @@ export const DeletedItemsTab: React.FC = React.memo(() => {
             } else {
               await handleRestoreMultipleArchivedItems(itemsToRestore);
             }
-            if (restoresChinaBatch) fetchChinaBatches();
+            if (restoresChinaBatch) { fetchChinaBatches(); fetchFactoryOrders(); }
             setItemsToRestore(null);
           }
         }}

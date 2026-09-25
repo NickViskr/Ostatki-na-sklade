@@ -6,6 +6,8 @@ import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useChinaStore } from '../store/useChinaStore';
 import { FactoryOrder, ChinaForecastResult } from '../types';
+import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder } from '../lib/factoryOrderDisplay';
+import { daysBetweenIso } from '../lib/ozonCoverage';
 
 const money = (value: number, currency: string): string =>
   `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
@@ -19,8 +21,15 @@ interface FactoryOrderModalProps {
   suggestedQty: number;
   pcsPerBox: number;
   leadTimeDays: number;
-  /** Активный заказ по этому артикулу или null, если заказа ещё нет. */
+  /** Активный РУЧНОЙ заказ по этому артикулу или null — форма ниже редактирует только его,
+   * заказ из Китая в неё никогда не подставляется (item 83f). */
   order: FactoryOrder | null;
+  /** Item 83g: ВСЕ активные заказы артикула — ручные и из Китая — список показывается целиком,
+   * China-строки в нём только для просмотра. */
+  orders: FactoryOrder[];
+  /** Item 83e: ручные заказы этого артикула, скрытые из ТРУБЫ конфликтом с заказом из Китая. */
+  hiddenManual: FactoryOrder[];
+  onResolveConflict: (order: FactoryOrder, same: boolean) => void;
 }
 
 const toIsoDate = (d: Date) => {
@@ -39,6 +48,9 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
   pcsPerBox,
   leadTimeDays,
   order,
+  orders,
+  hiddenManual,
+  onResolveConflict,
 }) => {
   const saveFactoryOrder = useWarehouseStore((state) => state.saveFactoryOrder);
   const setFactoryOrderReceived = useWarehouseStore((state) => state.setFactoryOrderReceived);
@@ -171,6 +183,56 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
             <X size={20} />
           </button>
         </div>
+
+        {/* Item 83g: every active order of the article, China rows included — read-only, the
+            form below only ever edits the one manual row. */}
+        {orders.length > 1 && (
+          <div className="px-6 pt-4 space-y-2">
+            {orders.map((o) => {
+              const badge = factoryOrderBadge(o);
+              const late = isChinaFactoryOrder(o) && o.expectedAt
+                ? factoryLateLabel(daysBetweenIso(o.expectedAt, new Date().toISOString().slice(0, 10)))
+                : '';
+              return (
+                <div
+                  key={o.id}
+                  className={`text-[12px] rounded-xl px-3 py-2 flex items-center justify-between gap-2 flex-wrap ${
+                    isChinaFactoryOrder(o) ? 'bg-indigo-50 border border-indigo-100 text-indigo-700' : 'bg-slate-50 border border-slate-200 text-slate-600'
+                  }`}
+                >
+                  <span className="font-semibold">{o.qty} шт{badge ? ` · ${badge}` : ''}</span>
+                  <span className="flex items-center gap-2">
+                    {o.expectedAt ? `ждём ${o.expectedAt}` : '—'}
+                    {late && <span className="font-bold text-amber-600">{late}</span>}
+                    {isChinaFactoryOrder(o) && (
+                      <span className="text-slate-400">управляется во вкладке «Заказы в Китае»</span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Item 83e: this article's manual order is real, but the owner still has to say whether
+            it is the SAME shipment as an existing China row or a genuinely different order. */}
+        {hiddenManual.length > 0 && (
+          <div className="px-6 pt-4 space-y-2">
+            {hiddenManual.map((h) => (
+              <div key={h.id} className="text-[12px] bg-amber-50 border border-amber-200 text-amber-700 rounded-xl px-3 py-2 space-y-1.5">
+                <div>ручной заказ {h.qty} шт скрыт из трубы: по артикулу есть заказ из Китая</div>
+                <div className="flex gap-2">
+                  <button type="button" className="font-bold underline hover:text-amber-900" onClick={() => onResolveConflict(h, true)}>
+                    это тот же заказ
+                  </button>
+                  <button type="button" className="font-bold underline hover:text-amber-900" onClick={() => onResolveConflict(h, false)}>
+                    это разные заказы
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         <form onSubmit={handleSave} className="p-6 space-y-5">
           <div className="space-y-2">

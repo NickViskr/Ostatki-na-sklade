@@ -6,6 +6,7 @@ import { useUIStore } from '../store/useUIStore';
 import { ChinaForecastFactFigure, ChinaForecastLine, ChinaForecastResult, ChinaSavedForecast } from '../types';
 import { chinaNumber } from '../lib/chinaBatchForm';
 import { chinaForecastDateText, chinaForecastPrefillSplit } from '../lib/chinaForecastView';
+import { forecastPipelineStatus, forecastPipelineStatusLabel } from '../lib/factoryOrderDisplay';
 
 const money = (value: number, currency: string): string =>
   `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
@@ -46,6 +47,7 @@ const factCell = (f: ChinaForecastFactFigure, unit: string): React.ReactNode => 
  */
 export const ChinaForecastPanel: React.FC = () => {
   const forecastData = useChinaStore((s) => s.forecastData);
+  const batches = useChinaStore((s) => s.batches);
   const forecastPrefill = useChinaStore((s) => s.forecastPrefill);
   const setForecastPrefill = useChinaStore((s) => s.setForecastPrefill);
   const fetchChinaForecastData = useChinaStore((s) => s.fetchChinaForecastData);
@@ -60,6 +62,7 @@ export const ChinaForecastPanel: React.FC = () => {
   const [result, setResult] = useState<ChinaForecastResult | null>(null);
   const [isCalculating, setIsCalculating] = useState(false);
   const [orderNo, setOrderNo] = useState('');
+  const [expectedShipAt, setExpectedShipAt] = useState('');
   const [comment, setComment] = useState('');
   const [prefillMissing, setPrefillMissing] = useState<string[]>([]);
   const [openForecastId, setOpenForecastId] = useState('');
@@ -118,8 +121,8 @@ export const ChinaForecastPanel: React.FC = () => {
   const save = async () => {
     const lines = filledLines();
     if (lines.length === 0) return;
-    const ok = await saveChinaForecast({ orderNo: orderNo.trim(), comment: comment.trim(), lines });
-    if (ok) { setOrderNo(''); setComment(''); }
+    const ok = await saveChinaForecast({ orderNo: orderNo.trim(), expectedShipAt, comment: comment.trim(), lines });
+    if (ok) { setOrderNo(''); setExpectedShipAt(''); setComment(''); }
   };
 
   const askDelete = (forecast: ChinaSavedForecast) => {
@@ -361,6 +364,15 @@ export const ChinaForecastPanel: React.FC = () => {
                     <span className="text-[11px] font-bold text-slate-500 uppercase">Номер заказа</span>
                     <input className={`${field} w-40`} value={orderNo} onChange={(e) => setOrderNo(e.target.value)} placeholder="необязательно" />
                   </label>
+                  <label className="block">
+                    <span className="text-[11px] font-bold text-slate-500 uppercase">Ожидаемая отгрузка с фабрики</span>
+                    <input
+                      type="date"
+                      className={`${field} w-40`}
+                      value={expectedShipAt}
+                      onChange={(e) => setExpectedShipAt(e.target.value)}
+                    />
+                  </label>
                   <label className="block grow">
                     <span className="text-[11px] font-bold text-slate-500 uppercase">Комментарий</span>
                     <input className={`${field} w-full`} value={comment} onChange={(e) => setComment(e.target.value)} />
@@ -386,6 +398,11 @@ export const ChinaForecastPanel: React.FC = () => {
             {savedForecasts.map((f) => {
               const isOpenF = openForecastId === f.id;
               const costTypical = f.result.totals ? f.result.totals.costRubTypical : 0;
+              // Item 83b: a forecast with both an order number and a ship date enters the
+              // pipeline as 'Китай прогноз' rows — until a real batch of the same order arrives,
+              // when the batch replaces them (one order ships as one batch).
+              const hasBatchOfOrder = !!f.orderNo && batches.some((b) => b.orderNo === f.orderNo);
+              const pipelineStatus = forecastPipelineStatus({ orderNo: f.orderNo, expectedShipAt: f.expectedShipAt }, hasBatchOfOrder);
               return (
                 <div key={f.id} className="border border-slate-100 rounded-lg">
                   <button
@@ -397,6 +414,15 @@ export const ChinaForecastPanel: React.FC = () => {
                     <span className="font-bold">{f.orderNo ? `заказ №${f.orderNo}` : '(без номера заказа)'}</span>
                     <span className="text-slate-400">{f.createdAt}</span>
                     <span className="text-slate-400">{f.lines.length} артикулов</span>
+                    {f.expectedShipAt && <span className="text-slate-400">отгрузка {f.expectedShipAt}</span>}
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                        pipelineStatus === 'inPipeline' ? 'bg-sky-50 text-sky-700' :
+                        pipelineStatus === 'replaced' ? 'bg-slate-100 text-slate-500' : 'bg-amber-50 text-amber-700'
+                      }`}
+                    >
+                      {forecastPipelineStatusLabel(pipelineStatus)}
+                    </span>
                     <span className="grow" />
                     <span className="font-bold">{money0(costTypical, '₽')}</span>
                     <button

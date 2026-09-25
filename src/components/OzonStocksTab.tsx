@@ -16,6 +16,7 @@ import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCa
 import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
+import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder } from '../lib/factoryOrderDisplay';
 
 /** Пункт 64. Кластер, куда товар ещё ни разу не ездил: строка есть, чисел нет.
  *  Строится здесь, а не в правиле: форму строки таблицы знает только экран. */
@@ -417,12 +418,43 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
   // Пункт 35/83. ТРУБА: общее правило factoryOnOrderByArticle (src/lib/ozonCoverage.ts),
   // общее с Dashboard.tsx. Сегодняшняя дата считается здесь же: переменная todayIso
-  // объявлена ниже по файлу.
-  const factoryOnOrder = useMemo(() => {
+  // объявлена ниже по файлу. Item 83e/83d: the same call also gives the hidden-manual notice
+  // and the «задерживается N дн» label of a late China row — both used by the table below.
+  const factoryPipeline = useMemo(() => {
     const d = new Date();
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return factoryOnOrderByArticle(factoryOrders || [], today).qty;
+    return factoryOnOrderByArticle(factoryOrders || [], today);
   }, [factoryOrders]);
+  const factoryOnOrder = factoryPipeline.qty;
+
+  // Item 83e: manual orders hidden from the ТРУБА by an active China row of the same article,
+  // grouped by article for the table's notice.
+  const hiddenManualByArticle = useMemo(() => {
+    const map: Record<string, FactoryOrder[]> = {};
+    for (const o of factoryPipeline.hiddenManual) {
+      const key = String(o.article || '').trim();
+      if (!key) continue;
+      if (!map[key]) map[key] = [];
+      map[key].push(o);
+    }
+    return map;
+  }, [factoryPipeline]);
+
+  const resolveFactoryOrderConflict = useWarehouseStore((state) => state.resolveFactoryOrderConflict);
+  const setConfirmDialog = useUIStore((state) => state.setConfirmDialog);
+  const askResolveFactoryConflict = (order: FactoryOrder, same: boolean) => {
+    setConfirmDialog({
+      show: true,
+      title: same ? 'Это тот же заказ?' : 'Это разные заказы?',
+      message: same
+        ? `Ручной заказ на ${order.qty} шт по артикулу ${order.article} закроется как дубликат заказа из Китая. Отменить это будет нельзя.`
+        : `Ручной заказ на ${order.qty} шт по артикулу ${order.article} и заказ из Китая по этому же артикулу будут считаться РАЗНЫМИ и оба войдут в ТРУБУ.`,
+      onConfirm: async () => {
+        setConfirmDialog({ show: false, title: '', message: '', onConfirm: () => {} });
+        await resolveFactoryOrderConflict(order.id, same);
+      }
+    });
+  };
 
   /* ---- «Распределить весь остаток» ------------------------------------------------
    * Кластер попадает в распределение, только если у товара есть скорость продаж именно в
@@ -634,10 +666,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }, []);
 
+  // Item 83f/83g: MANUAL row only — the modal's «new order» form edits a manual order, never a
+  // China row (those are read-only, «управляется во вкладке «Заказы в Китае»»).
   const activeFactoryOrders = useMemo(() => {
     const map: Record<string, FactoryOrder> = {};
     for (const o of factoryOrders || []) {
       if (String(o.status || '').trim() === 'received') continue;
+      if (isChinaFactoryOrder(o)) continue;
       const key = String(o.article || '').trim();
       if (key) map[key] = o;
     }
@@ -1483,15 +1518,27 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         // Подсказки раскрываются вверх, а у первых строк сверху нет места: таблица лежит
                         // в контейнере с прокруткой и обрезает всё, что вышло за его край. У них раскрываем вниз.
                         const tipUp = rowIdx > 1 ? 'bottom-full mb-1.5' : 'top-full mt-1.5';
-                        const factoryOrder = activeFactoryOrders[art.article] || null;
-                        const factoryOverdue = !!(factoryOrder && factoryOrder.expectedAt && factoryOrder.expectedAt < todayIso);
                         // Пункт 35. Разбор заказов на фабрике для пяти состояний ячейки.
+                        // Item 83d: a China row NEVER drops into the «просрочен» state — it stays in the
+                        // ТРУБА even late, only «задерживается N дн» tells the owner about it.
                         const factoryList = factoryOrdersByArticle[art.article] || [];
-                        const factoryOverdueList = factoryList.filter((o) => o.expectedAt && o.expectedAt < todayIso);
+                        const factoryOverdueList = factoryList.filter((o) => !isChinaFactoryOrder(o) && o.expectedAt && o.expectedAt < todayIso);
                         const factoryOverdueQty = factoryOverdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-                        const factoryWaitingList = factoryList.filter((o) => !o.expectedAt || o.expectedAt >= todayIso);
+                        const factoryWaitingList = factoryList.filter((o) => isChinaFactoryOrder(o) || !o.expectedAt || o.expectedAt >= todayIso);
                         const factoryWaitingQty = factoryWaitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
                         const factoryNearest = factoryWaitingList[0] || null;
+                        // Item 83e: manual orders hidden from the ТРУБА for this article, shown as a
+                        // separate notice next to the article, with the two owner buttons.
+                        const factoryHiddenManual = hiddenManualByArticle[art.article] || [];
+                        // Item 83g: one line per active order — badge and «задерживается N дн» when a
+                        // China row is late — appended to the cell's tooltips below.
+                        const factoryOrdersDetail = factoryList
+                          .map((o) => {
+                            const badge = factoryOrderBadge(o);
+                            const late = factoryLateLabel(factoryPipeline.late[o.id]);
+                            return `${fmtInt(o.qty)} шт${badge ? ` · ${badge}` : ''}${o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}${late ? ` · ${late}` : ''}`;
+                          })
+                          .join('\n');
                         const factoryOrderQty = art.factory ? art.factory.orderQty : 0;
                         const factoryClusterOnly = !!(art.factory && art.factory.reason === 'clusterDeficit' && art.factory.orderQty === 0);
                         const factoryBox = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
@@ -1522,6 +1569,31 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     )}
                                   </div>
                                   <span className="text-slate-500 truncate block text-[11px]" title={art.name}>{art.name}</span>
+                                  {/* Item 83e: the manual order is real, it just double-counts an article that
+                                      already has a China shipment — the owner decides which. */}
+                                  {factoryHiddenManual.map((hidden) => (
+                                    <div
+                                      key={hidden.id}
+                                      className="text-[10px] bg-amber-50 border border-amber-200 text-amber-700 rounded-lg px-2 py-1 flex items-center gap-2 flex-wrap"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <span>ручной заказ {fmtInt(hidden.qty)} шт скрыт из трубы: по артикулу есть заказ из Китая</span>
+                                      <button
+                                        type="button"
+                                        className="font-bold underline hover:text-amber-900"
+                                        onClick={() => askResolveFactoryConflict(hidden, true)}
+                                      >
+                                        это тот же заказ
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="font-bold underline hover:text-amber-900"
+                                        onClick={() => askResolveFactoryConflict(hidden, false)}
+                                      >
+                                        это разные заказы
+                                      </button>
+                                    </div>
+                                  ))}
                                 </div>
                               </td>
                               {isColVisible('sold') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.qtySold)}</td>}
@@ -1681,11 +1753,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         <span className="block text-[10px] font-semibold text-amber-600">{fmtInt(factoryOverdueQty)} шт · нажми, чтобы решить</span>
                                       </button>
                                       <span className="pointer-events-none absolute right-0 top-full mt-1 z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal normal-case text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-normal">
-                                        Заказано {fmtInt(factoryOrder.qty)} шт ({fmtInt(Math.ceil(factoryOrder.qty / factoryBox))} кор)<br />
-                                        Размещён: {fmtDateFull(factoryOrder.orderedAt)}<br />
-                                        Ожидается: {fmtDateFull(factoryOrder.expectedAt)}{factoryOverdue ? ' — срок прошёл' : ''}<br />
-                                        {factoryOrder.comment ? <>Комментарий: {factoryOrder.comment}<br /></> : null}
-                                        {factoryOrder.user ? <>Отметил: {factoryOrder.user}<br /></> : null}
+                                        Заказано {fmtInt(factoryOverdueList[0].qty)} шт ({fmtInt(Math.ceil(factoryOverdueList[0].qty / factoryBox))} кор)<br />
+                                        Размещён: {fmtDateFull(factoryOverdueList[0].orderedAt)}<br />
+                                        Ожидается: {fmtDateFull(factoryOverdueList[0].expectedAt)} — срок прошёл<br />
+                                        {factoryOverdueList[0].comment ? <>Комментарий: {factoryOverdueList[0].comment}<br /></> : null}
+                                        {factoryOverdueList[0].user ? <>Отметил: {factoryOverdueList[0].user}<br /></> : null}
+                                        {/* Item 83g: every OTHER active order of the article (e.g. a China row that
+                                            keeps counting while this manual one is overdue) — the owner needs to
+                                            see it here too, not just the one this branch is about. */}
+                                        {factoryList.filter((o) => o.id !== factoryOverdueList[0].id).map((o) => (
+                                          <React.Fragment key={o.id}>
+                                            {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}
+                                            {factoryLateLabel(factoryPipeline.late[o.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[o.id])}` : ''}<br />
+                                          </React.Fragment>
+                                        ))}
                                         Нажми, чтобы изменить заказ или отметить приход партии.
                                       </span>
                                     </span>
@@ -1694,7 +1775,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
                                       className="text-rose-600 font-bold text-right hover:underline"
-                                      title={`Запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас). В запас входят остаток на Ozon, Мой склад и заказанное на фабрике ${fmtInt(factoryWaitingQty)} шт. Нажми, чтобы отметить размещённый заказ.`}
+                                      title={`Запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас). В запас входят остаток на Ozon, Мой склад и заказанное на фабрике ${fmtInt(factoryWaitingQty)} шт. Нажми, чтобы отметить размещённый заказ.\n${factoryOrdersDetail}`}
                                     >
                                       {factoryWaitingQty > 0 ? 'дозаказать ' : ''}{fmtInt(factoryOrderQty)} шт
                                       <span className="block text-[10px] font-semibold text-rose-400">
@@ -1707,7 +1788,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         type="button"
                                         onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
                                         className="text-[10px] font-semibold text-slate-500 text-right hover:underline"
-                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. с учётом заказанных на фабрике ${fmtInt(factoryWaitingQty)} шт. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно. Нажми, чтобы изменить заказ.`}
+                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. с учётом заказанных на фабрике ${fmtInt(factoryWaitingQty)} шт. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно. Нажми, чтобы изменить заказ.\n${factoryOrdersDetail}`}
                                       >
                                         дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
                                         <span className="block text-[10px] font-normal text-sky-600">заказано {fmtInt(factoryWaitingQty)} шт · ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}</span>
@@ -1728,10 +1809,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
                                       className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100"
-                                      title={`Заказано на фабрике ${fmtInt(factoryWaitingQty)} шт. Заказ входит в запас, дозаказывать не нужно. Нажми, чтобы изменить заказ или отметить приход партии.`}
+                                      title={`Заказано на фабрике ${fmtInt(factoryWaitingQty)} шт. Заказ входит в запас, дозаказывать не нужно. Нажми, чтобы изменить заказ или отметить приход партии.\n${factoryOrdersDetail}`}
                                     >
                                       заказано {fmtInt(factoryWaitingQty)} шт
-                                      <span className="block text-[10px] font-semibold text-sky-600">ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}</span>
+                                      <span className="block text-[10px] font-semibold text-sky-600">
+                                        ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}
+                                        {factoryNearest && factoryOrderBadge(factoryNearest) ? ` · ${factoryOrderBadge(factoryNearest)}` : ''}
+                                      </span>
                                     </button>
                                   ) : bottleneckByKit[art.article] ? (
                                     <span
@@ -2265,6 +2349,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           pcsPerBox={factoryModalRow ? factoryModalRow.pcsPerBox : 1}
           leadTimeDays={factoryModalRow ? factoryModalRow.leadTimeDays : 0}
           order={activeFactoryOrders[factoryModalArticle] || null}
+          orders={factoryOrdersByArticle[factoryModalArticle] || []}
+          hiddenManual={hiddenManualByArticle[factoryModalArticle] || []}
+          onResolveConflict={askResolveFactoryConflict}
         />
       )}
       {pendingModalArticle && (

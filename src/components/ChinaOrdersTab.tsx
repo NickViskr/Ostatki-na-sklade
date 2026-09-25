@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Plus, RefreshCw, Loader2, Trash2, Pencil, ChevronDown, ChevronRight, AlertTriangle, Save, FileUp
+  Plus, RefreshCw, Loader2, Trash2, Pencil, ChevronDown, ChevronRight, AlertTriangle, Save, FileUp, RotateCw
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { ChinaBatch, ChinaBatchLine } from '../types';
+import { chinaBatchPipelineInfo } from '../lib/factoryOrderDisplay';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import { ChinaForecastPanel } from './ChinaForecastPanel';
@@ -63,6 +64,15 @@ export const ChinaOrdersTab: React.FC = () => {
   const setConfirmDialog = useUIStore((s) => s.setConfirmDialog);
   const skus = useWarehouseStore((s) => s.skus);
   const sessionToken = useWarehouseStore((s) => s.sessionToken) || '';
+  const currentUser = useWarehouseStore((s) => s.currentUser);
+  const isAdmin = currentUser?.role?.toLowerCase() === 'admin' ||
+    ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
+  // Item 83.4: the pipeline indicator per batch reads the warehouse's own «Заказы на фабрике» —
+  // fetch it once if nothing has loaded it yet (e.g. this tab opened first, before «Остатки Ozon»).
+  const factoryOrders = useWarehouseStore((s) => s.factoryOrders);
+  const fetchFactoryOrders = useWarehouseStore((s) => s.fetchFactoryOrders);
+  const syncChinaFactoryOrders = useChinaStore((s) => s.syncChinaFactoryOrders);
+  const [isSyncingFactoryOrders, setIsSyncingFactoryOrders] = useState(false);
 
   const [openId, setOpenId] = useState<string>('');
   const [editing, setEditing] = useState<ChinaBatch | null>(null);
@@ -81,6 +91,7 @@ export const ChinaOrdersTab: React.FC = () => {
   const [costComment, setCostComment] = useState('');
 
   useEffect(() => { fetchChinaBatches(); }, [fetchChinaBatches]);
+  useEffect(() => { if (factoryOrders.length === 0) fetchFactoryOrders(); }, [factoryOrders.length, fetchFactoryOrders]);
 
   const open = useMemo(() => batches.find((b) => b.id === openId) || null, [batches, openId]);
 
@@ -289,6 +300,43 @@ export const ChinaOrdersTab: React.FC = () => {
     setShowModal(true);
   };
 
+  // Item 83.4: the admin-only manual/first-run reconciliation of «Заказы на фабрике» — the
+  // success/summary toast is the store's own (`syncChinaFactoryOrders`); this one adds the
+  // before→after pipeline qty of every article the sync actually changed.
+  const runSyncFactoryOrders = async () => {
+    setIsSyncingFactoryOrders(true);
+    const result = await syncChinaFactoryOrders();
+    setIsSyncingFactoryOrders(false);
+    if (!result) return;
+    const changedArticles = Array.from(new Set([...Object.keys(result.before), ...Object.keys(result.after)]))
+      .filter((a) => (result.before[a] || 0) !== (result.after[a] || 0))
+      .sort();
+    if (changedArticles.length === 0) return;
+    toast.custom(() => (
+      <div className="bg-white border border-slate-200 rounded-xl shadow-lg p-4 text-sm max-w-sm">
+        <p className="font-bold mb-2">Труба изменилась по артикулам</p>
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-400 text-left">
+              <th className="pr-2 pb-1">Артикул</th>
+              <th className="pr-2 pb-1 text-right">Было</th>
+              <th className="pb-1 text-right">Стало</th>
+            </tr>
+          </thead>
+          <tbody>
+            {changedArticles.map((a) => (
+              <tr key={a}>
+                <td className="pr-2 font-mono">{a}</td>
+                <td className="pr-2 text-right">{result.before[a] || 0}</td>
+                <td className="text-right font-bold">{result.after[a] || 0}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    ), { duration: 12000 });
+  };
+
   const askDeleteBatch = (batch: ChinaBatch) => {
     setConfirmDialog({
       show: true,
@@ -319,6 +367,18 @@ export const ChinaOrdersTab: React.FC = () => {
             {isLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Обновить
           </button>
+          {isAdmin && (
+            <button
+              data-testid="btn-sync-china-factory-orders"
+              onClick={runSyncFactoryOrders}
+              disabled={isSyncingFactoryOrders}
+              title="Пересчитать заказы на фабрике по партиям и прогнозам «Заказы в Китае»"
+              className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:text-indigo-600 disabled:opacity-50"
+            >
+              {isSyncingFactoryOrders ? <Loader2 size={16} className="animate-spin" /> : <RotateCw size={16} />}
+              Обновить заказы на фабрике
+            </button>
+          )}
           <input
             ref={fileInput}
             type="file"
@@ -383,6 +443,9 @@ export const ChinaOrdersTab: React.FC = () => {
           // unless the script says otherwise for this account.
           const eta = chinaEtaText(batch, Number(settings.transitDays) || 30, new Date());
           const remaining = chinaRemainingText(batch);
+          // Item 83.4: display-only — the actual pipeline lives in «Заказы на фабрике», this
+          // just shows whether THIS batch is still counted there.
+          const pipelineInfo = chinaBatchPipelineInfo(factoryOrders, batch.code);
           return (
             <div key={batch.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <button
@@ -401,6 +464,14 @@ export const ChinaOrdersTab: React.FC = () => {
                     )}
                     {batch.closed && (
                       <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Расчёт закрыт</span>
+                    )}
+                    {pipelineInfo && (
+                      <span
+                        className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${pipelineInfo.received ? 'bg-slate-100 text-slate-500' : 'bg-sky-50 text-sky-700'}`}
+                        title="Пункт «Заказы на фабрике» вкладки «Остатки Ozon»"
+                      >
+                        {pipelineInfo.received ? 'получено' : `в трубе: ${pipelineInfo.qty} шт`}
+                      </span>
                     )}
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">

@@ -497,7 +497,7 @@ export function calcSupplyRecommendation(
 }
 
 /** Дней, разделяющих две ISO-даты (toDay − fromDay), считается через UTC-полночь. */
-function daysBetweenIso(fromDay: string, toDay: string): number {
+export function daysBetweenIso(fromDay: string, toDay: string): number {
   const DAY_MS = 24 * 60 * 60 * 1000;
   return Math.round((Date.parse(toDay + 'T00:00:00Z') - Date.parse(fromDay + 'T00:00:00Z')) / DAY_MS);
 }
