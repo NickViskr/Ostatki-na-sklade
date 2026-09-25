@@ -332,12 +332,12 @@
 Status on 2026-09-25. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
-- **Items:** 79 of 83 closed. OPEN: 53, 83 (China batches → factory orders and the pipeline: built and deployed 2026-09-25 — Code.gs 193, `sklad-00089-qpg` — in the owner's check; first run of «Обновить заказы на фабрике» is his). Also 27 (optional) and 37 (deferred: not reproducible on production data).
-- **Live:** Cloud Run `sklad-00096-j5w` (commit `f9e3c53`: the store takes money from write answers; before it `sklad-00095-rgz`, commit `01060ee`: the batch window closes right after the save answer, rubles without kopecks; before it `sklad-00094-85k`, commit `c5c4e6b`; before it `sklad-00093-vls`, commit `6824dd2`, after `sklad-00091-m6w`/`sklad-00092-5k4` the same day:
-  item 83 fixes after the owner's check — markingless lines, shipment in boxes, costs rows, order from bill; `index.html`, the main chunk and `ChinaOrdersTab` verified
-  byte for byte against the local build of the same export, modulo hashes and the label).
-  Previous: `sklad-00089-qpg` 25.09 14:51 (`57cd6de`), `sklad-00088-lbm` 25.09 13:29 (`8444782`), `sklad-00087-fbf` 25.09 12:17 (`0e87453`), `sklad-00086-lzx` 25.09 10:18 (`42ccbf8`), `sklad-00085-s5m` 25.09 06:43 (`84f3e94`), `sklad-00084-6bq` 24.09 19:42 (`10c3c22`), `sklad-00083-r8j` 24.09 18:59 (`dfb9ac4`), `sklad-00082-6pc` 24.09 18:05 (`223419e`), `sklad-00081-gwg` 24.09 14:34 (`e7247d8`), `sklad-00080-8hk` 24.09 12:56 (`8e3c365`), `sklad-00079-7l8` 22.09 16:52 (`5e7ae80`),
-  `sklad-00078-tpb` 22.09 16:36 (`055cf68`), `sklad-00077-px5` 22.09 13:09 (`774a21b`).
+- **Items:** 79 of 83 closed. OPEN: 53, 83 (China batches → factory orders and the pipeline: built and deployed 2026-09-25, then a day of owner's live fixes — see item 83; in the owner's check). Also 27 (optional) and 37 (deferred: not reproducible on production data).
+- **Live:** Cloud Run `sklad-00096-j5w` (build label 2026-09-25 20:59 МСК, commit `f9e3c53`: faster China save —
+  `index.html`, the main chunk and `ChinaOrdersTab` verified byte for byte against the local build of
+  the same export, modulo hashes and the label). The owner's first save on it took 10,4 s (Cloud Run log)
+  against 18–21 s before, and the window no longer waits for the refreshes.
+  Previous, all 25.09: `sklad-00095-rgz` (`01060ee`), `sklad-00094-85k` (`c5c4e6b`), `sklad-00093-vls` (`6824dd2`), `sklad-00092-5k4`, `sklad-00091-m6w` (`9f6837a`), `sklad-00090-kz9` (`28fa767`), `sklad-00089-qpg` (`57cd6de`), `sklad-00088-lbm` (`8444782`), `sklad-00087-fbf` (`0e87453`), `sklad-00086-lzx` (`42ccbf8`), `sklad-00085-s5m` (`84f3e94`); 24.09: `sklad-00084-6bq` (`10c3c22`), `sklad-00083-r8j`, `sklad-00082-6pc`, `sklad-00081-gwg` (`e7247d8`), `sklad-00080-8hk`; 22.09: `sklad-00079-7l8`, `sklad-00078-tpb`, `sklad-00077-px5`.
 - **Code.gs:** version 197 (2026-09-25, faster China save: per-action read cache invalidated on writes, money in every write answer — 96 → 47 Spreadsheet calls per batch save, 179 → 71 per report; 196 - 2026-09-25, a draft takes its bill's full code and «В пути»; 195 - 2026-09-25, stored Russian-costs flag on every save, bill matched by code without the pieces suffix, freight and single-product price from the report; 194 - owner's check: Russian costs as rows in one save, order number and arrival from the report's bill, no false «оплачено полностью»; 193 - item 83; 192 - item 82; 191 - remaining to pay, receipts to history; 190 - item 81g fixes; 189 - item 81g; 188 — item 81e trash and freight per kg; 187 — item 81e fixes; 186 — item 81e; 185 — items 81c–81d and the review fixes; 184 — item 81b: `getChinaBatches` reads without
   the global lock; 183 — item 81a, where the script grew a SECOND file, `ChinaOrders.gs`, so
   `clasp push` reports three; 182 — item 80 per-unit packaging; 181 — item 80 shipment
@@ -347,29 +347,34 @@ dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
   time. Rollback point «before clasp»: version 171.
 - **Checks:** Apps Script stand 983 checks; frontend 1099 tests in 42 files (also green under `TZ=Asia/Yekaterinburg`); `tsc --noEmit`
   clean; `vite build` passes.
-- **Module «Заказы в Китае» (item 81):** its OWN spreadsheet «Заказы в Китае» (Script Property
+- **Module «Заказы в Китае» (items 81–83):** its OWN spreadsheet «Заказы в Китае» (Script Property
   `china_spreadsheetId`; the id is never in the repository) and the second script file
   `ChinaOrders.gs`. Sheets: «Партии», «Строки партий», «Расходы партии», «Платежи», «Справочник»
-  (`cargoRateCnyPerUsd` 7, `transitDays` 30), and since 81g «Отчёты» (3 newest parsed reports),
-  «Поступления», «Движения заказов»; newer columns are appended at the END of live sheets and
-  every write goes by the sheet’s own header row. LIVE in full (Code.gs 191, `sklad-00087-fbf`):
-  81a–81d (costing, tab, import of the batch file and the report, payments, articles from the SKU
-  base); 81e (the arrival file, factory box weights, packaging analytics, trash for batches,
-  tariff vs real freight per kg); 81g (payments stay unallocated until a report shows their
-  receipt; goods money per order with moves at the leaving order’s average rate; freight FIFO in
-  DOLLARS; two rates per batch; provisional rate = typed → latest payment → previous batch;
-  «Чего не хватает» / «Расчёт закрыт»; AI safety net `/api/china/ai-read` with ✓ / ✓✓ / ⚠ / ✗;
-  remaining to pay, estimated arrival, receipts marked history by the owner). LIVE DATA
-  (25.09): batch NV-0923-4 (order 30) with articles and box data, six payments 20.08–25.09 all
-  matched, reports CR1 (24.09) and CR2 (25.09); NV-0923-4 costs 429 296,16 ₽, 374 962,27 ₽ left
-  to pay; the 04.08 receipt (4 819 ¥) is the owner’s to mark as history. ITEM 81 CLOSED
-  2026-09-25 after the owner’s live check. NEXT: item 82 (was 81f, per-article factory box
-  directory and a forecast of future shipments) BUILT, DEPLOYED (Code.gs 192,
-  `sklad-00088-lbm`) AND CLOSED 2026-09-25 after the owner's check. DEFERRED: stage 2 (posting an arrived batch onto the warehouse, on the owner’s word). OPEN
-  QUESTIONS: whether any article of the SKU base has leading zeros (Google Sheets turns «0012»
-  into 12); whether a manual edit after an AI check should drop the ✓✓ mark.
-- **Git:** branch `work/cloud-run-and-tests`; pushed to GitHub 2026-09-25 on the owner’s word
-  together with the closing of item 81 — `git push` only on the owner’s word.
+  (`cargoRateCnyPerUsd` 7, `transitDays` 30, `rubCostsPerBatch` 5000), «Отчёты» (3 newest), «Поступления»,
+  «Движения заказов», «Тарифы карго», «Прогнозы»; newer columns are appended at the END and every write goes
+  by the sheet’s own header row. Items 81 and 82 CLOSED 2026-09-25. Item 83 LIVE: China batches and ordered
+  forecasts are rows of «Заказы на фабрике» (sheet of «БД Склад», columns «Источник»/«Заказ Китай»/«Партия
+  Китай»/«Ключ Китай»/«Проверено»), synced after every batch/forecast/report write; received on «Прибыла»;
+  late China rows stay in the pipeline; a manual order is hidden by any China row of the article shipped on
+  or after it (the owner's «Миска_двойная» manual order has no date — hidden once NV-0916-24 is saved).
+  Same-day owner fixes (all live): orders visible under «дозаказать» and for goods not on Ozon yet; arrival
+  file rows without a marking (1:1 by position only); a shipment in BOXES takes waybill kg/m³ from the arrival
+  totals, box size and factory box kg shown; example placeholders removed; Chinese name column hidden; Russian
+  costs as editable rows (defaults «Разгрузка», «Доставка до склада») saved with one recost and the flag set;
+  the report's bill fills an empty order number, arrival and «Прибыла», freight fields, and — for a
+  single-product batch alone in its order — the price from the order total; bills match by code without the
+  «-N» pieces suffix when unique, and a draft takes the bill's full code and «В пути»; no «оплачено полностью»
+  without a known order; rubles without kopecks, other numbers to hundredths; the batch window closes on the
+  save answer; per-action read cache (96 → 47 Spreadsheet calls per save). LIVE DATA (25.09): NV-0923-4
+  (order 30, 4 articles in the pipeline), NV-0825-2 (order 28, arrived 17.09, costs 4 500 ₽ — already on the
+  warehouse, nothing posts stock from this module), NV-0916 → NV-0916-24 (order 29, «Миска_двойная», boxes,
+  no batch file). OPEN: the owner's question whether one carrier marking can cover DIFFERENT products on one
+  pallet (articles propagate by marking and lines of one marking share a cost — not changed until he answers);
+  the «БД Склад» factory sheet is still read twice per sync; leading zeros in SKU articles; whether a manual
+  edit after an AI check should drop ✓✓. DEFERRED: stage 2 (posting an arrived batch onto the warehouse, with
+  an «already on stock» mark for old batches like NV-0825-2), on the owner’s word.
+- **Git:** branch `work/cloud-run-and-tests`; everything up to this record pushed to GitHub 2026-09-25 on the
+  owner’s word — `git push` only on the owner’s word.
 - **Production contour:** the auto-poll writes to the production DB (Script Property
   `ozon_autoSyncTarget = 'prod'`); the dev-mode toggle switches only the browser to the
   test DB. The assistant checks the app live through the separate admin account «Claude»
