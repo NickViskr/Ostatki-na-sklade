@@ -30,8 +30,16 @@ not translated back; files drift to English as they are edited.
 
 ## Build and tests (npm, never pnpm — the pnpm hook breaks this repo; use `npx`)
 - `npx vitest run`, `npx tsc --noEmit`, `npx vite build`, `npm run test:gas` (Apps Script stand).
-- Mutation testing is mandatory for new logic: a surviving mutation means a missing test or
-  dead code. Test the whole path, not only the inner function.
+- Test depth follows the risk (owner's decision 2026-09-25, to cut time on small tasks):
+  - **Money-critical** (money, costs, rates, payment allocation, stock write-offs, dates, data
+    written to sheets): full check — mutation testing is mandatory (a surviving mutation means
+    a missing test or dead code), test the whole path, not only the inner function, plus the
+    `TZ=Asia/Yekaterinburg` run.
+  - **Cosmetic** (number formatting, labels, collapsing, layout, texts): 1–2 tests of the
+    changed behaviour, no mutations, no separate tester agent.
+  - While working, run only the tests of the changed module; the full set (`npx vitest run`,
+    the Yekaterinburg run, `npm run test:gas`, `tsc`, build) runs once before deployment.
+  - When unsure which tier a change is, treat it as money-critical.
 - All numeric calculations are executed as code, never mental arithmetic.
 - `npm audit fix` must not be run. The classifier refuses `rm -rf node_modules` — the owner
   does that.
