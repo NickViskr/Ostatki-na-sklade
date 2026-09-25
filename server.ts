@@ -362,7 +362,10 @@ async function startServer() {
     matchChinaPayment: ['getChinaBatches', 'getChinaMoney'],
     unmatchChinaPayment: ['getChinaBatches', 'getChinaMoney'],
     // Item 81g-3.
-    setChinaRubCostsDone: ['getChinaBatches', 'getChinaMoney']
+    setChinaRubCostsDone: ['getChinaBatches', 'getChinaMoney'],
+    // Owner, 2026-09-25: the owner's own «история» mark on a receipt — same reasoning as every
+    // other 81g write, both reads must drop.
+    setChinaReceiptHistory: ['getChinaBatches', 'getChinaMoney']
   };
 
   function invalidateCacheFor(writeAction: string): void {

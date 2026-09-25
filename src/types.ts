@@ -283,6 +283,9 @@ export interface ChinaMoneyReceipt {
   paymentId: string;
   rubGoods: number;
   rubFreight: number;
+  /** Item 89: true when `status: 'история'` came from the owner's own «это старое — в историю»
+   * button, not from the report itself predating tracking — only these can be undone. */
+  historyManual: boolean;
 }
 
 /** Item 81g: per order, what the report says was received and what of that is backed by an
@@ -430,4 +433,10 @@ export interface ChinaBatch {
   checkMark?: string;
   /** The AI's own words for `checkMark` of 'ИИ' or 'расхождение ИИ'. */
   checkNote?: string;
+  /** Item 89: what of the batch's own cost is still unpaid, worked out by the script from the
+   * rate the batch actually has — 0 without a rate even if `remainingGoodsCny`/
+   * `remainingFreightUsd` say otherwise. Absent on data saved before item 89. */
+  remainingRub?: number;
+  remainingGoodsCny?: number;
+  remainingFreightUsd?: number;
 }

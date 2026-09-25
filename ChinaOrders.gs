@@ -132,7 +132,12 @@ const CHINA_REPORT_HEADERS = ['ID', 'Загружен', 'Дата отчёта',
 // first introduced this date's receipt — chinaAllocateGoodsLedger uses exactly that to know
 // when a receipt joins the pool, even after its report has since been pruned away.
 const CHINA_RECEIPT_HEADERS = ['ID', 'Дата', 'Товар ¥', 'Доставка ¥', 'Доставка $', 'Курс ¥/$', 'Всего ¥',
-  'Статус', 'ОплатаID', '₽ товар', '₽ доставка', 'Отчёт'];
+  'Статус', 'ОплатаID', '₽ товар', '₽ доставка', 'Отчёт',
+  // Owner, 2026-09-25: the owner's own «история» mark (setChinaReceiptHistory) — kept apart from
+  // «Статус» so a later saveChinaReport upsert of the SAME date (which only ever touches the ¥
+  // totals of an EXISTING row, never «Статус») cannot flip a manually marked receipt back, and so
+  // unmarking it can refuse to touch a receipt whose «история» is the DATE's own, not the owner's.
+  'История вручную'];
 
 // Append-only: one row per order whose «получено» moved between two consecutive reports (the
 // very first report's own movements are its orders' baseline, from 0). This sheet is what the
@@ -152,7 +157,10 @@ const CHINA_TRACKING_START_DATE = '2026-08-01';
 const CHINA_CARRYOVER_RECEIPT_DATE = '2020-01-01';
 
 const CHINA_SETTINGS_DEFAULTS = [
-  { key: 'cargoRateCnyPerUsd', value: 7, desc: 'Курс карго: сколько юаней за 1 доллар перевозки' }
+  { key: 'cargoRateCnyPerUsd', value: 7, desc: 'Курс карго: сколько юаней за 1 доллар перевозки' },
+  // Owner, 2026-09-25: how many days a batch is typically in transit, shipment to arrival — the
+  // browser shows the estimated arrival date from it, the server does no date arithmetic at all.
+  { key: 'transitDays', value: 30, desc: 'Дней в пути от отгрузки до прибытия, ориентировочно' }
 ];
 
 const CHINA_STATUSES = ['Черновик', 'В пути', 'Прибыла'];
@@ -551,16 +559,51 @@ function chinaPaymentMoney(amountRub, rate, amountCny) {
   return { amountRub: rub, rate: rateValue, amountCny: cny };
 }
 
+/**
+ * Owner, 2026-09-25: what is still owed on a batch's OWN supply, in a collapsed row — the goods
+ * ¥ from the order's own line in the NEWEST report (a batch whose order the report does not even
+ * mention has nothing outstanding there, by construction), the freight $ from the batch's OWN
+ * bill (chinaAllocateFreightLedger's own `unpaidUsd`, the whole bill when no payment has touched
+ * it at all), and their ₽ equivalents at the batch's OWN rates — a rate of 0 (no rate resolved
+ * yet) drops that part of the ₽ figure to 0 rather than costing at a bogus rate.
+ */
+function chinaRemainingOf(ledger, batch) {
+  const newestOrders = (ledger.newest && Array.isArray(ledger.newest.orders)) ? ledger.newest.orders : [];
+  const orderNo = String(batch.orderNo || '').trim();
+  let remainingGoodsCny = 0;
+  newestOrders.forEach(function (o) {
+    if (String((o || {}).orderNo || '').trim() === orderNo) remainingGoodsCny = roundToTwo(Number(o.unpaidCny) || 0);
+  });
+
+  const bill = chinaBillKnown(ledger, batch.code);
+  const remainingFreightUsd = bill ? roundToTwo(Number(bill.unpaidUsd) || 0) : 0;
+
+  const goodsRate = Number(batch.goodsRate) || 0;
+  const freightRate = Number(batch.freightRate) || 0;
+  const cargoRate = Number(batch.cargoRate) || 0;
+  const remainingGoodsRub = goodsRate > 0 ? roundToTwo(remainingGoodsCny * goodsRate) : 0;
+  const remainingFreightRub = (freightRate > 0 && cargoRate > 0)
+    ? roundToTwo(remainingFreightUsd * cargoRate * freightRate) : 0;
+
+  return {
+    remainingGoodsCny: remainingGoodsCny,
+    remainingFreightUsd: remainingFreightUsd,
+    remainingRub: roundToTwo(remainingGoodsRub + remainingFreightRub)
+  };
+}
+
 function getChinaBatches() {
   const ss = chinaSpreadsheet();
   const batches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows.map(chinaBatchFromRow);
   const lines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows.map(chinaLineFromRow);
   const costs = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS).rows.map(chinaCostFromRow);
   const payments = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS).rows.map(chinaPaymentFromRow);
+  const ledger = chinaLedgerContext(ss);
   const byId = {};
   batches.forEach(function (b) {
     b.lines = [];
     b.costs = [];
+    Object.assign(b, chinaRemainingOf(ledger, b));
     b.payments = payments.filter(function (p) { return p.orderNo && p.orderNo === b.orderNo; });
     byId[b.id] = b;
   });
@@ -2034,7 +2077,9 @@ function chinaReceiptFromRow(r) {
     paymentId: String(r['ОплатаID'] || '').trim(),
     rubGoods: parseNumber(r['₽ товар']),
     rubFreight: parseNumber(r['₽ доставка']),
-    reportId: String(r['Отчёт'] || '').trim()
+    reportId: String(r['Отчёт'] || '').trim(),
+    // Owner, 2026-09-25: set only by setChinaReceiptHistory — see the header comment above.
+    historyManual: String(r['История вручную'] || '').trim() === 'да'
   };
 }
 
@@ -2713,6 +2758,48 @@ function unmatchChinaPayment(data, username) {
 }
 
 /**
+ * Owner, 2026-09-25 (live check): the report highlights EVERY 'ждёт оплату' receipt as
+ * unpaid, which is right for a new one but wrong for the live 2026-08-04 receipt (4 819 ¥) —
+ * that money is simply not going to be matched, and the owner marks it «история» by hand so the
+ * highlight goes away for good. history=true sets 'История' AND the manual flag; history=false
+ * puts it back to 'ждёт оплату' — but only for a receipt dated in the tracked era (before that,
+ * 'история' is the DATE's own status, not something to undo). Either direction is refused on a
+ * receipt already 'сопоставлено' — a matched receipt has real money behind it, marking it history
+ * would hide that from the ledger. Every batch is re-costed afterwards: the receipt's status
+ * bucket (chinaReceiptStatusBucket) feeds straight into the goods/freight ledgers a batch's rate
+ * is resolved against.
+ */
+function setChinaReceiptHistory(data, username) {
+  const receiptId = String((data || {}).receiptId || '').trim();
+  if (!receiptId) throw new Error('Не указано поступление');
+  const history = !!(data || {}).history;
+  const ss = chinaSpreadsheet();
+  const ctx = chinaReadSheet(ss, CHINA_RECEIPTS_SHEET, CHINA_RECEIPT_HEADERS);
+  let row = null;
+  ctx.rows.forEach(function (r) { if (String(r['ID']).trim() === receiptId) row = r; });
+  if (!row) throw new Error('Поступление ' + receiptId + ' не найдено');
+  if (String(row['Статус'] || '').trim() === 'сопоставлено') {
+    throw new Error('Поступление ' + receiptId + ' уже сопоставлено с оплатой — отметку «история» ставить незачем');
+  }
+
+  if (history) {
+    ctx.sheet.getRange(row.__row, 1, 1, ctx.headers.length).setValues([chinaRowFrom(ctx.headers,
+      Object.assign({}, chinaStripRow(row), { 'Статус': 'история', 'История вручную': 'да' }))]);
+  } else {
+    const date = chinaDateText(row['Дата'], 'Дата');
+    if (date < CHINA_TRACKING_START_DATE) {
+      throw new Error('Поступление от ' + date + ' раньше начала учёта (' + CHINA_TRACKING_START_DATE +
+        ') — снять отметку «история» нельзя');
+    }
+    ctx.sheet.getRange(row.__row, 1, 1, ctx.headers.length).setValues([chinaRowFrom(ctx.headers,
+      Object.assign({}, chinaStripRow(row), { 'Статус': 'ждёт оплату', 'История вручную': '' }))]);
+  }
+
+  chinaRecostAll(ss, username);
+  return getChinaBatches();
+}
+
+/**
  * Auto-matches every payment that is not 'сопоставлено' yet: EXACTLY one candidate matches it,
  * several or none leave it pending — the contract's own rule. Runs after a new payment is saved
  * and after every saveChinaReport (new receipts can turn an old orphan payment into an exact
@@ -2927,7 +3014,10 @@ function getChinaMoney() {
     return {
       id: r.id, date: r.date, goodsCny: r.goodsCny, freightCny: r.freightCny, freightUsd: r.freightUsd,
       cargoRate: r.cargoRate, totalCny: roundToTwo(r.goodsCny + r.freightCny), status: r.status,
-      paymentId: r.paymentId, rubGoods: r.rubGoods, rubFreight: r.rubFreight
+      paymentId: r.paymentId, rubGoods: r.rubGoods, rubFreight: r.rubFreight,
+      // Owner, 2026-09-25: whether 'история' is the owner's own mark (setChinaReceiptHistory) or
+      // just the receipt's date being before tracking — the browser's highlight rule needs both.
+      historyManual: r.historyManual
     };
   });
 

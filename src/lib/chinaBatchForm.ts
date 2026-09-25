@@ -95,6 +95,22 @@ export function chinaNumber(value: string | number): number {
   return isFinite(num) ? num : 0;
 }
 
+/**
+ * Item 89: «100000 должны выглядеть как 100 000» — groups the integer part of a ruble amount
+ * by threes as the owner types it, keeping a decimal comma if he already wrote one. Every
+ * character that is not a digit, a comma or a dot is dropped, so pasted spaces or a stray letter
+ * disappear rather than break the grouping; `chinaNumber` reads the result exactly as it reads
+ * the raw typing, since spaces mean nothing to it either.
+ */
+export function chinaGroupThousands(text: string): string {
+  const cleaned = String(text == null ? '' : text).replace(/[^\d,.]/g, '');
+  const sep = cleaned.search(/[,.]/);
+  const intPart = sep === -1 ? cleaned : cleaned.slice(0, sep);
+  const fracPart = sep === -1 ? '' : cleaned.slice(sep + 1).replace(/[,.]/g, '');
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  return sep === -1 ? grouped : `${grouped},${fracPart}`;
+}
+
 export function emptyChinaLine(): ChinaLineForm {
   return {
     marking: '', name: '', boxes: '', pcsPerBox: '', qty: '', priceCny: '',
@@ -384,6 +400,106 @@ export function chinaRateStatusText(
   }
   if (rubRateSource === 'оплаты') return `в базе оплат по этому заказу: ${paymentsCount}`;
   return 'курс не задан — внесите оплату или впишите курс ₽/¥ в партии, до тех пор суммы в рублях не считаются';
+}
+
+export interface ChinaRemainingText { text: string; className: string; title: string }
+
+const rubText = (value: number): string =>
+  value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/**
+ * Item 89: «рядом должно указываться сколько ещё рублей осталось доплатить» — the collapsed row
+ * used to show only the batch's own cost, never what of it is still owed. `remainingRub` is the
+ * script's own figure, worked out from the rate the batch actually has; when there is no rate yet
+ * it is 0 even though yuan or dollars remain unpaid, so that case is told apart from an actually
+ * settled batch by the ¥/$ figures the script always sends alongside it.
+ * `null` when the batch predates this item and carries no `remainingRub` at all — the caller then
+ * shows nothing extra, exactly as before.
+ */
+export function chinaRemainingText(batch: {
+  remainingRub?: number;
+  remainingGoodsCny?: number;
+  remainingFreightUsd?: number;
+}): ChinaRemainingText | null {
+  if (batch.remainingRub === undefined) return null;
+  const rub = batch.remainingRub;
+  const goodsCny = batch.remainingGoodsCny || 0;
+  const freightUsd = batch.remainingFreightUsd || 0;
+  const title = `товар ${goodsCny} ¥, перевозка ${freightUsd} $`;
+
+  if (rub === 0 && goodsCny <= 0 && freightUsd <= 0) {
+    return { text: 'оплачено полностью', className: 'text-emerald-600', title: '' };
+  }
+  if (rub === 0) {
+    // No rate at all yet: the script cannot say the debt in rubles, only in the currencies it
+    // is actually owed in.
+    const parts: string[] = [];
+    if (goodsCny > 0) parts.push(`${goodsCny} ¥`);
+    if (freightUsd > 0) parts.push(`${freightUsd} $`);
+    return { text: `осталось доплатить ${parts.join(' / ')}`, className: 'text-amber-600', title: '' };
+  }
+  return { text: `осталось доплатить ${rubText(rub)} ₽`, className: '', title };
+}
+
+const CODE_MMDD = /-(\d{2})(\d{2})(?:-\d+)?$/;
+
+export interface ChinaEtaText { text: string; className: string }
+
+/** DD.MM.YYYY of a `{year, month, day}` triple; `month` and `day` are 1-based. */
+const longDate = (year: number, month: number, day: number): string =>
+  `${String(day).padStart(2, '0')}.${String(month).padStart(2, '0')}.${year}`;
+const shortDate = (month: number, day: number): string =>
+  `${String(day).padStart(2, '0')}.${String(month).padStart(2, '0')}`;
+
+/**
+ * Item 89: «номер NV-0923-4 говорит о том, что поставка отправлена 23 сентября» — the collapsed
+ * row used to say nothing about when a batch still in transit would arrive. The shipping date is
+ * `shippedAt` when the owner filled it in (the waybill's own date), or else the MMDD the carrier's
+ * code itself carries — read in the year of `receivedAt` when there is one, `today` otherwise,
+ * since the code alone never states a year.
+ *
+ * Every date is taken apart into its own year/month/day and put back together with the plain
+ * `Date(year, month - 1, day)` constructor, never `new Date(isoString)` or `.toISOString()` — the
+ * former parses as UTC and the latter emits UTC, and either one can silently move the day by one
+ * once the process runs in a timezone ahead of or behind Moscow. Every getter used below
+ * (`getFullYear`/`getMonth`/`getDate`) reads back the SAME local components it was built from, so
+ * the calendar day survives no matter what `TZ` the process runs under.
+ */
+export function chinaEtaText(
+  batch: { code: string; shippedAt: string; arrivedAt: string; receivedAt: string },
+  transitDays: number,
+  today: Date
+): ChinaEtaText {
+  if (batch.arrivedAt) {
+    const m = batch.arrivedAt.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) return { text: `прибыла ${longDate(Number(m[1]), Number(m[2]), Number(m[3]))}`, className: '' };
+    return { text: `прибыла ${batch.arrivedAt}`, className: '' };
+  }
+
+  let year: number; let month: number; let day: number;
+  const shipped = batch.shippedAt.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (shipped) {
+    year = Number(shipped[1]); month = Number(shipped[2]); day = Number(shipped[3]);
+  } else {
+    const coded = batch.code.match(CODE_MMDD);
+    if (!coded) return { text: '', className: '' };
+    month = Number(coded[1]);
+    day = Number(coded[2]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return { text: '', className: '' };
+    const receivedYear = batch.receivedAt.match(/^(\d{4})-/);
+    year = receivedYear ? Number(receivedYear[1]) : today.getFullYear();
+  }
+
+  const estimate = new Date(year, month - 1, day);
+  estimate.setDate(estimate.getDate() + transitDays);
+  const estYear = estimate.getFullYear();
+  const estMonth = estimate.getMonth() + 1;
+  const estDay = estimate.getDate();
+
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const overdue = estimate.getTime() < todayMidnight.getTime();
+  if (overdue) return { text: `ожидалась ${shortDate(estMonth, estDay)}`, className: 'text-amber-600' };
+  return { text: `прибытие ≈ ${longDate(estYear, estMonth, estDay)}`, className: '' };
 }
 
 /**

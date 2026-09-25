@@ -3,7 +3,8 @@ import { Wallet, Loader2, Trash2, Wand2, ChevronDown, ChevronRight } from 'lucid
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { chinaNumber } from '../lib/chinaBatchForm';
+import { useUIStore } from '../store/useUIStore';
+import { chinaGroupThousands, chinaNumber } from '../lib/chinaBatchForm';
 import { parseChinaPaymentText } from '../lib/chinaPaymentText';
 
 // The choice to show or hide the orders table is a workspace preference, kept per viewer and
@@ -52,7 +53,9 @@ export const ChinaPaymentsCard: React.FC = () => {
   const deletePayment = useChinaStore((s) => s.deleteChinaPayment);
   const matchPayment = useChinaStore((s) => s.matchChinaPayment);
   const unmatchPayment = useChinaStore((s) => s.unmatchChinaPayment);
+  const setReceiptHistory = useChinaStore((s) => s.setChinaReceiptHistory);
   const fetchChinaMoney = useChinaStore((s) => s.fetchChinaMoney);
+  const setConfirmDialog = useUIStore((s) => s.setConfirmDialog);
   const username = useWarehouseStore((s) => s.currentUser?.username || '');
 
   const [text, setText] = useState('');
@@ -62,6 +65,7 @@ export const ChinaPaymentsCard: React.FC = () => {
   const [comment, setComment] = useState('');
   const [picked, setPicked] = useState<Record<string, string>>({});
   const [ordersOpen, setOrdersOpen] = useState(() => readOrdersOpen(username));
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => { fetchChinaMoney(); }, [fetchChinaMoney]);
 
@@ -80,7 +84,7 @@ export const ChinaPaymentsCard: React.FC = () => {
     // The date of THIS sentence, or none: kept from the payment before, it would quietly date a
     // payment made today with the day of the last one.
     setDate(parsed.date);
-    setAmountRub(String(parsed.amountRub));
+    setAmountRub(chinaGroupThousands(String(parsed.amountRub)));
     setRate(parsed.rate ? String(parsed.rate) : '');
     // The owner's own sentence goes whole into the comment, so nothing he wrote is lost — unless
     // he already typed a comment of his own, which the parse must not overwrite.
@@ -102,6 +106,56 @@ export const ChinaPaymentsCard: React.FC = () => {
     if (ok) { setText(''); setDate(''); setAmountRub(''); setRate(''); setComment(''); }
   };
 
+  // Item 89: «100000 должны выглядеть как 100 000» — the field groups thousands as the owner
+  // types, but a controlled input re-renders on every keystroke, and simply setting the grouped
+  // string would throw the caret to the end. Counting the digits before the caret in what was
+  // typed, then placing it after the SAME number of digits in the grouped result, keeps it where
+  // the owner left it — grouping only ever inserts or removes spaces between digits, never a
+  // digit itself, so counting digits alone is enough to find the spot back.
+  const digitsBefore = (text: string, caret: number): number =>
+    (text.slice(0, caret).match(/\d/g) || []).length;
+
+  const caretAfterDigits = (formatted: string, digitCount: number): number => {
+    if (digitCount <= 0) return 0;
+    let seen = 0;
+    for (let i = 0; i < formatted.length; i += 1) {
+      if (/\d/.test(formatted[i])) {
+        seen += 1;
+        if (seen === digitCount) return i + 1;
+      }
+    }
+    return formatted.length;
+  };
+
+  const onAmountRubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const raw = input.value;
+    const digitCount = digitsBefore(raw, input.selectionStart ?? raw.length);
+    const formatted = chinaGroupThousands(raw);
+    setAmountRub(formatted);
+    // Same trick `readOrdersOpen` etc. do not need: React commits the state update after this
+    // handler returns, re-assigning the SAME string to `input.value` — which browsers do not
+    // move the caret for. Setting it here too makes the field correct even before that commit.
+    input.value = formatted;
+    const caret = caretAfterDigits(formatted, digitCount);
+    input.setSelectionRange(caret, caret);
+  };
+
+  // Item 89: a receipt the report still calls «ждёт оплату» but that actually predates tracking —
+  // the owner marks it himself rather than wait forever for a payment that was made in cash, or
+  // before the app existed.
+  const askMarkHistory = (receiptId: string, dateIso: string, totalCny: number) => {
+    setConfirmDialog({
+      show: true,
+      title: 'Отметить историей?',
+      message: `Поступление от ${shortDate(dateIso)} на ${totalCny} ¥ будет считаться историей без курса и перестанет подсвечиваться.`,
+      onConfirm: async () => {
+        setConfirmDialog({ show: false, title: '', message: '', onConfirm: () => {} });
+        await setReceiptHistory(receiptId, true);
+      }
+    });
+  };
+
   const match = async (paymentId: string) => {
     const receiptId = picked[paymentId];
     if (!receiptId) {
@@ -118,6 +172,9 @@ export const ChinaPaymentsCard: React.FC = () => {
   const pending = payments.filter((p) => p.status === 'не распределена');
   const allocated = payments.filter((p) => p.status === 'распределена');
   const awaitingPayment = receipts.filter((r) => r.status === 'ждёт оплату');
+  // Item 89: `historyManual` tells the owner's OWN mark (undoable) apart from a receipt the
+  // report itself already calls history because it predates tracking (nothing to undo there).
+  const historyMarked = receipts.filter((r) => r.status === 'история' && r.historyManual);
   const receiptOf = (id: string) => receipts.find((r) => r.id === id) || null;
 
   const field = 'block px-3 py-2 border border-slate-200 rounded-lg text-sm';
@@ -162,7 +219,12 @@ export const ChinaPaymentsCard: React.FC = () => {
         </label>
         <label className="block">
           <span className="text-[11px] font-bold text-slate-500 uppercase">Сумма ₽</span>
-          <input className={`${field} w-32`} value={amountRub} onChange={(e) => setAmountRub(e.target.value)} />
+          <input
+            data-testid="input-china-payment-rub"
+            className={`${field} w-32`}
+            value={amountRub}
+            onChange={onAmountRubChange}
+          />
         </label>
         <label className="block">
           <span className="text-[11px] font-bold text-slate-500 uppercase">Курс ₽/¥</span>
@@ -296,10 +358,49 @@ export const ChinaPaymentsCard: React.FC = () => {
       {awaitingPayment.length > 0 && (
         <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 space-y-1">
           {awaitingPayment.map((r) => (
-            <p key={r.id}>
-              {`в отчёте есть поступление от ${shortDate(r.date)} на ${r.totalCny} ¥, а оплаты в приложении нет`}
+            <p key={r.id} className="flex items-center justify-between gap-3 flex-wrap">
+              <span>{`в отчёте есть поступление от ${shortDate(r.date)} на ${r.totalCny} ¥, а оплаты в приложении нет`}</span>
+              <button
+                data-testid="btn-china-receipt-history"
+                onClick={() => askMarkHistory(r.id, r.date, r.totalCny)}
+                disabled={isSaving}
+                className="px-2 py-1 bg-white border border-amber-200 rounded text-xs font-bold text-amber-700 hover:text-red-600 disabled:opacity-40 shrink-0"
+              >
+                это старое — в историю
+              </button>
             </p>
           ))}
+        </div>
+      )}
+
+      {historyMarked.length > 0 && (
+        <div className="space-y-2">
+          <button
+            type="button"
+            data-testid="btn-china-history-toggle"
+            onClick={() => setHistoryOpen((v) => !v)}
+            className="flex items-center gap-2 font-bold text-sm text-slate-700 hover:text-indigo-600"
+          >
+            {historyOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            Отмеченные как история ({historyMarked.length})
+          </button>
+          {historyOpen && (
+            <div className="space-y-1">
+              {historyMarked.map((r) => (
+                <p key={r.id} className="flex items-center justify-between gap-3 flex-wrap text-sm text-slate-500">
+                  <span>{`поступление от ${shortDate(r.date)} на ${r.totalCny} ¥`}</span>
+                  <button
+                    data-testid="btn-china-receipt-unhistory"
+                    onClick={() => setReceiptHistory(r.id, false)}
+                    disabled={isSaving}
+                    className="px-2 py-1 bg-white border border-slate-200 rounded text-xs font-bold text-slate-600 hover:text-indigo-600 disabled:opacity-40 shrink-0"
+                  >
+                    вернуть
+                  </button>
+                </p>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

@@ -3859,8 +3859,8 @@ function batch27() {
   h.setupChinaSpreadsheet();
   h.setupChinaSpreadsheet();
   check('81a: a repeated setup adds no extra sheet', h.targetSheetNames().length === 8, h.targetSheetNames().join(', '));
-  check('81a: a repeated setup adds no second directory row',
-    h.dumpChinaSheet('Справочник').length === 1, JSON.stringify(h.dumpChinaSheet('Справочник')));
+  check('81a: a repeated setup adds no second directory row per default (2 defaults: carrier rate, transitDays)',
+    h.dumpChinaSheet('Справочник').length === 2, JSON.stringify(h.dumpChinaSheet('Справочник')));
 
   // Somebody clears the directory by hand: the rate must not silently become zero, or the
   // freight of every batch would turn into nothing.
@@ -6457,6 +6457,208 @@ function h_chinaLotsMissingMessages() {
   check('81g fix: the freight side of the same message says «на эту перевозку»',
     batch.missing.indexOf('в отчёте есть поступления 05.09 (700 ¥) на эту перевозку, а оплат в приложении нет — внесите их') !== -1,
     JSON.stringify(batch.missing));
+})();
+
+// ================= Owner, 2026-09-25: remaining money on a batch (collapsed row) =============
+//
+// Live example (NV-0923-4, order 30): unpaid goods 9 464 ¥ in the newest report, an unpaid
+// freight bill of 2 646 $, goodsRate 13.3994, freightRate 13.3976, cargoRate 7. Python:
+// round2(9464*13.3994) = 126 811.92 ₽; round2(2646*7*13.3976) = 248 150.35 ₽; sum = 374 962.27 ₽.
+(function () {
+  const h = withChina();
+  const ledger = {
+    newest: { orders: [{ orderNo: '30', unpaidCny: 9464 }] },
+    freightAlloc: { bills: { 'NV-0923-4': { unpaidUsd: 2646 } } }
+  };
+  const batch = { orderNo: '30', code: 'NV-0923-4', goodsRate: 13.3994, freightRate: 13.3976, cargoRate: 7 };
+  const out = h.chinaRemainingOf(ledger, batch);
+  check('81g-4: chinaRemainingOf reproduces the owner\'s own live example exactly',
+    out.remainingGoodsCny === 9464 && out.remainingFreightUsd === 2646 && out.remainingRub === 374962.27,
+    JSON.stringify(out));
+})();
+
+// Zero-rate parts drop to 0 ₽ without turning the whole figure into 0 or NaN.
+(function () {
+  const h = withChina();
+  const ledger = {
+    newest: { orders: [{ orderNo: '1', unpaidCny: 1000 }] },
+    freightAlloc: { bills: { A: { unpaidUsd: 100 } } }
+  };
+  const noGoodsRate = h.chinaRemainingOf(ledger, { orderNo: '1', code: 'A', goodsRate: 0, freightRate: 10, cargoRate: 7 });
+  check('81g-4: a zero goods rate drops only the goods ₽ part to 0',
+    noGoodsRate.remainingGoodsCny === 1000 && noGoodsRate.remainingRub === roundToTwoTest(100 * 7 * 10),
+    JSON.stringify(noGoodsRate));
+  const noFreightRate = h.chinaRemainingOf(ledger, { orderNo: '1', code: 'A', goodsRate: 5, freightRate: 0, cargoRate: 7 });
+  check('81g-4: a zero freight rate drops only the freight ₽ part to 0',
+    noFreightRate.remainingRub === roundToTwoTest(1000 * 5), JSON.stringify(noFreightRate));
+  const noCargoRate = h.chinaRemainingOf(ledger, { orderNo: '1', code: 'A', goodsRate: 5, freightRate: 10, cargoRate: 0 });
+  check('81g-4: a zero cargo rate also drops the freight ₽ part to 0 (freight $ never converts)',
+    noCargoRate.remainingRub === roundToTwoTest(1000 * 5), JSON.stringify(noCargoRate));
+})();
+
+// No bill at all for the batch's code: remainingFreightUsd is 0, not an error.
+(function () {
+  const h = withChina();
+  const ledger = { newest: { orders: [] }, freightAlloc: { bills: {} } };
+  const out = h.chinaRemainingOf(ledger, { orderNo: '9', code: 'NOBILL', goodsRate: 10, freightRate: 10, cargoRate: 7 });
+  check('81g-4: an order the newest report never mentions, and a code with no bill, both read 0',
+    out.remainingGoodsCny === 0 && out.remainingFreightUsd === 0 && out.remainingRub === 0, JSON.stringify(out));
+})();
+
+function roundToTwoTest(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
+
+// End-to-end through getChinaBatches: a real report/freight ledger, a real batch, a manually
+// typed rate (goods and freight both 10 ₽/¥ — chinaWithPaymentRate's own «вручную» path).
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт',
+    orders: [{ orderNo: '50', date: '2026-01-01', receivedCny: 1000, totalCny: 1500, unpaidCny: 500 }],
+    receipts: [], freights: [{ code: 'BATCHREM', orderNo: '50', amountUsd: 300, cargoRate: 7 }]
+  }, 'Николай');
+  h.saveChinaBatch({
+    orderNo: '50', code: 'BATCHREM', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-20',
+    weightKg: 100, freightUsd: 300, cargoRate: 7, ratePerKgUsd: 3, rubRate: 10,
+    lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'BATCHREM'; })[0];
+  // goods 500 ¥ × 10 = 5 000 ₽; freight 300 $ (no payment matched — the whole bill is unpaid) ×
+  // 7 ¥/$ × 10 ₽/¥ = 21 000 ₽ → 26 000 ₽.
+  check('81g-4: getChinaBatches wires remainingGoodsCny/remainingFreightUsd/remainingRub through',
+    batch.remainingGoodsCny === 500 && batch.remainingFreightUsd === 300 && batch.remainingRub === 26000,
+    JSON.stringify({ g: batch.remainingGoodsCny, f: batch.remainingFreightUsd, r: batch.remainingRub }));
+})();
+
+// ================= Owner, 2026-09-25: marking a receipt «история» by hand ======================
+//
+// Live case: a 'ждёт оплату' receipt from 2026-08-04 (4 819 ¥) is highlighted forever since it
+// will never be matched — setChinaReceiptHistory lets the owner mark it history for good.
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-08-05', source: 'скрипт',
+    orders: [], receipts: [{ date: '2026-08-04', goodsCny: 4819 }]
+  }, 'Николай');
+  const before = h.getChinaMoney();
+  const receiptId = before.receipts[0].id;
+  check('81g-4: setup — a receipt in the tracked era starts «ждёт оплату», not manually marked',
+    before.receipts[0].status === 'ждёт оплату' && before.receipts[0].historyManual === false,
+    JSON.stringify(before.receipts[0]));
+
+  const marked = h.setChinaReceiptHistory({ receiptId: receiptId, history: true }, 'Николай');
+  check('setChinaReceiptHistory: marks the receipt «история» with the manual flag set',
+    marked !== undefined, 'returns getChinaBatches()');
+  const afterMark = h.getChinaMoney().receipts[0];
+  check('setChinaReceiptHistory: status is «история», «История вручную» = «да»',
+    afterMark.status === 'история' && afterMark.historyManual === true, JSON.stringify(afterMark));
+
+  // A later report re-upload of a DIFFERENT date, repeating the SAME receipt with an UNCHANGED
+  // total, must not touch the manual mark at all (the "already known" branch of saveChinaReport).
+  h.saveChinaReport({
+    reportDate: '2026-08-10', source: 'скрипт',
+    orders: [], receipts: [{ date: '2026-08-04', goodsCny: 4819 }, { date: '2026-08-10', goodsCny: 100 }]
+  }, 'Николай');
+  const afterSameReport = h.getChinaMoney().receipts.filter(function (r) { return r.id === receiptId; })[0];
+  check('setChinaReceiptHistory: an unchanged re-upload of the same receipt keeps the manual mark',
+    afterSameReport.status === 'история' && afterSameReport.historyManual === true,
+    JSON.stringify(afterSameReport));
+
+  // Even when the report REVISES that receipt's own total (the mismatch/warning branch), the
+  // manual mark and status survive — the merge is against the PREVIOUS row, not a fresh default.
+  h.saveChinaReport({
+    reportDate: '2026-08-15', source: 'скрипт',
+    orders: [], receipts: [{ date: '2026-08-04', goodsCny: 5000 }, { date: '2026-08-10', goodsCny: 100 }]
+  }, 'Николай');
+  const afterRevisedTotal = h.getChinaMoney().receipts.filter(function (r) { return r.id === receiptId; })[0];
+  check('setChinaReceiptHistory: even a revised ¥ total for the SAME receipt keeps the manual mark',
+    afterRevisedTotal.status === 'история' && afterRevisedTotal.historyManual === true,
+    JSON.stringify(afterRevisedTotal));
+
+  // Unmark: back to 'ждёт оплату', flag cleared — the receipt's date (2026-08-04) is in era.
+  const unmarked = h.setChinaReceiptHistory({ receiptId: receiptId, history: false }, 'Николай');
+  const afterUnmark = h.getChinaMoney().receipts.filter(function (r) { return r.id === receiptId; })[0];
+  check('setChinaReceiptHistory: unmarking restores «ждёт оплату» and clears the manual flag',
+    afterUnmark.status === 'ждёт оплату' && afterUnmark.historyManual === false, JSON.stringify(afterUnmark));
+})();
+
+// Refusals: a receipt before tracking cannot be unmarked, and a matched receipt cannot be
+// touched in either direction.
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-07-20', source: 'скрипт',
+    orders: [], receipts: [{ date: '2026-07-15', goodsCny: 300 }]
+  }, 'Николай');
+  const oldReceipt = h.getChinaMoney().receipts[0];
+  check('setChinaReceiptHistory: setup — a receipt before tracking starts «история» on its own',
+    oldReceipt.status === 'история' && oldReceipt.historyManual === false, JSON.stringify(oldReceipt));
+
+  let refusedUnmark = '';
+  try { h.setChinaReceiptHistory({ receiptId: oldReceipt.id, history: false }, 'Николай'); }
+  catch (e) { refusedUnmark = e.message; }
+  check('setChinaReceiptHistory: unmarking a before-tracking receipt is refused (Russian message)',
+    refusedUnmark.indexOf('раньше начала учёта') !== -1, refusedUnmark);
+
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт',
+    orders: [{ orderNo: '60', date: '2026-01-01', receivedCny: 1000 }],
+    receipts: [{ date: '2026-08-20', goodsCny: 1000 }]
+  }, 'Николай');
+  h.saveChinaPayment({ date: '2026-08-20', amountRub: 12400, rate: 12.4, comment: 'order 60' }, 'Николай');
+  const matched = h.getChinaMoney().receipts.filter(function (r) { return r.date === '2026-08-20'; })[0];
+  check('setChinaReceiptHistory: setup — the payment matched the receipt',
+    matched.status === 'сопоставлено', JSON.stringify(matched));
+
+  let refusedMark = '';
+  try { h.setChinaReceiptHistory({ receiptId: matched.id, history: true }, 'Николай'); }
+  catch (e) { refusedMark = e.message; }
+  check('setChinaReceiptHistory: marking a «сопоставлено» receipt as history is refused (Russian message)',
+    refusedMark.indexOf('сопоставлено') !== -1, refusedMark);
+})();
+
+// Marking history changes the receipt's bucket, and chinaRecostAll actually re-costs every
+// batch on it — the pending-receipts message drops a receipt once it is marked history.
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт',
+    orders: [{ orderNo: '30', date: '2026-09-01', receivedCny: 4056 }],
+    receipts: [{ date: '2026-09-03', goodsCny: 2974 }, { date: '2026-09-16', goodsCny: 5001 }]
+  }, 'Николай');
+  h.saveChinaBatch({
+    orderNo: '30', code: 'NV-PENDING', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-20',
+    weightKg: 100, freightUsd: 100, cargoRate: 7, ratePerKgUsd: 1,
+    lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }]
+  }, 'Николай');
+  const before = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-PENDING'; })[0];
+  check('setChinaReceiptHistory: setup — both pending receipts are named in «Чего не хватает»',
+    before.missing.some(function (m) { return m.indexOf('03.09') !== -1 && m.indexOf('16.09') !== -1; }),
+    JSON.stringify(before.missing));
+
+  const cg1 = h.getChinaMoney().receipts.filter(function (r) { return r.date === '2026-09-03'; })[0];
+  h.setChinaReceiptHistory({ receiptId: cg1.id, history: true }, 'Николай');
+  const after = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-PENDING'; })[0];
+  check('setChinaReceiptHistory: re-costs every batch — the marked receipt drops out of the pending message',
+    after.missing.some(function (m) { return m.indexOf('16.09') !== -1 && m.indexOf('03.09') === -1; }),
+    JSON.stringify(after.missing));
+})();
+
+// ================= Owner, 2026-09-25: transitDays directory setting ============================
+(function () {
+  const h = withChina();
+  check('transitDays: a freshly set up spreadsheet seeds 30 days',
+    h.getChinaSettings().transitDays === 30, JSON.stringify(h.getChinaSettings()));
+
+  // An existing live sheet made before this item never got the row at all — getChinaSettings
+  // must still answer 30 via the defaults merge, exactly as it already does for cargoRateCnyPerUsd.
+  h.getTargetSheet('Справочник').deleteRow(3);
+  check('transitDays: a directory row missing entirely still answers with the default (30)',
+    h.getChinaSettings().transitDays === 30, JSON.stringify(h.getChinaSettings()));
+
+  // An owner override in the sheet wins over the default.
+  h.getTargetSheet('Справочник').appendRow(['transitDays', 45, 'испытание']);
+  check('transitDays: an owner-typed value in the sheet overrides the default',
+    h.getChinaSettings().transitDays === 45, JSON.stringify(h.getChinaSettings()));
 })();
 
 // ================= Итог =================

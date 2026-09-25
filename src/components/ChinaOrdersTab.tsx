@@ -10,10 +10,10 @@ import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import {
-  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark, chinaFormFromArrival,
-  chinaFormFromFiles, chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes, chinaMarkingMatches,
-  chinaMatchArrivalBatch, chinaMatchFinalBatch, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor,
-  chinaTariffRateUnit
+  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark, chinaEtaText,
+  chinaFormFromArrival, chinaFormFromFiles, chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes,
+  chinaMarkingMatches, chinaMatchArrivalBatch, chinaMatchFinalBatch, chinaRateSourceLabel, chinaRateStatusText,
+  chinaRemainingText, chinaShowWeightFactor, chinaTariffRateUnit
 } from '../lib/chinaBatchForm';
 import {
   ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, ChinaSheets, chinaReportPayload,
@@ -46,6 +46,7 @@ interface LabelDraft { article: string; group: string }
 
 export const ChinaOrdersTab: React.FC = () => {
   const batches = useChinaStore((s) => s.batches);
+  const settings = useChinaStore((s) => s.settings);
   const isLoading = useChinaStore((s) => s.isLoading);
   const isSaving = useChinaStore((s) => s.isSaving);
   const loaded = useChinaStore((s) => s.loaded);
@@ -376,6 +377,10 @@ export const ChinaOrdersTab: React.FC = () => {
           const conflicts = chinaArticleConflicts(batch.lines);
           const hasBoxData = batch.lines.some((l) => l.boxVolumeM3 > 0 || l.factoryBoxKg > 0);
           const checkMark = chinaCheckMark(batch.checkMark || '', batch.checkNote || '');
+          // Item 89: the transit itself takes about `transitDays` from the shipping date — 30
+          // unless the script says otherwise for this account.
+          const eta = chinaEtaText(batch, Number(settings.transitDays) || 30, new Date());
+          const remaining = chinaRemainingText(batch);
           return (
             <div key={batch.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <button
@@ -398,13 +403,18 @@ export const ChinaOrdersTab: React.FC = () => {
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">
                     {batch.shippedAt && <>отгружена {batch.shippedAt} </>}
-                    {batch.arrivedAt && <>· прибыла {batch.arrivedAt} </>}
+                    {eta.text && <>· <span className={eta.className}>{eta.text}</span> </>}
                     · {batch.lines.length} строк · {batch.weightKg} кг
                   </div>
                 </div>
                 <div className="text-right">
                   <div className="font-bold">{money(batch.totalRub, '₽')}</div>
                   <div className="text-xs text-slate-400">себестоимость партии</div>
+                  {remaining && (
+                    <div className={`text-xs font-bold ${remaining.className}`} title={remaining.title}>
+                      {remaining.text}
+                    </div>
+                  )}
                 </div>
               </button>
 

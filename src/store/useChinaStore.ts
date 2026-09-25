@@ -49,6 +49,10 @@ interface ChinaState {
   saveChinaReport: (payload: Record<string, unknown>) => Promise<string[] | null>;
   matchChinaPayment: (paymentId: string, receiptId: string) => Promise<boolean>;
   unmatchChinaPayment: (paymentId: string) => Promise<boolean>;
+  /** Item 89: an owner's manual mark that a receipt still «ждёт оплату» is actually old — no rate
+   * is missing, it just predates tracking, exactly like a receipt the report itself calls
+   * 'история'. `history: false` undoes the mark. */
+  setChinaReceiptHistory: (receiptId: string, history: boolean) => Promise<boolean>;
   setChinaRubCostsDone: (batchId: string, done: boolean) => Promise<boolean>;
 }
 
@@ -236,6 +240,20 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     toast.success('Сопоставление отменено');
+    await get().fetchChinaMoney();
+    await get().fetchChinaBatches();
+    return true;
+  },
+
+  setChinaReceiptHistory: async (receiptId, history) => {
+    set({ isSaving: true });
+    const result = await callChina('setChinaReceiptHistory', { receiptId, history });
+    set({ isSaving: false });
+    if (result.status !== 'success') {
+      toast.error(result.message || 'Не удалось отметить поступление');
+      return false;
+    }
+    toast.success(history ? 'Поступление отмечено историей' : 'Поступление возвращено из истории');
     await get().fetchChinaMoney();
     await get().fetchChinaBatches();
     return true;

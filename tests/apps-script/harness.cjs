@@ -723,6 +723,9 @@ module.exports = {
   chinaLotsKnownRub: (...args) => context.chinaLotsKnownRub(...args),
   // ---------- Item 81g-3: rates into chinaBatchCost, missing/closed/history, checkMark ----------
   setChinaRubCostsDone: (...args) => context.setChinaRubCostsDone(...args),
+  // Owner, 2026-09-25: remaining-money fields, the manual «история» mark and transitDays.
+  setChinaReceiptHistory: (...args) => context.setChinaReceiptHistory(...args),
+  chinaRemainingOf: (...args) => context.chinaRemainingOf(...args),
   chinaMissingListOf: (...args) => context.chinaMissingListOf(...args),
   chinaFullyCost: (...args) => context.chinaFullyCost(...args),
   chinaLedgerContext: (...args) => context.chinaLedgerContext(...args),

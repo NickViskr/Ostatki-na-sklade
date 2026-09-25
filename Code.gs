@@ -491,6 +491,8 @@ function doPost(e) {
       case 'unmatchChinaPayment': assertAdmin(currentUser); result = unmatchChinaPayment(data, currentUser.username); break;
       // Item 81g-3.
       case 'setChinaRubCostsDone': assertAdmin(currentUser); result = setChinaRubCostsDone(data, currentUser.username); break;
+      // Owner, 2026-09-25: the owner's own «история» mark on a receipt (setChinaReceiptHistory).
+      case 'setChinaReceiptHistory': assertAdmin(currentUser); result = setChinaReceiptHistory(data, currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }

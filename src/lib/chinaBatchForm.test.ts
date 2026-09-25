@@ -7,7 +7,8 @@ import {
   chinaFormFromFiles, chinaFormFromArrival, ChinaBatchForm, chinaMatchFinalBatch, chinaMatchArrivalBatch,
   chinaMarkingMatches, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor, chinaFreightPerKgLabel,
   chinaCheckMark,
-  chinaTariffRateUnit
+  chinaTariffRateUnit,
+  chinaGroupThousands, chinaRemainingText, chinaEtaText
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
@@ -980,5 +981,121 @@ describe('item 82: the unit of the carrier\'s own tariff', () => {
   it('unknown or empty basis: defaults to кг, the usual case', () => {
     expect(chinaTariffRateUnit('')).toBe('кг');
     expect(chinaTariffRateUnit('чушь')).toBe('кг');
+  });
+});
+
+// Item 89: «100000 должны выглядеть как 100 000» in the payments card's ruble field.
+describe('item 89: grouping thousands as the owner types a ruble amount', () => {
+  it('groups a plain integer by threes', () => {
+    expect(chinaGroupThousands('100000')).toBe('100 000');
+  });
+
+  it('groups a bigger number into more than one gap', () => {
+    expect(chinaGroupThousands('1234567')).toBe('1 234 567');
+  });
+
+  it('keeps a decimal comma and groups only the integer part', () => {
+    expect(chinaGroupThousands('12345,6')).toBe('12 345,6');
+  });
+
+  it('drops spaces already in the text before regrouping, so retyping stays stable', () => {
+    expect(chinaGroupThousands('100 000')).toBe('100 000');
+  });
+
+  it('a short number gets no gap at all', () => {
+    expect(chinaGroupThousands('999')).toBe('999');
+    expect(chinaGroupThousands('')).toBe('');
+  });
+
+  it('a dot is read the same as a comma, but the comma is what comes back', () => {
+    expect(chinaGroupThousands('12345.6')).toBe('12 345,6');
+  });
+
+  it('a stray letter is dropped rather than breaking the grouping', () => {
+    expect(chinaGroupThousands('100000 руб')).toBe('100 000');
+  });
+});
+
+describe('item 89: what is still owed on a batch, shown beside its cost', () => {
+  it('a batch predating the item has nothing to show', () => {
+    expect(chinaRemainingText({})).toBeNull();
+  });
+
+  it('nothing left at all: paid in full', () => {
+    const result = chinaRemainingText({ remainingRub: 0, remainingGoodsCny: 0, remainingFreightUsd: 0 });
+    expect(result).toEqual({ text: 'оплачено полностью', className: 'text-emerald-600', title: '' });
+  });
+
+  it('a ruble debt, with the ¥/$ breakdown in the tooltip', () => {
+    const result = chinaRemainingText({ remainingRub: 123456.78, remainingGoodsCny: 8000, remainingFreightUsd: 500 });
+    expect(result!.text).toBe('осталось доплатить 123 456,78 ₽');
+    expect(result!.title).toBe('товар 8000 ¥, перевозка 500 $');
+    expect(result!.className).toBe('');
+  });
+
+  it('no rate yet: 0 ₽ owed does not mean paid — the ¥/$ figures show instead', () => {
+    const result = chinaRemainingText({ remainingRub: 0, remainingGoodsCny: 8000, remainingFreightUsd: 0 });
+    expect(result!.text).toBe('осталось доплатить 8000 ¥');
+    expect(result!.className).toBe('text-amber-600');
+  });
+
+  it('no rate yet, only the freight left unpaid', () => {
+    const result = chinaRemainingText({ remainingRub: 0, remainingFreightUsd: 500 });
+    expect(result!.text).toBe('осталось доплатить 500 $');
+  });
+});
+
+// Item 89: «номер NV-0923-4 говорит о том, что поставка отправлена 23 сентября» — the estimated
+// arrival shown on the collapsed row. Run once under TZ=Asia/Yekaterinburg too (docs/OZON_PLAN.md
+// item 89), to prove the date arithmetic below does not shift by a day.
+describe('item 89: the estimated arrival date of a batch', () => {
+  const TODAY = new Date(2026, 8, 25); // 25.09.2026
+
+  it('already arrived: the arrival date itself, not an estimate', () => {
+    const batch = { code: 'NV-0923-4', shippedAt: '', arrivedAt: '2026-09-30', receivedAt: '' };
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: 'прибыла 30.09.2026', className: '' });
+  });
+
+  it('shippedAt beats the code — the waybill is the truth, the code is only a fallback', () => {
+    const batch = { code: 'NV-0923-4', shippedAt: '2026-09-24', arrivedAt: '', receivedAt: '' };
+    // 24.09.2026 + 30 days = 24.10.2026, not overdue on 25.09.2026
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: 'прибытие ≈ 24.10.2026', className: '' });
+  });
+
+  it('no shippedAt: the MMDD the code itself carries, in the year of receivedAt', () => {
+    const batch = { code: 'NV-0923-4', shippedAt: '', arrivedAt: '', receivedAt: '2026-11-01' };
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: 'прибытие ≈ 23.10.2026', className: '' });
+  });
+
+  it('no shippedAt and no receivedAt: the code’s MMDD in the year of today', () => {
+    const batch = { code: 'NV-0923-4', shippedAt: '', arrivedAt: '', receivedAt: '' };
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: 'прибытие ≈ 23.10.2026', className: '' });
+  });
+
+  it('overdue: the estimate is in the past and the batch has not arrived', () => {
+    const batch = { code: 'NV-0601-1', shippedAt: '2026-06-01', arrivedAt: '', receivedAt: '' };
+    // 01.06.2026 + 30 days = 01.07.2026, well before 25.09.2026
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: 'ожидалась 01.07', className: 'text-amber-600' });
+  });
+
+  it('the estimate landing exactly today is not yet overdue', () => {
+    const batch = { code: 'NV-0826-1', shippedAt: '2026-08-26', arrivedAt: '', receivedAt: '' };
+    // 26.08.2026 + 30 days = 25.09.2026, the same day as TODAY
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: 'прибытие ≈ 25.09.2026', className: '' });
+  });
+
+  it('a code with no MMDD suffix and no shippedAt: nothing to estimate from', () => {
+    const batch = { code: 'ЧЕРНОВИК', shippedAt: '', arrivedAt: '', receivedAt: '' };
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: '', className: '' });
+  });
+
+  it('a month the code carries that is not a real calendar month is refused, not guessed at', () => {
+    const batch = { code: 'NV-1332-1', shippedAt: '', arrivedAt: '', receivedAt: '' };
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: '', className: '' });
+  });
+
+  it('a valid month but a day no month has is refused too', () => {
+    const batch = { code: 'NV-0140-1', shippedAt: '', arrivedAt: '', receivedAt: '' };
+    expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: '', className: '' });
   });
 });
