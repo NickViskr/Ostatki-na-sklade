@@ -368,9 +368,11 @@ dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
   save answer; per-action read cache (96 → 47 Spreadsheet calls per save). LIVE DATA (25.09): NV-0923-4
   (order 30, 4 articles in the pipeline), NV-0825-2 (order 28, arrived 17.09, costs 4 500 ₽ — already on the
   warehouse, nothing posts stock from this module), NV-0916 → NV-0916-24 (order 29, «Миска_двойная», boxes,
-  no batch file). OPEN: the owner's question whether one carrier marking can cover DIFFERENT products on one
-  pallet (articles propagate by marking and lines of one marking share a cost — not changed until he answers);
-  the «БД Склад» factory sheet is still read twice per sync; leading zeros in SKU articles; whether a manual
+  no batch file). ANSWERED 2026-09-25 by the owner: one carrier marking
+  in one batch is always ONE product, so propagating the article by marking stays as built. Same day the owner
+  cancelled by hand his manual «Миска_двойная» order (dated 18.09, one day after the China row NV-0916-24 of
+  17.09, so the hide rule «China orderedAt >= manual orderedAt» did not hide it); only the China row is left.
+  He declined changing the hide rule. OPEN: the «БД Склад» factory sheet is still read twice per sync; leading zeros in SKU articles; whether a manual
   edit after an AI check should drop ✓✓. DEFERRED: stage 2 (posting an arrived batch onto the warehouse, with
   an «already on stock» mark for old batches like NV-0825-2), on the owner’s word.
 - **Git:** branch `work/cloud-run-and-tests`; everything up to this record pushed to GitHub 2026-09-25 on the
