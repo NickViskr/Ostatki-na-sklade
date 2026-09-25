@@ -1186,6 +1186,12 @@ function saveChinaBatch(data, username) {
   if (Array.isArray(data.costs) && chinaReplaceBatchCosts(ss, batchId, data.costs, username)) {
     batch.rubCostsDone = true;
   }
+  // Item A (owner, 2026-09-25 live check): a save that never touches costs at all (e.g. the
+  // owner re-saving labels only, after the flag was already 'да' from an earlier save) must not
+  // make chinaMissingListOf believe the costs are unconfirmed — the stored flag on the batch's
+  // OWN previous row (same source writeChinaBatch's merge already trusts) is what «Расходы РФ
+  // внесены» already holds, and the missing list has to agree with the column, always.
+  if (!batch.rubCostsDone && target) batch.rubCostsDone = chinaBatchFromRow(target).rubCostsDone;
 
   const lines = incoming.map(function (l) {
     return {
@@ -1221,8 +1227,18 @@ function saveChinaBatch(data, username) {
   batch.orderNo = fill.orderNo;
   batch.arrivedAt = fill.arrivedAt;
   batch.status = fill.status;
+  batch.ratePerKgUsd = fill.ratePerKgUsd;
+  batch.freightUsd = fill.freightUsd;
+  batch.weightKg = fill.weightKg;
+  batch.volumeM3 = fill.volumeM3;
+
+  // Item C (owner, 2026-09-25): a single-product batch with no priced batch file at all — every
+  // line still at 0 ¥ — is priced off its OWN order's total in the newest report, but only when
+  // that order belongs to this batch alone (see chinaFillGoodsPriceFromOrder).
+  const priceFill = chinaFillGoodsPriceFromOrder(ss, batch, lines, batchId);
 
   const rated = chinaWithPaymentRate(ss, batch);
+  if (priceFill.note) rated.goodsPriceNote = priceFill.note;
   const calc = chinaFullyCost(rated, lines, rubTotal, getChinaSettings());
   writeChinaBatch(ss, batchCtx, rated, lines, calc, username);
   chinaRecostBorrowers(ss, username, [batchId]);
@@ -1319,6 +1335,75 @@ function chinaNewestReportFreights(ss) {
   return newest ? newest.freights : [];
 }
 
+// The owner's own orders of the newest stored report — each with the order's own declared
+// «Всего ¥» (totalCny), distinct from chinaOrderKnown's receivedCny-based total. Item C's own
+// reading of «Отчёты», same pattern as chinaNewestReportFreights right above.
+function chinaNewestReportOrders(ss) {
+  const reports = chinaReadSheet(ss, CHINA_REPORTS_SHEET, CHINA_REPORT_HEADERS).rows.map(chinaReportFromRow);
+  let newest = null;
+  reports.forEach(function (r) { if (!newest || r.reportDate > newest.reportDate) newest = r; });
+  return newest ? newest.orders : [];
+}
+
+/**
+ * Item C (owner, 2026-09-25): a single-product batch that never had a priced batch file at all —
+ * every line still at 0 ¥ — is priced off its OWN order's declared total in the newest report,
+ * but only when that order belongs to THIS batch alone (no other batch already carries it) — a
+ * shared order's total must never be split blindly across batches that each cost their own
+ * share differently. "Single product": one line, or several lines that all share one «Наш
+ * артикул». The order's whole ¥ is spread over the batch's total pieces at one price rounded to
+ * 4 decimals; the LAST line absorbs whatever a kopeck of rounding leaves over, so the batch's
+ * own goods ¥ always sums to the order's total exactly, to the fen. Mutates `lines` in place —
+ * `writeChinaBatch` persists whatever price ends up on each line right after, same as any other
+ * batch file. Returns `{ note }`, the «Чего не хватает» text for that one save, or '' when
+ * nothing needed filling.
+ */
+function chinaFillGoodsPriceFromOrder(ss, batch, lines, batchId) {
+  const list = lines || [];
+  const hasPrice = list.some(function (l) { return Number(l.priceCny) > 0; });
+  if (hasPrice) return { note: '' };
+
+  const articles = {};
+  list.forEach(function (l) { articles[String(l.article || '').trim()] = true; });
+  const singleProduct = list.length === 1 || Object.keys(articles).length === 1;
+  if (!singleProduct) return { note: '' };
+
+  const orderNo = String((batch || {}).orderNo || '').trim();
+  if (!orderNo) return { note: '' };
+
+  const otherBatches = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS).rows
+    .filter(function (r) { return String(r['ID']).trim() !== batchId; })
+    .map(chinaBatchFromRow);
+  const orderTakenElsewhere = otherBatches.some(function (b) { return String(b.orderNo || '').trim() === orderNo; });
+  if (orderTakenElsewhere) return { note: '' };
+
+  const reportOrder = chinaNewestReportOrders(ss).find(function (o) {
+    return String((o || {}).orderNo || '').trim() === orderNo;
+  });
+  const totalCny = reportOrder ? roundToTwo(Number(reportOrder.totalCny) || 0) : 0;
+  if (!(totalCny > 0)) return { note: '' };
+
+  // saveChinaBatch's own upfront validation already refuses any line with qty <= 0 (and an
+  // empty line list altogether) before this ever runs — totalQty is always positive here.
+  let totalQty = 0;
+  list.forEach(function (l) { totalQty += Number(l.qty) || 0; });
+
+  const unitPrice = Math.round((totalCny / totalQty) * 10000) / 10000;
+  let assignedCny = 0;
+  list.forEach(function (l, i) {
+    const qty = Number(l.qty) || 0;
+    if (i === list.length - 1) {
+      const remainderCny = roundToTwo(totalCny - assignedCny);
+      l.priceCny = qty > 0 ? remainderCny / qty : 0;
+    } else {
+      l.priceCny = unitPrice;
+      assignedCny = roundToTwo(assignedCny + roundToTwo(unitPrice * qty));
+    }
+  });
+
+  return { note: 'цена товара взята из отчёта: сумма заказа ' + orderNo + ' ÷ штук' };
+}
+
 /**
  * Item 3 (owner, 2026-09-25 live check): which carrier bill of the newest report is THIS
  * batch's own —
@@ -1329,17 +1414,44 @@ function chinaNewestReportFreights(ss) {
  *      as chinaMatchFinalBatch on the browser side.
  * Pure — `freights` is whatever chinaNewestReportFreights already read.
  */
-function chinaMatchReportBill(freights, batch) {
-  const bills = (freights || []).filter(function (f) { return String((f || {}).code || '').trim(); });
-  const code = String((batch || {}).code || '').trim().toLowerCase();
-  if (!code) return null;
-  const exact = bills.find(function (f) { return String(f.code || '').trim().toLowerCase() === code; });
-  if (exact) return exact;
-  if (String((batch || {}).status || '') !== 'Черновик') return null;
-  const matches = bills.filter(function (f) {
-    return String(f.code || '').trim().toLowerCase().replace(/-\d+$/, '') === code;
+/**
+ * Item B (owner, 2026-09-25): the ONE matcher used everywhere a batch's own carrier bill is
+ * looked up in a report — an exact code match first; failing that, the bill(s) whose code
+ * agrees with the batch's once each side's trailing «-N» (the carrier's piece count) is
+ * stripped. More than one such bill is an unresolved ambiguity, never guessed at —
+ * `ambiguousCount` lets the caller report it instead of silently picking one. Not limited to
+ * draft batches any more: any batch's own code can carry the carrier's «-N» suffix too.
+ */
+// A batch's real code is «customer + MMDD» (already ONE dash, e.g. 'nv-0916') — the carrier's
+// own «-N» piece count is a SECOND, separate dash group ('nv-0916-24'). Stripping a trailing
+// «-digits» blindly would eat the MMDD group of a bare code that never had a piece count at
+// all ('nv-0916' → 'nv', wrong). Only trust the strip when a dash is still left afterwards —
+// that only happens when the code truly had an EXTRA group to strip.
+function chinaStripPieceSuffix(code) {
+  const c = String(code || '');
+  const stripped = c.replace(/-\d+$/, '');
+  return stripped.indexOf('-') >= 0 ? stripped : c;
+}
+
+function chinaMatchBillByCode(bills, batchCode) {
+  const list = (bills || []).filter(function (b) { return String((b || {}).code || '').trim(); });
+  const code = String(batchCode || '').trim().toLowerCase();
+  if (!code) return { bill: null, ambiguousCount: 0 };
+  const exact = list.find(function (b) { return String(b.code).trim().toLowerCase() === code; });
+  if (exact) return { bill: exact, ambiguousCount: 0 };
+  const strippedBatch = chinaStripPieceSuffix(code);
+  const matches = list.filter(function (b) {
+    const billCode = String(b.code).trim().toLowerCase();
+    const strippedBill = chinaStripPieceSuffix(billCode);
+    return strippedBill === code || strippedBatch === strippedBill;
   });
-  return matches.length === 1 ? matches[0] : null;
+  return { bill: matches.length === 1 ? matches[0] : null, ambiguousCount: matches.length };
+}
+
+function chinaMatchReportBill(freights, batch) {
+  const code = String((batch || {}).code || '').trim();
+  if (!code) return null;
+  return chinaMatchBillByCode(freights, code).bill;
 }
 
 /**
@@ -1347,15 +1459,31 @@ function chinaMatchReportBill(freights, batch) {
  * (chinaMatchReportBill) where the batch has nothing of its own yet. An order number ALREADY
  * on the batch is never overwritten, even when it disagrees with the bill's — chinaMissingListOf
  * reports that disagreement instead (reading the same bill via `rated.billInfo.orderNo`), so the
- * owner can see and fix it rather than have the script silently pick a side. Pure — returns a
- * plain `{orderNo, arrivedAt, status, changed}`, never touches a sheet.
+ * owner can see and fix it rather than have the script silently pick a side.
+ *
+ * Item B (owner, 2026-09-25): the SAME matched bill also fills the batch's own freight fields —
+ * «Ставка $/кг», «Перевозка $», «Вес накладной, кг», «Объём, м³» — wherever the batch's own value
+ * is still empty/0; an owner-typed or batch-file value is never touched. A bill priced per m³
+ * (chinaTariffFromFreight's own basis rule) leaves the $/кг rate empty on purpose — that rate is
+ * meaningless for this bill's basis — and fills only the bill's total «Перевозка $».
+ *
+ * Pure — returns a plain `{orderNo, arrivedAt, status, ratePerKgUsd, freightUsd, weightKg,
+ * volumeM3, changed}`, never touches a sheet.
  */
 function chinaFillOrderFromBill(freights, batch) {
   const b = batch || {};
   const ownOrderNo = String(b.orderNo || '').trim();
   const ownArrivedAt = String(b.arrivedAt || '').trim();
   const ownStatus = String(b.status || '').trim();
-  const out = { orderNo: ownOrderNo, arrivedAt: ownArrivedAt, status: ownStatus, changed: false };
+  const ownRate = Number(b.ratePerKgUsd) || 0;
+  const ownFreightUsd = Number(b.freightUsd) || 0;
+  const ownWeightKg = Number(b.weightKg) || 0;
+  const ownVolumeM3 = Number(b.volumeM3) || 0;
+  const out = {
+    orderNo: ownOrderNo, arrivedAt: ownArrivedAt, status: ownStatus,
+    ratePerKgUsd: ownRate, freightUsd: ownFreightUsd, weightKg: ownWeightKg, volumeM3: ownVolumeM3,
+    changed: false
+  };
 
   const bill = chinaMatchReportBill(freights, b);
   if (!bill) return out;
@@ -1369,7 +1497,22 @@ function chinaFillOrderFromBill(freights, batch) {
     out.status = 'Прибыла';
   }
 
-  out.changed = out.orderNo !== ownOrderNo || out.arrivedAt !== ownArrivedAt || out.status !== ownStatus;
+  const billUsd = Number(bill.amountUsd) || 0;
+  if (!(ownFreightUsd > 0) && billUsd > 0) out.freightUsd = billUsd;
+
+  const basis = chinaTariffFromFreight(bill, '').basis;
+  const billRate = Number(bill.ratePerKgUsd) || 0;
+  if (!(ownRate > 0) && basis !== 'м³' && billRate > 0) out.ratePerKgUsd = billRate;
+
+  const billWeight = Number(bill.weightKg) || 0;
+  if (!(ownWeightKg > 0) && billWeight > 0) out.weightKg = billWeight;
+
+  const billVolume = Number(bill.volumeM3) || 0;
+  if (!(ownVolumeM3 > 0) && billVolume > 0) out.volumeM3 = billVolume;
+
+  out.changed = out.orderNo !== ownOrderNo || out.arrivedAt !== ownArrivedAt || out.status !== ownStatus ||
+    out.ratePerKgUsd !== ownRate || out.freightUsd !== ownFreightUsd ||
+    out.weightKg !== ownWeightKg || out.volumeM3 !== ownVolumeM3;
   return out;
 }
 
@@ -1384,6 +1527,12 @@ function chinaFillBatchesFromReport(ss, freights, username) {
   const orderCol = ctx.headers.indexOf('Номер заказа') + 1;
   const arrivedCol = ctx.headers.indexOf('Дата прибытия') + 1;
   const statusCol = ctx.headers.indexOf('Статус') + 1;
+  // Item B: the same freight-field fill saveChinaBatch already runs on a plain save, applied
+  // here too — a report upload can be the FIRST time a batch's own matching bill shows up.
+  const rateCol = ctx.headers.indexOf('Ставка $/кг') + 1;
+  const freightCol = ctx.headers.indexOf('Перевозка $') + 1;
+  const weightCol = ctx.headers.indexOf('Вес накладной, кг') + 1;
+  const volumeCol = ctx.headers.indexOf('Объём, м³') + 1;
   const updatedCol = ctx.headers.indexOf('Обновлено') + 1;
   ctx.rows.forEach(function (r) {
     const batch = chinaBatchFromRow(r);
@@ -1392,6 +1541,10 @@ function chinaFillBatchesFromReport(ss, freights, username) {
     if (fill.orderNo !== batch.orderNo) ctx.sheet.getRange(r.__row, orderCol, 1, 1).setValues([[fill.orderNo]]);
     if (fill.arrivedAt !== batch.arrivedAt) ctx.sheet.getRange(r.__row, arrivedCol, 1, 1).setValues([[fill.arrivedAt]]);
     if (fill.status !== batch.status) ctx.sheet.getRange(r.__row, statusCol, 1, 1).setValues([[fill.status]]);
+    if (fill.ratePerKgUsd !== batch.ratePerKgUsd) ctx.sheet.getRange(r.__row, rateCol, 1, 1).setValues([[fill.ratePerKgUsd]]);
+    if (fill.freightUsd !== batch.freightUsd) ctx.sheet.getRange(r.__row, freightCol, 1, 1).setValues([[fill.freightUsd]]);
+    if (fill.weightKg !== batch.weightKg) ctx.sheet.getRange(r.__row, weightCol, 1, 1).setValues([[fill.weightKg]]);
+    if (fill.volumeM3 !== batch.volumeM3) ctx.sheet.getRange(r.__row, volumeCol, 1, 1).setValues([[fill.volumeM3]]);
     ctx.sheet.getRange(r.__row, updatedCol, 1, 1).setValues([[chinaStamp()]]);
     Logger.log('Заказы в Китае: партия ' + batch.id + ' дополнена из отчёта — ' +
       (fill.orderNo !== batch.orderNo ? 'заказ №' + fill.orderNo + ' ' : '') +
@@ -1415,9 +1568,20 @@ function chinaOrderKnown(ledger, orderNo) {
   };
 }
 
+// Item B: the SAME code matcher as chinaMatchReportBill, over the bills chinaAllocateFreightLedger
+// already keyed by their own exact code — `code`'s own list entry gets a `code` field added back
+// (chinaAllocateFreightLedger's own dict values don't carry it) purely so the shared matcher can
+// read it. Returns { bill, ambiguousCount } — ambiguousCount > 1 only when the batch's code is a
+// prefix of several bills and none of them can be picked.
+function chinaBillMatch(ledger, code) {
+  const bills = (ledger && ledger.freightAlloc && ledger.freightAlloc.bills) || {};
+  const list = Object.keys(bills).map(function (k) { return Object.assign({ code: k }, bills[k]); });
+  return chinaMatchBillByCode(list, code);
+}
+
 // The known ¥/₽/unpaid $ of a freight BILL — straight off chinaAllocateFreightLedger.
 function chinaBillKnown(ledger, code) {
-  return ledger.freightAlloc.bills[String(code || '').trim()] || null;
+  return chinaBillMatch(ledger, code).bill;
 }
 
 /**
@@ -1514,7 +1678,8 @@ function chinaWithPaymentRate(ss, batch) {
     out.goodsRateSource = source ? 'предыдущая партия' : '';
   }
 
-  const bill = chinaBillKnown(ledger, batch.code);
+  const billMatch = chinaBillMatch(ledger, batch.code);
+  const bill = billMatch.bill;
   if (bill && bill.knownCny > 0.004) {
     out.freightRate = bill.knownRate;
     out.freightRateSource = 'оплаты';
@@ -1555,6 +1720,10 @@ function chinaWithPaymentRate(ss, batch) {
 
   out.orderInfo = orderInfo;
   out.billInfo = bill;
+  // Item B: > 1 only when the batch's own code prefix-matches several bills in the report and
+  // none of them could be picked — chinaMissingListOf reports the ambiguity by name instead of
+  // the plain «no bill at all» message.
+  out.billAmbiguousCount = billMatch.ambiguousCount;
   // Coordinator, 2026-09-25: kept alongside orderInfo/billInfo so chinaMissingListOf can name
   // the actual receipts a pending amount is waiting on (chinaLotsMissingMessages).
   out.receiptsById = ledger.receiptsById;
@@ -1673,8 +1842,20 @@ function chinaMissingListOf(rated, calc) {
   const hasWeight = Number(rated.weightKg) > 0;
   const hasFreight = Number(rated.freightUsd) > 0 || (Number(rated.ratePerKgUsd) > 0 && hasWeight);
   if (!hasWeight || !hasFreight) missing.push('не загружен файл партии (нет веса или перевозки)');
+  // Item C (owner, 2026-09-25): either the note chinaFillGoodsPriceFromOrder left on THIS save
+  // (a single-product batch just priced off its own order's total), or — when goods ¥ is still
+  // 0 and nothing filled it — a plain call to upload the batch file.
+  if (rated.goodsPriceNote) missing.push(rated.goodsPriceNote);
+  else if (!(Number(calc.goodsCny) > 0)) missing.push('нет цены товара — загрузите файл партии');
   const bill = rated.billInfo;
-  if (!bill) missing.push('в отчёте нет накладной карго на эту партию');
+  if (!bill) {
+    // Item B: an ambiguous prefix match (several bills, none pickable) gets its own message
+    // instead of the plain «no bill at all» — the owner needs to know WHY nothing was chosen.
+    missing.push(Number(rated.billAmbiguousCount) > 1
+      ? 'в отчёте несколько накладных ' + chinaStripPieceSuffix(String(rated.code || '').trim()) +
+        '-…: уточните код партии'
+      : 'в отчёте нет накладной карго на эту партию');
+  }
   // Item 3 (owner, 2026-09-25 live check): the bill's own order number disagrees with the one
   // already on the batch — chinaFillOrderFromBill never overwrites it, this just says so.
   if (bill && bill.orderNo && String(rated.orderNo || '').trim() && bill.orderNo !== String(rated.orderNo).trim()) {

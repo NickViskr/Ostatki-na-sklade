@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { FactoryOrder } from '../types';
 import {
-  isChinaFactoryOrder, factoryOrderBadge, factoryLateLabel, chinaBatchPipelineInfo,
+  isChinaFactoryOrder, factoryOrderBadge, factoryLateLabel,
   forecastPipelineStatus, forecastPipelineStatusLabel
 } from './factoryOrderDisplay';
 
@@ -34,22 +34,6 @@ describe('factoryLateLabel', () => {
     expect(factoryLateLabel(5)).toBe('задерживается 5 дн');
     expect(factoryLateLabel(0)).toBe('');
     expect(factoryLateLabel(undefined)).toBe('');
-  });
-});
-
-describe('chinaBatchPipelineInfo', () => {
-  it('sums the active qty of the batch\'s own rows', () => {
-    const orders = [
-      order({ id: 'a', chinaBatchCode: 'NV-1', qty: 20, status: 'active' }),
-      order({ id: 'b', chinaBatchCode: 'NV-1', qty: 5, status: 'active' }),
-      order({ id: 'c', chinaBatchCode: 'NV-2', qty: 99, status: 'active' }),
-    ];
-    expect(chinaBatchPipelineInfo(orders, 'NV-1')).toEqual({ qty: 25, received: false });
-  });
-  it('reports received once every row of the batch is received, null when the batch has no rows', () => {
-    const orders = [order({ id: 'a', chinaBatchCode: 'NV-1', qty: 20, status: 'received' })];
-    expect(chinaBatchPipelineInfo(orders, 'NV-1')).toEqual({ qty: 0, received: true });
-    expect(chinaBatchPipelineInfo(orders, 'NV-3')).toBeNull();
   });
 });
 

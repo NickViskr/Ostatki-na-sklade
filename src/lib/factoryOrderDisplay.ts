@@ -29,24 +29,6 @@ export function factoryLateLabel(lateDays: number | undefined): string {
   return lateDays && lateDays > 0 ? `задерживается ${lateDays} дн` : '';
 }
 
-/** Item 83.4 (China tab): the pipeline state of one batch, read straight off the warehouse's own
- * factory-order rows for that batch code (`chinaBatchCode`). `null` means the batch has no rows
- * at all yet — nothing our article, or a history batch `syncChinaFactoryOrders` skips. */
-export interface ChinaBatchPipelineInfo {
-  qty: number;
-  received: boolean;
-}
-
-export function chinaBatchPipelineInfo(orders: FactoryOrder[], batchCode: string): ChinaBatchPipelineInfo | null {
-  const code = String(batchCode || '').trim();
-  if (!code) return null;
-  const rows = (orders || []).filter((o) => String(o.chinaBatchCode || '').trim() === code);
-  if (rows.length === 0) return null;
-  const active = rows.filter((o) => String(o.status || '').trim() !== 'received');
-  if (active.length === 0) return { qty: 0, received: true };
-  return { qty: active.reduce((sum, o) => sum + (Number(o.qty) || 0), 0), received: false };
-}
-
 /** Item 83b: whether a saved forecast's own lines are still in the pipeline as 'Китай прогноз'
  * rows. A forecast needs BOTH an order number and an expected ship date to enter the pipeline
  * (`syncChinaFactoryOrders`, server side); once a real batch of the same order number exists, its

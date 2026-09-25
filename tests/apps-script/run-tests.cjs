@@ -7494,6 +7494,51 @@ function byKeySuffix(rows, needle) {
     /Неизвестный тип расхода/.test(badKind), badKind);
 })();
 
+// Item A (owner, 2026-09-25 live check): a re-save without costs must never make «Чего не
+// хватает» disagree with the already-set «Расходы РФ внесены» flag — the flag used to stay
+// 'да' (the merge always preserved the CELL) while the missing list drifted to «не
+// подтверждены» because it read the call's own (empty) batch.rubCostsDone instead of the row's.
+(function () {
+  const h = withChina();
+  const saved = h.saveChinaBatch({
+    orderNo: '62', code: 'NV-0925-3', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-10',
+    weightKg: 100, ratePerKgUsd: 2, rubRate: 12,
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+    costs: [{ type: 'Разгрузка', amountRub: 1000 }]
+  }, 'Николай');
+  const batch = saved.batches[0];
+  check('Item A: the flag is «да» and the missing list has no «не подтверждены» right after the cost save',
+    batch.rubCostsDone === true && batch.missing.indexOf('расходы РФ не подтверждены') === -1,
+    JSON.stringify({ rubCostsDone: batch.rubCostsDone, missing: batch.missing }));
+
+  // Re-save WITHOUT costs (a plain label edit) — the flag stays 'да' from the sheet, and the
+  // missing list must agree with it.
+  const resaved = h.saveChinaBatch({
+    id: batch.id, orderNo: '62', code: 'NV-0925-3', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-10',
+    weightKg: 100, ratePerKgUsd: 2, rubRate: 12,
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: 'ART-62' }]
+  }, 'Николай');
+  const resavedBatch = resaved.batches[0];
+  check('Item A: a re-save with no `costs` key keeps the flag «да» and drops the false «не подтверждены»',
+    resavedBatch.rubCostsDone === true && resavedBatch.missing.indexOf('расходы РФ не подтверждены') === -1,
+    JSON.stringify({ rubCostsDone: resavedBatch.rubCostsDone, missing: resavedBatch.missing }));
+
+  // A report upload recosts every batch (chinaRecostAll → recalcChinaBatch, which reads the
+  // flag straight off the row) — the agreement must survive that too.
+  h.saveChinaReport({ reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [], freights: [] }, 'Николай');
+  const afterReport = h.getChinaBatches().batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('Item A: a report-triggered recost also keeps the flag/missing agreement',
+    afterReport.rubCostsDone === true && afterReport.missing.indexOf('расходы РФ не подтверждены') === -1,
+    JSON.stringify({ rubCostsDone: afterReport.rubCostsDone, missing: afterReport.missing }));
+
+  // A payment recost (saveChinaPayment → chinaRecostAll) too.
+  h.saveChinaPayment({ date: '2026-09-11', amountRub: 100, rate: 12, purpose: 'Товар', orderNo: '62' }, 'Николай');
+  const afterPayment = h.getChinaBatches().batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('Item A: a payment-triggered recost also keeps the flag/missing agreement',
+    afterPayment.rubCostsDone === true && afterPayment.missing.indexOf('расходы РФ не подтверждены') === -1,
+    JSON.stringify({ rubCostsDone: afterPayment.rubCostsDone, missing: afterPayment.missing }));
+})();
+
 // Item 2: «оплачено полностью» must not show up for a batch with nothing to compare a payment
 // against — chinaRemainingOf now says explicitly whether each side (goods/freight) is known.
 (function () {
@@ -7624,10 +7669,16 @@ function byKeySuffix(rows, needle) {
   ];
   check('chinaMatchReportBill: an exact code match wins, any status',
     h.chinaMatchReportBill(freights, { code: 'NV-01', status: 'В пути' }).orderNo === '1', '');
-  check('chinaMatchReportBill: a prefix match is tried ONLY for a Черновик',
-    h.chinaMatchReportBill(freights, { code: 'NV-02', status: 'В пути' }) === null, '');
-  check('chinaMatchReportBill: a Черновик matches the bill\'s code minus its trailing -N',
+  // Item B (owner, 2026-09-25): the prefix match is no longer limited to a Черновик — the SAME
+  // matcher is used everywhere, «Not only for drafts».
+  check('chinaMatchReportBill: a prefix match applies to ANY status, not only a Черновик',
+    h.chinaMatchReportBill(freights, { code: 'NV-02', status: 'В пути' }).orderNo === '2', '');
+  check('chinaMatchReportBill: matches the bill\'s code minus its trailing -N',
     h.chinaMatchReportBill(freights, { code: 'NV-02', status: 'Черновик' }).orderNo === '2', '');
+  // Item B: an exact match wins even when a DIFFERENT bill would also prefix-match.
+  const withBoth = freights.concat([{ code: 'NV-02', orderNo: '9' }]);
+  check('chinaMatchReportBill: an exact match is preferred over a prefix match',
+    h.chinaMatchReportBill(withBoth, { code: 'NV-02', status: 'Черновик' }).orderNo === '9', '');
 
   const fill = h.chinaFillOrderFromBill(freights, { code: 'NV-02', status: 'Черновик', orderNo: '', arrivedAt: '' });
   check('chinaFillOrderFromBill: fills order + arrival + status when the batch has none of its own',
@@ -7637,6 +7688,165 @@ function byKeySuffix(rows, needle) {
   const kept = h.chinaFillOrderFromBill(freights, { code: 'NV-01', status: 'В пути', orderNo: '999', arrivedAt: '' });
   check('chinaFillOrderFromBill: never overwrites an order number the batch already has',
     kept.orderNo === '999' && kept.changed === false, JSON.stringify(kept));
+})();
+
+// Item B (owner, 2026-09-25 live check): the batch's own freight fields, filled from its matched
+// bill — the owner's live NV-0916 / NV-0916-24 case, priced per kg (not m³).
+(function () {
+  const h = freshHarness();
+  const freights = [{ code: 'NV-0916-24', orderNo: '29', ratePerKgUsd: 2.6, weightKg: 408, volumeM3: 4.04, amountUsd: 1109 }];
+  const fill = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'Черновик' });
+  check('Item B: the bill\'s $/кг, $, weight and volume are filled onto the empty batch',
+    fill.ratePerKgUsd === 2.6 && fill.freightUsd === 1109 && fill.weightKg === 408 && fill.volumeM3 === 4.04,
+    JSON.stringify(fill));
+
+  // A bill priced per m³ (chinaTariffFromFreight's own basis rule) leaves the $/кг rate empty —
+  // only the bill's total «Перевозка $» is filled.
+  const m3Freights = [{ code: 'NV-0920', ratePerKgUsd: 3, weightKg: 50, volumeM3: 10, amountUsd: 30 }];
+  const m3Fill = h.chinaFillOrderFromBill(m3Freights, { code: 'NV-0920', status: 'Черновик' });
+  check('Item B: a bill priced per m³ fills only «Перевозка $», never the $/кг rate',
+    m3Fill.ratePerKgUsd === 0 && m3Fill.freightUsd === 30, JSON.stringify(m3Fill));
+
+  // An owner-typed (or batch-file) non-empty rate is never overwritten.
+  const owned = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'Черновик', ratePerKgUsd: 9.9 });
+  check('Item B: a non-empty owner rate is never overwritten by the bill\'s own',
+    owned.ratePerKgUsd === 9.9, JSON.stringify(owned));
+
+  // Same for the batch's own non-empty «Перевозка $» and «Вес накладной, кг».
+  const ownedFreight = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'Черновик', freightUsd: 555 });
+  check('Item B: a non-empty owner freight $ is never overwritten by the bill\'s own',
+    ownedFreight.freightUsd === 555, JSON.stringify(ownedFreight));
+  const ownedWeight = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'Черновик', weightKg: 111 });
+  check('Item B: a non-empty owner weight is never overwritten by the bill\'s own',
+    ownedWeight.weightKg === 111, JSON.stringify(ownedWeight));
+})();
+
+// Item B: an ambiguous prefix (two bills, e.g. NV-0916-2 and NV-0916-3) gets its own message in
+// «Чего не хватает», on a batch of ANY status — not only a Черновик.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    orderNo: '29', code: 'NV-0916', status: 'В пути', shippedAt: '2026-09-16',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [],
+    freights: [
+      { code: 'NV-0916-2', orderNo: '29', amountUsd: 10, cargoRate: 7 },
+      { code: 'NV-0916-3', orderNo: '29', amountUsd: 10, cargoRate: 7 }
+    ]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-0916'; })[0];
+  check('Item B: an ambiguous prefix match names the reason instead of the plain «no bill» message',
+    batch.missing.indexOf('в отчёте несколько накладных NV-0916-…: уточните код партии') !== -1,
+    JSON.stringify(batch.missing));
+})();
+
+// Item C (owner, 2026-09-25 live check): a single-product, un-priced batch (the owner's live
+// NV-0916 / order 29 case) is priced from its own order's total in the newest report.
+(function () {
+  const h = withChina();
+  const saved = h.saveChinaBatch({
+    orderNo: '29', code: 'NV-0916', status: 'В пути', shippedAt: '2026-09-16',
+    lines: [{ marking: 'Миска_двойная', boxes: 24, pcsPerBox: 42, qty: 1008, priceCny: 0, article: 'ART-МД' }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт',
+    orders: [{ orderNo: '29', date: '2026-09-01', receivedCny: 0, totalCny: 5000, unpaidCny: 5000 }],
+    receipts: [], freights: []
+  }, 'Николай');
+  // A manual rate stands in for the order's own known payments (which this fixture never
+  // supplies) purely so the batch's own cost is non-zero — the price fill itself, the actual
+  // thing under test, needs no payments at all.
+  const resaved = h.saveChinaBatch({
+    id: saved.batches[0].id, orderNo: '29', code: 'NV-0916', status: 'В пути', shippedAt: '2026-09-16',
+    rubRate: 12,
+    lines: [{ marking: 'Миска_двойная', boxes: 24, pcsPerBox: 42, qty: 1008, priceCny: 0, article: 'ART-МД' }]
+  }, 'Николай');
+  const batch = resaved.batches[0];
+  check('Item C: the batch\'s goods ¥ equals the order\'s total exactly, to the fen',
+    Math.abs(batch.goodsCny - 5000) < 0.005, JSON.stringify(batch.goodsCny));
+  check('Item C: the missing list names WHY the price was filled',
+    batch.missing.indexOf('цена товара взята из отчёта: сумма заказа 29 ÷ штук') !== -1,
+    JSON.stringify(batch.missing));
+  check('Item C: the batch\'s cost is no longer zero',
+    batch.totalRub > 0, JSON.stringify(batch.totalRub));
+})();
+
+// Item C: two batches of the same order — neither gets the order's total, and the plain
+// «no price» message shows instead.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    orderNo: '40', code: 'NV-A', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-A' }]
+  }, 'Николай');
+  const saved = h.saveChinaBatch({
+    orderNo: '40', code: 'NV-B', status: 'В пути', shippedAt: '2026-09-02',
+    lines: [{ marking: 'M2', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-B' }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт',
+    orders: [{ orderNo: '40', date: '2026-09-01', receivedCny: 0, totalCny: 1000, unpaidCny: 1000 }],
+    receipts: [], freights: []
+  }, 'Николай');
+  const savedBId = saved.batches.filter(function (b) { return b.code === 'NV-B'; })[0].id;
+  const batchB = h.saveChinaBatch({
+    id: savedBId, orderNo: '40', code: 'NV-B', status: 'В пути', shippedAt: '2026-09-02',
+    lines: [{ marking: 'M2', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-B' }]
+  }, 'Николай').batches.filter(function (b) { return b.code === 'NV-B'; })[0];
+  check('Item C: an order shared by two batches is never split blindly — goods ¥ stays 0',
+    batchB.goodsCny === 0, JSON.stringify(batchB.goodsCny));
+  check('Item C: the plain «upload the batch file» message shows instead',
+    batchB.missing.indexOf('нет цены товара — загрузите файл партии') !== -1, JSON.stringify(batchB.missing));
+})();
+
+// Item C: a batch with more than one PRODUCT (different articles) is never priced off an
+// order's total — there is no way to split it correctly between the products.
+(function () {
+  const h = withChina();
+  const saved = h.saveChinaBatch({
+    orderNo: '41', code: 'NV-0902-1', status: 'В пути', shippedAt: '2026-09-02',
+    lines: [
+      { marking: 'M1', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-C1' },
+      { marking: 'M2', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-C2' }
+    ]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт',
+    orders: [{ orderNo: '41', date: '2026-09-01', receivedCny: 0, totalCny: 200, unpaidCny: 200 }],
+    receipts: [], freights: []
+  }, 'Николай');
+  const batch = h.saveChinaBatch({
+    id: saved.batches[0].id, orderNo: '41', code: 'NV-0902-1', status: 'В пути', shippedAt: '2026-09-02',
+    lines: [
+      { marking: 'M1', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-C1' },
+      { marking: 'M2', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-C2' }
+    ]
+  }, 'Николай').batches[0];
+  check('Item C: two different products in the same batch are never priced off the order total',
+    batch.goodsCny === 0, JSON.stringify(batch.goodsCny));
+  check('Item C: the plain «no price» message shows, not the order-total note',
+    batch.missing.indexOf('нет цены товара — загрузите файл партии') !== -1 &&
+    batch.missing.every(function (m) { return m.indexOf('цена товара взята из отчёта') === -1; }),
+    JSON.stringify(batch.missing));
+})();
+
+// Item C: the batch's order is not in the newest report at all (or its total is 0 ¥) —
+// nothing gets filled, and no note is added.
+(function () {
+  const h = withChina();
+  const saved = h.saveChinaBatch({
+    orderNo: '42', code: 'NV-0903-1', status: 'В пути', shippedAt: '2026-09-03',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-C3' }]
+  }, 'Николай');
+  const batch = h.saveChinaBatch({
+    id: saved.batches[0].id, orderNo: '42', code: 'NV-0903-1', status: 'В пути', shippedAt: '2026-09-03',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 0, article: 'ART-C3' }]
+  }, 'Николай').batches[0];
+  check('Item C: no report order at all — goods ¥ stays 0, no order-total note added',
+    batch.goodsCny === 0 && batch.missing.every(function (m) { return m.indexOf('цена товара взята из отчёта') === -1; }),
+    JSON.stringify({ goodsCny: batch.goodsCny, missing: batch.missing }));
 })();
 
 // ================= Итог =================

@@ -7,7 +7,6 @@ import { useChinaStore } from '../store/useChinaStore';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { ChinaBatch, ChinaBatchLine } from '../types';
-import { chinaBatchPipelineInfo } from '../lib/factoryOrderDisplay';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import { ChinaForecastPanel } from './ChinaForecastPanel';
@@ -66,10 +65,6 @@ export const ChinaOrdersTab: React.FC = () => {
   const currentUser = useWarehouseStore((s) => s.currentUser);
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' ||
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
-  // Item 83.4: the pipeline indicator per batch reads the warehouse's own «Заказы на фабрике» —
-  // fetch it once if nothing has loaded it yet (e.g. this tab opened first, before «Остатки Ozon»).
-  const factoryOrders = useWarehouseStore((s) => s.factoryOrders);
-  const fetchFactoryOrders = useWarehouseStore((s) => s.fetchFactoryOrders);
   const syncChinaFactoryOrders = useChinaStore((s) => s.syncChinaFactoryOrders);
   const [isSyncingFactoryOrders, setIsSyncingFactoryOrders] = useState(false);
 
@@ -95,7 +90,6 @@ export const ChinaOrdersTab: React.FC = () => {
   const [costDrafts, setCostDrafts] = useState<Record<string, ChinaCostRow[]>>({});
 
   useEffect(() => { fetchChinaBatches(); }, [fetchChinaBatches]);
-  useEffect(() => { if (factoryOrders.length === 0) fetchFactoryOrders(); }, [factoryOrders.length, fetchFactoryOrders]);
 
   const open = useMemo(() => batches.find((b) => b.id === openId) || null, [batches, openId]);
 
@@ -470,9 +464,6 @@ export const ChinaOrdersTab: React.FC = () => {
           // unless the script says otherwise for this account.
           const eta = chinaEtaText(batch, Number(settings.transitDays) || 30, new Date());
           const remaining = chinaRemainingText(batch);
-          // Item 83.4: display-only — the actual pipeline lives in «Заказы на фабрике», this
-          // just shows whether THIS batch is still counted there.
-          const pipelineInfo = chinaBatchPipelineInfo(factoryOrders, batch.code);
           return (
             <div key={batch.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <button
@@ -491,14 +482,6 @@ export const ChinaOrdersTab: React.FC = () => {
                     )}
                     {batch.closed && (
                       <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Расчёт закрыт</span>
-                    )}
-                    {pipelineInfo && (
-                      <span
-                        className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${pipelineInfo.received ? 'bg-slate-100 text-slate-500' : 'bg-sky-50 text-sky-700'}`}
-                        title="Пункт «Заказы на фабрике» вкладки «Остатки Ozon»"
-                      >
-                        {pipelineInfo.received ? 'получено' : `в трубе: ${pipelineInfo.qty} шт`}
-                      </span>
                     )}
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">
