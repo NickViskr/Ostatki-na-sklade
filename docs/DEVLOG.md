@@ -581,3 +581,4 @@
 | 2026-09-25 | Deployed: item 82 | Code.gs 192 (owner), Cloud Run `sklad-00088-lbm` (commit `8444782`), `docs/OZON_PLAN.md` | Awaiting the owner's check of the whole item. |
 | 2026-09-25 | Item 82 closed | `docs/OZON_PLAN.md` | Owner checked the whole item live: «все работает». Pushed to GitHub on his word. |
 | 2026-09-25 | Item 83 added with a proposed plan | `docs/OZON_PLAN.md` | China batches → «Заказы на фабрике» → pipeline; awaiting the owner's answers. |
+| 2026-09-25 | Item 83 plan refined on the owner's answers | `docs/OZON_PLAN.md` | Received at «Прибыла», late stays with a mark, 30 days, forecast rows, manual order 29 «Миска_двойная» must not double. |
