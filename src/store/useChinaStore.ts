@@ -9,7 +9,7 @@
 
 import { create } from 'zustand';
 import { toast } from 'sonner';
-import { ChinaBatch, ChinaMoney, ChinaPayment } from '../types';
+import { ChinaBatch, ChinaForecastData, ChinaForecastResult, ChinaMoney, ChinaPayment } from '../types';
 import { useWarehouseStore } from './useWarehouseStore';
 
 interface ChinaAnswer {
@@ -20,7 +20,7 @@ interface ChinaAnswer {
     payments?: ChinaPayment[];
     settings?: Record<string, number | string>;
     warnings?: string[];
-  } & Partial<ChinaMoney>;
+  } & Partial<ChinaMoney> & Partial<ChinaForecastData> & Partial<ChinaForecastResult>;
 }
 
 interface ChinaState {
@@ -30,6 +30,13 @@ interface ChinaState {
   /** Item 81g: the picture `getChinaMoney` answers with — payments, receipts and orders of the
    * financial report, kept apart from `batches` because the payments card reads it, not them. */
   money: ChinaMoney | null;
+  /** Item 82: tariff history, box directory and saved forecasts — `getChinaForecastData`'s own
+   * state, kept apart from `batches`/`money` the same way `money` is. */
+  forecastData: ChinaForecastData | null;
+  /** Item 82: quantities the warehouse screen «Заказ на фабрике» pushes in, for the forecast
+   * form to pick up when the owner opens the tab — null until something pushes it, cleared by
+   * the form itself once read. */
+  forecastPrefill: { article: string; pieces: number }[] | null;
   isLoading: boolean;
   isSaving: boolean;
   /** Empty until the first answer arrives, so an empty list is not shown as «нет партий». */
@@ -54,6 +61,14 @@ interface ChinaState {
    * 'история'. `history: false` undoes the mark. */
   setChinaReceiptHistory: (receiptId: string, history: boolean) => Promise<boolean>;
   setChinaRubCostsDone: (batchId: string, done: boolean) => Promise<boolean>;
+  /** Item 82: reads the tariff history, box directory and saved forecasts in one call. */
+  fetchChinaForecastData: () => Promise<void>;
+  /** Item 82: a pure read+compute, no write — the result is not stored on its own, the caller
+   * (the forecast form) holds it until it saves. */
+  calcChinaForecast: (lines: { article: string; pieces: number }[]) => Promise<ChinaForecastResult | null>;
+  saveChinaForecast: (payload: { id?: string; orderNo: string; comment?: string; lines: { article: string; pieces: number }[] }) => Promise<boolean>;
+  deleteChinaForecast: (id: string) => Promise<boolean>;
+  setForecastPrefill: (lines: { article: string; pieces: number }[] | null) => void;
 }
 
 const callChina = async (action: string, data?: Record<string, unknown>): Promise<ChinaAnswer> => {
@@ -66,6 +81,8 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
   payments: [],
   settings: {},
   money: null,
+  forecastData: null,
+  forecastPrefill: null,
   isLoading: false,
   isSaving: false,
   loaded: false,
@@ -269,5 +286,52 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || get().batches, loaded: true, error: '' });
     return true;
-  }
+  },
+
+  fetchChinaForecastData: async () => {
+    if (!useWarehouseStore.getState().sessionToken) return;
+    const result = await callChina('getChinaForecastData');
+    if (result.status === 'success' && result.data) {
+      set({ forecastData: result.data as ChinaForecastData });
+      return;
+    }
+    toast.error(result.message || 'Не удалось прочитать прогнозы поставок из Китая');
+  },
+
+  calcChinaForecast: async (lines) => {
+    const result = await callChina('calcChinaForecast', { lines });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось посчитать прогноз');
+      return null;
+    }
+    return result.data as ChinaForecastResult;
+  },
+
+  saveChinaForecast: async (payload) => {
+    set({ isSaving: true });
+    const result = await callChina('saveChinaForecast', payload);
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось сохранить прогноз');
+      return false;
+    }
+    set({ forecastData: result.data as ChinaForecastData });
+    toast.success('Прогноз сохранён');
+    return true;
+  },
+
+  deleteChinaForecast: async (id) => {
+    set({ isSaving: true });
+    const result = await callChina('deleteChinaForecast', { id });
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось удалить прогноз');
+      return false;
+    }
+    set({ forecastData: result.data as ChinaForecastData });
+    toast.success('Прогноз удалён');
+    return true;
+  },
+
+  setForecastPrefill: (lines) => set({ forecastPrefill: lines })
 }));

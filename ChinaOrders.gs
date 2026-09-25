@@ -52,6 +52,12 @@ const CHINA_SETTINGS_SHEET = 'Справочник';
 const CHINA_REPORTS_SHEET = 'Отчёты';
 const CHINA_RECEIPTS_SHEET = 'Поступления';
 const CHINA_MOVEMENTS_SHEET = 'Движения заказов';
+// Item 82a: the carrier's own tariff history, one row per bill (freight) — upserted by
+// saveChinaReport (chinaUpsertTariffs) by 'Код партии' so a newer report's arrival date, say,
+// overwrites the row of the SAME bill rather than duplicating it. Item 82d adds the forecasts
+// a shipment not yet made is checked against once it actually arrives.
+const CHINA_TARIFFS_SHEET = 'Тарифы карго';
+const CHINA_FORECASTS_SHEET = 'Прогнозы';
 
 const CHINA_BATCH_HEADERS = [
   'ID', 'Номер заказа', 'Код партии', 'Дата отгрузки', 'Дата прибытия', 'Статус',
@@ -145,6 +151,21 @@ const CHINA_RECEIPT_HEADERS = ['ID', 'Дата', 'Товар ¥', 'Достав�
 // itself from the reports it is given, so it never depends on this sheet either.
 const CHINA_MOVEMENT_HEADERS = ['Отчёт', 'Дата отчёта', 'Номер заказа', 'Изменение ¥'];
 
+// Item 82a: one row per carrier bill (freight), across every report ever uploaded — reports
+// themselves keep only the 3 newest (chinaPruneReports), this sheet is the durable history.
+const CHINA_TARIFF_HEADERS = [
+  'Код партии', 'Номер заказа', 'Дата отгрузки', 'Дата прибытия', 'Дней в пути',
+  'Ставка $', 'Тариф за', 'Вес, кг', 'Объём, м³', 'Плотность, кг/м³', 'По тарифу $', 'Сумма $',
+  'Надбавка $', 'Надбавка, %', 'Реально за 1 кг $', 'Отчёт', 'Обновлено'
+];
+
+// Item 82d: a saved forecast of a future shipment, snapshotted with the SERVER's own result
+// (never a browser-sent one) so a later change of tariffs/settings does not retroactively move
+// what was actually predicted at the time.
+const CHINA_FORECAST_HEADERS = [
+  'ID', 'Номер заказа', 'Создан', 'Кто', 'Комментарий', 'Ввод (JSON)', 'Результат (JSON)', 'Обновлено'
+];
+
 // Everything before this date is «история без курса» (owner, 2026-09-24) — the 结转
 // carry-over line included. Kept apart from CHINA_RECEIPT_HEADERS so 81g-2/3 share one
 // definition of "before tracking" instead of repeating the literal.
@@ -160,7 +181,10 @@ const CHINA_SETTINGS_DEFAULTS = [
   { key: 'cargoRateCnyPerUsd', value: 7, desc: 'Курс карго: сколько юаней за 1 доллар перевозки' },
   // Owner, 2026-09-25: how many days a batch is typically in transit, shipment to arrival — the
   // browser shows the estimated arrival date from it, the server does no date arithmetic at all.
-  { key: 'transitDays', value: 30, desc: 'Дней в пути от отгрузки до прибытия, ориентировочно' }
+  { key: 'transitDays', value: 30, desc: 'Дней в пути от отгрузки до прибытия, ориентировочно' },
+  // Item 82c: the forecast has no batch of its own to read Russian-side costs off of, so the
+  // owner states a typical figure once instead of the forecast showing 0 ₽ for it outright.
+  { key: 'rubCostsPerBatch', value: 5000, desc: 'Расходы в России на одну партию, ₽ — для прогноза' }
 ];
 
 const CHINA_STATUSES = ['Черновик', 'В пути', 'Прибыла'];
@@ -224,7 +248,10 @@ function setupChinaSpreadsheet() {
     // Item 81g-1.
     { name: CHINA_REPORTS_SHEET, headers: CHINA_REPORT_HEADERS },
     { name: CHINA_RECEIPTS_SHEET, headers: CHINA_RECEIPT_HEADERS },
-    { name: CHINA_MOVEMENTS_SHEET, headers: CHINA_MOVEMENT_HEADERS }
+    { name: CHINA_MOVEMENTS_SHEET, headers: CHINA_MOVEMENT_HEADERS },
+    // Item 82.
+    { name: CHINA_TARIFFS_SHEET, headers: CHINA_TARIFF_HEADERS },
+    { name: CHINA_FORECASTS_SHEET, headers: CHINA_FORECAST_HEADERS }
   ];
   const created = [];
   plan.forEach(function (p) {
@@ -2602,6 +2629,11 @@ function saveChinaReport(data, username) {
     reportCtx.sheet.appendRow(reportRow);
   }
   chinaPruneReports(ss);
+  // Item 82a: every carrier bill of this report joins the durable tariff history, upserted by
+  // its own code so a later report confirming, say, the arrival date of the same bill replaces
+  // the row rather than duplicating it. The no-op branch above returns before reaching here, so
+  // a repeated upload of identical content leaves the tariff sheet untouched too.
+  chinaUpsertTariffs(ss, freights, reportId);
 
   // Item 81g-2: new receipts can turn an old orphan payment into an exact match — tried on
   // every report, not just on saving a payment.
@@ -3028,5 +3060,665 @@ function getChinaMoney() {
   return {
     payments: paymentsOut, receipts: receiptsOut, orders: orders, pool: pool, reports: reportsOut,
     warnings: allocation.warnings.concat(freightAlloc.warnings)
+  };
+}
+
+// ================================================================================
+// Item 82: forecasting a future China shipment — tariff history, per-article factory box
+// directory, the forecast itself and how it compares against the batch it eventually becomes.
+// Nothing here writes to a batch or a line; the forecast is read-only computation over data
+// the module already has.
+// ================================================================================
+
+// 'yyyy-MM-dd' UTC calendar days between two dates, or null if either is missing/malformed —
+// used only for «Дней в пути», which is meaningless without both ends of the trip.
+function chinaDaysBetween(fromText, toText) {
+  const mf = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(fromText || ''));
+  const mt = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(toText || ''));
+  if (!mf || !mt) return null;
+  const from = Date.UTC(Number(mf[1]), Number(mf[2]) - 1, Number(mf[3]));
+  const to = Date.UTC(Number(mt[1]), Number(mt[2]) - 1, Number(mt[3]));
+  return Math.round((to - from) / 86400000);
+}
+
+// Today, in the module's own spreadsheet time zone — set by chinaSpreadsheet(), same rule
+// chinaDateText follows so a forecast's «Оценка прибытия» cannot drift a day the way a raw
+// `new Date()` read in the wrong zone once did (item 81e).
+function chinaTodayText() {
+  return Utilities.formatDate(new Date(), _chinaTimeZone || Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd');
+}
+
+// The middle value of a list of numbers, rounded to the kopeck like everything else in this
+// file; 0 for an empty list so a caller with nothing to average never sees NaN.
+function chinaMedian(numbers) {
+  const sorted = (numbers || []).map(Number).filter(function (n) { return !isNaN(n); }).sort(function (a, b) { return a - b; });
+  const n = sorted.length;
+  if (n === 0) return 0;
+  const mid = Math.floor(n / 2);
+  return n % 2 === 0 ? roundToTwo((sorted[mid - 1] + sorted[mid]) / 2) : roundToTwo(sorted[mid]);
+}
+
+/**
+ * Item 82a: one carrier bill (a `freights[]` entry of a stored report, or a row already
+ * upserted into «Тарифы карго») turned into a tariff record. Which unit the carrier actually
+ * billed (кг or м³) is not stated anywhere — it is INFERRED as whichever of rate×kg / rate×m³
+ * comes closer to the bill's own dollar total; the extra on top of that tariff, its percentage,
+ * and the real $ per kilogram follow from the same pair. Pure — everything it needs is already
+ * on `freight`.
+ */
+function chinaTariffFromFreight(freight, reportId) {
+  const f = freight || {};
+  const rate = Number(f.ratePerKgUsd) || 0;
+  const kg = Number(f.weightKg) || 0;
+  const m3 = Number(f.volumeM3) || 0;
+  const usd = Number(f.amountUsd) || 0;
+  const basis = Math.abs(rate * m3 - usd) < Math.abs(rate * kg - usd) ? 'м³' : 'кг';
+  const billed = roundToTwo(rate * (basis === 'м³' ? m3 : kg));
+  const extrasUsd = roundToTwo(usd - billed);
+  return {
+    code: String(f.code || '').trim(),
+    orderNo: String(f.orderNo || '').trim(),
+    shippedAt: String(f.shippedAt || '').trim(),
+    arrivedAt: String(f.arrivedAt || '').trim(),
+    transitDays: chinaDaysBetween(f.shippedAt, f.arrivedAt),
+    rate: rate,
+    basis: basis,
+    weightKg: kg,
+    volumeM3: m3,
+    densityKgM3: m3 > 0 ? roundToTwo(kg / m3) : 0,
+    billedUsd: billed,
+    amountUsd: roundToTwo(usd),
+    extrasUsd: extrasUsd,
+    extrasPct: billed > 0 ? roundToTwo(extrasUsd / billed * 100) : 0,
+    realPerKgUsd: kg > 0 ? roundToTwo(usd / kg) : 0,
+    reportId: String(reportId || '').trim(),
+    updatedAt: chinaStamp()
+  };
+}
+
+// A tariff record, keyed by the sheet's own header labels — the shape chinaWriteSheet/appendRow
+// and chinaRowFrom expect.
+function chinaTariffRowValues(t) {
+  return {
+    'Код партии': t.code, 'Номер заказа': t.orderNo, 'Дата отгрузки': t.shippedAt, 'Дата прибытия': t.arrivedAt,
+    'Дней в пути': t.transitDays === null || t.transitDays === undefined ? '' : t.transitDays,
+    'Ставка $': t.rate, 'Тариф за': t.basis, 'Вес, кг': t.weightKg, 'Объём, м³': t.volumeM3,
+    'Плотность, кг/м³': t.densityKgM3, 'По тарифу $': t.billedUsd, 'Сумма $': t.amountUsd,
+    'Надбавка $': t.extrasUsd, 'Надбавка, %': t.extrasPct, 'Реально за 1 кг $': t.realPerKgUsd,
+    'Отчёт': t.reportId, 'Обновлено': t.updatedAt
+  };
+}
+
+function chinaTariffFromRow(r) {
+  const transitRaw = r['Дней в пути'];
+  return {
+    code: String(r['Код партии'] || '').trim(),
+    orderNo: String(r['Номер заказа'] || '').trim(),
+    shippedAt: String(r['Дата отгрузки'] || '').trim(),
+    arrivedAt: String(r['Дата прибытия'] || '').trim(),
+    transitDays: transitRaw === '' || transitRaw === null || transitRaw === undefined ? null : parseNumber(transitRaw),
+    rate: parseNumber(r['Ставка $']),
+    basis: String(r['Тариф за'] || '').trim(),
+    weightKg: parseNumber(r['Вес, кг']),
+    volumeM3: parseNumber(r['Объём, м³']),
+    densityKgM3: parseNumber(r['Плотность, кг/м³']),
+    billedUsd: parseNumber(r['По тарифу $']),
+    amountUsd: parseNumber(r['Сумма $']),
+    extrasUsd: parseNumber(r['Надбавка $']),
+    extrasPct: parseNumber(r['Надбавка, %']),
+    realPerKgUsd: parseNumber(r['Реально за 1 кг $']),
+    reportId: String(r['Отчёт'] || '').trim(),
+    updatedAt: String(r['Обновлено'] || '').trim()
+  };
+}
+
+// Upserts every freight of a just-saved report into «Тарифы карго» by 'Код партии'. Called from
+// saveChinaReport AFTER the report row itself is written, so a save that fails earlier (a
+// malformed payload, an out-of-order date) never touches this sheet either.
+function chinaUpsertTariffs(ss, freights, reportId) {
+  const ctx = chinaReadSheet(ss, CHINA_TARIFFS_SHEET, CHINA_TARIFF_HEADERS);
+  const rowByCode = {};
+  ctx.rows.forEach(function (r) {
+    const code = String(r['Код партии'] || '').trim();
+    if (code) rowByCode[code] = r.__row;
+  });
+  (freights || []).forEach(function (f) {
+    const code = String((f || {}).code || '').trim();
+    if (!code) return;
+    const values = chinaRowFrom(ctx.headers, chinaTariffRowValues(chinaTariffFromFreight(f, reportId)));
+    const existingRow = rowByCode[code];
+    if (existingRow) {
+      ctx.sheet.getRange(existingRow, 1, 1, ctx.headers.length).setValues([values]);
+    } else {
+      ctx.sheet.appendRow(values);
+    }
+  });
+}
+
+/**
+ * Item 82a: the whole tariff history — «Тарифы карго» merged with the freight bills of every
+ * report still stored. The sheet is upserted on every saveChinaReport, so for a code touched by
+ * a currently-stored report the sheet's own row and the report's freight are the SAME bill; the
+ * report is applied last (oldest to newest) purely so a code carried by an older report never
+ * overrides what a newer one — or the sheet itself — already says. Sorted by shipping date.
+ */
+function chinaTariffList(ss) {
+  const ctx = chinaReadSheet(ss, CHINA_TARIFFS_SHEET, CHINA_TARIFF_HEADERS);
+  const byCode = {};
+  ctx.rows.forEach(function (r) {
+    const t = chinaTariffFromRow(r);
+    if (t.code) byCode[t.code] = t;
+  });
+  const reports = chinaReadSheet(ss, CHINA_REPORTS_SHEET, CHINA_REPORT_HEADERS).rows.map(chinaReportFromRow)
+    .sort(function (a, b) { return String(a.reportDate).localeCompare(String(b.reportDate)); });
+  reports.forEach(function (rep) {
+    (rep.freights || []).forEach(function (f) {
+      const code = String((f || {}).code || '').trim();
+      if (code) byCode[code] = chinaTariffFromFreight(f, rep.id);
+    });
+  });
+  return Object.keys(byCode).map(function (code) { return byCode[code]; })
+    .sort(function (a, b) { return String(a.shippedAt).localeCompare(String(b.shippedAt)); });
+}
+
+/**
+ * Item 82a/c: which cargo tariff a future shipment of the given weight/density should be
+ * forecast at.
+ *
+ * Basis (кг vs м³): a "switch density" is the midpoint between the densest м³-billed bill and
+ * the least dense кг-billed bill — the boundary the carrier's own choices seem to draw. Below
+ * it the shipment is forecast м³, at or above it кг. With only one basis ever seen, that basis
+ * is the only one there is to pick.
+ *
+ * Typical/low/high $ come from the 5 bills of the chosen basis NEAREST the shipment, distance
+ * being sqrt((ln(kg/kg_i))² + (ln(density/density_i))²) — closer in both weight and density
+ * wins, on a log scale so a bill twice as heavy counts the same as one twice as light. Fewer
+ * than 5 known bills of that basis: every one of them is used. Ties go to the more recently
+ * shipped bill.
+ *
+ * Extras % and transit days are the median over EVERY bill known, regardless of basis — a
+ * shipment's likely surcharge and time in transit are not what the weight/density switch is
+ * about.
+ *
+ * With no bills at all, returns an explicit `empty: true` the caller shows as
+ * «нет истории тарифов» rather than silently forecasting at $0.
+ */
+function chinaTariffPick(tariffs, weightKg, densityKgM3) {
+  const all = (tariffs || []).filter(function (t) { return t && t.code; });
+  if (all.length === 0) {
+    return {
+      empty: true, message: 'нет истории тарифов', basis: '', switchDensity: null,
+      typicalUsd: 0, lowUsd: 0, highUsd: 0, codes: [], n: 0, extrasPct: 0, transitDays: null
+    };
+  }
+
+  const m3Bills = all.filter(function (t) { return t.basis === 'м³'; });
+  const kgBills = all.filter(function (t) { return t.basis === 'кг'; });
+  let switchDensity = null;
+  if (m3Bills.length > 0 && kgBills.length > 0) {
+    const maxM3Density = Math.max.apply(null, m3Bills.map(function (t) { return t.densityKgM3; }));
+    const minKgDensity = Math.min.apply(null, kgBills.map(function (t) { return t.densityKgM3; }));
+    switchDensity = roundToTwo((maxM3Density + minKgDensity) / 2);
+  }
+  const basis = switchDensity !== null
+    ? ((Number(densityKgM3) || 0) < switchDensity ? 'м³' : 'кг')
+    : (m3Bills.length > 0 ? 'м³' : 'кг');
+
+  const pool = (basis === 'м³' ? m3Bills : kgBills).filter(function (t) { return t.weightKg > 0 && t.densityKgM3 > 0; });
+  const kg = (Number(weightKg) || 0) > 0 ? Number(weightKg) : 0.0001;
+  const dens = (Number(densityKgM3) || 0) > 0 ? Number(densityKgM3) : 0.0001;
+  const withDistance = pool.map(function (t) {
+    const dw = Math.log(kg / t.weightKg);
+    const dd = Math.log(dens / t.densityKgM3);
+    return { t: t, distance: Math.sqrt(dw * dw + dd * dd) };
+  });
+  withDistance.sort(function (a, b) {
+    if (a.distance !== b.distance) return a.distance - b.distance;
+    return String(b.t.shippedAt).localeCompare(String(a.t.shippedAt)); // tie: the more recent bill first
+  });
+  const near = withDistance.slice(0, 5).map(function (x) { return x.t; });
+  const rates = near.map(function (t) { return t.rate; });
+
+  const extrasPct = chinaMedian(all.map(function (t) { return t.extrasPct; }));
+  const transitKnown = all.filter(function (t) { return t.transitDays !== null && t.transitDays !== undefined; })
+    .map(function (t) { return t.transitDays; });
+  const transitDays = transitKnown.length > 0 ? Math.round(chinaMedian(transitKnown)) : null;
+
+  return {
+    empty: false, basis: basis, switchDensity: switchDensity,
+    typicalUsd: chinaMedian(rates),
+    lowUsd: rates.length > 0 ? Math.min.apply(null, rates) : 0,
+    highUsd: rates.length > 0 ? Math.max.apply(null, rates) : 0,
+    codes: near.map(function (t) { return t.code; }), n: near.length,
+    extrasPct: extrasPct, transitDays: transitDays
+  };
+}
+
+/**
+ * Item 82b: per-article (or, lacking one, per-marking) factory box directory — the latest known
+ * box of that key, by the shipping date of the batch it came from, plus whether it ever
+ * changed. Only lines with real box data (a measured volume and a known box weight) count;
+ * everything else has nothing to forecast a future box FROM. `batches` supplies each line's
+ * shipping date by `batchId`; a deleted batch is never in `batches` at all (deleteChinaBatch
+ * removes its row outright), so nothing extra has to be filtered here.
+ */
+function chinaBoxDirectory(batches, lines) {
+  const metaByBatchId = {};
+  (batches || []).forEach(function (b) { metaByBatchId[b.id] = { code: b.code, shippedAt: b.shippedAt }; });
+
+  const groups = {};
+  (lines || []).forEach(function (l) {
+    const stats = chinaLineBoxStats(l);
+    if (!(stats.boxVolumeM3 > 0)) return;
+    const boxKg = Number(l.boxWeightKg) > 0 ? Number(l.boxWeightKg) : Number(l.factoryBoxKg) || 0;
+    if (!(boxKg > 0)) return;
+    const key = String(l.article || '').trim() || String(l.marking || '').trim();
+    if (!key) return;
+    const meta = metaByBatchId[l.batchId] || { code: '', shippedAt: '' };
+    if (!groups[key]) groups[key] = [];
+    groups[key].push({
+      batchCode: meta.code, shippedAt: meta.shippedAt,
+      boxLengthM: Number(l.boxLengthM) || 0, boxWidthM: Number(l.boxWidthM) || 0, boxHeightM: Number(l.boxHeightM) || 0,
+      boxVolumeM3: stats.boxVolumeM3, boxKg: boxKg, pcsPerBox: Number(l.pcsPerBox) || 0,
+      kgPerPiece: stats.kgPerPiece, densityKgM3: stats.densityKgM3,
+      priceCny: Number(l.priceCny) || 0, name: String(l.name || '').trim()
+    });
+  });
+
+  const out = {};
+  Object.keys(groups).forEach(function (key) {
+    const entries = groups[key].slice().sort(function (a, b) { return String(a.shippedAt).localeCompare(String(b.shippedAt)); });
+    const latest = entries[entries.length - 1];
+    const changed = entries.some(function (e) {
+      return e.boxLengthM !== latest.boxLengthM || e.boxWidthM !== latest.boxWidthM ||
+        e.boxHeightM !== latest.boxHeightM || e.boxKg !== latest.boxKg || e.pcsPerBox !== latest.pcsPerBox;
+    });
+    const codes = [];
+    entries.forEach(function (e) { if (e.batchCode && codes.indexOf(e.batchCode) === -1) codes.push(e.batchCode); });
+    out[key] = {
+      article: key, name: latest.name,
+      boxLengthM: latest.boxLengthM, boxWidthM: latest.boxWidthM, boxHeightM: latest.boxHeightM,
+      boxVolumeM3: latest.boxVolumeM3, boxKg: latest.boxKg, pcsPerBox: latest.pcsPerBox,
+      kgPerPiece: latest.kgPerPiece, densityKgM3: latest.densityKgM3, priceCny: latest.priceCny,
+      batches: codes.length, changed: changed, codes: codes
+    };
+  });
+  return out;
+}
+
+/**
+ * Item 82c, coordinator fix (2026-09-25): the carrier bills the WAYBILL weight/volume, not the
+ * goods weight — the waybill also carries the carrier's own packaging (pallets, dunnage), which
+ * a factory box's own dimensions know nothing about (NV-0923-4: waybill 967 kg / 9.14 m³ vs
+ * 847 kg / 7.5611 m³ of goods from box data — ~14 % more). A forecast built straight from goods
+ * kg/m³ both underprices freight and picks a tariff by the wrong density.
+ *
+ * The factor a batch's waybill was over its own goods figures — median across every batch that
+ * states BOTH (median, not average, so one outlier batch cannot skew every forecast); 1 with no
+ * such batch at all, so a fresh spreadsheet forecasts at face value rather than crashing.
+ */
+function chinaPackagingFactors(batches) {
+  const weightRatios = [], volumeRatios = [];
+  (batches || []).forEach(function (b) {
+    const waybillKg = Number(b.weightKg) || 0;
+    const goodsKg = Number(b.goodsKg) || 0;
+    if (waybillKg > 0 && goodsKg > 0) weightRatios.push(waybillKg / goodsKg);
+    const waybillM3 = Number(b.volumeM3) || 0;
+    const goodsM3 = Number(b.goodsVolumeM3) || 0;
+    if (waybillM3 > 0 && goodsM3 > 0) volumeRatios.push(waybillM3 / goodsM3);
+  });
+  return {
+    weightFactor: weightRatios.length > 0 ? chinaMedian(weightRatios) : 1,
+    weightFactorN: weightRatios.length,
+    volumeFactor: volumeRatios.length > 0 ? chinaMedian(volumeRatios) : 1,
+    volumeFactorN: volumeRatios.length
+  };
+}
+
+// Everything chinaForecastCalc needs, gathered from the sheets in one place — kept apart from
+// the pure calculation so the calculation itself is testable with a hand-built context, no
+// sheet at all.
+function chinaForecastContext(ss) {
+  const state = getChinaBatches(); // { batches (with .lines), payments, settings }
+  const allLines = [];
+  state.batches.forEach(function (b) { (b.lines || []).forEach(function (l) { allLines.push(l); }); });
+  return {
+    directory: chinaBoxDirectory(state.batches, allLines),
+    tariffs: chinaTariffList(ss),
+    settings: state.settings,
+    payments: state.payments,
+    batches: state.batches
+  };
+}
+
+/**
+ * Item 82c: the forecast itself — pure computation, no sheet access, so `calcChinaForecast` and
+ * `saveChinaForecast` (which must recompute on the server, never trust a browser-sent result)
+ * can share exactly this function. `input.lines` is `[{article, pieces}]`; `ctx` is whatever
+ * `chinaForecastContext` gathered (or, in a test, whatever is built by hand).
+ *
+ * A line missing its box (no directory entry for the article) is returned with
+ * `warning: 'нет данных о коробке'` and takes no part in any total — there is nothing to
+ * forecast its weight or freight from.
+ */
+function chinaForecastCalc(input, ctx) {
+  const inputLines = Array.isArray((input || {}).lines) ? input.lines : [];
+  const c = ctx || {};
+  const directory = c.directory || {};
+  const settings = c.settings || {};
+  const cargoRate = Number(settings.cargoRateCnyPerUsd) || 0;
+  const rubCostsPerBatch = Number(settings.rubCostsPerBatch) || 0;
+
+  const latestPayment = chinaLatestPaymentRate(c.payments || []);
+  const rubRate = latestPayment ? latestPayment.rate : 0;
+  const rubRateSource = latestPayment ? (latestPayment.date + ' ' + latestPayment.id) : '';
+  const warnings = [];
+  if (!latestPayment) warnings.push('нет курса: ни одной оплаты');
+
+  const packagingFactors = chinaPackagingFactors(c.batches || []);
+
+  // The historic share of goods ¥ that also moved as China-domestic delivery ¥ — only batches
+  // that state BOTH are any evidence of that share at all.
+  let domesticSum = 0, goodsSumForShare = 0;
+  (c.batches || []).forEach(function (b) {
+    const goods = Number(b.goodsCny) || 0;
+    const domestic = Number(b.chinaDeliveryCny) || 0;
+    if (goods > 0 && domestic > 0) { domesticSum += domestic; goodsSumForShare += goods; }
+  });
+  const domesticShare = goodsSumForShare > 0 ? domesticSum / goodsSumForShare : 0;
+
+  const results = [];
+  const computed = [];
+  inputLines.forEach(function (l) {
+    const article = String((l || {}).article || '').trim();
+    const pieces = Number((l || {}).pieces) || 0;
+    const box = directory[article];
+    if (!box || !(box.pcsPerBox > 0)) {
+      results.push({ article: article, pieces: pieces, warning: 'нет данных о коробке' });
+      return;
+    }
+    const boxes = Math.ceil(pieces / box.pcsPerBox);
+    const item = {
+      article: article, pieces: pieces, boxes: boxes,
+      missingToFullBox: boxes * box.pcsPerBox - pieces,
+      kg: roundToTwo(boxes * box.boxKg),
+      m3: Math.round(boxes * box.boxVolumeM3 * 1e6) / 1e6,
+      goodsCny: roundToTwo(pieces * box.priceCny)
+    };
+    computed.push(item);
+    results.push(item);
+  });
+
+  if (computed.length === 0) {
+    return {
+      lines: results, totals: null, pick: chinaTariffPick(c.tariffs || [], 0, 0),
+      cargoRate: cargoRate, rubRate: rubRate, rubRateSource: rubRateSource,
+      packagingFactors: packagingFactors, warnings: warnings,
+      domesticShare: roundToTwo(domesticShare * 100), estimatedArrival: ''
+    };
+  }
+
+  let totalKg = 0, totalM3 = 0, totalGoodsCny = 0;
+  computed.forEach(function (it) { totalKg += it.kg; totalM3 += it.m3; totalGoodsCny += it.goodsCny; });
+  totalKg = roundToTwo(totalKg);
+  totalM3 = Math.round(totalM3 * 1e6) / 1e6;
+  totalGoodsCny = roundToTwo(totalGoodsCny);
+  const density = totalM3 > 0 ? roundToTwo(totalKg / totalM3) : 0;
+
+  // The CHARGEABLE weight/volume — what the carrier actually bills — is the goods figure
+  // scaled by the packaging factor; the tariff is picked and priced by THIS, not by the goods
+  // figure alone (see chinaPackagingFactors above).
+  const chargeableKg = roundToTwo(totalKg * packagingFactors.weightFactor);
+  const chargeableM3 = Math.round(totalM3 * packagingFactors.volumeFactor * 1e6) / 1e6;
+  const chargeableDensity = chargeableM3 > 0 ? roundToTwo(chargeableKg / chargeableM3) : 0;
+
+  const pick = chinaTariffPick(c.tariffs || [], chargeableKg, chargeableDensity);
+  const perUnitTotal = pick.basis === 'м³' ? chargeableM3 : chargeableKg;
+  const extrasFactor = 1 + (Number(pick.extrasPct) || 0) / 100;
+  const freightTotalTypical = roundToTwo(pick.typicalUsd * perUnitTotal * extrasFactor);
+  const freightTotalLow = roundToTwo(pick.lowUsd * perUnitTotal * extrasFactor);
+  const freightTotalHigh = roundToTwo(pick.highUsd * perUnitTotal * extrasFactor);
+
+  const domesticTotal = roundToTwo(totalGoodsCny * domesticShare);
+  const russianTotal = rubCostsPerBatch;
+
+  const perUnitBases = computed.map(function (it) { return pick.basis === 'м³' ? it.m3 : it.kg; });
+  const freightSharesTypical = chinaAllocate(freightTotalTypical, perUnitBases);
+  const freightSharesLow = chinaAllocate(freightTotalLow, perUnitBases);
+  const freightSharesHigh = chinaAllocate(freightTotalHigh, perUnitBases);
+  const goodsBases = computed.map(function (it) { return it.goodsCny; });
+  const domesticShares = chinaAllocate(domesticTotal, goodsBases);
+  const boxBases = chinaBoxBases(computed.map(function (it) { return { boxes: it.boxes, qty: it.pieces }; }));
+  const russianShares = chinaAllocate(russianTotal, boxBases);
+
+  // Coordinator fix, 2026-09-25: the owner's display rule («after a ¥/$ figure, its ₽ in
+  // brackets») means the ₽ equivalent of every ¥/$ amount is computed HERE, once, so the
+  // screen never multiplies a rate itself. Each ₽ figure is derived from the line's own
+  // ALREADY EXACT ¥/$ share (chinaAllocate's output), then the totals are the SUM of those —
+  // never an independent goodsCny(total) × rubRate, which could round a kopeck away from the
+  // sum of its own parts.
+  let totalCostTypical = 0, totalCostLow = 0, totalCostHigh = 0;
+  let totalGoodsRub = 0, totalDomesticRub = 0, totalFreightRubTypical = 0, totalFreightRubLow = 0, totalFreightRubHigh = 0;
+  computed.forEach(function (it, i) {
+    const domesticCny = domesticShares[i];
+    const rubShare = russianShares[i];
+    const goodsRub = roundToTwo(it.goodsCny * rubRate);
+    const domesticRub = roundToTwo(domesticCny * rubRate);
+    const freightRubTypical = roundToTwo(freightSharesTypical[i] * cargoRate * rubRate);
+    const freightRubLow = roundToTwo(freightSharesLow[i] * cargoRate * rubRate);
+    const freightRubHigh = roundToTwo(freightSharesHigh[i] * cargoRate * rubRate);
+    const costTypical = roundToTwo((it.goodsCny + domesticCny + freightSharesTypical[i] * cargoRate) * rubRate + rubShare);
+    const costLow = roundToTwo((it.goodsCny + domesticCny + freightSharesLow[i] * cargoRate) * rubRate + rubShare);
+    const costHigh = roundToTwo((it.goodsCny + domesticCny + freightSharesHigh[i] * cargoRate) * rubRate + rubShare);
+    totalCostTypical = roundToTwo(totalCostTypical + costTypical);
+    totalCostLow = roundToTwo(totalCostLow + costLow);
+    totalCostHigh = roundToTwo(totalCostHigh + costHigh);
+    totalGoodsRub = roundToTwo(totalGoodsRub + goodsRub);
+    totalDomesticRub = roundToTwo(totalDomesticRub + domesticRub);
+    totalFreightRubTypical = roundToTwo(totalFreightRubTypical + freightRubTypical);
+    totalFreightRubLow = roundToTwo(totalFreightRubLow + freightRubLow);
+    totalFreightRubHigh = roundToTwo(totalFreightRubHigh + freightRubHigh);
+    Object.assign(it, {
+      freightUsdTypical: freightSharesTypical[i], freightUsdLow: freightSharesLow[i], freightUsdHigh: freightSharesHigh[i],
+      domesticCny: domesticCny, rubShare: rubShare,
+      goodsRub: goodsRub, domesticRub: domesticRub,
+      freightRubTypical: freightRubTypical, freightRubLow: freightRubLow, freightRubHigh: freightRubHigh,
+      costRubTypical: costTypical, costRubLow: costLow, costRubHigh: costHigh,
+      costPerPieceTypical: it.pieces > 0 ? roundToTwo(costTypical / it.pieces) : 0,
+      costPerPieceLow: it.pieces > 0 ? roundToTwo(costLow / it.pieces) : 0,
+      costPerPieceHigh: it.pieces > 0 ? roundToTwo(costHigh / it.pieces) : 0
+    });
+  });
+
+  const transitDays = (pick.transitDays !== null && pick.transitDays !== undefined) ? pick.transitDays : (Number(settings.transitDays) || 0);
+  const estimatedArrival = chinaAddDaysText(chinaTodayText(), transitDays);
+
+  return {
+    lines: results,
+    totals: {
+      goodsKg: totalKg, goodsM3: totalM3, goodsDensityKgM3: density,
+      chargeableKg: chargeableKg, chargeableM3: chargeableM3, chargeableDensityKgM3: chargeableDensity,
+      goodsCny: totalGoodsCny, goodsRub: totalGoodsRub,
+      domesticCny: domesticTotal, domesticRub: totalDomesticRub,
+      freightUsdTypical: freightTotalTypical, freightUsdLow: freightTotalLow, freightUsdHigh: freightTotalHigh,
+      freightRubTypical: totalFreightRubTypical, freightRubLow: totalFreightRubLow, freightRubHigh: totalFreightRubHigh,
+      russianCosts: russianTotal,
+      costRubTypical: totalCostTypical, costRubLow: totalCostLow, costRubHigh: totalCostHigh
+    },
+    pick: pick,
+    cargoRate: cargoRate, rubRate: rubRate, rubRateSource: rubRateSource,
+    packagingFactors: packagingFactors, warnings: warnings,
+    domesticShare: roundToTwo(domesticShare * 100),
+    estimatedArrival: estimatedArrival
+  };
+}
+
+// The action behind the «посчитать прогноз» button — a pure read of the module's own
+// spreadsheet followed by chinaForecastCalc; it writes nothing.
+function calcChinaForecast(data) {
+  const ss = chinaSpreadsheet();
+  return chinaForecastCalc(data, chinaForecastContext(ss));
+}
+
+function chinaForecastFromRow(r) {
+  let input = {}, result = {};
+  try { input = JSON.parse(String(r['Ввод (JSON)'] || '') || '{}'); } catch (e) { input = {}; }
+  try { result = JSON.parse(String(r['Результат (JSON)'] || '') || '{}'); } catch (e) { result = {}; }
+  return {
+    id: String(r['ID'] || '').trim(),
+    orderNo: String(r['Номер заказа'] || '').trim(),
+    createdAt: String(r['Создан'] || '').trim(),
+    user: String(r['Кто'] || '').trim(),
+    comment: String(r['Комментарий'] || '').trim(),
+    lines: Array.isArray(input.lines) ? input.lines : [],
+    result: result,
+    updatedAt: String(r['Обновлено'] || '').trim()
+  };
+}
+
+/**
+ * Item 82d: saves a forecast under an order number, for later comparison against the batch that
+ * order actually becomes. The RESULT stored is always recomputed here from `lines` — a result
+ * the browser sends along is ignored outright, so a forecast on the sheet can never disagree
+ * with what `chinaForecastCalc` would say about the same input.
+ */
+function saveChinaForecast(data, username) {
+  const d = data || {};
+  const lines = Array.isArray(d.lines) ? d.lines : [];
+  if (lines.length === 0) throw new Error('В прогнозе нет ни одной строки товара');
+
+  const ss = chinaSpreadsheet();
+  const result = chinaForecastCalc({ lines: lines }, chinaForecastContext(ss));
+
+  const ctx = chinaReadSheet(ss, CHINA_FORECASTS_SHEET, CHINA_FORECAST_HEADERS);
+  const requested = String(d.id || '').trim();
+  let existing = null;
+  ctx.rows.forEach(function (r) { if (String(r['ID']).trim() === requested) existing = r; });
+  if (requested && !existing) throw new Error('Прогноз ' + requested + ' не найден');
+  const id = existing ? requested : chinaNextId(ctx.rows, 'CF');
+
+  const values = chinaRowFrom(ctx.headers, {
+    'ID': id,
+    'Номер заказа': String(d.orderNo || '').trim(),
+    'Создан': existing ? existing['Создан'] : chinaStamp(),
+    'Кто': username || '',
+    'Комментарий': String(d.comment || '').trim(),
+    'Ввод (JSON)': JSON.stringify({ lines: lines }),
+    'Результат (JSON)': JSON.stringify(result),
+    'Обновлено': chinaStamp()
+  });
+  if (existing) {
+    ctx.sheet.getRange(existing.__row, 1, 1, ctx.headers.length).setValues([values]);
+  } else {
+    ctx.sheet.appendRow(values);
+  }
+  return getChinaForecastData();
+}
+
+function deleteChinaForecast(data, username) {
+  const id = String((data || {}).id || '').trim();
+  if (!id) throw new Error('Не указан ID прогноза');
+  const ss = chinaSpreadsheet();
+  const ctx = chinaReadSheet(ss, CHINA_FORECASTS_SHEET, CHINA_FORECAST_HEADERS);
+  let targetRow = 0;
+  ctx.rows.forEach(function (r) { if (String(r['ID']).trim() === id) targetRow = r.__row; });
+  if (!targetRow) throw new Error('Прогноз ' + id + ' не найден');
+  ctx.sheet.deleteRow(targetRow);
+  Logger.log('Заказы в Китае: прогноз ' + id + ' удалён пользователем ' + (username || '—'));
+  return getChinaForecastData();
+}
+
+/**
+ * Item 82d: forecast vs fact, per article, for every batch whose «Номер заказа» matches the
+ * forecast's own. A batch not yet arrived, or one that never got as far as costing an article,
+ * comes back with `fact: null` on the figures it cannot state rather than a false zero.
+ */
+function chinaForecastVsFact(forecast, batches) {
+  const f = forecast || {};
+  const orderNo = String(f.orderNo || '').trim();
+  if (!orderNo) return [];
+  const matching = (batches || []).filter(function (b) { return String(b.orderNo || '').trim() === orderNo; });
+  if (matching.length === 0) return [];
+
+  const factByArticle = {};
+  matching.forEach(function (b) {
+    const cargoRate = Number(b.cargoRate) || 0;
+    (b.lines || []).forEach(function (l) {
+      const article = String(l.article || '').trim();
+      if (!article) return;
+      if (!factByArticle[article]) {
+        factByArticle[article] = { pieces: 0, kg: 0, freightCny: 0, costRub: 0, cargoRate: cargoRate, hasCost: false };
+      }
+      const entry = factByArticle[article];
+      entry.pieces += Number(l.qty) || 0;
+      const goodsKg = Number(l.goodsKg) || 0;
+      entry.kg += goodsKg > 0 ? goodsKg : (Number(l.weightKg) || 0);
+      entry.freightCny += Number(l.freightShareCny) || 0;
+      if (Number(l.costRub) > 0) entry.hasCost = true;
+      entry.costRub += Number(l.costRub) || 0;
+      if (cargoRate > 0) entry.cargoRate = cargoRate; // the latest batch's own rate wins
+    });
+  });
+
+  const errorPct = function (forecastVal, factVal) {
+    if (factVal === null || factVal === undefined || factVal === 0) return null;
+    return roundToTwo((forecastVal - factVal) / factVal * 100);
+  };
+
+  const resultLines = (f.result && f.result.lines) || [];
+  return resultLines.map(function (line) {
+    const article = String(line.article || '').trim();
+    const fact = factByArticle[article];
+    const forecastPieces = Number(line.pieces) || 0;
+    const forecastKg = Number(line.kg) || 0;
+    const forecastFreightUsd = Number(line.freightUsdTypical) || 0;
+    const forecastCostPerPiece = Number(line.costPerPieceTypical) || 0;
+
+    const factPieces = fact ? fact.pieces : null;
+    const factKg = fact ? roundToTwo(fact.kg) : null;
+    const factFreightUsd = fact && fact.cargoRate > 0 ? roundToTwo(fact.freightCny / fact.cargoRate) : null;
+    const factCostPerPiece = fact && fact.hasCost && fact.pieces > 0 ? roundToTwo(fact.costRub / fact.pieces) : null;
+
+    return {
+      article: article,
+      pieces: { forecast: forecastPieces, fact: factPieces, errorPct: errorPct(forecastPieces, factPieces) },
+      kg: { forecast: forecastKg, fact: factKg, errorPct: errorPct(forecastKg, factKg) },
+      freightUsd: { forecast: forecastFreightUsd, fact: factFreightUsd, errorPct: errorPct(forecastFreightUsd, factFreightUsd) },
+      costPerPiece: { forecast: forecastCostPerPiece, fact: factCostPerPiece, errorPct: errorPct(forecastCostPerPiece, factCostPerPiece) }
+    };
+  });
+}
+
+// The whole read the forecast screen needs in one call: the tariff history, the box directory,
+// every saved forecast with its fact comparison, and the settings the forecast is computed from.
+/**
+ * Coordinator fix, 2026-09-25: the tariff chart/switch-line needs `switchDensity`, the two
+ * medians and a bill count WITHOUT the screen running a forecast first — so `getChinaForecastData`
+ * carries them as `tariffSummary`. `chinaTariffPick` already computes switchDensity/extrasPct/
+ * transitDays independently of the weight/density it is asked to price (only the basis/typical-
+ * low-high/codes/n it also returns depend on that), so calling it once here with a throwaway
+ * input reuses that exact formula instead of duplicating it; `n` here is deliberately the WHOLE
+ * bill count, not `chinaTariffPick`'s own "nearest 5" — there is no shipment to be near yet.
+ */
+function chinaTariffSummary(tariffs) {
+  const pick = chinaTariffPick(tariffs || [], 0, 0);
+  return {
+    switchDensity: pick.switchDensity,
+    transitDays: pick.transitDays,
+    extrasPct: pick.empty ? 0 : pick.extrasPct,
+    n: (tariffs || []).length
+  };
+}
+
+function getChinaForecastData() {
+  const ss = chinaSpreadsheet();
+  const ctx = chinaForecastContext(ss);
+  const forecasts = chinaReadSheet(ss, CHINA_FORECASTS_SHEET, CHINA_FORECAST_HEADERS).rows.map(chinaForecastFromRow);
+  return {
+    tariffs: ctx.tariffs,
+    tariffSummary: chinaTariffSummary(ctx.tariffs),
+    boxes: ctx.directory,
+    forecasts: forecasts.map(function (f) { return Object.assign({}, f, { fact: chinaForecastVsFact(f, ctx.batches) }); }),
+    settings: ctx.settings
   };
 }

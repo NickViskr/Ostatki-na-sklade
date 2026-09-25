@@ -251,7 +251,11 @@ function doPost(e) {
       // queueing it behind a commit would make the tab wait for the warehouse.
       'getChinaBatches',
       // Item 81g-2: same reasoning — getChinaMoney only reads «Отчёты»/«Поступления»/«Платежи».
-      'getChinaMoney'
+      'getChinaMoney',
+      // Item 82: both pure reads of the module's own spreadsheet, same reasoning as
+      // getChinaBatches — calcChinaForecast computes but writes nothing either.
+      'getChinaForecastData',
+      'calcChinaForecast'
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();
@@ -493,6 +497,12 @@ function doPost(e) {
       case 'setChinaRubCostsDone': assertAdmin(currentUser); result = setChinaRubCostsDone(data, currentUser.username); break;
       // Owner, 2026-09-25: the owner's own «история» mark on a receipt (setChinaReceiptHistory).
       case 'setChinaReceiptHistory': assertAdmin(currentUser); result = setChinaReceiptHistory(data, currentUser.username); break;
+      // Item 82: forecasting a future China shipment — tariff history, box directory, the
+      // forecast itself and saved forecasts vs the batch they became.
+      case 'getChinaForecastData': assertAdmin(currentUser); result = getChinaForecastData(); break;
+      case 'calcChinaForecast': assertAdmin(currentUser); result = calcChinaForecast(data); break;
+      case 'saveChinaForecast': assertAdmin(currentUser); result = saveChinaForecast(data, currentUser.username); break;
+      case 'deleteChinaForecast': assertAdmin(currentUser); result = deleteChinaForecast(data, currentUser.username); break;
       default:
         throw new Error('Unknown action: ' + action);
     }

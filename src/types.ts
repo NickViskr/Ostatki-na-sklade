@@ -331,6 +331,208 @@ export interface ChinaMoney {
   warnings: string[];
 }
 
+/** Item 82a: one carrier bill turned into a tariff record — `chinaTariffFromFreight`'s shape. */
+export interface ChinaTariff {
+  code: string;
+  orderNo: string;
+  shippedAt: string;
+  arrivedAt: string;
+  /** null when the bill has not arrived yet. */
+  transitDays: number | null;
+  rate: number;
+  /** 'кг' or 'м³' — which unit the carrier actually billed, inferred from the bill's own total. */
+  basis: string;
+  weightKg: number;
+  volumeM3: number;
+  densityKgM3: number;
+  billedUsd: number;
+  amountUsd: number;
+  extrasUsd: number;
+  extrasPct: number;
+  realPerKgUsd: number;
+  reportId: string;
+  updatedAt: string;
+}
+
+/** Item 82a/c: `chinaTariffPick`'s answer — which tariff a forecast is costed at, and why. */
+export interface ChinaTariffPick {
+  empty: boolean;
+  /** Only set when `empty` is true — «нет истории тарифов». */
+  message?: string;
+  basis: string;
+  /** The density boundary between м³- and кг-billed shipments; null with only one basis known. */
+  switchDensity: number | null;
+  typicalUsd: number;
+  lowUsd: number;
+  highUsd: number;
+  /** Codes of the (up to 5) bills the typical/low/high figures were taken from. */
+  codes: string[];
+  n: number;
+  extrasPct: number;
+  transitDays: number | null;
+}
+
+/** Item 82b: one entry of `chinaBoxDirectory`, keyed by article (or marking, lacking one). */
+export interface ChinaBoxEntry {
+  article: string;
+  name: string;
+  boxLengthM: number;
+  boxWidthM: number;
+  boxHeightM: number;
+  boxVolumeM3: number;
+  boxKg: number;
+  pcsPerBox: number;
+  kgPerPiece: number;
+  densityKgM3: number;
+  priceCny: number;
+  /** Number of distinct batches this article/marking was seen in. */
+  batches: number;
+  /** True when the box dimensions/weight/pcs differed between batches. */
+  changed: boolean;
+  codes: string[];
+}
+
+/** Item 82c: one line of a forecast, as computed and returned by `chinaForecastCalc`. */
+export interface ChinaForecastLine {
+  article: string;
+  pieces: number;
+  /** Absent when `warning` is set — the line took no part in any total. */
+  boxes?: number;
+  missingToFullBox?: number;
+  kg?: number;
+  m3?: number;
+  goodsCny?: number;
+  freightUsdTypical?: number;
+  freightUsdLow?: number;
+  freightUsdHigh?: number;
+  domesticCny?: number;
+  rubShare?: number;
+  /** Coordinator fix, 2026-09-25: the ₽ equivalent of every ¥/$ figure above, computed by the
+   * script (goodsCny × rubRate, domesticCny × rubRate, freightUsd… × cargoRate × rubRate) —
+   * the owner's display rule («¥/$ followed by its ₽ in brackets») without the browser ever
+   * multiplying a rate itself. */
+  goodsRub?: number;
+  domesticRub?: number;
+  freightRubTypical?: number;
+  freightRubLow?: number;
+  freightRubHigh?: number;
+  costRubTypical?: number;
+  costRubLow?: number;
+  costRubHigh?: number;
+  costPerPieceTypical?: number;
+  costPerPieceLow?: number;
+  costPerPieceHigh?: number;
+  /** 'нет данных о коробке' when the article has no box in the directory. */
+  warning?: string;
+}
+
+export interface ChinaForecastTotals {
+  /** Weight/volume of the goods themselves, from box data — NOT what the carrier bills. */
+  goodsKg: number;
+  goodsM3: number;
+  goodsDensityKgM3: number;
+  /** Coordinator fix, 2026-09-25: the CHARGEABLE (waybill) weight/volume the carrier actually
+   * bills — goods figures scaled by `ChinaPackagingFactors` — is what the tariff is picked and
+   * priced by, not the goods figures alone. */
+  chargeableKg: number;
+  chargeableM3: number;
+  chargeableDensityKgM3: number;
+  goodsCny: number;
+  /** Coordinator fix, 2026-09-25: ₽ equivalents, summed from the already-exact per-line shares
+   * (see `ChinaForecastLine`) — never an independent grand-total × rate, which could round a
+   * kopeck away from the sum of its own parts. */
+  goodsRub: number;
+  domesticCny: number;
+  domesticRub: number;
+  freightUsdTypical: number;
+  freightUsdLow: number;
+  freightUsdHigh: number;
+  freightRubTypical: number;
+  freightRubLow: number;
+  freightRubHigh: number;
+  russianCosts: number;
+  costRubTypical: number;
+  costRubLow: number;
+  costRubHigh: number;
+}
+
+/** Coordinator fix, 2026-09-25: how far a batch's waybill runs over its own goods figures — the
+ * carrier's own packaging (pallets, dunnage) included in the waybill but not in a factory box's
+ * dimensions. Median across every batch stating BOTH; 1 (no scaling) with no such batch yet. */
+export interface ChinaPackagingFactors {
+  weightFactor: number;
+  weightFactorN: number;
+  volumeFactor: number;
+  volumeFactorN: number;
+}
+
+/** Item 82c: the whole answer of `calcChinaForecast`/`chinaForecastCalc`. */
+export interface ChinaForecastResult {
+  lines: ChinaForecastLine[];
+  /** null when every line was missing its box. */
+  totals: ChinaForecastTotals | null;
+  pick: ChinaTariffPick;
+  cargoRate: number;
+  rubRate: number;
+  /** e.g. «2026-08-20 CP3» — the payment `rubRate` was taken from; '' when there is none. */
+  rubRateSource: string;
+  packagingFactors: ChinaPackagingFactors;
+  /** e.g. «нет курса: ни одной оплаты» when there is no payment to price the forecast at. */
+  warnings: string[];
+  /** Historic China-domestic-delivery share of goods ¥, as a percentage. */
+  domesticShare: number;
+  estimatedArrival: string;
+}
+
+/** Item 82d: forecast vs fact for one figure of one article. */
+export interface ChinaForecastFactFigure {
+  forecast: number;
+  /** null when the batch has not arrived, or never costed this article at all. */
+  fact: number | null;
+  errorPct: number | null;
+}
+
+export interface ChinaForecastFact {
+  article: string;
+  pieces: ChinaForecastFactFigure;
+  kg: ChinaForecastFactFigure;
+  freightUsd: ChinaForecastFactFigure;
+  costPerPiece: ChinaForecastFactFigure;
+}
+
+/** Item 82d: one saved forecast, with its vs-fact comparison already attached. */
+export interface ChinaSavedForecast {
+  id: string;
+  orderNo: string;
+  createdAt: string;
+  user: string;
+  comment: string;
+  lines: { article: string; pieces: number }[];
+  result: ChinaForecastResult;
+  updatedAt: string;
+  fact: ChinaForecastFact[];
+}
+
+/** Coordinator fix, 2026-09-25: the switch density/medians the tariff chart needs, computed by
+ * `chinaTariffSummary` (reusing `chinaTariffPick`'s own formula) so the screen never has to run
+ * a forecast first just to draw the switch line. `n` is the WHOLE bill count, unlike
+ * `ChinaTariffPick.n` (the nearest-5 count of an actual pick). */
+export interface ChinaTariffSummary {
+  switchDensity: number | null;
+  transitDays: number | null;
+  extrasPct: number;
+  n: number;
+}
+
+/** Item 82: the whole answer of `getChinaForecastData`. */
+export interface ChinaForecastData {
+  tariffs: ChinaTariff[];
+  tariffSummary: ChinaTariffSummary;
+  boxes: Record<string, ChinaBoxEntry>;
+  forecasts: ChinaSavedForecast[];
+  settings: Record<string, number | string>;
+}
+
 export interface ChinaBatch {
   id: string;
   orderNo: string;

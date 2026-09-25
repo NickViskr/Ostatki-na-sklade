@@ -1,9 +1,11 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Columns3, FileDown, HelpCircle, Maximize2, Minimize2, PackagePlus, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
+import { Calculator, ChevronDown, ChevronRight, Columns3, FileDown, HelpCircle, Maximize2, Minimize2, PackagePlus, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
+import { useChinaStore } from '../store/useChinaStore';
 import { OzonStockRow, FactoryOrder } from '../types';
+import { chinaFactoryOrdersToForecastLines } from '../lib/chinaForecastView';
 import { OzonSettingsModal } from './OzonSettingsModal';
 import { FactoryOrderModal } from './FactoryOrderModal';
 import { OzonSupplyModal } from './OzonSupplyModal';
@@ -821,6 +823,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return { supplies, factories, orderedCount, clusterDeficitCount };
   }, [coverageRows, activeFactoryOrders, factoryOnOrder, wideArticles, wideCoverage]);
 
+  // Item 82: «Прогноз Китай» — the signal «Заказ на фабрике» sent straight to the forecast
+  // calculator of the module «Заказы в Китае», admin only. Reads the stores directly instead of
+  // subscribing, since this is a one-shot action, not something the render depends on.
+  const goToChinaForecast = () => {
+    const lines = chinaFactoryOrdersToForecastLines(recommendations.factories);
+    useChinaStore.getState().setForecastPrefill(lines);
+    useUIStore.getState().setActiveTab('china');
+  };
+
   const supplyPlan = useMemo(() => {
     const rows: any[] = [];
     const boxesByCluster: Record<string, { clusterId: string; clusterName: string; boxes: number }> = {};
@@ -1190,7 +1201,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                       )}
                     </div>
                     <div>
-                      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Заказать на фабрике</div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Заказать на фабрике</div>
+                        {isAdmin && recommendations.factories.length > 0 && (
+                          <button
+                            type="button"
+                            data-testid="btn-china-forecast-prefill"
+                            onClick={goToChinaForecast}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100"
+                            title="Открыть прогноз поставки в модуле «Заказы в Китае» с этими артикулами и количествами"
+                          >
+                            <Calculator size={12} /> Прогноз Китай
+                          </button>
+                        )}
+                      </div>
                       {recommendations.factories.length === 0 ? (
                         <div className="text-[11px] text-slate-400">
                           Заказывать пока нечего.

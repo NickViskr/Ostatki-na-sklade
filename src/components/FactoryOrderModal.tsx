@@ -4,7 +4,11 @@ import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { FactoryOrder } from '../types';
+import { useChinaStore } from '../store/useChinaStore';
+import { FactoryOrder, ChinaForecastResult } from '../types';
+
+const money = (value: number, currency: string): string =>
+  `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
 
 interface FactoryOrderModalProps {
   isOpen: boolean;
@@ -41,6 +45,17 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
   const cancelFactoryOrder = useWarehouseStore((state) => state.cancelFactoryOrder);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const kits = useWarehouseStore((state) => state.kits);
+  const currentUser = useWarehouseStore((state) => state.currentUser);
+  const isAdmin = currentUser?.role?.toLowerCase() === 'admin' ||
+    ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
+
+  // Item 82: «Прогноз из Китая» — a preview of what THIS order would cost, straight from the
+  // forecast calculator; admin only, and it never blocks the modal — a missing box or a failed
+  // call just leaves the block off.
+  const forecastData = useChinaStore((state) => state.forecastData);
+  const fetchChinaForecastData = useChinaStore((state) => state.fetchChinaForecastData);
+  const calcChinaForecast = useChinaStore((state) => state.calcChinaForecast);
+  const [chinaForecast, setChinaForecast] = useState<ChinaForecastResult | null>(null);
 
   const setActiveTab = useUIStore((state) => state.setActiveTab);
   const setOpType = useUIStore((state) => state.setOpType);
@@ -65,6 +80,23 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
     setExpectedAt(order && order.expectedAt ? order.expectedAt : toIsoDate(eta));
     setComment(order ? order.comment : '');
   }, [isOpen, order, suggestedQty, pcsPerBox, leadTimeDays]);
+
+  useEffect(() => {
+    if (!isOpen || !isAdmin) return;
+    if (!forecastData) fetchChinaForecastData();
+  }, [isOpen, isAdmin, forecastData, fetchChinaForecastData]);
+
+  useEffect(() => {
+    if (!isOpen || !isAdmin || !forecastData) { setChinaForecast(null); return; }
+    if (!forecastData.boxes[article]) { setChinaForecast(null); return; }
+    const pieces = Number(qty) || 0;
+    if (pieces <= 0) { setChinaForecast(null); return; }
+    let cancelled = false;
+    calcChinaForecast([{ article, pieces }])
+      .then((res) => { if (!cancelled) setChinaForecast(res); })
+      .catch(() => { if (!cancelled) setChinaForecast(null); });
+    return () => { cancelled = true; };
+  }, [isOpen, isAdmin, article, forecastData, qty, calcChinaForecast]);
 
   if (!isOpen) return null;
 
@@ -178,6 +210,14 @@ export const FactoryOrderModal: React.FC<FactoryOrderModalProps> = ({
               )}
             </div>
           </div>
+
+          {isAdmin && chinaForecast && chinaForecast.lines[0] && !chinaForecast.lines[0].warning && (
+            <div className="text-[12px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-2xl p-3 leading-snug">
+              Прогноз из Китая: ~{money(chinaForecast.lines[0].costPerPieceTypical || 0, '₽')}/шт
+              {' '}(от {money(chinaForecast.lines[0].costPerPieceLow || 0, '₽')} до {money(chinaForecast.lines[0].costPerPieceHigh || 0, '₽')})
+              {pcsPerBox > 0 && <>, в коробке фабрики {pcsPerBox} шт, коробок {Math.ceil((Number(qty) || 0) / pcsPerBox)}</>}
+            </div>
+          )}
 
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-600 uppercase">Ожидаемое прибытие</label>

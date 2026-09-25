@@ -381,9 +381,10 @@ describe('подключение модуля «Заказы в Китае»', (
     ['setupChinaSpreadsheet', 'saveChinaBatch', 'deleteChinaBatch', 'saveChinaBatchCost', 'deleteChinaBatchCost']
       .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches'`));
     // Item 81g: a write can change the money of every order, so the batch writes drop the
-    // money read as well.
+    // money read as well. Item 82: tariffs/boxes/vs-fact derive from the same data, so every
+    // batch write drops the forecast read too.
     ['saveChinaBatch', 'deleteChinaBatch', 'saveChinaBatchCost', 'deleteChinaBatchCost']
-      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches', 'getChinaMoney']`));
+      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData']`));
   });
 
   it('every write replaces the whole state with what the script answered', () => {

@@ -9,6 +9,7 @@ import { useUIStore } from '../store/useUIStore';
 import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
+import { ChinaForecastPanel } from './ChinaForecastPanel';
 import {
   CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark, chinaEtaText,
   chinaFormFromArrival, chinaFormFromFiles, chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes,
@@ -363,6 +364,7 @@ export const ChinaOrdersTab: React.FC = () => {
       )}
 
       {loaded && !error && <ChinaPaymentsCard />}
+      {loaded && !error && <ChinaForecastPanel />}
 
       {loaded && batches.length === 0 && !error && (
         <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">

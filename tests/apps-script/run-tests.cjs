@@ -3840,9 +3840,9 @@ function batch27() {
 (function () {
   const h = withChina();
   const names = h.targetSheetNames();
-  check('81a: setup creates exactly the sheets of the module (81g-1 adds three: report ledger)',
+  check('81a: setup creates exactly the sheets of the module (81g-1 adds three: report ledger; item 82 adds two more)',
     JSON.stringify(names) === JSON.stringify(['Партии', 'Строки партий', 'Расходы партии', 'Платежи', 'Справочник',
-      'Отчёты', 'Поступления', 'Движения заказов']),
+      'Отчёты', 'Поступления', 'Движения заказов', 'Тарифы карго', 'Прогнозы']),
     names.join(', '));
 
   const batchHead = h.getTargetSheet('Партии').__dump()[0];
@@ -3858,9 +3858,9 @@ function batch27() {
   // Idempotence: the module is set up on every entry into the tab.
   h.setupChinaSpreadsheet();
   h.setupChinaSpreadsheet();
-  check('81a: a repeated setup adds no extra sheet', h.targetSheetNames().length === 8, h.targetSheetNames().join(', '));
-  check('81a: a repeated setup adds no second directory row per default (2 defaults: carrier rate, transitDays)',
-    h.dumpChinaSheet('Справочник').length === 2, JSON.stringify(h.dumpChinaSheet('Справочник')));
+  check('81a: a repeated setup adds no extra sheet', h.targetSheetNames().length === 10, h.targetSheetNames().join(', '));
+  check('81a: a repeated setup adds no second directory row per default (3 defaults: carrier rate, transitDays, rubCostsPerBatch)',
+    h.dumpChinaSheet('Справочник').length === 3, JSON.stringify(h.dumpChinaSheet('Справочник')));
 
   // Somebody clears the directory by hand: the rate must not silently become zero, or the
   // freight of every batch would turn into nothing.
@@ -3916,7 +3916,7 @@ function batch27() {
   h.setChinaSpreadsheet('https://docs.google.com/spreadsheets/d/' + h.CHINA_SPREADSHEET_ID + '/edit#gid=0');
   h.setupChinaSpreadsheet();
   check('81a: the module sets itself up from a link pasted whole',
-    h.targetSheetNames().length === 8, h.targetSheetNames().join(', '));
+    h.targetSheetNames().length === 10, h.targetSheetNames().join(', '));
 })();
 
 // ---- 81a: splitting an amount ----
@@ -6659,6 +6659,421 @@ function roundToTwoTest(n) { return Math.round((n + Number.EPSILON) * 100) / 100
   h.getTargetSheet('Справочник').appendRow(['transitDays', 45, 'испытание']);
   check('transitDays: an owner-typed value in the sheet overrides the default',
     h.getChinaSettings().transitDays === 45, JSON.stringify(h.getChinaSettings()));
+})();
+
+// ================= Item 82: forecast of a future China shipment ==============================
+//
+// The 12 bills below are the owner's own report of 25.09.2026 (docs/OZON_PLAN.md, item 82
+// brief) — code;order;shipped;arrived;rate;kg;m3;usd, exactly as given. Every expected number
+// (basis, density, extras, switch density, the nearest-5 pick, the extras/transit medians) was
+// derived independently in Python first (see the scratchpad script of this session) — never
+// mental arithmetic.
+function chinaRealFreights() {
+  return [
+    { code: 'NV-1209-7', orderNo: '', shippedAt: '2025-12-10', arrivedAt: '2026-01-10', ratePerKgUsd: 2.6, weightKg: 3115, volumeM3: 23.8, amountUsd: 8468 },
+    { code: 'NV-1217-15', orderNo: '20', shippedAt: '2025-12-17', arrivedAt: '2026-01-25', ratePerKgUsd: 2.45, weightKg: 381, volumeM3: 3.46, amountUsd: 948 },
+    { code: 'NV-0118-15', orderNo: '21', shippedAt: '2026-01-19', arrivedAt: '2026-03-05', ratePerKgUsd: 2.9, weightKg: 386.25, volumeM3: 3.34, amountUsd: 1243 },
+    { code: 'NV-0310-10', orderNo: '22', shippedAt: '2026-03-11', arrivedAt: '2026-03-29', ratePerKgUsd: 1.75, weightKg: 3040, volumeM3: 22.3, amountUsd: 5788 },
+    { code: 'NV-0424-12', orderNo: '23', shippedAt: '2026-04-25', arrivedAt: '2026-05-22', ratePerKgUsd: 2.15, weightKg: 3742, volumeM3: 27.47, amountUsd: 8606 },
+    { code: 'NV-0401-23', orderNo: '24', shippedAt: '2026-04-03', arrivedAt: '2026-05-30', ratePerKgUsd: 2.05, weightKg: 514.4, volumeM3: 4.93, amountUsd: 1251 },
+    { code: 'NV-0617-3', orderNo: '25', shippedAt: '2026-06-18', arrivedAt: '2026-07-19', ratePerKgUsd: 310, weightKg: 206.7, volumeM3: 3.07, amountUsd: 1120 },
+    { code: 'NV-0716-3', orderNo: '27', shippedAt: '2026-07-17', arrivedAt: '2026-08-21', ratePerKgUsd: 2.3, weightKg: 1001.5, volumeM3: 7.41, amountUsd: 2438 },
+    { code: 'NV-0703-23', orderNo: '26', shippedAt: '2026-07-04', arrivedAt: '2026-08-22', ratePerKgUsd: 2.55, weightKg: 500.8, volumeM3: 4.81, amountUsd: 1488 },
+    { code: 'NV-0825-2', orderNo: '28', shippedAt: '2026-08-27', arrivedAt: '2026-09-17', ratePerKgUsd: 2.3, weightKg: 672.5, volumeM3: 4.92, amountUsd: 1637 },
+    { code: 'NV-0916-24', orderNo: '29', shippedAt: '2026-09-17', arrivedAt: '', ratePerKgUsd: 2.6, weightKg: 408, volumeM3: 4.04, amountUsd: 1109 },
+    { code: 'NV-0923-4', orderNo: '30', shippedAt: '2026-09-24', arrivedAt: '', ratePerKgUsd: 2.55, weightKg: 967, volumeM3: 9.14, amountUsd: 2646 }
+  ];
+}
+
+// ---- chinaTariffFromFreight: basis, density, extras of a few real bills ----
+(function () {
+  const h = withChina();
+  const freights = chinaRealFreights();
+  const byCode = {};
+  freights.forEach(function (f) { byCode[f.code] = h.chinaTariffFromFreight(f, 'CR1'); });
+
+  check('82a: NV-0617-3 (310 $/m³) is billed per м³, every other bill per кг',
+    byCode['NV-0617-3'].basis === 'м³' &&
+    ['NV-1209-7', 'NV-1217-15', 'NV-0118-15', 'NV-0310-10', 'NV-0424-12', 'NV-0401-23', 'NV-0716-3', 'NV-0703-23', 'NV-0825-2', 'NV-0916-24', 'NV-0923-4']
+      .every(function (c) { return byCode[c].basis === 'кг'; }),
+    JSON.stringify(freights.map(function (f) { return byCode[f.code].basis; })));
+
+  check('82a: NV-0310-10 density/billed/extras/extrasPct — Python: 136.32 / 5320.0 / 468.0 / 8.8',
+    byCode['NV-0310-10'].densityKgM3 === 136.32 && byCode['NV-0310-10'].billedUsd === 5320 &&
+    byCode['NV-0310-10'].extrasUsd === 468 && byCode['NV-0310-10'].extrasPct === 8.8,
+    JSON.stringify(byCode['NV-0310-10']));
+
+  check('82a: NV-0617-3 (м³ basis) density/billed/extras — Python: 67.33 / 951.7 / 168.3 / 17.68',
+    byCode['NV-0617-3'].densityKgM3 === 67.33 && byCode['NV-0617-3'].billedUsd === 951.7 &&
+    byCode['NV-0617-3'].extrasUsd === 168.3 && byCode['NV-0617-3'].extrasPct === 17.68,
+    JSON.stringify(byCode['NV-0617-3']));
+
+  check('82a: real $/kg of NV-1209-7 — Python: 8468/3115 = 2.72',
+    byCode['NV-1209-7'].realPerKgUsd === 2.72, JSON.stringify(byCode['NV-1209-7']));
+
+  check('82a: transit days of NV-0825-2 (2026-08-27 -> 2026-09-17) is 21, and an unarrived bill reads null',
+    byCode['NV-0825-2'].transitDays === 21 && byCode['NV-0923-4'].transitDays === null,
+    byCode['NV-0825-2'].transitDays + ' / ' + byCode['NV-0923-4'].transitDays);
+})();
+
+// ---- saveChinaReport upserts every freight into «Тарифы карго» by code ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({ reportDate: '2026-08-20', source: 'скрипт', orders: [], receipts: [], freights: chinaRealFreights() }, 'Николай');
+  const rows1 = h.dumpChinaTariffs();
+  check('82a: the first report writes exactly 12 tariff rows, one per bill',
+    rows1.length === 12, rows1.length);
+  check('82a: a bill with no arrival yet reads «Дней в пути» empty',
+    rows1.filter(function (r) { return r['Код партии'] === 'NV-0923-4'; })[0]['Дней в пути'] === '',
+    JSON.stringify(rows1.filter(function (r) { return r['Код партии'] === 'NV-0923-4'; })[0]));
+
+  // A later report confirms the arrival of NV-0923-4 — same code, must OVERWRITE, not duplicate.
+  const revisedFreights = chinaRealFreights().map(function (f) {
+    return f.code === 'NV-0923-4' ? Object.assign({}, f, { arrivedAt: '2026-10-25' }) : f;
+  });
+  h.saveChinaReport({ reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [], freights: revisedFreights }, 'Николай');
+  const rows2 = h.dumpChinaTariffs();
+  check('82a: the second report upserts by code — still exactly 12 rows, not 24',
+    rows2.length === 12, rows2.length);
+  const revised = rows2.filter(function (r) { return r['Код партии'] === 'NV-0923-4'; })[0];
+  check('82a: the arrival date landed on the SAME row, transit days now filled',
+    revised['Дата прибытия'] === '2026-10-25' && Number(revised['Дней в пути']) === 31,
+    JSON.stringify(revised));
+
+  // An identical re-upload of the newest report's own content is a no-op — the tariff sheet
+  // must not be touched a third time either.
+  const before = JSON.stringify(h.dumpChinaTariffs());
+  h.saveChinaReport({ reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [], freights: revisedFreights }, 'Николай');
+  check('82a: an identical re-upload leaves the tariff sheet untouched (no-op)',
+    JSON.stringify(h.dumpChinaTariffs()) === before, 'unchanged');
+})();
+
+// ---- chinaTariffList merges the sheet with freights of still-stored reports ----
+(function () {
+  const h = withChina();
+  // Four reports in a row, each with ONE new bill — chinaPruneReports keeps only the 3 newest,
+  // so by the time the fourth is saved the FIRST report is gone from «Отчёты» entirely; its
+  // bill must still show up because chinaUpsertTariffs already wrote it to the durable sheet.
+  h.saveChinaReport({ reportDate: '2026-01-01', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'A1', orderNo: '1', shippedAt: '2026-01-01', arrivedAt: '2026-02-01', ratePerKgUsd: 2, weightKg: 100, volumeM3: 1, amountUsd: 200 }] }, 'Николай');
+  h.saveChinaReport({ reportDate: '2026-02-01', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'A2', orderNo: '2', shippedAt: '2026-02-01', arrivedAt: '2026-03-01', ratePerKgUsd: 2, weightKg: 100, volumeM3: 1, amountUsd: 200 }] }, 'Николай');
+  h.saveChinaReport({ reportDate: '2026-03-01', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'A3', orderNo: '3', shippedAt: '2026-03-01', arrivedAt: '2026-04-01', ratePerKgUsd: 2, weightKg: 100, volumeM3: 1, amountUsd: 200 }] }, 'Николай');
+  h.saveChinaReport({ reportDate: '2026-04-01', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'A4', orderNo: '4', shippedAt: '2026-04-01', arrivedAt: '2026-05-01', ratePerKgUsd: 2, weightKg: 100, volumeM3: 1, amountUsd: 200 }] }, 'Николай');
+
+  const reportDates = h.dumpChinaReports().map(function (r) { return r['Дата отчёта']; });
+  check('82a: only the 3 newest reports survive pruning', reportDates.length === 3, JSON.stringify(reportDates));
+
+  // getChinaForecastData reads chinaTariffList through the module's own spreadsheet — A1's bill
+  // is gone from «Отчёты» by now, but must still show, from the durable «Тарифы карго» sheet.
+  const codes = h.getChinaForecastData().tariffs.map(function (t) { return t.code; });
+  check('82a: a bill whose introducing report has been pruned still shows, from the sheet',
+    codes.indexOf('A1') !== -1 && codes.length === 4, JSON.stringify(codes));
+})();
+
+// ---- chinaTariffPick on the real 12-bill data ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({ reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [], freights: chinaRealFreights() }, 'Николай');
+  const tariffs = h.getChinaForecastData().tariffs;
+  check('82a: all 12 bills are read back', tariffs.length === 12, tariffs.length);
+
+  // Python: switch density = (67.33 м³-max + 100.99 кг-min) / 2 = 84.16.
+  const pick = h.chinaTariffPick(tariffs, 700, 140);
+  check('82a: switch density is the midpoint of the м³-max and кг-min densities (84.16)',
+    pick.switchDensity === 84.16, JSON.stringify(pick));
+  check('82a: a shipment at 140 kg/m³ (above the switch) is billed кг, not м³',
+    pick.basis === 'кг', pick.basis);
+  // Python nearest-5 by log-distance: NV-0825-2, NV-0716-3, NV-0401-23, NV-0923-4, NV-0703-23 —
+  // rates [2.3, 2.3, 2.05, 2.55, 2.55], median 2.3, min 2.05, max 2.55.
+  check('82a: the 5 nearest кг bills are exactly the ones Python picked',
+    JSON.stringify(pick.codes.slice().sort()) === JSON.stringify(['NV-0401-23', 'NV-0703-23', 'NV-0716-3', 'NV-0825-2', 'NV-0923-4'].sort()),
+    JSON.stringify(pick.codes));
+  check('82a: typical/low/high $ of the pick — Python: 2.3 / 2.05 / 2.55',
+    pick.typicalUsd === 2.3 && pick.lowUsd === 2.05 && pick.highUsd === 2.55, JSON.stringify(pick));
+  check('82a: extras % is the median over ALL 12 bills, not just the picked 5 — Python: 7.14',
+    pick.extrasPct === 7.14, pick.extrasPct);
+  check('82a: transit days is the median over every bill with an arrival — Python: 33',
+    pick.transitDays === 33, pick.transitDays);
+
+  // A shipment dense enough to fall BELOW the switch is billed м³ — with only one м³ bill ever
+  // seen, that single bill is both the pick and its own typical/low/high.
+  const m3Pick = h.chinaTariffPick(tariffs, 200, 60);
+  check('82a: a shipment at 60 kg/m³ (below the switch) is billed м³',
+    m3Pick.basis === 'м³' && m3Pick.n === 1 && m3Pick.codes[0] === 'NV-0617-3' &&
+    m3Pick.typicalUsd === 310 && m3Pick.lowUsd === 310 && m3Pick.highUsd === 310,
+    JSON.stringify(m3Pick));
+
+  check('82a: no history at all reads an explicit «нет истории тарифов»',
+    h.chinaTariffPick([], 100, 100).empty === true && h.chinaTariffPick([], 100, 100).message === 'нет истории тарифов',
+    JSON.stringify(h.chinaTariffPick([], 100, 100)));
+
+  // Coordinator fix, 2026-09-25: chinaTariffSummary must reuse chinaTariffPick's own formula
+  // for switchDensity/extrasPct/transitDays (identical regardless of the weight/density it is
+  // asked to price) — same Python numbers as the pick test above: 84.16 / 33 / 7.14, over all 12.
+  const summary = h.chinaTariffSummary(tariffs);
+  check('82a fix: tariffSummary reuses chinaTariffPick\'s own switchDensity/transitDays/extrasPct — 84.16/33/7.14, n=12',
+    summary.switchDensity === 84.16 && summary.transitDays === 33 && summary.extrasPct === 7.14 && summary.n === 12,
+    JSON.stringify(summary));
+  check('82a fix: an empty tariff list reads an empty summary, not a crash',
+    JSON.stringify(h.chinaTariffSummary([])) === JSON.stringify({ switchDensity: null, transitDays: null, extrasPct: 0, n: 0 }),
+    JSON.stringify(h.chinaTariffSummary([])));
+})();
+
+// ---- chinaBoxDirectory: latest box per article, «changed», batch count ----
+(function () {
+  const h = withChina();
+  const batches = [
+    { id: 'CB1', code: 'NV-A', shippedAt: '2026-01-01' },
+    { id: 'CB2', code: 'NV-B', shippedAt: '2026-03-01' }
+  ];
+  const lines = [
+    // Article ART1: same box both times — not changed, seen in 2 batches.
+    { batchId: 'CB1', article: 'ART1', marking: 'M1', boxLengthM: 0.3, boxWidthM: 0.2, boxHeightM: 0.1,
+      factoryBoxKg: 5, pcsPerBox: 10, priceCny: 20, name: 'Товар 1' },
+    { batchId: 'CB2', article: 'ART1', marking: 'M1', boxLengthM: 0.3, boxWidthM: 0.2, boxHeightM: 0.1,
+      factoryBoxKg: 5, pcsPerBox: 10, priceCny: 22, name: 'Товар 1' },
+    // Article ART2: the box changed between batches (weight 4 -> 6 kg) — latest (CB2) wins.
+    { batchId: 'CB1', article: 'ART2', marking: 'M2', boxLengthM: 0.2, boxWidthM: 0.2, boxHeightM: 0.2,
+      factoryBoxKg: 4, pcsPerBox: 8, priceCny: 15, name: 'Товар 2' },
+    { batchId: 'CB2', article: 'ART2', marking: 'M2', boxLengthM: 0.2, boxWidthM: 0.2, boxHeightM: 0.2,
+      factoryBoxKg: 6, pcsPerBox: 8, priceCny: 16, name: 'Товар 2' },
+    // No article: falls back to marking M3, and has no box data at all — excluded outright.
+    { batchId: 'CB1', article: '', marking: 'M3', boxLengthM: 0, boxWidthM: 0, boxHeightM: 0, factoryBoxKg: 0, pcsPerBox: 5, priceCny: 10, name: 'Без коробки' }
+  ];
+  const dir = h.chinaBoxDirectory(batches, lines);
+  check('82b: only ART1 and ART2 make it into the directory (M3 has no box data)',
+    JSON.stringify(Object.keys(dir).sort()) === JSON.stringify(['ART1', 'ART2']), JSON.stringify(Object.keys(dir)));
+  check('82b: ART1 is unchanged and seen in 2 batches',
+    dir.ART1.changed === false && dir.ART1.batches === 2 && dir.ART1.boxKg === 5 && dir.ART1.priceCny === 22,
+    JSON.stringify(dir.ART1));
+  check('82b: ART2 is marked changed and its latest (by shippedAt) box wins — 6 kg, not 4',
+    dir.ART2.changed === true && dir.ART2.boxKg === 6 && dir.ART2.priceCny === 16,
+    JSON.stringify(dir.ART2));
+})();
+
+// ---- chinaForecastCalc: missing box warning, exact splits, the settings default ----
+(function () {
+  const h = withChina();
+  check('82c: rubCostsPerBatch defaults to 5000 ₽',
+    h.getChinaSettings().rubCostsPerBatch === 5000, JSON.stringify(h.getChinaSettings()));
+
+  const ctx = {
+    directory: {
+      ART1: { pcsPerBox: 10, boxKg: 5, boxVolumeM3: 0.01, priceCny: 20 },
+      ART2: { pcsPerBox: 8, boxKg: 6, boxVolumeM3: 0.02, priceCny: 15 }
+    },
+    tariffs: chinaRealFreights().map(function (f) { return h.chinaTariffFromFreight(f, 'CR1'); }),
+    settings: { cargoRateCnyPerUsd: 7, rubCostsPerBatch: 5000, transitDays: 30 },
+    payments: [{ id: 'CP1', date: '2026-09-20', rate: 12.5, actualRate: 0 }],
+    batches: [{ goodsCny: 10000, chinaDeliveryCny: 500 }, { goodsCny: 20000, chinaDeliveryCny: 1000 }]
+  };
+  const result = h.chinaForecastCalc({
+    lines: [{ article: 'ART1', pieces: 105 }, { article: 'ART2', pieces: 40 }, { article: 'NOPE', pieces: 5 }]
+  }, ctx);
+
+  check('82c: an article with no box directory entry is returned with a warning, no totals',
+    result.lines[2].warning === 'нет данных о коробке' && result.lines[2].boxes === undefined,
+    JSON.stringify(result.lines[2]));
+  check('82c: boxes = ceil(pieces / pcsPerBox); missingToFullBox fills the last box',
+    result.lines[0].boxes === 11 && result.lines[0].missingToFullBox === 5 &&
+    result.lines[1].boxes === 5 && result.lines[1].missingToFullBox === 0,
+    JSON.stringify(result.lines));
+  check('82c: kg/m³ of each line = boxes × the box\'s own kg/m³',
+    result.lines[0].kg === 55 && result.lines[1].kg === 30, JSON.stringify(result.lines));
+
+  check('82c: the ruble rate is the LATEST payment\'s own — 12.5, sourced «2026-09-20 CP1»',
+    result.rubRate === 12.5 && result.rubRateSource === '2026-09-20 CP1', result.rubRate + ' / ' + result.rubRateSource);
+  check('82c: China-domestic-delivery share is historic (500+1000)/(10000+20000)×100 = 5 %',
+    result.domesticShare === 5, result.domesticShare);
+
+  const totals = result.totals;
+  const sumFreightTypical = roundTest(result.lines[0].freightUsdTypical + result.lines[1].freightUsdTypical);
+  check('82c: the freight split sums EXACTLY to the total (typical)',
+    sumFreightTypical === totals.freightUsdTypical, sumFreightTypical + ' vs ' + totals.freightUsdTypical);
+  // The pick's basis here is кг (density ~531 kg/m³ against a switch of 84.16) — the split MUST
+  // follow kg, not m³: $/kg is the same for both lines only when split by kg.
+  check('82c: the freight split follows the pick\'s own basis (кг here), not the other one',
+    result.pick.basis === 'кг' &&
+    Math.abs(result.lines[0].freightUsdTypical / result.lines[0].kg - result.lines[1].freightUsdTypical / result.lines[1].kg) < 0.01,
+    (result.lines[0].freightUsdTypical / result.lines[0].kg) + ' vs ' + (result.lines[1].freightUsdTypical / result.lines[1].kg));
+  const sumDomestic = roundTest(result.lines[0].domesticCny + result.lines[1].domesticCny);
+  check('82c: the domestic-delivery split sums exactly to the total',
+    sumDomestic === totals.domesticCny, sumDomestic + ' vs ' + totals.domesticCny);
+  const sumRub = roundTest(result.lines[0].rubShare + result.lines[1].rubShare);
+  check('82c: the Russian-costs split (by boxes) sums exactly to the settings figure',
+    sumRub === totals.russianCosts, sumRub + ' vs ' + totals.russianCosts);
+  const sumCostTypical = roundTest(result.lines[0].costRubTypical + result.lines[1].costRubTypical);
+  check('82c: the per-line total cost (typical) sums exactly to the batch total',
+    sumCostTypical === totals.costRubTypical, sumCostTypical + ' vs ' + totals.costRubTypical);
+
+  // Coordinator fix, 2026-09-25: ₽ equivalents next to every ¥/$ figure — Python: goodsCny×12.5 =
+  // 2100×12.5 = 26250 / 600×12.5 = 7500, sum 33750.
+  check('82c fix: goodsRub = goodsCny × rubRate, per line — Python: 26250 / 7500',
+    result.lines[0].goodsRub === 26250 && result.lines[1].goodsRub === 7500, JSON.stringify([result.lines[0].goodsRub, result.lines[1].goodsRub]));
+  check('82c fix: goodsRub sums exactly to totals.goodsRub',
+    roundTest(result.lines[0].goodsRub + result.lines[1].goodsRub) === totals.goodsRub, totals.goodsRub);
+  check('82c fix: domesticRub = domesticCny × rubRate, per line, and sums exactly',
+    result.lines[0].domesticRub === roundTest(result.lines[0].domesticCny * 12.5) &&
+    result.lines[1].domesticRub === roundTest(result.lines[1].domesticCny * 12.5) &&
+    roundTest(result.lines[0].domesticRub + result.lines[1].domesticRub) === totals.domesticRub,
+    JSON.stringify([result.lines[0].domesticRub, result.lines[1].domesticRub, totals.domesticRub]));
+  check('82c fix: freightRubTypical/Low/High = freightUsd × cargoRate × rubRate, per line, and sum exactly',
+    result.lines[0].freightRubTypical === roundTest(result.lines[0].freightUsdTypical * 7 * 12.5) &&
+    roundTest(result.lines[0].freightRubTypical + result.lines[1].freightRubTypical) === totals.freightRubTypical &&
+    roundTest(result.lines[0].freightRubLow + result.lines[1].freightRubLow) === totals.freightRubLow &&
+    roundTest(result.lines[0].freightRubHigh + result.lines[1].freightRubHigh) === totals.freightRubHigh,
+    JSON.stringify({ typical: totals.freightRubTypical, low: totals.freightRubLow, high: totals.freightRubHigh }));
+
+  check('82c: estimated arrival = today + the pick\'s own transit median, not the settings fallback',
+    result.estimatedArrival === h.chinaAddDaysText(h.chinaTodayText(), result.pick.transitDays),
+    result.estimatedArrival);
+
+  // Every line missing its box: totals must be null, not a division-by-zero mess.
+  const empty = h.chinaForecastCalc({ lines: [{ article: 'NOPE', pieces: 1 }] }, ctx);
+  check('82c: every line missing its box leaves totals null',
+    empty.totals === null, JSON.stringify(empty.totals));
+})();
+function roundTest(x) { return Math.round((x + Number.EPSILON) * 100) / 100; }
+
+// ---- coordinator fix, 2026-09-25: the forecast must price the CHARGEABLE (waybill) weight,
+// not the goods weight — NV-0923-4's own waybill/goods gap (967/847 kg, 9.14/7.5611 m³) ----
+(function () {
+  const h = withChina();
+
+  // chinaPackagingFactors is pure — no forecast context needed at all.
+  const factors = h.chinaPackagingFactors([
+    { weightKg: 967, goodsKg: 847, volumeM3: 9.14, goodsVolumeM3: 7.5611 }
+  ]);
+  check('82c fix: weightFactor/volumeFactor — Python: 967/847 = 1.14, 9.14/7.5611 = 1.21',
+    factors.weightFactor === 1.14 && factors.volumeFactor === 1.21 &&
+    factors.weightFactorN === 1 && factors.volumeFactorN === 1, JSON.stringify(factors));
+
+  check('82c fix: a batch missing either figure contributes to NEITHER ratio',
+    JSON.stringify(h.chinaPackagingFactors([{ weightKg: 967, goodsKg: 0, volumeM3: 9.14, goodsVolumeM3: 0 }])) ===
+    JSON.stringify({ weightFactor: 1, weightFactorN: 0, volumeFactor: 1, volumeFactorN: 0 }),
+    JSON.stringify(h.chinaPackagingFactors([{ weightKg: 967, goodsKg: 0, volumeM3: 9.14, goodsVolumeM3: 0 }])));
+
+  check('82c fix: no batch with box data at all reads factors of 1 (no scaling)',
+    JSON.stringify(h.chinaPackagingFactors([])) === JSON.stringify({ weightFactor: 1, weightFactorN: 0, volumeFactor: 1, volumeFactorN: 0 }),
+    JSON.stringify(h.chinaPackagingFactors([])));
+
+  // The full path: a forecast whose only batch with box data is an NV-0923-4-like one. The
+  // forecast line itself is built so its GOODS kg/m³ are round numbers (100 kg / 1 m³) —
+  // Python: chargeableKg = 100 × 1.14 = 114, chargeableM³ = 1 × 1.21 = 1.21, density = 94.21.
+  const ctxFix = {
+    directory: { ART1: { pcsPerBox: 1, boxKg: 100, boxVolumeM3: 1, priceCny: 50 } },
+    tariffs: chinaRealFreights().map(function (f) { return h.chinaTariffFromFreight(f, 'CR1'); }),
+    settings: { cargoRateCnyPerUsd: 7, rubCostsPerBatch: 5000, transitDays: 30 },
+    payments: [{ id: 'CP1', date: '2026-09-20', rate: 12.5, actualRate: 0 }],
+    batches: [{ goodsCny: 0, chinaDeliveryCny: 0, weightKg: 967, goodsKg: 847, volumeM3: 9.14, goodsVolumeM3: 7.5611 }]
+  };
+  const resultFix = h.chinaForecastCalc({ lines: [{ article: 'ART1', pieces: 1 }] }, ctxFix);
+  check('82c fix: totals keep the GOODS figures untouched (100 kg / 1 m³)',
+    resultFix.totals.goodsKg === 100 && resultFix.totals.goodsM3 === 1, JSON.stringify(resultFix.totals));
+  check('82c fix: totals also carry the CHARGEABLE figures — Python: 114 kg / 1.21 m³ / 94.21 kg/m³',
+    resultFix.totals.chargeableKg === 114 && resultFix.totals.chargeableM3 === 1.21 &&
+    resultFix.totals.chargeableDensityKgM3 === 94.21, JSON.stringify(resultFix.totals));
+
+  const pick = resultFix.pick;
+  const perUnit = pick.basis === 'м³' ? resultFix.totals.chargeableM3 : resultFix.totals.chargeableKg;
+  const expectedFreightTypical = Math.round((pick.typicalUsd * perUnit * (1 + pick.extrasPct / 100) + Number.EPSILON) * 100) / 100;
+  check('82c fix: freight is tariff × CHARGEABLE kg/m³ (per the pick\'s own basis), not goods',
+    resultFix.totals.freightUsdTypical === expectedFreightTypical, resultFix.totals.freightUsdTypical + ' vs ' + expectedFreightTypical);
+  // The same tariff priced off the GOODS figure instead would give a materially different
+  // number — proves the fix actually moved the pricing base, not just added extra fields.
+  const perUnitGoods = pick.basis === 'м³' ? resultFix.totals.goodsM3 : resultFix.totals.goodsKg;
+  const freightIfGoods = Math.round((pick.typicalUsd * perUnitGoods * (1 + pick.extrasPct / 100) + Number.EPSILON) * 100) / 100;
+  check('82c fix: freight priced off chargeable is NOT the same as if it were priced off goods',
+    resultFix.totals.freightUsdTypical !== freightIfGoods, resultFix.totals.freightUsdTypical + ' vs ' + freightIfGoods);
+
+  // No payment at all: the rate must read 0 loud, not silent — a warning, not a 0 ₽ cost nobody notices.
+  const ctxNoPayment = Object.assign({}, ctxFix, { payments: [] });
+  const noPaymentResult = h.chinaForecastCalc({ lines: [{ article: 'ART1', pieces: 1 }] }, ctxNoPayment);
+  check('82c fix: with no payment the rate reads 0 and a warning is raised, not a silent 0 ₽',
+    noPaymentResult.rubRate === 0 && noPaymentResult.warnings.indexOf('нет курса: ни одной оплаты') !== -1,
+    JSON.stringify(noPaymentResult.warnings));
+  check('82c fix: a known payment raises no such warning',
+    resultFix.warnings.indexOf('нет курса: ни одной оплаты') === -1, JSON.stringify(resultFix.warnings));
+
+  // A second fixture where goods density (85) and chargeable density (80.08) fall on OPPOSITE
+  // sides of the switch (84.16) — Python: chargeableKg = 85×1.14 = 96.9, chargeableM³ = 1.21,
+  // chargeableDensity = 80.08. If the pick were still made off the GOODS figure (as before this
+  // fix), basis would read кг; made off chargeable, as it must, it reads м³ — the strongest
+  // possible proof the pick itself moved to chargeable, not just the final multiplication.
+  const ctxFlip = Object.assign({}, ctxFix, {
+    directory: { ART1: { pcsPerBox: 1, boxKg: 85, boxVolumeM3: 1, priceCny: 50 } }
+  });
+  const resultFlip = h.chinaForecastCalc({ lines: [{ article: 'ART1', pieces: 1 }] }, ctxFlip);
+  check('82c fix: chargeable density (80.08, below the 84.16 switch) picks м³, not кг as the goods density (85) would',
+    resultFlip.totals.goodsDensityKgM3 === 85 && resultFlip.totals.chargeableDensityKgM3 === 80.08 &&
+    resultFlip.pick.basis === 'м³', JSON.stringify(resultFlip.totals) + ' / basis ' + resultFlip.pick.basis);
+})();
+
+// ---- calcChinaForecast / saveChinaForecast: the whole path, server recomputes always ----
+(function () {
+  const h = withChina();
+  h.saveChinaReport({ reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [], freights: chinaRealFreights() }, 'Николай');
+  h.saveChinaPayment({ date: '2026-09-20', amountRub: 62500, rate: 12.5, comment: '' }, 'Николай');
+
+  const article = 'FORECAST-ART';
+  h.saveChinaBatch({
+    orderNo: '77', code: 'NV-TEST-1', status: 'Прибыла', shippedAt: '2026-01-01', arrivedAt: '2026-02-01',
+    lines: [{ marking: 'NVX', name: 'x', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 20,
+      boxLengthM: 0.3, boxWidthM: 0.2, boxHeightM: 0.1, factoryBoxKg: 5, article: article }]
+  }, 'Николай');
+
+  const calc = h.calcChinaForecast({ lines: [{ article: article, pieces: 55 }] });
+  check('82c: calcChinaForecast finds the box the batch above just gave the directory',
+    calc.lines[0].boxes === 6 && !calc.lines[0].warning, JSON.stringify(calc.lines[0]));
+
+  const saved = h.saveChinaForecast({
+    orderNo: '77', comment: 'испытание', lines: [{ article: article, pieces: 55 }],
+    // A browser-sent result — must be ignored outright, the server recomputes its own.
+    result: { totals: { costRubTypical: 999999999 } }
+  }, 'Николай');
+  const forecastRow = saved.forecasts[0];
+  check('82c: saveChinaForecast recomputes on the server — the bogus browser result never lands',
+    forecastRow.result.totals.costRubTypical !== 999999999 &&
+    forecastRow.result.totals.costRubTypical === calc.totals.costRubTypical,
+    JSON.stringify(forecastRow.result.totals));
+  check('82c: the forecast is stored under its own order number and comment',
+    forecastRow.orderNo === '77' && forecastRow.comment === 'испытание', JSON.stringify(forecastRow));
+  check('82c fix: getChinaForecastData carries tariffSummary through the whole path — 12 bills, switch 84.16',
+    saved.tariffSummary.n === 12 && saved.tariffSummary.switchDensity === 84.16, JSON.stringify(saved.tariffSummary));
+
+  // vs-fact: the batch of order 77 above already has a cost (saveChinaBatch costs on save via
+  // recalc elsewhere, or at least ships the box/weight the forecast can compare against).
+  const fact = forecastRow.fact[0];
+  check('82c: vs-fact matches by orderNo and reads the actual pieces back',
+    fact && fact.article === article && fact.pieces.fact === 100, JSON.stringify(fact));
+
+  // A forecast under an order number NOTHING was ever shipped against reads an empty fact list.
+  const noOrder = h.saveChinaForecast({ orderNo: 'NO-SUCH-ORDER', lines: [{ article: article, pieces: 10 }] }, 'Николай');
+  const noOrderForecast = noOrder.forecasts.filter(function (f) { return f.orderNo === 'NO-SUCH-ORDER'; })[0];
+  check('82c: an order nothing was ever shipped against reads an empty fact list',
+    noOrderForecast.fact.length === 0, JSON.stringify(noOrderForecast.fact));
+
+  // Edit an existing forecast (send its id back) — must UPDATE the row, not add a second one.
+  const before = h.getChinaForecastData().forecasts.length;
+  h.saveChinaForecast({ id: forecastRow.id, orderNo: '77', comment: 'изменено', lines: [{ article: article, pieces: 55 }] }, 'Николай');
+  const afterEdit = h.getChinaForecastData();
+  check('82c: editing an existing forecast (its own id) updates the row, does not add one',
+    afterEdit.forecasts.length === before &&
+    afterEdit.forecasts.filter(function (f) { return f.id === forecastRow.id; })[0].comment === 'изменено',
+    afterEdit.forecasts.length + ' vs ' + before);
+
+  const idToDelete = forecastRow.id;
+  const afterDelete = h.deleteChinaForecast({ id: idToDelete }, 'Николай');
+  check('82c: deleteChinaForecast removes exactly that forecast',
+    afterDelete.forecasts.filter(function (f) { return f.id === idToDelete; }).length === 0, JSON.stringify(afterDelete.forecasts.map(function (f) { return f.id; })));
+
+  let msg = '';
+  try { h.deleteChinaForecast({ id: idToDelete }, 'Николай'); } catch (e) { msg = e.message; }
+  check('82c: deleting an already-gone forecast is refused, not silently ok',
+    msg.indexOf('не найден') !== -1, msg);
 })();
 
 // ================= Итог =================

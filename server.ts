@@ -348,24 +348,29 @@ async function startServer() {
     saveOzonSupplyDocs: ['getOzonSupplyRequests'],
     // Item 81: the module «Заказы в Китае». Its writes touch nothing but its own
     // spreadsheet, so only its own read has to be dropped.
+    // Item 82: tariffs/boxes/vs-fact all derive from batches, lines, payments and reports, so
+    // every China write below also drops getChinaForecastData, not just its own read(s).
     setupChinaSpreadsheet: ['getChinaBatches'],
-    saveChinaBatch: ['getChinaBatches', 'getChinaMoney'],
-    deleteChinaBatch: ['getChinaBatches', 'getChinaMoney'],
-    saveChinaBatchCost: ['getChinaBatches', 'getChinaMoney'],
-    deleteChinaBatchCost: ['getChinaBatches', 'getChinaMoney'],
-    saveChinaPayment: ['getChinaBatches', 'getChinaMoney'],
-    deleteChinaPayment: ['getChinaBatches', 'getChinaMoney'],
+    saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    deleteChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    saveChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    deleteChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    saveChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    deleteChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     // Item 81g-1: the report touches only its own spreadsheet's read, same as every other
     // China write above.
-    saveChinaReport: ['getChinaBatches', 'getChinaMoney'],
+    saveChinaReport: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     // Item 81g-2: matching moves money between a payment and a receipt — both reads must drop.
-    matchChinaPayment: ['getChinaBatches', 'getChinaMoney'],
-    unmatchChinaPayment: ['getChinaBatches', 'getChinaMoney'],
+    matchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    unmatchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     // Item 81g-3.
-    setChinaRubCostsDone: ['getChinaBatches', 'getChinaMoney'],
+    setChinaRubCostsDone: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     // Owner, 2026-09-25: the owner's own «история» mark on a receipt — same reasoning as every
     // other 81g write, both reads must drop.
-    setChinaReceiptHistory: ['getChinaBatches', 'getChinaMoney']
+    setChinaReceiptHistory: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    // Item 82d: a saved/deleted forecast only ever changes its own read.
+    saveChinaForecast: ['getChinaForecastData'],
+    deleteChinaForecast: ['getChinaForecastData']
   };
 
   function invalidateCacheFor(writeAction: string): void {
@@ -475,7 +480,10 @@ async function startServer() {
     // lifetime below — every write of the module answers with the whole state anyway.
     'getChinaBatches',
     // Item 81g-2: same reasoning.
-    'getChinaMoney'
+    'getChinaMoney',
+    // Item 82: both pure reads — calcChinaForecast computes a forecast but writes nothing.
+    'getChinaForecastData',
+    'calcChinaForecast'
   ];
 
   // API Endpoint to proxy GAS requests
