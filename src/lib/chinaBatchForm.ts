@@ -466,10 +466,29 @@ export function chinaRateStatusText(
   return 'курс не задан — внесите оплату или впишите курс ₽/¥ в партии, до тех пор суммы в рублях не считаются';
 }
 
+/**
+ * Owner, 2026-09-25 (live check): rubles are read at a glance, kopecks only add noise — every
+ * ruble figure in the China tab is shown rounded to a whole ruble, grouped by thousands
+ * («129 999», never «129 999,85»). Any other write of a ruble amount (payments, costs) is
+ * untouched — this is display only.
+ */
+export function chinaRubText(value: number): string {
+  return (Number(value) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 0 });
+}
+
+/**
+ * Owner, 2026-09-25 (live check): every non-ruble number in the China tab (¥, $, kg, m, density,
+ * kg/pcs, %) is rounded to hundredths with a trailing «,00» dropped («9,6» not «9,60», «17» not
+ * «17,00») — `toLocaleString` with no `minimumFractionDigits` does both the rounding and the
+ * trimming, and groups the integer part by thousands the same way `chinaRubText` does.
+ */
+export function chinaNumText(value: number): string {
+  return (Number(value) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+}
+
 export interface ChinaRemainingText { text: string; className: string; title: string }
 
-const rubText = (value: number): string =>
-  value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const rubText = chinaRubText;
 
 /**
  * Item 89: «рядом должно указываться сколько ещё рублей осталось доплатить» — the collapsed row

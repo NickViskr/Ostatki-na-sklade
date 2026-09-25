@@ -7587,6 +7587,8 @@ function byKeySuffix(rows, needle) {
 
 // Item 3: a draft matched to the bill by its code minus the trailing «-N» — order filled, stays
 // not arrived (the owner's live NV-0916 / NV-0916-24 case).
+// Item C (owner, 2026-09-25 live check): the SAME upload also renames the draft to the bill's own
+// full code and moves it to «В пути» — no arrival in the bill leaves it not-arrived either way.
 (function () {
   const h = withChina();
   h.saveChinaBatch({
@@ -7599,11 +7601,13 @@ function byKeySuffix(rows, needle) {
     receipts: [],
     freights: [{ code: 'NV-0916-24', orderNo: '29', amountUsd: 20, cargoRate: 7 }]
   }, 'Николай');
-  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-0916'; })[0];
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-0916-24'; })[0];
+  check('Item C: a draft matched by prefix takes the bill\'s own full code',
+    !!batch, JSON.stringify(h.getChinaBatches().batches.map(function (b) { return b.code; })));
   check('Item 3: a draft\'s code = the bill\'s code minus its trailing -N — order 29 filled',
     batch.orderNo === '29', JSON.stringify(batch.orderNo));
-  check('Item 3: no arrival in the bill — the draft stays not arrived',
-    batch.arrivedAt === '' && batch.status === 'Черновик',
+  check('Item C: no arrival in the bill, but the rename moves a Черновик on to «В пути»',
+    batch.arrivedAt === '' && batch.status === 'В пути',
     JSON.stringify({ arrivedAt: batch.arrivedAt, status: batch.status }));
 })();
 
@@ -7725,6 +7729,88 @@ function byKeySuffix(rows, needle) {
   const ownedWeight = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'Черновик', weightKg: 111 });
   check('Item B: a non-empty owner weight is never overwritten by the bill\'s own',
     ownedWeight.weightKg === 111, JSON.stringify(ownedWeight));
+})();
+
+// Item C (owner, 2026-09-25 live check): «почему поставка nv-0916 в статусе черновик и почему не
+// подтянулся её полный номер» — a Черновик's rename to its bill's own full code, pure unit checks.
+(function () {
+  const h = freshHarness();
+  const freights = [{ code: 'NV-0916-24', orderNo: '29', shippedAt: '2026-09-16' }];
+
+  const renamed = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'Черновик' }, []);
+  check('Item C: a Черновик takes the bill\'s own full code and moves to «В пути»',
+    renamed.code === 'NV-0916-24' && renamed.status === 'В пути' && renamed.shippedAt === '2026-09-16' &&
+    renamed.changed === true, JSON.stringify(renamed));
+
+  // Own shippedAt is only ARRIVAL-file data (receivedAt), same value under the wrong field — the
+  // bill's real shipping date still replaces it.
+  const wrongShipped = h.chinaFillOrderFromBill(freights,
+    { code: 'NV-0916', status: 'Черновик', shippedAt: '2026-09-15', receivedAt: '2026-09-15' }, []);
+  check('Item C: shippedAt that is really the arrival-file date is replaced by the bill\'s own',
+    wrongShipped.shippedAt === '2026-09-16', JSON.stringify(wrongShipped));
+
+  // A real, typed shipping date is never touched.
+  const realShipped = h.chinaFillOrderFromBill(freights,
+    { code: 'NV-0916', status: 'Черновик', shippedAt: '2026-09-14', receivedAt: '2026-09-15' }, []);
+  check('Item C: a shippedAt that differs from receivedAt is the batch\'s own — kept as is',
+    realShipped.shippedAt === '2026-09-14', JSON.stringify(realShipped));
+
+  // Another batch already carries the bill's exact code: the rename is refused, the status stays
+  // «Черновик» — `chinaWithPaymentRate`'s own collision re-check is what reports it, not this fill.
+  const clashed = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'Черновик' }, ['NV-0916-24']);
+  check('Item C: the rename is refused when another batch already carries the bill\'s code',
+    clashed.code === 'NV-0916' && clashed.status === 'Черновик', JSON.stringify(clashed));
+
+  // A batch that is NOT a draft keeps its own code — the rename rule is a Черновик-only thing.
+  const notDraft = h.chinaFillOrderFromBill(freights, { code: 'NV-0916', status: 'В пути' }, []);
+  check('Item C: a non-draft batch is never renamed even when a fuller bill code matches',
+    notDraft.code === 'NV-0916' && notDraft.status === 'В пути', JSON.stringify(notDraft));
+})();
+
+// Item C: end to end — saveChinaBatch (a draft) then saveChinaReport (its bill) renames the draft
+// and syncs «Заказы на фабрике» under the new code, keyed by the SAME batch id.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    code: 'NV-0916', status: 'Черновик',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: 'ART-1' }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'NV-0916-24', orderNo: '29', shippedAt: '2026-09-16', amountUsd: 20, cargoRate: 7 }]
+  }, 'Николай');
+  const batches = h.getChinaBatches().batches;
+  check('Item C: saveChinaReport renames the draft to the bill\'s own full code, «В пути»',
+    batches.length === 1 && batches[0].code === 'NV-0916-24' && batches[0].status === 'В пути',
+    JSON.stringify(batches.map(function (b) { return { code: b.code, status: b.status }; })));
+  const factoryRow = byKeySuffix(h.dumpFactoryOrders(), ':ART-1')[0];
+  check('Item C: «Заказы на фабрике» shows the batch\'s NEW code, keyed by the same batch id',
+    !!factoryRow && factoryRow['Партия Китай'] === 'NV-0916-24', JSON.stringify(factoryRow));
+})();
+
+// Item C: two drafts that would both take the SAME bill code — the second's rename is refused,
+// with a note in its own «Чего не хватает», never a silent clash of two batches under one code.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    code: 'NV-0916', status: 'Черновик',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }]
+  }, 'Николай');
+  h.saveChinaBatch({
+    code: 'NV-0916-24', status: 'Черновик',
+    lines: [{ marking: 'M2', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт', orders: [], receipts: [],
+    freights: [{ code: 'NV-0916-24', orderNo: '29', amountUsd: 20, cargoRate: 7 }]
+  }, 'Николай');
+  const batches = h.getChinaBatches().batches;
+  const stillDraft = batches.filter(function (b) { return b.code === 'NV-0916'; })[0];
+  check('Item C: the exact-code batch keeps NV-0916-24, the prefix-matched draft is not renamed',
+    !!stillDraft && stillDraft.status === 'Черновик', JSON.stringify(batches.map(function (b) { return b.code; })));
+  check('Item C: the refused rename is explained in «Чего не хватает»',
+    stillDraft.missing.indexOf('накладная NV-0916-24 уже присвоена другой партии — код черновика не изменён') !== -1,
+    JSON.stringify(stillDraft.missing));
 })();
 
 // Item B: an ambiguous prefix (two bills, e.g. NV-0916-2 and NV-0916-3) gets its own message in

@@ -131,7 +131,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     toast.success('Таблица «Заказы в Китае» настроена');
-    await get().fetchChinaBatches();
+    void get().fetchChinaBatches().catch(() => {});
     return true;
   },
 
@@ -146,10 +146,14 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     set({ batches: result.data.batches || [], payments: result.data.payments || get().payments,
       settings: result.data.settings || get().settings, loaded: true, error: '' });
     toast.success('Партия сохранена, себестоимость пересчитана');
-    await get().fetchChinaMoney();
-    // Item 83c: the batch save may have changed «Заказы на фабрике» (syncChinaFactoryOrders
-    // on the server) — refresh the warehouse's own copy so the pipeline sees it right away.
-    await useWarehouseStore.getState().fetchFactoryOrders();
+    // Item 84: refreshes run in the background, not awaited — the owner watches the modal
+    // close right after the save answers, not after two more requests (~10 s together).
+    void Promise.all([
+      get().fetchChinaMoney(),
+      // Item 83c: the batch save may have changed «Заказы на фабрике» (syncChinaFactoryOrders
+      // on the server) — refresh the warehouse's own copy so the pipeline sees it right away.
+      useWarehouseStore.getState().fetchFactoryOrders()
+    ]).catch(() => {});
     return true;
   },
 
@@ -163,7 +167,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
     toast.success('Оплата учтена, курс партий пересчитан');
-    await get().fetchChinaMoney();
+    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -177,7 +181,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], payments: result.data.payments || [], loaded: true, error: '' });
     toast.success('Оплата удалена, курс партий пересчитан');
-    await get().fetchChinaMoney();
+    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -191,9 +195,12 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
     toast.success('Партия удалена');
-    await get().fetchChinaMoney();
-    // Item 83c: same reasoning as saveChinaBatch above.
-    await useWarehouseStore.getState().fetchFactoryOrders();
+    // Item 84: same reasoning as saveChinaBatch above — do not make the caller wait.
+    void Promise.all([
+      get().fetchChinaMoney(),
+      // Item 83c: same reasoning as saveChinaBatch above.
+      useWarehouseStore.getState().fetchFactoryOrders()
+    ]).catch(() => {});
     return true;
   },
 
@@ -207,7 +214,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
     toast.success('Расход учтён в себестоимости партии');
-    await get().fetchChinaMoney();
+    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -221,7 +228,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || [], loaded: true, error: '' });
     toast.success('Расход удалён, себестоимость пересчитана');
-    await get().fetchChinaMoney();
+    void get().fetchChinaMoney().catch(() => {});
     return true;
   },
 
@@ -238,7 +245,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ batches: result.data.batches || get().batches, loaded: true, error: '' });
     toast.success('Отчёт загружен, партии пересчитаны');
-    await get().fetchChinaMoney();
+    void get().fetchChinaMoney().catch(() => {});
     return result.data.warnings || [];
   },
 
@@ -251,8 +258,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     toast.success('Оплата сопоставлена с поступлением из отчёта');
-    await get().fetchChinaMoney();
-    await get().fetchChinaBatches();
+    void Promise.all([get().fetchChinaMoney(), get().fetchChinaBatches()]).catch(() => {});
     return true;
   },
 
@@ -265,8 +271,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     toast.success('Сопоставление отменено');
-    await get().fetchChinaMoney();
-    await get().fetchChinaBatches();
+    void Promise.all([get().fetchChinaMoney(), get().fetchChinaBatches()]).catch(() => {});
     return true;
   },
 
@@ -279,8 +284,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
       return false;
     }
     toast.success(history ? 'Поступление отмечено историей' : 'Поступление возвращено из истории');
-    await get().fetchChinaMoney();
-    await get().fetchChinaBatches();
+    void Promise.all([get().fetchChinaMoney(), get().fetchChinaBatches()]).catch(() => {});
     return true;
   },
 
@@ -327,7 +331,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     toast.success('Прогноз сохранён');
     // Item 83c: a forecast with an order number and expectedShipAt may add/remove rows of
     // «Заказы на фабрике» (syncChinaFactoryOrders on the server).
-    await useWarehouseStore.getState().fetchFactoryOrders();
+    void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
     return true;
   },
 
@@ -341,7 +345,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     set({ forecastData: result.data as ChinaForecastData });
     toast.success('Прогноз удалён');
-    await useWarehouseStore.getState().fetchFactoryOrders();
+    void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
     return true;
   },
 
@@ -357,7 +361,7 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     }
     const data = result.data as unknown as { summary: { added: number; updated: number; removed: number }; before: Record<string, number>; after: Record<string, number> };
     toast.success(`Заказы на фабрике синхронизированы: добавлено ${data.summary.added}, обновлено ${data.summary.updated}, удалено ${data.summary.removed}`);
-    await useWarehouseStore.getState().fetchFactoryOrders();
+    void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
     return { ...data.summary, before: data.before, after: data.after };
   }
 }));

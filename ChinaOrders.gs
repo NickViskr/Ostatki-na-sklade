@@ -1223,8 +1223,15 @@ function saveChinaBatch(data, username) {
   // arrival, once the bill states one) is filled from the newest report's own carrier bill —
   // before the batch is costed, so goods that arrived under an order the owner never typed in
   // by hand are costed from that order's real money instead of staying on «последняя оплата».
-  const fill = chinaFillOrderFromBill(chinaNewestReportFreights(ss), batch);
+  // Item C: the same fill also renames a 'Черновик' to its bill's full code — `otherCodes` is
+  // every OTHER batch's own code, so the rename can be refused when one is already taken.
+  const otherCodes = batchCtx.rows
+    .filter(function (r) { return String(r['ID']).trim() !== batchId; })
+    .map(function (r) { return String(r['Код партии'] || '').trim(); });
+  const fill = chinaFillOrderFromBill(chinaNewestReportFreights(ss), batch, otherCodes);
   batch.orderNo = fill.orderNo;
+  batch.code = fill.code;
+  batch.shippedAt = fill.shippedAt;
   batch.arrivedAt = fill.arrivedAt;
   batch.status = fill.status;
   batch.ratePerKgUsd = fill.ratePerKgUsd;
@@ -1467,12 +1474,28 @@ function chinaMatchReportBill(freights, batch) {
  * (chinaTariffFromFreight's own basis rule) leaves the $/кг rate empty on purpose — that rate is
  * meaningless for this bill's basis — and fills only the bill's total «Перевозка $».
  *
- * Pure — returns a plain `{orderNo, arrivedAt, status, ratePerKgUsd, freightUsd, weightKg,
- * volumeM3, changed}`, never touches a sheet.
+ * Item C (owner, 2026-09-25 live check): «почему поставка nv-0916 в статусе черновик и почему не
+ * подтянулся её полный номер» — a 'Черновик' left behind by an arrival file (its code is the
+ * receiving-date draft name, e.g. 'NV-0916') keeps that short code and 'Черновик' forever once
+ * the newest report brings its real carrier bill, UNLESS this fill also takes the bill's own full
+ * code (e.g. 'NV-0916-24') and moves the status on — `chinaMatchReportBill` only returns a bill
+ * when the prefix match is UNIQUE, so the rename is never a guess between several candidates.
+ * `otherCodes` is the caller's own list of every OTHER batch's code (never this one's); the rename
+ * is refused, not forced, when one of them already carries the bill's exact code — the caller
+ * (`chinaWithPaymentRate`, independently) is what turns that refusal into a «Чего не хватает» note.
+ * The shipping date is filled from the bill too, but only when the batch has none of its own yet
+ * or carries just the arrival-file date (`receivedAt`) where `shippedAt` should be — a real
+ * shipping date typed or read off a batch file is never touched.
+ *
+ * Pure — returns a plain `{orderNo, code, shippedAt, arrivedAt, status, ratePerKgUsd, freightUsd,
+ * weightKg, volumeM3, changed}`, never touches a sheet.
  */
-function chinaFillOrderFromBill(freights, batch) {
+function chinaFillOrderFromBill(freights, batch, otherCodes) {
   const b = batch || {};
   const ownOrderNo = String(b.orderNo || '').trim();
+  const ownCode = String(b.code || '').trim();
+  const ownShippedAt = String(b.shippedAt || '').trim();
+  const ownReceivedAt = String(b.receivedAt || '').trim();
   const ownArrivedAt = String(b.arrivedAt || '').trim();
   const ownStatus = String(b.status || '').trim();
   const ownRate = Number(b.ratePerKgUsd) || 0;
@@ -1480,7 +1503,7 @@ function chinaFillOrderFromBill(freights, batch) {
   const ownWeightKg = Number(b.weightKg) || 0;
   const ownVolumeM3 = Number(b.volumeM3) || 0;
   const out = {
-    orderNo: ownOrderNo, arrivedAt: ownArrivedAt, status: ownStatus,
+    orderNo: ownOrderNo, code: ownCode, shippedAt: ownShippedAt, arrivedAt: ownArrivedAt, status: ownStatus,
     ratePerKgUsd: ownRate, freightUsd: ownFreightUsd, weightKg: ownWeightKg, volumeM3: ownVolumeM3,
     changed: false
   };
@@ -1497,6 +1520,23 @@ function chinaFillOrderFromBill(freights, batch) {
     out.status = 'Прибыла';
   }
 
+  const billCode = String(bill.code || '').trim();
+  if (ownStatus === 'Черновик' && billCode && billCode.toLowerCase() !== ownCode.toLowerCase()) {
+    const taken = (otherCodes || []).some(function (c) {
+      return String(c || '').trim().toLowerCase() === billCode.toLowerCase();
+    });
+    if (!taken) {
+      out.code = billCode;
+      if (!ownShippedAt || ownShippedAt === ownReceivedAt) {
+        const billShippedAt = String(bill.shippedAt || '').trim();
+        if (billShippedAt) out.shippedAt = billShippedAt;
+      }
+      // The arrival branch above may already have promoted it to 'Прибыла' — only a status that
+      // is STILL 'Черновик' moves to 'В пути' here.
+      if (out.status === ownStatus) out.status = 'В пути';
+    }
+  }
+
   const billUsd = Number(bill.amountUsd) || 0;
   if (!(ownFreightUsd > 0) && billUsd > 0) out.freightUsd = billUsd;
 
@@ -1510,7 +1550,8 @@ function chinaFillOrderFromBill(freights, batch) {
   const billVolume = Number(bill.volumeM3) || 0;
   if (!(ownVolumeM3 > 0) && billVolume > 0) out.volumeM3 = billVolume;
 
-  out.changed = out.orderNo !== ownOrderNo || out.arrivedAt !== ownArrivedAt || out.status !== ownStatus ||
+  out.changed = out.orderNo !== ownOrderNo || out.code !== ownCode || out.shippedAt !== ownShippedAt ||
+    out.arrivedAt !== ownArrivedAt || out.status !== ownStatus ||
     out.ratePerKgUsd !== ownRate || out.freightUsd !== ownFreightUsd ||
     out.weightKg !== ownWeightKg || out.volumeM3 !== ownVolumeM3;
   return out;
@@ -1524,7 +1565,9 @@ function chinaFillOrderFromBill(freights, batch) {
  */
 function chinaFillBatchesFromReport(ss, freights, username) {
   const ctx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
+  const codeCol = ctx.headers.indexOf('Код партии') + 1;
   const orderCol = ctx.headers.indexOf('Номер заказа') + 1;
+  const shippedCol = ctx.headers.indexOf('Дата отгрузки') + 1;
   const arrivedCol = ctx.headers.indexOf('Дата прибытия') + 1;
   const statusCol = ctx.headers.indexOf('Статус') + 1;
   // Item B: the same freight-field fill saveChinaBatch already runs on a plain save, applied
@@ -1534,11 +1577,22 @@ function chinaFillBatchesFromReport(ss, freights, username) {
   const weightCol = ctx.headers.indexOf('Вес накладной, кг') + 1;
   const volumeCol = ctx.headers.indexOf('Объём, м³') + 1;
   const updatedCol = ctx.headers.indexOf('Обновлено') + 1;
+  // Item C: every OTHER row's code, so a draft's rename can be refused when one of them already
+  // carries the bill's exact code — recomputed per row (a rename earlier in this same loop must
+  // count too, not just the codes the sheet started this pass with).
   ctx.rows.forEach(function (r) {
     const batch = chinaBatchFromRow(r);
-    const fill = chinaFillOrderFromBill(freights, batch);
+    const otherCodes = ctx.rows
+      .filter(function (row) { return row.__row !== r.__row; })
+      .map(function (row) { return String(row['Код партии'] || '').trim(); });
+    const fill = chinaFillOrderFromBill(freights, batch, otherCodes);
     if (!fill.changed) return;
+    if (fill.code !== batch.code) {
+      ctx.sheet.getRange(r.__row, codeCol, 1, 1).setValues([[fill.code]]);
+      r['Код партии'] = fill.code; // keeps `otherCodes` of the rows still to come in step
+    }
     if (fill.orderNo !== batch.orderNo) ctx.sheet.getRange(r.__row, orderCol, 1, 1).setValues([[fill.orderNo]]);
+    if (fill.shippedAt !== batch.shippedAt) ctx.sheet.getRange(r.__row, shippedCol, 1, 1).setValues([[fill.shippedAt]]);
     if (fill.arrivedAt !== batch.arrivedAt) ctx.sheet.getRange(r.__row, arrivedCol, 1, 1).setValues([[fill.arrivedAt]]);
     if (fill.status !== batch.status) ctx.sheet.getRange(r.__row, statusCol, 1, 1).setValues([[fill.status]]);
     if (fill.ratePerKgUsd !== batch.ratePerKgUsd) ctx.sheet.getRange(r.__row, rateCol, 1, 1).setValues([[fill.ratePerKgUsd]]);
@@ -1547,6 +1601,7 @@ function chinaFillBatchesFromReport(ss, freights, username) {
     if (fill.volumeM3 !== batch.volumeM3) ctx.sheet.getRange(r.__row, volumeCol, 1, 1).setValues([[fill.volumeM3]]);
     ctx.sheet.getRange(r.__row, updatedCol, 1, 1).setValues([[chinaStamp()]]);
     Logger.log('Заказы в Китае: партия ' + batch.id + ' дополнена из отчёта — ' +
+      (fill.code !== batch.code ? 'код «' + fill.code + '» ' : '') +
       (fill.orderNo !== batch.orderNo ? 'заказ №' + fill.orderNo + ' ' : '') +
       (fill.status !== batch.status ? 'статус «' + fill.status + '»' : ''));
   });
@@ -1680,6 +1735,18 @@ function chinaWithPaymentRate(ss, batch) {
 
   const billMatch = chinaBillMatch(ledger, batch.code);
   const bill = billMatch.bill;
+  // Item C (owner, 2026-09-25 live check): a 'Черновик' whose bill names a DIFFERENT, already
+  // taken code — chinaFillOrderFromBill refused that rename — is reported here, the same way
+  // `billAmbiguousCount` below already reports an unresolved prefix match; recomputed fresh on
+  // every recalc (chinaFillOrderFromBill's own refusal at save/report time is not stored anywhere).
+  out.billCodeTaken = '';
+  if (String(batch.status || '') === 'Черновик' && bill && bill.code &&
+    String(bill.code).trim().toLowerCase() !== String(batch.code || '').trim().toLowerCase()) {
+    const taken = others.some(function (o) {
+      return String(o.code || '').trim().toLowerCase() === String(bill.code).trim().toLowerCase();
+    });
+    if (taken) out.billCodeTaken = String(bill.code).trim();
+  }
   if (bill && bill.knownCny > 0.004) {
     out.freightRate = bill.knownRate;
     out.freightRateSource = 'оплаты';
@@ -1839,6 +1906,9 @@ function chinaMissingListOf(rated, calc) {
   if (rated.history) return [];
   const missing = [];
   if (String(rated.status || '') !== 'Прибыла') missing.push('статус не «Прибыла»');
+  // Item C: a draft whose bill's rename was refused — another batch already carries that exact
+  // code (`chinaWithPaymentRate`'s own re-check of the collision chinaFillOrderFromBill refused).
+  if (rated.billCodeTaken) missing.push('накладная ' + rated.billCodeTaken + ' уже присвоена другой партии — код черновика не изменён');
   const hasWeight = Number(rated.weightKg) > 0;
   const hasFreight = Number(rated.freightUsd) > 0 || (Number(rated.ratePerKgUsd) > 0 && hasWeight);
   if (!hasWeight || !hasFreight) missing.push('не загружен файл партии (нет веса или перевозки)');

@@ -9,7 +9,7 @@ import {
   chinaCheckMark,
   chinaTariffRateUnit,
   chinaGroupThousands, chinaRemainingText, chinaEtaText, chinaCmToM, chinaMToCm,
-  chinaDefaultCostRows, chinaCostRowsOf, chinaCostRowsPayload
+  chinaDefaultCostRows, chinaCostRowsOf, chinaCostRowsPayload, chinaRubText, chinaNumText
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
@@ -1165,7 +1165,8 @@ describe('item 89: what is still owed on a batch, shown beside its cost', () => 
 
   it('a ruble debt, with the ¥/$ breakdown in the tooltip', () => {
     const result = chinaRemainingText({ remainingRub: 123456.78, remainingGoodsCny: 8000, remainingFreightUsd: 500 });
-    expect(result!.text).toBe('осталось доплатить 123 456,78 ₽');
+    // Owner, 2026-09-25: rubles show no kopecks — 123456.78 reads as the whole ruble it rounds to.
+    expect(result!.text).toBe('осталось доплатить 123 457 ₽');
     expect(result!.title).toBe('товар 8000 ¥, перевозка 500 $');
     expect(result!.className).toBe('');
   });
@@ -1291,5 +1292,36 @@ describe('item 89: the estimated arrival date of a batch', () => {
   it('a valid month but a day no month has is refused too', () => {
     const batch = { code: 'NV-0140-1', shippedAt: '', arrivedAt: '', receivedAt: '' };
     expect(chinaEtaText(batch, 30, TODAY)).toEqual({ text: '', className: '' });
+  });
+});
+
+// Owner, 2026-09-25 (live check): rubles with no kopecks, every other number to hundredths with
+// a trailing «,00» dropped — the two display-only formatters `money`/`moneyWithRub` of
+// `ChinaOrdersTab.tsx` build on.
+describe('chinaRubText: rubles, no kopecks', () => {
+  it('rounds to a whole ruble and groups thousands with a non-breaking space', () => {
+    expect(chinaRubText(129999.85)).toBe('130\u00a0000');
+  });
+
+  it('rounds a small remainder up rather than truncating it away', () => {
+    expect(chinaRubText(104027.58)).toBe('104\u00a0028');
+  });
+
+  it('a missing value reads as zero, not NaN', () => {
+    expect(chinaRubText(undefined as unknown as number)).toBe('0');
+  });
+});
+
+describe('chinaNumText: ¥/$/kg/m/density/%, hundredths with the trailing zero dropped', () => {
+  it('rounds a long division to hundredths', () => {
+    expect(chinaNumText(9.600198412698413)).toBe('9,6');
+  });
+
+  it('drops a trailing ",00" a whole number would otherwise carry', () => {
+    expect(chinaNumText(17)).toBe('17');
+  });
+
+  it('groups thousands the same way rubles do', () => {
+    expect(chinaNumText(9677)).toBe('9\u00a0677');
   });
 });

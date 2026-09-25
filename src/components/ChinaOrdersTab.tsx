@@ -14,8 +14,8 @@ import {
   CHINA_COST_TYPES, ChinaBatchForm, ChinaCostRow, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark,
   chinaCostRowsOf, chinaCostRowsPayload, chinaEtaText, chinaFormFromArrival, chinaFormFromFiles,
   chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes, chinaMarkingMatches, chinaMatchArrivalBatch,
-  chinaMatchFinalBatch, chinaRateSourceLabel, chinaRateStatusText, chinaRemainingText, chinaShowWeightFactor,
-  chinaTariffRateUnit
+  chinaMatchFinalBatch, chinaNumText, chinaRateSourceLabel, chinaRateStatusText, chinaRemainingText, chinaRubText,
+  chinaShowWeightFactor, chinaTariffRateUnit
 } from '../lib/chinaBatchForm';
 import {
   ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, ChinaSheets, chinaReportPayload,
@@ -28,12 +28,19 @@ import {
   chinaAiNotice, chinaAiParse, chinaAiPassed, chinaAiRead
 } from '../lib/chinaAiRead';
 
-const money = (value: number, currency: string): string =>
-  `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+/** Owner, 2026-09-25: rubles show no kopecks, every other number (¥, $, kg, m, %...) rounds to
+ * hundredths with a trailing «,00» dropped — `chinaRubText`/`chinaNumText` do the rounding. */
+const money = (value: number, currency: string): string => {
+  const text = currency === '₽' ? chinaRubText(value) : chinaNumText(value);
+  return currency ? `${text} ${currency}` : text;
+};
 
 /** Item 81f: «после стоимости в валюте указывай стоимость в рублях в скобках» — the rubles are
  * the script's own figure, never computed here; when it is 0 or missing only the currency
- * amount is shown, so old data without it renders exactly as before. */
+ * amount is shown, so old data without it renders exactly as before.
+ * Item 84 (owner, 2026-09-25): `money`'s own grouping uses a non-breaking space between digit
+ * groups (`toLocaleString('ru-RU')`), so a number never wraps mid-figure; the plain space before
+ * «(₽ ...)» stays the only place the line may break. */
 const moneyWithRub = (value: number, currency: string, rub?: number): string =>
   rub ? `${money(value, currency)} (${money(rub, '₽')})` : money(value, currency);
 
@@ -630,23 +637,23 @@ export const ChinaOrdersTab: React.FC = () => {
                   )}
 
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full text-sm tabular-nums">
                       <thead>
                         <tr className="text-[11px] uppercase text-slate-400 text-left border-b border-slate-100">
                           <th className="py-2 pr-3">Маркировка</th>
                           <th className="py-2 pr-3">Коробок</th>
                           <th className="py-2 pr-3">Кол-во</th>
-                          <th className="py-2 pr-3">Цена ¥</th>
-                          <th className="py-2 pr-3">Сумма ¥</th>
-                          <th className="py-2 pr-3">Вес, кг</th>
-                          {hasBoxData && <th className="py-2 pr-3">Коробка Д×Ш×В, м</th>}
-                          {hasBoxData && <th className="py-2 pr-3">Кг/коробка</th>}
-                          {hasBoxData && <th className="py-2 pr-3">Кг/шт</th>}
-                          {hasBoxData && <th className="py-2 pr-3">Плотность</th>}
-                          <th className="py-2 pr-3">Перевозка</th>
-                          <th className="py-2 pr-3">Расходы РФ ₽</th>
-                          <th className="py-2 pr-3">Себестоимость ₽</th>
-                          <th className="py-2 pr-3">₽ за штуку</th>
+                          <th className="py-2 pr-3 whitespace-nowrap">Цена ¥</th>
+                          <th className="py-2 pr-3 whitespace-nowrap">Сумма ¥</th>
+                          <th className="py-2 pr-3 whitespace-nowrap">Вес, кг</th>
+                          {hasBoxData && <th className="py-2 pr-3 whitespace-nowrap">Коробка Д×Ш×В, м</th>}
+                          {hasBoxData && <th className="py-2 pr-3 whitespace-nowrap">Кг/коробка</th>}
+                          {hasBoxData && <th className="py-2 pr-3 whitespace-nowrap">Кг/шт</th>}
+                          {hasBoxData && <th className="py-2 pr-3 whitespace-nowrap">Плотность</th>}
+                          <th className="py-2 pr-3 whitespace-nowrap">Перевозка</th>
+                          <th className="py-2 pr-3 whitespace-nowrap">Расходы РФ ₽</th>
+                          <th className="py-2 pr-3 whitespace-nowrap">Себестоимость ₽</th>
+                          <th className="py-2 pr-3 whitespace-nowrap">₽ за штуку</th>
                           <th className="py-2 pr-3">Наш артикул</th>
                           <th className="py-2 pr-3">Один товар</th>
                         </tr>
@@ -663,26 +670,26 @@ export const ChinaOrdersTab: React.FC = () => {
                               </td>
                               <td className="py-2 pr-3">{line.boxes}</td>
                               <td className="py-2 pr-3">{line.qty}</td>
-                              <td className="py-2 pr-3">{line.priceCny}</td>
+                              <td className="py-2 pr-3 whitespace-nowrap">{chinaNumText(line.priceCny)}</td>
                               <td className="py-2 pr-3">{moneyWithRub(line.sumCny, '¥', line.goodsRub)}</td>
-                              <td className="py-2 pr-3">
-                                {line.weightKg}
+                              <td className="py-2 pr-3 whitespace-nowrap">
+                                {chinaNumText(line.weightKg)}
                                 <span className="block text-[10px] text-slate-400">{line.weightSource}</span>
                               </td>
                               {hasBoxData && (
-                                <td className="py-2 pr-3">
-                                  {line.boxLengthM > 0 ? `${line.boxLengthM}×${line.boxWidthM}×${line.boxHeightM}` : '—'}
+                                <td className="py-2 pr-3 whitespace-nowrap">
+                                  {line.boxLengthM > 0 ? `${chinaNumText(line.boxLengthM)}×${chinaNumText(line.boxWidthM)}×${chinaNumText(line.boxHeightM)}` : '—'}
                                 </td>
                               )}
-                              {hasBoxData && <td className="py-2 pr-3">{line.factoryBoxKg || '—'}</td>}
-                              {hasBoxData && <td className="py-2 pr-3">{line.kgPerPiece || '—'}</td>}
-                              {hasBoxData && <td className="py-2 pr-3">{line.densityKgM3 ? money(line.densityKgM3, '') : '—'}</td>}
-                              <td className="py-2 pr-3">
+                              {hasBoxData && <td className="py-2 pr-3 whitespace-nowrap">{line.factoryBoxKg ? chinaNumText(line.factoryBoxKg) : '—'}</td>}
+                              {hasBoxData && <td className="py-2 pr-3 whitespace-nowrap">{line.kgPerPiece ? chinaNumText(line.kgPerPiece) : '—'}</td>}
+                              {hasBoxData && <td className="py-2 pr-3 whitespace-nowrap">{line.densityKgM3 ? money(line.densityKgM3, '') : '—'}</td>}
+                              <td className="py-2 pr-3 whitespace-nowrap">
                                 {line.freightShareRub ? money(line.freightShareRub, '₽') : money(line.freightShareCny, '¥')}
                               </td>
-                              <td className="py-2 pr-3">{money(line.rubShare, '₽')}</td>
-                              <td className="py-2 pr-3">{money(line.costRub, '₽')}</td>
-                              <td className="py-2 pr-3 font-bold">{money(line.unitRub, '₽')}</td>
+                              <td className="py-2 pr-3 whitespace-nowrap">{money(line.rubShare, '₽')}</td>
+                              <td className="py-2 pr-3 whitespace-nowrap">{money(line.costRub, '₽')}</td>
+                              <td className="py-2 pr-3 font-bold whitespace-nowrap">{money(line.unitRub, '₽')}</td>
                               <td className="py-2 pr-3">
                                 <select
                                   className="px-2 py-1 border border-slate-200 rounded text-sm min-w-[220px]"
