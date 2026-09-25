@@ -1781,6 +1781,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       <span className="block text-[10px] font-semibold text-rose-400">
                                         {fmtInt(art.factory.orderBoxes)} кор · {factoryWaitingQty > 0 ? `уже заказано ${fmtInt(factoryWaitingQty)} шт` : `хватит на ${Math.round(art.factory.daysLeft)} дн.`}
                                       </span>
+                                      {/* Owner, 2026-09-25: an order that does not cover the whole need was invisible
+                                          here — show every waiting order with its China batch and arrival. */}
+                                      {factoryWaitingList.map((o) => (
+                                        <span key={o.id} className="block text-[10px] font-semibold text-sky-600">
+                                          заказ {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(factoryPipeline.late[o.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[o.id])}` : ''}
+                                        </span>
+                                      ))}
                                     </button>
                                   ) : factoryClusterOnly ? (
                                     factoryWaitingQty > 0 ? (
@@ -2102,6 +2109,39 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                 </div>
               </div>
             )}
+
+            {(() => {
+              // Owner, 2026-09-25: goods ordered in China that are not on Ozon yet (they go there
+              // after arriving at the warehouse) have no row above — list their orders here so an
+              // order never disappears from sight. Components have their own table below.
+              const shown = new Set<string>([
+                ...(coverageRows as any[]).map((r) => String(r.article)),
+                ...(componentRows as any[]).map((c) => String(c.component)),
+              ]);
+              const liveOrders = (a: string) => factoryOrdersByArticle[a].filter((o) => String(o.status || '').trim() !== 'replaced');
+              const offOzon = Object.keys(factoryOrdersByArticle).filter((a) => !shown.has(a) && liveOrders(a).length > 0).sort();
+              if (offOzon.length === 0) return null;
+              return (
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-offozon-factory">
+                  <div className="text-xs font-bold text-slate-700 mb-1">
+                    Заказано на фабрике — товары, которых пока нет на Ozon
+                    <span className="font-normal text-slate-400 ml-2">артикулов: {offOzon.length}</span>
+                  </div>
+                  <div className="flex flex-col gap-1 text-[11px]">
+                    {offOzon.map((a) => (
+                      <div key={a} className="flex flex-wrap items-baseline gap-x-3">
+                        <span className="font-mono font-bold text-slate-800">{a}</span>
+                        {liveOrders(a).map((o) => (
+                          <span key={o.id} className="text-sky-700">
+                            {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(factoryPipeline.late[o.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[o.id])}` : ''}
+                          </span>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
 
             {componentRows.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-components-factory">
