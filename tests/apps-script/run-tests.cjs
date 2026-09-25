@@ -3903,7 +3903,7 @@ function batch27() {
 
 (function () {
   const h = freshHarness();
-  const ID = '1z3Krw0pNmqXAFs8ZVBbhN7XFPJiPtC8QNofZ4rABCDA';
+  const ID = '1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE'; // a made-up id: the repository is public
   check('81a: a bare id is taken as it is', h.chinaIdFromSetting(ID) === ID, h.chinaIdFromSetting(ID));
   check('81a: the id is pulled out of a full link',
     h.chinaIdFromSetting('https://docs.google.com/spreadsheets/d/' + ID + '/edit?gid=0#gid=0') === ID,
