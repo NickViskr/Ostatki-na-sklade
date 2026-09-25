@@ -7,7 +7,7 @@
  * one product — by exactly the rule `chinaGroupKey` uses in `ChinaOrders.gs`.
  */
 
-import { ChinaBatch, ChinaBatchLine } from '../types';
+import { ChinaBatch, ChinaBatchCost, ChinaBatchLine } from '../types';
 import { ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, chinaFreightOf, chinaOrderOf } from './chinaFileParse';
 
 export interface ChinaLineForm {
@@ -81,6 +81,50 @@ export interface ChinaBatchForm {
 
 export const CHINA_STATUSES = ['Черновик', 'В пути', 'Прибыла'];
 export const CHINA_COST_TYPES = ['Разгрузка', 'Доставка до склада', 'Прочее'];
+
+/**
+ * Owner, 2026-09-25: «поставка пересчитывается каждый раз когда я нажимаю "Добавить расход"» —
+ * the Russian-side cost block is now a local editable list, sent whole with
+ * «Сохранить артикулы и пересчитать» (`saveChinaBatch`'s own `costs` field) instead of one
+ * `saveChinaBatchCost` round trip per row. `id` is '' for a row the browser has not saved yet.
+ */
+export interface ChinaCostRow {
+  id: string;
+  type: string;
+  amountRub: string;
+  comment: string;
+}
+
+/** The two rows the block starts with when the batch has no Russian-side costs of its own yet —
+ * the owner's own habitual pair, empty until he types an amount into one. */
+export function chinaDefaultCostRows(): ChinaCostRow[] {
+  return [
+    { id: '', type: 'Разгрузка', amountRub: '', comment: '' },
+    { id: '', type: 'Доставка до склада', amountRub: '', comment: '' }
+  ];
+}
+
+/** The batch's own saved costs, as editable rows — or the two defaults when it has none. */
+export function chinaCostRowsOf(costs: ChinaBatchCost[]): ChinaCostRow[] {
+  if (costs.length === 0) return chinaDefaultCostRows();
+  return costs.map((c) => ({
+    id: c.id,
+    type: c.kind,
+    amountRub: c.amountRub ? String(c.amountRub) : '',
+    comment: c.comment
+  }));
+}
+
+/** The `costs` field of `saveChinaBatch`'s payload — plain numbers, the script itself drops a
+ * row whose amount is empty or 0 (an unfinished row the owner never typed into). */
+export function chinaCostRowsPayload(rows: ChinaCostRow[]): Record<string, unknown>[] {
+  return rows.map((r) => ({
+    ...(r.id ? { id: r.id } : {}),
+    type: r.type,
+    amountRub: chinaNumber(r.amountRub),
+    comment: r.comment.trim()
+  }));
+}
 
 /** A number typed by a person: a comma for the decimal point, spaces inside, empty for zero. */
 export function chinaNumber(value: string | number): number {
@@ -435,13 +479,28 @@ const rubText = (value: number): string =>
  * settled batch by the ¥/$ figures the script always sends alongside it.
  * `null` when the batch predates this item and carries no `remainingRub` at all — the caller then
  * shows nothing extra, exactly as before.
+ *
+ * Owner, 2026-09-25 (live check): a batch with no order number (or an order the newest report
+ * never mentions) computed a `remainingRub` of exactly 0, same as a batch that is genuinely paid
+ * off — «оплачено полностью» showed up for NV-0916, which has nothing to check a payment
+ * against at all. `remainingGoodsKnown`/`remainingFreightKnown` (chinaRemainingOf, the script)
+ * say whether each side actually had something to compare; missing either one is reported
+ * BEFORE the amounts are even looked at.
  */
 export function chinaRemainingText(batch: {
   remainingRub?: number;
   remainingGoodsCny?: number;
   remainingFreightUsd?: number;
+  remainingGoodsKnown?: boolean;
+  remainingFreightKnown?: boolean;
 }): ChinaRemainingText | null {
   if (batch.remainingRub === undefined) return null;
+  if (batch.remainingGoodsKnown === false) {
+    return { text: 'нет номера заказа — не с чем сверить оплату', className: 'text-amber-600', title: '' };
+  }
+  if (batch.remainingFreightKnown === false) {
+    return { text: 'накладной нет в отчёте', className: 'text-amber-600', title: '' };
+  }
   const rub = batch.remainingRub;
   const goodsCny = batch.remainingGoodsCny || 0;
   const freightUsd = batch.remainingFreightUsd || 0;

@@ -8,7 +8,8 @@ import {
   chinaMarkingMatches, chinaRateSourceLabel, chinaRateStatusText, chinaShowWeightFactor, chinaFreightPerKgLabel,
   chinaCheckMark,
   chinaTariffRateUnit,
-  chinaGroupThousands, chinaRemainingText, chinaEtaText, chinaCmToM, chinaMToCm
+  chinaGroupThousands, chinaRemainingText, chinaEtaText, chinaCmToM, chinaMToCm,
+  chinaDefaultCostRows, chinaCostRowsOf, chinaCostRowsPayload
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
@@ -1178,6 +1179,63 @@ describe('item 89: what is still owed on a batch, shown beside its cost', () => 
   it('no rate yet, only the freight left unpaid', () => {
     const result = chinaRemainingText({ remainingRub: 0, remainingFreightUsd: 500 });
     expect(result!.text).toBe('осталось доплатить 500 $');
+  });
+
+  // Owner, 2026-09-25 (live check): NV-0916 has no order number at all — remainingRub reads 0
+  // the same as a genuinely settled batch, so «оплачено полностью» must never show up for it.
+  it('no order number at all — nothing to compare, not «оплачено полностью»', () => {
+    const result = chinaRemainingText({
+      remainingRub: 0, remainingGoodsCny: 0, remainingFreightUsd: 0, remainingGoodsKnown: false
+    });
+    expect(result).toEqual({ text: 'нет номера заказа — не с чем сверить оплату', className: 'text-amber-600', title: '' });
+  });
+
+  it('order known, but the code has no bill in the report — freight side unknown', () => {
+    const result = chinaRemainingText({
+      remainingRub: 0, remainingGoodsCny: 0, remainingFreightUsd: 0,
+      remainingGoodsKnown: true, remainingFreightKnown: false
+    });
+    expect(result).toEqual({ text: 'накладной нет в отчёте', className: 'text-amber-600', title: '' });
+  });
+
+  it('both sides known and genuinely settled — still «оплачено полностью»', () => {
+    const result = chinaRemainingText({
+      remainingRub: 0, remainingGoodsCny: 0, remainingFreightUsd: 0,
+      remainingGoodsKnown: true, remainingFreightKnown: true
+    });
+    expect(result).toEqual({ text: 'оплачено полностью', className: 'text-emerald-600', title: '' });
+  });
+});
+
+// Item 1 (owner, 2026-09-25): the Russian-side cost block's local editable list.
+describe('item 1: the Russian-side cost list, as editable rows', () => {
+  it('a batch with no costs yet starts with the two default rows', () => {
+    expect(chinaDefaultCostRows()).toEqual([
+      { id: '', type: 'Разгрузка', amountRub: '', comment: '' },
+      { id: '', type: 'Доставка до склада', amountRub: '', comment: '' }
+    ]);
+  });
+
+  it('chinaCostRowsOf falls back to the defaults when the batch has no saved costs', () => {
+    expect(chinaCostRowsOf([])).toEqual(chinaDefaultCostRows());
+  });
+
+  it('chinaCostRowsOf shows the batch\'s own saved costs as rows, not the defaults', () => {
+    const rows = chinaCostRowsOf([
+      { id: 'CC1', batchId: 'CB1', date: '2026-09-01', kind: 'Прочее', amountRub: 500, comment: 'такси', user: 'Николай' }
+    ]);
+    expect(rows).toEqual([{ id: 'CC1', type: 'Прочее', amountRub: '500', comment: 'такси' }]);
+  });
+
+  it('chinaCostRowsPayload turns typed text into numbers, keeping an existing id', () => {
+    const payload = chinaCostRowsPayload([
+      { id: 'CC1', type: 'Разгрузка', amountRub: '1 000,50', comment: ' выгрузка ' },
+      { id: '', type: 'Прочее', amountRub: '', comment: '' }
+    ]);
+    expect(payload).toEqual([
+      { id: 'CC1', type: 'Разгрузка', amountRub: 1000.5, comment: 'выгрузка' },
+      { type: 'Прочее', amountRub: 0, comment: '' }
+    ]);
   });
 });
 

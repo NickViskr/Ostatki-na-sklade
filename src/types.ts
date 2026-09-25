@@ -658,4 +658,10 @@ export interface ChinaBatch {
   remainingRub?: number;
   remainingGoodsCny?: number;
   remainingFreightUsd?: number;
+  /** Owner, 2026-09-25 (live check): whether the goods/freight side had anything to compare the
+   * payment against at all — a batch with no order number, or one the newest report never
+   * mentions, is NOT the same as a batch that is actually paid off (chinaRemainingOf /
+   * chinaRemainingText). */
+  remainingGoodsKnown?: boolean;
+  remainingFreightKnown?: boolean;
 }

@@ -361,7 +361,10 @@ async function startServer() {
     deleteChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     // Item 81g-1: the report touches only its own spreadsheet's read, same as every other
     // China write above.
-    saveChinaReport: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
+    // Item 3: saveChinaReport now also fills batches' order/arrival from the report's bills and
+    // syncs «Заказы на фабрике» (chinaFillBatchesFromReport + syncChinaFactoryOrders) — same
+    // cache entries as saveChinaBatch, for the same reason.
+    saveChinaReport: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
     // Item 81g-2: matching moves money between a payment and a receipt — both reads must drop.
     matchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
     unmatchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],

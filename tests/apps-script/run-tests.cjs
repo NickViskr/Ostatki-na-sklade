@@ -7409,6 +7409,236 @@ function byKeySuffix(rows, needle) {
     today[article] === 80, JSON.stringify(today));
 })();
 
+// ================= Owner, 2026-09-25 (live check): items 1/2/3 =================
+//
+// Item 1: saveChinaBatch's `costs` field replaces the whole Russian-side cost list in one call,
+// dropping an empty/zero row and auto-ticking «Расходы РФ внесены» once a positive one lands.
+(function () {
+  const h = withChina();
+  const saved = h.saveChinaBatch({
+    orderNo: '60', code: 'NV-0925-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+    costs: [{ type: 'Разгрузка', amountRub: 1000 }, { type: 'Прочее', amountRub: 0 }]
+  }, 'Николай');
+  const batch = saved.batches[0];
+  check('Item 1: a zero-amount cost row is dropped — only the positive one is saved',
+    batch.costs.length === 1 && batch.costs[0].amountRub === 1000 && batch.costs[0].kind === 'Разгрузка',
+    JSON.stringify(batch.costs));
+  check('Item 1: rubCostsDone auto-ticks once a positive cost row is saved in the same call',
+    batch.rubCostsDone === true, JSON.stringify(batch.rubCostsDone));
+  check('Item 1: the batch recosts once, in this same call — «Расходы РФ ₽» reflects the new row',
+    batch.rubCosts === 1000, JSON.stringify(batch.rubCosts));
+
+  // Resaving with only an empty row replaces (does not add to) the cost list — it drops the
+  // previous positive row entirely — but never resets the flag it already set.
+  const saved2 = h.saveChinaBatch({
+    id: batch.id, orderNo: '60', code: 'NV-0925-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+    costs: [{ type: 'Прочее', amountRub: 0 }]
+  }, 'Николай');
+  const batch2 = saved2.batches[0];
+  check('Item 1: resaving with no positive rows drops the old cost — the list is REPLACED, not appended to',
+    batch2.costs.length === 0 && batch2.rubCosts === 0, JSON.stringify(batch2.costs));
+  check('Item 1: a save with no positive cost rows leaves «Расходы РФ внесены» untouched (still «да»)',
+    batch2.rubCostsDone === true, JSON.stringify(batch2.rubCostsDone));
+
+  // A plain label/edit save with NO `costs` key at all must not touch the cost list.
+  const saved3 = h.saveChinaBatch({
+    id: batch.id, orderNo: '60', code: 'NV-0925-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: 'ART-60' }]
+  }, 'Николай');
+  check('Item 1: a save with no `costs` key at all leaves the (now empty) cost list untouched',
+    saved3.batches[0].costs.length === 0, JSON.stringify(saved3.batches[0].costs));
+
+  // Editing an existing row in place (its own id sent back) keeps the SAME id and date, rather
+  // than deleting and re-creating it — the row's history in the sheet is not a fresh row.
+  const saved4 = h.saveChinaBatch({
+    id: batch.id, orderNo: '60', code: 'NV-0925-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+    costs: [{ type: 'Разгрузка', amountRub: 500 }]
+  }, 'Николай');
+  const firstId = saved4.batches[0].costs[0].id;
+  const saved5 = h.saveChinaBatch({
+    id: batch.id, orderNo: '60', code: 'NV-0925-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+    costs: [{ id: firstId, type: 'Разгрузка', amountRub: 700 }]
+  }, 'Николай');
+  check('Item 1: editing a row by its own id keeps the same id and only its amount changes',
+    saved5.batches[0].costs.length === 1 && saved5.batches[0].costs[0].id === firstId &&
+    saved5.batches[0].costs[0].amountRub === 700, JSON.stringify(saved5.batches[0].costs));
+
+  // Isolation: a second batch's costs are never touched by the first batch's save.
+  h.saveChinaBatch({
+    orderNo: '61', code: 'NV-0925-2', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+    costs: [{ type: 'Прочее', amountRub: 300 }]
+  }, 'Николай');
+  const other = h.saveChinaBatch({
+    id: batch.id, orderNo: '60', code: 'NV-0925-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+    costs: [{ type: 'Прочее', amountRub: 999 }]
+  }, 'Николай');
+  const untouched = other.batches.filter(function (b) { return b.code === 'NV-0925-2'; })[0];
+  check('Item 1: another batch\'s cost list is not touched by this batch\'s cost save',
+    untouched.costs.length === 1 && untouched.costs[0].amountRub === 300, JSON.stringify(untouched.costs));
+
+  let badKind = '';
+  try {
+    h.saveChinaBatch({
+      id: batch.id, orderNo: '60', code: 'NV-0925-1', status: 'В пути', shippedAt: '2026-09-01',
+      lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }],
+      costs: [{ type: 'Таможня', amountRub: 100 }]
+    }, 'Николай');
+  } catch (e) { badKind = e.message; }
+  check('Item 1: an unknown cost type is refused',
+    /Неизвестный тип расхода/.test(badKind), badKind);
+})();
+
+// Item 2: «оплачено полностью» must not show up for a batch with nothing to compare a payment
+// against — chinaRemainingOf now says explicitly whether each side (goods/freight) is known.
+(function () {
+  const h = withChina();
+  const saved = h.saveChinaBatch({
+    code: 'NV-0825-2', status: 'В пути', shippedAt: '2026-08-27',
+    lines: [{ marking: 'NV-99', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: 'ART-0825' }]
+  }, 'Николай');
+  const before = saved.batches[0];
+  check('Item 2: no order number at all — remainingGoodsKnown is false («не с чем сверить»)',
+    before.remainingGoodsKnown === false, JSON.stringify(before.remainingGoodsKnown));
+  check('Item 2: no bill for this code in any report — remainingFreightKnown is false',
+    before.remainingFreightKnown === false, JSON.stringify(before.remainingFreightKnown));
+
+  // Item 3: the owner's live case — the report's bill for the SAME code carries the order and
+  // the arrival the batch itself does not have yet.
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт',
+    orders: [{ orderNo: '28', date: '2026-08-01', receivedCny: 5000, totalCny: 5000, unpaidCny: 0 }],
+    receipts: [{ date: '2026-09-05', goodsCny: 5000, freightCny: 0, freightUsd: 0 }],
+    freights: [{ code: 'NV-0825-2', orderNo: '28', arrivedAt: '2026-09-17', amountUsd: 100, cargoRate: 7 }]
+  }, 'Николай');
+  const batches = h.getChinaBatches().batches;
+  const after = batches.filter(function (b) { return b.code === 'NV-0825-2'; })[0];
+  check('Item 3: the empty order number is filled from the report\'s own bill (28)',
+    after.orderNo === '28', JSON.stringify(after.orderNo));
+  check('Item 3: the arrival date/status are filled once the bill states an arrival',
+    after.arrivedAt === '2026-09-17' && after.status === 'Прибыла',
+    JSON.stringify({ arrivedAt: after.arrivedAt, status: after.status }));
+  check('Item 3: the goods rate source is no longer «последняя оплата» once order 28 has real money',
+    after.goodsRateSource !== 'последняя оплата', JSON.stringify(after.goodsRateSource));
+  check('Item 2: both sides are known now — remainingGoodsKnown/remainingFreightKnown are true',
+    after.remainingGoodsKnown === true && after.remainingFreightKnown === true,
+    JSON.stringify({ g: after.remainingGoodsKnown, f: after.remainingFreightKnown }));
+
+  const row = byKeySuffix(h.dumpFactoryOrders(), ':ART-0825')[0];
+  check('Item 3: the filled-in arrival turns the factory order row «received»',
+    !!row && row['Статус'] === 'received' && row['Дата получения'] === '2026-09-17', JSON.stringify(row));
+})();
+
+// Item 3: a draft matched to the bill by its code minus the trailing «-N» — order filled, stays
+// not arrived (the owner's live NV-0916 / NV-0916-24 case).
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    code: 'NV-0916', status: 'Черновик',
+    lines: [{ marking: 'Миска_двойная', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 1 }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт',
+    orders: [{ orderNo: '29', date: '2026-09-01', receivedCny: 0, totalCny: 0, unpaidCny: 0 }],
+    receipts: [],
+    freights: [{ code: 'NV-0916-24', orderNo: '29', amountUsd: 20, cargoRate: 7 }]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-0916'; })[0];
+  check('Item 3: a draft\'s code = the bill\'s code minus its trailing -N — order 29 filled',
+    batch.orderNo === '29', JSON.stringify(batch.orderNo));
+  check('Item 3: no arrival in the bill — the draft stays not arrived',
+    batch.arrivedAt === '' && batch.status === 'Черновик',
+    JSON.stringify({ arrivedAt: batch.arrivedAt, status: batch.status }));
+})();
+
+// Item 3: an ambiguous prefix match (two bills agree) is refused outright — no fill at all.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    code: 'NV-0917', status: 'Черновик',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 1 }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт',
+    orders: [], receipts: [],
+    freights: [
+      { code: 'NV-0917-1', orderNo: '30', amountUsd: 10, cargoRate: 7 },
+      { code: 'NV-0917-2', orderNo: '31', amountUsd: 10, cargoRate: 7 }
+    ]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-0917'; })[0];
+  check('Item 3: an ambiguous prefix match (two bills agree) is refused — order number stays empty',
+    batch.orderNo === '', JSON.stringify(batch.orderNo));
+})();
+
+// Item 3: an order number already on the batch, disagreeing with the report's bill, is KEPT —
+// the disagreement is reported in «Чего не хватает» instead of being silently resolved.
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    orderNo: '99', code: 'NV-0930-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5 }]
+  }, 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-25', source: 'скрипт',
+    orders: [{ orderNo: '28', date: '2026-08-01', receivedCny: 100, totalCny: 100, unpaidCny: 0 }],
+    receipts: [{ date: '2026-09-05', goodsCny: 100, freightCny: 0, freightUsd: 0 }],
+    freights: [{ code: 'NV-0930-1', orderNo: '28', amountUsd: 50, cargoRate: 7 }]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-0930-1'; })[0];
+  check('Item 3: a differing order number already on the batch is kept, not overwritten',
+    batch.orderNo === '99', JSON.stringify(batch.orderNo));
+  check('Item 3: the mismatch is reported in «Чего не хватает»',
+    batch.missing.indexOf('номер заказа в отчёте: 28') !== -1, JSON.stringify(batch.missing));
+})();
+
+// Item 3b: saveChinaBatch itself fills the order/arrival from an ALREADY uploaded report — the
+// fill is not only run from saveChinaReport.
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт',
+    orders: [{ orderNo: '32', date: '2026-08-01', receivedCny: 10, totalCny: 10, unpaidCny: 0 }],
+    receipts: [{ date: '2026-08-05', goodsCny: 10, freightCny: 0, freightUsd: 0 }],
+    freights: [{ code: 'NV-0801-1', orderNo: '32', amountUsd: 10, cargoRate: 7 }]
+  }, 'Николай');
+  const saved = h.saveChinaBatch({
+    code: 'NV-0801-1', status: 'В пути', shippedAt: '2026-08-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 1 }]
+  }, 'Николай');
+  check('Item 3b: saveChinaBatch itself fills the order number from an already-uploaded report',
+    saved.batches[0].orderNo === '32', JSON.stringify(saved.batches[0].orderNo));
+})();
+
+// chinaMatchReportBill / chinaFillOrderFromBill — pure unit checks of the matching/fill rules.
+(function () {
+  const h = freshHarness();
+  const freights = [
+    { code: 'NV-01', orderNo: '1' },
+    { code: 'NV-02-3', orderNo: '2', arrivedAt: '2026-09-10' }
+  ];
+  check('chinaMatchReportBill: an exact code match wins, any status',
+    h.chinaMatchReportBill(freights, { code: 'NV-01', status: 'В пути' }).orderNo === '1', '');
+  check('chinaMatchReportBill: a prefix match is tried ONLY for a Черновик',
+    h.chinaMatchReportBill(freights, { code: 'NV-02', status: 'В пути' }) === null, '');
+  check('chinaMatchReportBill: a Черновик matches the bill\'s code minus its trailing -N',
+    h.chinaMatchReportBill(freights, { code: 'NV-02', status: 'Черновик' }).orderNo === '2', '');
+
+  const fill = h.chinaFillOrderFromBill(freights, { code: 'NV-02', status: 'Черновик', orderNo: '', arrivedAt: '' });
+  check('chinaFillOrderFromBill: fills order + arrival + status when the batch has none of its own',
+    fill.orderNo === '2' && fill.arrivedAt === '2026-09-10' && fill.status === 'Прибыла' && fill.changed === true,
+    JSON.stringify(fill));
+
+  const kept = h.chinaFillOrderFromBill(freights, { code: 'NV-01', status: 'В пути', orderNo: '999', arrivedAt: '' });
+  check('chinaFillOrderFromBill: never overwrites an order number the batch already has',
+    kept.orderNo === '999' && kept.changed === false, JSON.stringify(kept));
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

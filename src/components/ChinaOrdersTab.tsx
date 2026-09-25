@@ -12,10 +12,11 @@ import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import { ChinaForecastPanel } from './ChinaForecastPanel';
 import {
-  CHINA_COST_TYPES, ChinaBatchForm, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark, chinaEtaText,
-  chinaFormFromArrival, chinaFormFromFiles, chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes,
-  chinaMarkingMatches, chinaMatchArrivalBatch, chinaMatchFinalBatch, chinaRateSourceLabel, chinaRateStatusText,
-  chinaRemainingText, chinaShowWeightFactor, chinaTariffRateUnit
+  CHINA_COST_TYPES, ChinaBatchForm, ChinaCostRow, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark,
+  chinaCostRowsOf, chinaCostRowsPayload, chinaEtaText, chinaFormFromArrival, chinaFormFromFiles,
+  chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes, chinaMarkingMatches, chinaMatchArrivalBatch,
+  chinaMatchFinalBatch, chinaRateSourceLabel, chinaRateStatusText, chinaRemainingText, chinaShowWeightFactor,
+  chinaTariffRateUnit
 } from '../lib/chinaBatchForm';
 import {
   ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, ChinaSheets, chinaReportPayload,
@@ -57,8 +58,6 @@ export const ChinaOrdersTab: React.FC = () => {
   const setupChinaSpreadsheet = useChinaStore((s) => s.setupChinaSpreadsheet);
   const saveChinaBatch = useChinaStore((s) => s.saveChinaBatch);
   const deleteChinaBatch = useChinaStore((s) => s.deleteChinaBatch);
-  const saveChinaCost = useChinaStore((s) => s.saveChinaCost);
-  const deleteChinaCost = useChinaStore((s) => s.deleteChinaCost);
   const saveChinaReportAction = useChinaStore((s) => s.saveChinaReport);
   const setChinaRubCostsDone = useChinaStore((s) => s.setChinaRubCostsDone);
   const setConfirmDialog = useUIStore((s) => s.setConfirmDialog);
@@ -89,9 +88,11 @@ export const ChinaOrdersTab: React.FC = () => {
   const [importAiCheck, setImportAiCheck] = useState<{ kind: ChinaAiKind; sheets: ChinaSheets; scriptParsed: ChinaAiParsed } | null>(null);
   const [isReading, setIsReading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const [costKind, setCostKind] = useState(CHINA_COST_TYPES[0]);
-  const [costAmount, setCostAmount] = useState('');
-  const [costComment, setCostComment] = useState('');
+  // Item 1 (owner, 2026-09-25): the Russian-side cost block is a local editable list, per batch,
+  // sent whole with «Сохранить артикулы и пересчитать» — nothing here calls the script until
+  // then. `undefined` for a batch means "no local edits yet": the rows shown are the batch's own
+  // saved costs (or the two defaults, chinaCostRowsOf).
+  const [costDrafts, setCostDrafts] = useState<Record<string, ChinaCostRow[]>>({});
 
   useEffect(() => { fetchChinaBatches(); }, [fetchChinaBatches]);
   useEffect(() => { if (factoryOrders.length === 0) fetchFactoryOrders(); }, [factoryOrders.length, fetchFactoryOrders]);
@@ -125,34 +126,55 @@ export const ChinaOrdersTab: React.FC = () => {
       return !!draft && (draft.article !== l.article || draft.group !== l.group);
     });
 
+  // Item 1: the rows shown for a batch — its own local draft once the owner has touched
+  // anything, otherwise its saved costs (or the two defaults for a batch with none yet).
+  const costRowsOf = (batch: ChinaBatch): ChinaCostRow[] => costDrafts[batch.id] || chinaCostRowsOf(batch.costs);
+  const costsChanged = (batch: ChinaBatch): boolean => costDrafts[batch.id] !== undefined;
+
+  const setCostField = (batch: ChinaBatch, index: number, patch: Partial<ChinaCostRow>) => {
+    const rows = costRowsOf(batch).slice();
+    rows[index] = { ...rows[index], ...patch };
+    setCostDrafts((prev) => ({ ...prev, [batch.id]: rows }));
+  };
+
+  const addCostRow = (batch: ChinaBatch) => {
+    setCostDrafts((prev) => ({
+      ...prev,
+      [batch.id]: [...costRowsOf(batch), { id: '', type: CHINA_COST_TYPES[0], amountRub: '', comment: '' }]
+    }));
+  };
+
+  const removeCostRow = (batch: ChinaBatch, index: number) => {
+    const rows = costRowsOf(batch).slice();
+    rows.splice(index, 1);
+    setCostDrafts((prev) => ({ ...prev, [batch.id]: rows }));
+  };
+
   // Saving the articles is saving the batch: the script recomputes it, because the article
-  // and the marker decide which lines are costed as one product.
+  // and the marker decide which lines are costed as one product. Item 1: the Russian-side cost
+  // list rides along in the SAME call, but only when the owner actually touched it — an
+  // article-only save must not resend costs and re-tick «Расходы РФ внесены» behind his back.
   const saveLabels = async (batch: ChinaBatch) => {
     const form = chinaBatchToForm(batch);
     form.lines = form.lines.map((line, i) => {
       const draft = labels[batch.lines[i].id];
       return draft ? { ...line, article: draft.article, group: draft.group } : line;
     });
-    const ok = await saveChinaBatch(chinaFormToPayload(form));
+    const payload = chinaFormToPayload(form);
+    if (costsChanged(batch)) payload.costs = chinaCostRowsPayload(costRowsOf(batch));
+    const ok = await saveChinaBatch(payload);
     if (ok) {
       setLabels((prev) => {
         const next = { ...prev };
         batch.lines.forEach((l) => delete next[l.id]);
         return next;
       });
+      setCostDrafts((prev) => {
+        const next = { ...prev };
+        delete next[batch.id];
+        return next;
+      });
     }
-  };
-
-  const addCost = async (batch: ChinaBatch) => {
-    const amount = Number(String(costAmount).replace(',', '.'));
-    if (!(amount > 0)) {
-      toast.error('Сумма расхода должна быть больше нуля');
-      return;
-    }
-    const ok = await saveChinaCost({
-      batchId: batch.id, kind: costKind, amountRub: amount, comment: costComment.trim()
-    });
-    if (ok) { setCostAmount(''); setCostComment(''); }
   };
 
   // Item 81g, step 7: called for a file whose OWN reading either failed outright (`parsed` is
@@ -714,7 +736,7 @@ export const ChinaOrdersTab: React.FC = () => {
                     <button
                       data-testid="btn-save-china-labels"
                       onClick={() => saveLabels(batch)}
-                      disabled={isSaving || !labelsChanged(batch)}
+                      disabled={isSaving || (!labelsChanged(batch) && !costsChanged(batch))}
                       className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 disabled:opacity-40"
                     >
                       {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
@@ -724,49 +746,55 @@ export const ChinaOrdersTab: React.FC = () => {
 
                   <div className="bg-slate-50 rounded-xl p-4 space-y-3">
                     <h3 className="font-bold text-sm">Расходы в рублях — делятся по коробкам</h3>
-                    {batch.costs.length > 0 && (
-                      <table className="w-full text-sm">
-                        <tbody>
-                          {batch.costs.map((cost) => (
-                            <tr key={cost.id} className="border-b border-slate-200 last:border-0">
-                              <td className="py-1.5 pr-3">{cost.date}</td>
-                              <td className="py-1.5 pr-3">{cost.kind}</td>
-                              <td className="py-1.5 pr-3">{money(cost.amountRub, '₽')}</td>
-                              <td className="py-1.5 pr-3 text-slate-500">{cost.comment}</td>
-                              <td className="py-1.5 text-right">
-                                <button onClick={() => deleteChinaCost(cost.id)} className="text-slate-300 hover:text-red-500">
-                                  <Trash2 size={15} />
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                    <div className="flex items-end gap-2 flex-wrap">
-                      <label className="block">
-                        <span className="text-[11px] font-bold text-slate-500 uppercase">Тип</span>
-                        <select className="block px-3 py-2 border border-slate-200 rounded-lg text-sm" value={costKind} onChange={(e) => setCostKind(e.target.value)}>
-                          {CHINA_COST_TYPES.map((k) => <option key={k} value={k}>{k}</option>)}
-                        </select>
-                      </label>
-                      <label className="block">
-                        <span className="text-[11px] font-bold text-slate-500 uppercase">Сумма, ₽</span>
-                        <input className="block px-3 py-2 border border-slate-200 rounded-lg text-sm w-32" value={costAmount} onChange={(e) => setCostAmount(e.target.value)} />
-                      </label>
-                      <label className="block grow">
-                        <span className="text-[11px] font-bold text-slate-500 uppercase">Комментарий</span>
-                        <input className="block w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" value={costComment} onChange={(e) => setCostComment(e.target.value)} />
-                      </label>
-                      <button
-                        data-testid="btn-add-china-cost"
-                        onClick={() => addCost(batch)}
-                        disabled={isSaving}
-                        className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-indigo-600 hover:bg-indigo-50 disabled:opacity-50"
-                      >
-                        Добавить расход
-                      </button>
-                    </div>
+                    <p className="text-xs text-slate-500">
+                      Строки ниже сохраняются вместе с артикулами, кнопкой «Сохранить артикулы и пересчитать» —
+                      пустая строка (без суммы) не сохраняется.
+                    </p>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {costRowsOf(batch).map((row, i) => (
+                          <tr key={row.id || `new-${i}`} className="border-b border-slate-200 last:border-0">
+                            <td className="py-1.5 pr-3">
+                              <select
+                                className="px-2 py-1 border border-slate-200 rounded text-sm"
+                                value={row.type}
+                                onChange={(e) => setCostField(batch, i, { type: e.target.value })}
+                              >
+                                {CHINA_COST_TYPES.map((k) => <option key={k} value={k}>{k}</option>)}
+                              </select>
+                            </td>
+                            <td className="py-1.5 pr-3">
+                              <input
+                                className="px-2 py-1 border border-slate-200 rounded text-sm w-28"
+                                placeholder="Сумма, ₽"
+                                value={row.amountRub}
+                                onChange={(e) => setCostField(batch, i, { amountRub: e.target.value })}
+                              />
+                            </td>
+                            <td className="py-1.5 pr-3">
+                              <input
+                                className="w-full px-2 py-1 border border-slate-200 rounded text-sm"
+                                placeholder="Комментарий"
+                                value={row.comment}
+                                onChange={(e) => setCostField(batch, i, { comment: e.target.value })}
+                              />
+                            </td>
+                            <td className="py-1.5 text-right">
+                              <button onClick={() => removeCostRow(batch, i)} className="text-slate-300 hover:text-red-500">
+                                <Trash2 size={15} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <button
+                      data-testid="btn-add-china-cost-row"
+                      onClick={() => addCostRow(batch)}
+                      className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-indigo-600 hover:bg-indigo-50"
+                    >
+                      Добавить строку
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-3">

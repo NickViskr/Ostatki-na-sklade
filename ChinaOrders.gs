@@ -597,15 +597,27 @@ function chinaPaymentMoney(amountRub, rate, amountCny) {
  * it at all), and their ₽ equivalents at the batch's OWN rates — a rate of 0 (no rate resolved
  * yet) drops that part of the ₽ figure to 0 rather than costing at a bogus rate.
  */
+// Owner, 2026-09-25 (live check): «оплачено полностью» used to show up for a batch that had
+// literally nothing to compare a payment against — no order number (NV-0916) reads as 0 ¥
+// outstanding the same way an order that is genuinely settled does. `remainingGoodsKnown`/
+// `remainingFreightKnown` say whether each side actually had something to check the payment
+// against: an order the newest report never mentions (or none at all) is not "known", and
+// neither is a code with no bill in the report. chinaRemainingText (browser) is the only place
+// that turns these into the three different messages — this function only states the facts.
 function chinaRemainingOf(ledger, batch) {
   const newestOrders = (ledger.newest && Array.isArray(ledger.newest.orders)) ? ledger.newest.orders : [];
   const orderNo = String(batch.orderNo || '').trim();
   let remainingGoodsCny = 0;
+  let goodsKnown = false;
   newestOrders.forEach(function (o) {
-    if (String((o || {}).orderNo || '').trim() === orderNo) remainingGoodsCny = roundToTwo(Number(o.unpaidCny) || 0);
+    if (orderNo && String((o || {}).orderNo || '').trim() === orderNo) {
+      remainingGoodsCny = roundToTwo(Number(o.unpaidCny) || 0);
+      goodsKnown = true;
+    }
   });
 
   const bill = chinaBillKnown(ledger, batch.code);
+  const freightKnown = !!bill;
   const remainingFreightUsd = bill ? roundToTwo(Number(bill.unpaidUsd) || 0) : 0;
 
   const goodsRate = Number(batch.goodsRate) || 0;
@@ -618,7 +630,9 @@ function chinaRemainingOf(ledger, batch) {
   return {
     remainingGoodsCny: remainingGoodsCny,
     remainingFreightUsd: remainingFreightUsd,
-    remainingRub: roundToTwo(remainingGoodsRub + remainingFreightRub)
+    remainingRub: roundToTwo(remainingGoodsRub + remainingFreightRub),
+    remainingGoodsKnown: goodsKnown,
+    remainingFreightKnown: freightKnown
   };
 }
 
@@ -1163,6 +1177,16 @@ function saveChinaBatch(data, username) {
     checkNote: data.checkNote === undefined ? undefined : String(data.checkNote || '').trim()
   };
 
+  // Owner, 2026-09-25: the «Сохранить артикулы и пересчитать» button now sends the batch's
+  // WHOLE Russian-side cost list along with the labels, in this one call, instead of one
+  // `saveChinaBatchCost` round trip per «Добавить расход» click — chinaReplaceBatchCosts
+  // replaces the cost rows before the single recost below runs. `data.costs` is left out
+  // entirely (not an empty array) by every OTHER caller of saveChinaBatch (the edit modal,
+  // file imports), so their costs stay untouched.
+  if (Array.isArray(data.costs) && chinaReplaceBatchCosts(ss, batchId, data.costs, username)) {
+    batch.rubCostsDone = true;
+  }
+
   const lines = incoming.map(function (l) {
     return {
       marking: String(l.marking || '').trim(),
@@ -1188,6 +1212,15 @@ function saveChinaBatch(data, username) {
     .map(chinaCostFromRow).filter(function (c) { return c.batchId === batchId; });
   let rubTotal = 0;
   costs.forEach(function (c) { rubTotal = roundToTwo(rubTotal + c.amountRub); });
+
+  // Item 3 (owner, 2026-09-25 live check): a batch whose «Номер заказа» is still empty (and its
+  // arrival, once the bill states one) is filled from the newest report's own carrier bill —
+  // before the batch is costed, so goods that arrived under an order the owner never typed in
+  // by hand are costed from that order's real money instead of staying on «последняя оплата».
+  const fill = chinaFillOrderFromBill(chinaNewestReportFreights(ss), batch);
+  batch.orderNo = fill.orderNo;
+  batch.arrivedAt = fill.arrivedAt;
+  batch.status = fill.status;
 
   const rated = chinaWithPaymentRate(ss, batch);
   const calc = chinaFullyCost(rated, lines, rubTotal, getChinaSettings());
@@ -1274,6 +1307,96 @@ function chinaLedgerContext(ss) {
   const freightAlloc = chinaAllocateFreightLedger(
     newest ? newest.freights : [], receipts, newest ? newest.openingFreightUsd : 0);
   return { receiptsById: receiptsById, goodsAlloc: goodsAlloc, freightAlloc: freightAlloc, newest: newest };
+}
+
+// The freight bills of the newest stored report — [] when no report has ever been uploaded.
+// Item 3's own reading of «Отчёты», kept apart from chinaLedgerContext so a plain batch save
+// does not have to build the whole goods/freight allocation just to look a bill up by code.
+function chinaNewestReportFreights(ss) {
+  const reports = chinaReadSheet(ss, CHINA_REPORTS_SHEET, CHINA_REPORT_HEADERS).rows.map(chinaReportFromRow);
+  let newest = null;
+  reports.forEach(function (r) { if (!newest || r.reportDate > newest.reportDate) newest = r; });
+  return newest ? newest.freights : [];
+}
+
+/**
+ * Item 3 (owner, 2026-09-25 live check): which carrier bill of the newest report is THIS
+ * batch's own —
+ *   1. exactly the batch's own code;
+ *   2. failing that, and only for a 'Черновик' (a batch that has no code of its own yet, made
+ *      from an arrival file), the ONE bill whose code equals the batch's code with its trailing
+ *      «-N» stripped — an ambiguous match (more than one bill agrees) is refused outright, same
+ *      as chinaMatchFinalBatch on the browser side.
+ * Pure — `freights` is whatever chinaNewestReportFreights already read.
+ */
+function chinaMatchReportBill(freights, batch) {
+  const bills = (freights || []).filter(function (f) { return String((f || {}).code || '').trim(); });
+  const code = String((batch || {}).code || '').trim().toLowerCase();
+  if (!code) return null;
+  const exact = bills.find(function (f) { return String(f.code || '').trim().toLowerCase() === code; });
+  if (exact) return exact;
+  if (String((batch || {}).status || '') !== 'Черновик') return null;
+  const matches = bills.filter(function (f) {
+    return String(f.code || '').trim().toLowerCase().replace(/-\d+$/, '') === code;
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Item 3: the batch's own orderNo/arrivedAt/status, filled from its matching bill
+ * (chinaMatchReportBill) where the batch has nothing of its own yet. An order number ALREADY
+ * on the batch is never overwritten, even when it disagrees with the bill's — chinaMissingListOf
+ * reports that disagreement instead (reading the same bill via `rated.billInfo.orderNo`), so the
+ * owner can see and fix it rather than have the script silently pick a side. Pure — returns a
+ * plain `{orderNo, arrivedAt, status, changed}`, never touches a sheet.
+ */
+function chinaFillOrderFromBill(freights, batch) {
+  const b = batch || {};
+  const ownOrderNo = String(b.orderNo || '').trim();
+  const ownArrivedAt = String(b.arrivedAt || '').trim();
+  const ownStatus = String(b.status || '').trim();
+  const out = { orderNo: ownOrderNo, arrivedAt: ownArrivedAt, status: ownStatus, changed: false };
+
+  const bill = chinaMatchReportBill(freights, b);
+  if (!bill) return out;
+
+  const billOrderNo = String(bill.orderNo || '').trim();
+  if (!ownOrderNo && billOrderNo) out.orderNo = billOrderNo;
+
+  const billArrivedAt = String(bill.arrivedAt || '').trim();
+  if (billArrivedAt && ownStatus !== 'Прибыла') {
+    out.arrivedAt = billArrivedAt;
+    out.status = 'Прибыла';
+  }
+
+  out.changed = out.orderNo !== ownOrderNo || out.arrivedAt !== ownArrivedAt || out.status !== ownStatus;
+  return out;
+}
+
+/**
+ * Item 3b: runs chinaFillOrderFromBill over EVERY batch and writes back the ones it actually
+ * changed — called from saveChinaReport, once per upload, BEFORE the report-wide recost so the
+ * newly filled order/arrival feed straight into it (and, via `syncChinaFactoryOrders` right
+ * after, into «Заказы на фабрике» becoming 'received').
+ */
+function chinaFillBatchesFromReport(ss, freights, username) {
+  const ctx = chinaReadSheet(ss, CHINA_BATCHES_SHEET, CHINA_BATCH_HEADERS);
+  const orderCol = ctx.headers.indexOf('Номер заказа') + 1;
+  const arrivedCol = ctx.headers.indexOf('Дата прибытия') + 1;
+  const statusCol = ctx.headers.indexOf('Статус') + 1;
+  const updatedCol = ctx.headers.indexOf('Обновлено') + 1;
+  ctx.rows.forEach(function (r) {
+    const batch = chinaBatchFromRow(r);
+    const fill = chinaFillOrderFromBill(freights, batch);
+    if (!fill.changed) return;
+    if (fill.orderNo !== batch.orderNo) ctx.sheet.getRange(r.__row, orderCol, 1, 1).setValues([[fill.orderNo]]);
+    if (fill.arrivedAt !== batch.arrivedAt) ctx.sheet.getRange(r.__row, arrivedCol, 1, 1).setValues([[fill.arrivedAt]]);
+    if (fill.status !== batch.status) ctx.sheet.getRange(r.__row, statusCol, 1, 1).setValues([[fill.status]]);
+    ctx.sheet.getRange(r.__row, updatedCol, 1, 1).setValues([[chinaStamp()]]);
+    Logger.log('Заказы в Китае: партия ' + batch.id + ' дополнена из отчёта — ' +
+      (fill.orderNo !== batch.orderNo ? 'заказ №' + fill.orderNo + ' ' : '') +
+      (fill.status !== batch.status ? 'статус «' + fill.status + '»' : ''));
+  });
 }
 
 // The known ¥/₽ of an ORDER, straight off the goods pool allocation — chinaLotsKnownRub reused
@@ -1552,6 +1675,11 @@ function chinaMissingListOf(rated, calc) {
   if (!hasWeight || !hasFreight) missing.push('не загружен файл партии (нет веса или перевозки)');
   const bill = rated.billInfo;
   if (!bill) missing.push('в отчёте нет накладной карго на эту партию');
+  // Item 3 (owner, 2026-09-25 live check): the bill's own order number disagrees with the one
+  // already on the batch — chinaFillOrderFromBill never overwrites it, this just says so.
+  if (bill && bill.orderNo && String(rated.orderNo || '').trim() && bill.orderNo !== String(rated.orderNo).trim()) {
+    missing.push('номер заказа в отчёте: ' + bill.orderNo);
+  }
   const receiptsById = rated.receiptsById || {};
   const order = rated.orderInfo || { pendingCny: 0, historyCny: 0, unknownCny: 0, lots: [] };
   if (order.pendingCny > 0.004 || order.historyCny > 0.004) {
@@ -1661,6 +1789,11 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
   // instead of resetting it to '' because this particular save never touched it.
   if (batch.checkMark !== undefined) values['Проверка'] = batch.checkMark;
   if (batch.checkNote !== undefined) values['Проверка: детали'] = batch.checkNote;
+  // Owner, 2026-09-25: saveChinaBatch sets this only when at least one Russian-side cost row
+  // with a positive amount was just saved alongside the labels — the merge below leaves the
+  // column untouched (and so does NOT unset an owner-ticked checkbox) whenever this save had
+  // no costs to report at all.
+  if (batch.rubCostsDone) values['Расходы РФ внесены'] = 'да';
 
   let targetRow = 0, previousRecord = null;
   batchCtx.rows.forEach(function (r) {
@@ -1878,6 +2011,61 @@ function restoreChinaBatch(payload, username) {
   // Item 83c: the restored batch's rows come back into «Заказы на фабрике» too.
   syncChinaFactoryOrders(username);
   return { batchId: batchId, reKeyed: reKeyed };
+}
+
+/**
+ * Owner, 2026-09-25: replaces the WHOLE Russian-side cost list of a batch in one write — the
+ * browser now edits an unsaved local list (two prefilled rows, add/remove a row) and sends it
+ * only once, with `saveChinaBatch`, instead of one `saveChinaBatchCost` round trip per row. A
+ * row with an empty/zero amount is dropped silently: the two rows the browser prefills start
+ * empty, and an unfinished row the owner never typed an amount into is not a real cost. An
+ * `id` the caller sends is reused only if it is actually a cost row of THIS batch — anything
+ * else (missing, stale, belonging to another batch) is treated as a brand new row, so the
+ * ids handed out by `chinaNextIds` never collide with what a row already has.
+ * Returns whether at least one row with a positive amount was actually saved.
+ */
+function chinaReplaceBatchCosts(ss, batchId, incoming, username) {
+  const costCtx = chinaReadSheet(ss, CHINA_COSTS_SHEET, CHINA_COST_HEADERS);
+  const otherRows = costCtx.rows
+    .filter(function (r) { return String(r['ПартияID']).trim() !== batchId; })
+    .map(function (r) { return chinaRowFrom(costCtx.headers, r); });
+  const ownById = {};
+  costCtx.rows.forEach(function (r) {
+    if (String(r['ПартияID']).trim() === batchId) ownById[String(r['ID']).trim()] = r;
+  });
+
+  const kept = (incoming || []).filter(function (c) {
+    return roundToTwo(parseNumber((c || {}).amountRub)) > 0;
+  });
+  kept.forEach(function (c) {
+    const kind = String((c || {}).type || '').trim();
+    if (CHINA_COST_TYPES.indexOf(kind) === -1) throw new Error('Неизвестный тип расхода: ' + kind);
+  });
+
+  const needIds = kept.filter(function (c) {
+    const id = String((c || {}).id || '').trim();
+    return !(id && ownById[id]);
+  }).length;
+  const freshIds = chinaNextIds(costCtx.rows, 'CC', needIds);
+  let freshIdx = 0;
+
+  const freshRows = kept.map(function (c) {
+    const requestedId = String((c || {}).id || '').trim();
+    const id = (requestedId && ownById[requestedId]) ? requestedId : freshIds[freshIdx++];
+    const previous = ownById[id];
+    return chinaRowFrom(costCtx.headers, {
+      'ID': id,
+      'ПартияID': batchId,
+      'Дата': (previous && previous['Дата']) || getTodayDateString(),
+      'Тип': String((c || {}).type || '').trim(),
+      'Сумма ₽': roundToTwo(parseNumber(c.amountRub)),
+      'Комментарий': String((c || {}).comment || '').trim(),
+      'Кто': username || ''
+    });
+  });
+
+  chinaWriteSheet(costCtx.sheet, costCtx.headers, otherRows.concat(freshRows));
+  return kept.length > 0;
 }
 
 /**
@@ -2648,9 +2836,15 @@ function saveChinaReport(data, username) {
   // Item 81g-2: new receipts can turn an old orphan payment into an exact match — tried on
   // every report, not just on saving a payment.
   chinaAutoMatchPending(ss, username);
+  // Item 3: a batch whose order number/arrival is still empty is filled from THIS report's own
+  // carrier bills — before the recost below, so the filled-in order's real money costs the
+  // batch instead of a provisional rate.
+  chinaFillBatchesFromReport(ss, freights, username);
   // Item 81g-3: the report itself is the ledger every batch's rate is resolved against —
   // every batch is re-costed, not just the ones whose OWN order/bill changed.
   chinaRecostAll(ss, username);
+  // Item 83c, item 3: an order/arrival just filled in above can turn a factory order 'received'.
+  syncChinaFactoryOrders(username);
 
   const allReports = chinaReadSheet(ss, CHINA_REPORTS_SHEET, CHINA_REPORT_HEADERS).rows.map(chinaReportFromRow);
   const allReceipts = chinaReadSheet(ss, CHINA_RECEIPTS_SHEET, CHINA_RECEIPT_HEADERS).rows.map(chinaReceiptFromRow);
@@ -2962,7 +3156,11 @@ function chinaAllocateFreightLedger(freights, receipts, openingFreightUsd) {
       knownCny: knownCny, knownRub: knownRub,
       knownRate: knownCny > 0.004 ? Math.round((knownRub / knownCny) * 10000) / 10000 : 0,
       pendingCny: pendingCny, historyCny: historyCny,
-      totalUsd: wantUsd
+      totalUsd: wantUsd,
+      // Item 3 (owner, 2026-09-25 live check): the bill's OWN order number, straight from the
+      // report — chinaMissingListOf compares it against the batch's own to report a mismatch
+      // rather than silently overwrite an order number the owner already typed in.
+      orderNo: String(bill.orderNo || '').trim()
     };
   });
   return out;

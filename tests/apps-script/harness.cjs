@@ -737,6 +737,12 @@ module.exports = {
   chinaLatestPaymentRate: (...args) => context.chinaLatestPaymentRate(...args),
   chinaShortDate: (...args) => context.chinaShortDate(...args),
   chinaJoinAnd: (...args) => context.chinaJoinAnd(...args),
+  // ---------- Item 1/2/3 (owner, 2026-09-25, live check): one-call cost save, remaining-money
+  // known/unknown state, filling a batch's order/arrival from the newest report's own bill.
+  // chinaReplaceBatchCosts/chinaFillBatchesFromReport need a live spreadsheet (`ss`) and are
+  // exercised through saveChinaBatch/saveChinaReport instead of directly. ----------
+  chinaMatchReportBill: (...args) => context.chinaMatchReportBill(...args),
+  chinaFillOrderFromBill: (...args) => context.chinaFillOrderFromBill(...args),
   chinaTrackingStartLabel: (...args) => context.chinaTrackingStartLabel(...args),
   chinaLotsMissingMessages: (...args) => context.chinaLotsMissingMessages(...args),
   dumpChinaReports() { return this.dumpChinaSheet('Отчёты'); },
