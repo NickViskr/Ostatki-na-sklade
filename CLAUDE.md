@@ -62,6 +62,9 @@ not translated back; files drift to English as they are edited.
 - Journals `docs/DEVLOG.md` and `docs/TEST_LOG.md` are append-only, one table row per step.
 - Plan integrity: the ✅/⬜ counts of `docs/OZON_PLAN.md` change only when an item is
   legitimately added or closed; never type those glyphs inside prose.
+- Excel dates in the browser are read from the raw serial with `XLSX.SSF.parse_date_code`
+  (`src/lib/chinaXlsx.ts`), never through `cellDates: true` — that shifts dates a day early in the
+  owner's zone. Run `TZ=Asia/Yekaterinburg npx vitest run` as well as the plain run.
 - Diagnose calculation questions by replaying the production modules on an xlsx export
   through `npx vite-node <script>.ts`, and read the Cloud Run log lines `GASDIAG …` /
   `SUPPLYDOCS …`.

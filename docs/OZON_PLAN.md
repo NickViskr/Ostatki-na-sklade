@@ -327,10 +327,10 @@
 
 ## Очередь дальше — current state (replaced in place, never appended)
 
-Status on 2026-09-24. Full history of revisions, dated notes and defect
+Status on 2026-09-25. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
-- **Items:** 77 of 81 closed. OPEN: 53, 81 (81a–81e and the review fixes deployed, awaiting the owner’s live check; 81f deferred). Also 27 (optional) and 37 (deferred: not reproducible on production data).
+- **Items:** 77 of 81 closed. OPEN: 53, 81 (81a–81g live, in the owner’s live check; 81f deferred). Also 27 (optional) and 37 (deferred: not reproducible on production data).
 - **Live:** Cloud Run `sklad-00087-fbf` (build label 2026-09-25 12:17 МСК, commit `0e87453`:
   item 81g remaining to pay, ETA, receipts to history; `index.html`, the main chunk and `ChinaOrdersTab` verified
   byte for byte against the local build of the same export, modulo hashes and the label).
@@ -345,25 +345,29 @@ dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
   time. Rollback point «before clasp»: version 171.
 - **Checks:** Apps Script stand 829 checks; frontend 1043 tests in 40 files (also green under `TZ=Asia/Yekaterinburg`); `tsc --noEmit`
   clean; `vite build` passes.
-- **Module «Заказы в Китае» (item 81):** lives in its OWN spreadsheet (Script Property
-  `china_spreadsheetId`, set by the owner 2026-09-22; the id is never in the repository) and in
-  the second script file `ChinaOrders.gs`. The spreadsheet is set up live (five sheets, header rows
-  of 81a — newer columns get appended at the END on first use, which the code now handles). LIVE:
-  81a–81d and the fixes of the 2026-09-24 review (Code.gs 185, `sklad-00081-gwg`). NEXT: the
-  owner’s live check — import of the two Chinese files, a payment, articles from the SKU base.
-  LIVE: 81e — the arrival-data file, factory box weights and dimensions, packaging cost
-  analytics per batch (Code.gs 186, `sklad-00082-6pc`). The owner’s check found a one-day date
-  shift in his time zone and asked for rubles beside every currency amount and the previous
-  batch’s rate as the provisional one: FIXED AND DEPLOYED (Code.gs 187, `sklad-00083-r8j`);
-  the owner deletes the stray draft NV-0922 and re-imports, then checks live. Then the trash
-  for deleted batches, the rate status text and the tariff vs real freight per kg: DEPLOYED
-  (Code.gs 188, `sklad-00084-6bq`); awaiting the owner’s live check.
-  LIVE: 81g — payments distributed by the financial report, AI safety net (Code.gs 189,
-  `sklad-00085-s5m`); the owner's check found the date of a payment sentence not read and no
-  provisional rate from payments: FIXED AND DEPLOYED (Code.gs 190, `sklad-00086-lzx`). OPEN DECISIONS for the owner: automatic matching of
-  his payments to the receipts of the report; a Gemini fallback for a file whose layout changed;
-  whether any article of the SKU base has leading zeros (Google Sheets turns «0012» into 12).
-  Stage 2 (posting an arrived batch onto the warehouse) waits for the owner’s word.
+- **Module «Заказы в Китае» (item 81):** its OWN spreadsheet «Заказы в Китае» (Script Property
+  `china_spreadsheetId`; the id is never in the repository) and the second script file
+  `ChinaOrders.gs`. Sheets: «Партии», «Строки партий», «Расходы партии», «Платежи», «Справочник»
+  (`cargoRateCnyPerUsd` 7, `transitDays` 30), and since 81g «Отчёты» (3 newest parsed reports),
+  «Поступления», «Движения заказов»; newer columns are appended at the END of live sheets and
+  every write goes by the sheet’s own header row. LIVE in full (Code.gs 191, `sklad-00087-fbf`):
+  81a–81d (costing, tab, import of the batch file and the report, payments, articles from the SKU
+  base); 81e (the arrival file, factory box weights, packaging analytics, trash for batches,
+  tariff vs real freight per kg); 81g (payments stay unallocated until a report shows their
+  receipt; goods money per order with moves at the leaving order’s average rate; freight FIFO in
+  DOLLARS; two rates per batch; provisional rate = typed → latest payment → previous batch;
+  «Чего не хватает» / «Расчёт закрыт»; AI safety net `/api/china/ai-read` with ✓ / ✓✓ / ⚠ / ✗;
+  remaining to pay, estimated arrival, receipts marked history by the owner). LIVE DATA
+  (25.09): batch NV-0923-4 (order 30) with articles and box data, six payments 20.08–25.09 all
+  matched, reports CR1 (24.09) and CR2 (25.09); NV-0923-4 costs 429 296,16 ₽, 374 962,27 ₽ left
+  to pay; the 04.08 receipt (4 819 ¥) is the owner’s to mark as history. NEXT: the owner’s
+  check of Code.gs 191 / `sklad-00087-fbf`. DEFERRED: 81f (per-article factory box directory
+  and a forecast of future shipments from the collected history — no carrier tariff table
+  exists), stage 2 (posting an arrived batch onto the warehouse, on the owner’s word). OPEN
+  QUESTIONS: whether any article of the SKU base has leading zeros (Google Sheets turns «0012»
+  into 12); whether a manual edit after an AI check should drop the ✓✓ mark.
+- **Git:** branch `work/cloud-run-and-tests`; everything after `e7247d8` (81e onwards) is
+  committed locally and NOT pushed — `git push` only on the owner’s word.
 - **Production contour:** the auto-poll writes to the production DB (Script Property
   `ozon_autoSyncTarget = 'prod'`); the dev-mode toggle switches only the browser to the
   test DB. The assistant checks the app live through the separate admin account «Claude»
