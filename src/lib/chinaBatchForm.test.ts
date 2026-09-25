@@ -9,7 +9,8 @@ import {
   chinaCheckMark,
   chinaTariffRateUnit,
   chinaGroupThousands, chinaRemainingText, chinaEtaText, chinaCmToM, chinaMToCm,
-  chinaDefaultCostRows, chinaCostRowsOf, chinaCostRowsPayload, chinaRubText, chinaNumText
+  chinaDefaultCostRows, chinaCostRowsOf, chinaCostRowsPayload, chinaRubText, chinaNumText,
+  chinaPostQtyError, chinaPostPricePerUnit, chinaPostingBadge
 } from './chinaBatchForm';
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
@@ -421,7 +422,10 @@ describe('подключение модуля «Заказы в Китае»', (
     // Item 83c: saveChinaBatch/deleteChinaBatch ALSO sync «Заказы на фабрике», so both drop
     // getFactoryOrders and the getOzonInitialData composite too.
     ['saveChinaBatch', 'deleteChinaBatch']
-      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData']`));
+      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'`));
+    // Item 84 (stage 1): saveChinaBatch can also run the automatic cost correction, which
+    // writes the MAIN spreadsheet's stock/transactions — its own cache entries must drop too.
+    expect(server).toContain("saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions']");
   });
 
   it('every write replaces the whole state with what the script answered', () => {
@@ -1323,5 +1327,57 @@ describe('chinaNumText: ¥/$/kg/m/density/%, hundredths with the trailing zero d
 
   it('groups thousands the same way rubles do', () => {
     expect(chinaNumText(9677)).toBe('9\u00a0677');
+  });
+});
+
+// Item 84 (stage 2): the posting confirmation window's quantity validation \u2014 money-adjacent,
+// since the entered quantity decides the price per unit the server posts.
+describe('chinaPostQtyError: the posting window\'s quantity validation', () => {
+  it('refuses empty, zero, negative, fractional and non-numeric input', () => {
+    expect(chinaPostQtyError('')).toBe('\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e');
+    expect(chinaPostQtyError('  ')).toBe('\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e');
+    expect(chinaPostQtyError('0')).toBe('\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u043d\u0435 \u043c\u0435\u043d\u044c\u0448\u0435 1');
+    expect(chinaPostQtyError('-3')).toBe('\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u043d\u0435 \u043c\u0435\u043d\u044c\u0448\u0435 1');
+    expect(chinaPostQtyError('2.5')).toBe('\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u0446\u0435\u043b\u044b\u043c \u0447\u0438\u0441\u043b\u043e\u043c');
+    expect(chinaPostQtyError('abc')).toBe('\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u0446\u0435\u043b\u044b\u043c \u0447\u0438\u0441\u043b\u043e\u043c');
+  });
+
+  it('accepts a whole number of at least 1, trimmed', () => {
+    expect(chinaPostQtyError(' 12 ')).toBeNull();
+    expect(chinaPostQtyError('1')).toBeNull();
+  });
+});
+
+describe('chinaPostPricePerUnit: the posting window\'s display-only provisional price', () => {
+  it('divides the cost by the entered quantity, rounded to whole kopecks', () => {
+    expect(chinaPostPricePerUnit(1000, 3)).toBe(333.33);
+  });
+
+  it('is 0 for a zero or missing quantity, never a division error', () => {
+    expect(chinaPostPricePerUnit(1000, 0)).toBe(0);
+    expect(chinaPostPricePerUnit(1000, undefined as unknown as number)).toBe(0);
+  });
+});
+
+describe('chinaPostingBadge: the compact mark of a posted batch', () => {
+  it('is null for an unposted batch', () => {
+    expect(chinaPostingBadge(makeBatch({ postingState: '' }))).toBeNull();
+  });
+
+  it('reads \u00ab\u0423\u0436\u0435 \u043d\u0430 \u043e\u0441\u0442\u0430\u0442\u043a\u0435\u00bb with no date/author for the migration mark', () => {
+    expect(chinaPostingBadge(makeBatch({ postingState: '\u0443\u0436\u0435 \u043d\u0430 \u043e\u0441\u0442\u0430\u0442\u043a\u0435' }))).toEqual({
+      text: '\u0423\u0436\u0435 \u043d\u0430 \u043e\u0441\u0442\u0430\u0442\u043a\u0435', className: 'bg-slate-100 text-slate-500'
+    });
+  });
+
+  it('shows the date, the author and \u00ab\u043f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u00bb/\u00ab\u043e\u043a\u043e\u043d\u0447\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u00bb for a real posting', () => {
+    const provisional = chinaPostingBadge(makeBatch({
+      postingState: '\u043f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u043e', postedAt: '2026-09-25 14:30:00', postedBy: '\u041d\u0438\u043a\u043e\u043b\u0430\u0439'
+    }));
+    expect(provisional?.text).toBe('\u041d\u0430 \u0441\u043a\u043b\u0430\u0434\u0435 \u0441 25.09.2026 \u00b7 \u041d\u0438\u043a\u043e\u043b\u0430\u0439 \u00b7 \u0446\u0435\u043d\u0430 \u043f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f');
+    const final = chinaPostingBadge(makeBatch({
+      postingState: '\u043e\u043a\u043e\u043d\u0447\u0430\u0442\u0435\u043b\u044c\u043d\u043e', postedAt: '2026-09-25 14:30:00', postedBy: '\u041d\u0438\u043a\u043e\u043b\u0430\u0439'
+    }));
+    expect(final?.text).toBe('\u041d\u0430 \u0441\u043a\u043b\u0430\u0434\u0435 \u0441 25.09.2026 \u00b7 \u041d\u0438\u043a\u043e\u043b\u0430\u0439 \u00b7 \u0446\u0435\u043d\u0430 \u043e\u043a\u043e\u043d\u0447\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f');
   });
 });

@@ -42,6 +42,11 @@ describe('lastReceiptByArticle / daysLying: how long a product lies', () => {
     expect(lastReceiptByArticle(rows).has('B')).toBe(false);
     expect(lastReceiptByArticle(undefined as unknown as Transaction[]).size).toBe(0);
   });
+  it('item 84: a China cost-correction receipt (qty 0) does not reset «лежит N дней»', () => {
+    const rows = [tx('2026-06-10', 'C', 5), tx('2026-09-19', 'C', 0)]; // later correction, 0 pcs
+    const m = lastReceiptByArticle(rows);
+    expect(ymd(m.get('C')!)).toBe('2026-06-10');
+  });
   it('daysLying floors to whole days and never goes negative', () => {
     expect(daysLying(new Date('2026-09-20T16:00:00'), NOW)).toBe(0);
     expect(daysLying(new Date('2026-09-25T00:00:00'), NOW)).toBe(0);

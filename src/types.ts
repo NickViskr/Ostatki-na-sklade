@@ -664,4 +664,37 @@ export interface ChinaBatch {
    * chinaRemainingText). */
   remainingGoodsKnown?: boolean;
   remainingFreightKnown?: boolean;
+  /** Item 84 (stage 2): '' | 'уже на остатке' | 'предварительно' | 'окончательно' — see
+   * ChinaOrders.gs CHINA_POSTING_STATE_*. */
+  postingState?: string;
+  postedAt?: string;
+  postedBy?: string;
+  postingOpId?: string;
+  /** The batch's own per-article record of what it has already put on stock (receipts and
+   * later cost corrections), so a cancel or a correction never has to reconstruct it. */
+  postingRecords?: ChinaPostingRecord[];
+  /** Server-computed: whether «Оприходовать» is available right now. */
+  canPost?: boolean;
+  /** Russian sentences explaining why `canPost` is false; empty once it is true. */
+  postingBlockers?: string[];
+  /** Per-article preview for the confirmation window — ordered qty, batch cost ₽, provisional
+   * price per unit (costRub ÷ qty). Empty for a batch that cannot be posted right now. */
+  postingPreview?: ChinaPostingPreviewLine[];
+}
+
+/** Item 84 (stage 2): one article's worth of what a posted batch has already put on stock. */
+export interface ChinaPostingRecord {
+  article: string;
+  qty: number;
+  receiptRub: number;
+  receiptTxnId: string;
+  corrections: { amount: number; txnId: string; date: string }[];
+}
+
+/** Item 84 (stage 2): one row of the posting confirmation window's preview table. */
+export interface ChinaPostingPreviewLine {
+  article: string;
+  qty: number;
+  costRub: number;
+  pricePerUnitRub: number;
 }

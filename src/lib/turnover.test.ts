@@ -95,6 +95,13 @@ describe('buildTurnover: one article, hand-checked arithmetic', () => {
     expect(a.ageDays).toBe(1);
     expect(a.lastReceiptDay).toBe('2026-09-16');
   });
+  it('item 84: a China cost-correction receipt (qty 0) after the real one leaves lastReceiptDay untouched', () => {
+    const withCorrection = buildTurnover({
+      ...input,
+      transactions: [...input.transactions, tx('2026-09-19', 'A', 0)]
+    });
+    expect(withCorrection.articles.find((x) => x.article === 'A')!.lastReceiptDay).toBe('2026-09-16');
+  });
   it('20 days per turn is «normal» with fast < 20 and slow > 45; the boundaries are strict', () => {
     expect(a.status).toBe('normal');
     expect(buildTurnover({ ...input, settings: { periodDays: 10, slowDays: 19, fastDays: 5 } }).articles[0].status).toBe('slow');

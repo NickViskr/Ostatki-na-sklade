@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Plus, RefreshCw, Loader2, Trash2, Pencil, ChevronDown, ChevronRight, AlertTriangle, Save, FileUp, RotateCw
+  Plus, RefreshCw, Loader2, Trash2, Pencil, ChevronDown, ChevronRight, AlertTriangle, Save, FileUp, RotateCw,
+  PackageCheck, Undo2
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
@@ -10,12 +11,13 @@ import { ChinaBatch, ChinaBatchLine } from '../types';
 import { ChinaBatchModal } from './ChinaBatchModal';
 import { ChinaPaymentsCard } from './ChinaPaymentsCard';
 import { ChinaForecastPanel } from './ChinaForecastPanel';
+import { ChinaPostModal } from './ChinaPostModal';
 import {
   CHINA_COST_TYPES, ChinaBatchForm, ChinaCostRow, chinaArticleConflicts, chinaBatchToForm, chinaCheckMark,
   chinaCostRowsOf, chinaCostRowsPayload, chinaEtaText, chinaFormFromArrival, chinaFormFromFiles,
   chinaFormToPayload, chinaFreightPerKgLabel, chinaLevelledIndexes, chinaMarkingMatches, chinaMatchArrivalBatch,
-  chinaMatchFinalBatch, chinaNumText, chinaRateSourceLabel, chinaRateStatusText, chinaRemainingText, chinaRubText,
-  chinaShowWeightFactor, chinaTariffRateUnit
+  chinaMatchFinalBatch, chinaNumText, chinaPostingBadge, chinaRateSourceLabel, chinaRateStatusText,
+  chinaRemainingText, chinaRubText, chinaShowWeightFactor, chinaTariffRateUnit
 } from '../lib/chinaBatchForm';
 import {
   ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, ChinaSheets, chinaReportPayload,
@@ -66,6 +68,7 @@ export const ChinaOrdersTab: React.FC = () => {
   const deleteChinaBatch = useChinaStore((s) => s.deleteChinaBatch);
   const saveChinaReportAction = useChinaStore((s) => s.saveChinaReport);
   const setChinaRubCostsDone = useChinaStore((s) => s.setChinaRubCostsDone);
+  const cancelChinaBatchPosting = useChinaStore((s) => s.cancelChinaBatchPosting);
   const setConfirmDialog = useUIStore((s) => s.setConfirmDialog);
   const skus = useWarehouseStore((s) => s.skus);
   const sessionToken = useWarehouseStore((s) => s.sessionToken) || '';
@@ -78,6 +81,8 @@ export const ChinaOrdersTab: React.FC = () => {
   const [openId, setOpenId] = useState<string>('');
   const [editing, setEditing] = useState<ChinaBatch | null>(null);
   const [showModal, setShowModal] = useState(false);
+  // Item 84 (stage 2): the batch id the posting confirmation window is open for, '' when closed.
+  const [postingBatchId, setPostingBatchId] = useState<string>('');
   const [labels, setLabels] = useState<Record<string, LabelDraft>>({});
   const [importForm, setImportForm] = useState<ChinaBatchForm | null>(null);
   const [importNotes, setImportNotes] = useState<string[]>([]);
@@ -99,6 +104,7 @@ export const ChinaOrdersTab: React.FC = () => {
   useEffect(() => { fetchChinaBatches(); }, [fetchChinaBatches]);
 
   const open = useMemo(() => batches.find((b) => b.id === openId) || null, [batches, openId]);
+  const postingBatch = useMemo(() => batches.find((b) => b.id === postingBatchId) || null, [batches, postingBatchId]);
 
   const labelOf = (line: ChinaBatchLine): LabelDraft =>
     labels[line.id] || { article: line.article, group: line.group };
@@ -377,6 +383,22 @@ export const ChinaOrdersTab: React.FC = () => {
     });
   };
 
+  // Item 84 (stage 2), decision 7: the admin-only rollback — removes the receipts and
+  // corrections into «Удалённые», rolls the stock back and returns the order to the pipeline;
+  // the server refuses it when part of the goods is already shipped or a receipt is older than
+  // 30 days, and its own Russian message reaches the owner through the usual error toast.
+  const askCancelPosting = (batch: ChinaBatch) => {
+    setConfirmDialog({
+      show: true,
+      title: 'Отменить оприходование?',
+      message: `Приходы и доводки себестоимости партии ${batch.code} уйдут в «Удалённые», остаток на складе откатится, заказ вернётся в трубу. Отменить нельзя, если часть товара уже отгружена или приход старше 30 дней.`,
+      onConfirm: async () => {
+        setConfirmDialog({ show: false, title: '', message: '', onConfirm: () => {} });
+        await cancelChinaBatchPosting(batch.id);
+      }
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -471,6 +493,8 @@ export const ChinaOrdersTab: React.FC = () => {
           // unless the script says otherwise for this account.
           const eta = chinaEtaText(batch, Number(settings.transitDays) || 30, new Date());
           const remaining = chinaRemainingText(batch);
+          const postingBadge = chinaPostingBadge(batch);
+          const isPosted = !!batch.postingState;
           return (
             <div key={batch.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <button
@@ -489,6 +513,11 @@ export const ChinaOrdersTab: React.FC = () => {
                     )}
                     {batch.closed && (
                       <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Расчёт закрыт</span>
+                    )}
+                    {postingBadge && (
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${postingBadge.className}`}>
+                        {postingBadge.text}
+                      </span>
                     )}
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">
@@ -787,7 +816,7 @@ export const ChinaOrdersTab: React.FC = () => {
                     </button>
                   </div>
 
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 flex-wrap">
                     <button
                       onClick={() => { setEditing(batch); setShowModal(true); }}
                       className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:text-indigo-600"
@@ -800,6 +829,30 @@ export const ChinaOrdersTab: React.FC = () => {
                     >
                       <Trash2 size={16} /> Удалить партию
                     </button>
+                    {/* Item 84 (stage 2): «Оприходовать» only for an arrived, not yet posted
+                        batch — a batch marked 'уже на остатке' shows the badge above instead. */}
+                    {batch.status === 'Прибыла' && !isPosted && (
+                      <button
+                        data-testid={`btn-post-china-batch-${batch.id}`}
+                        onClick={() => setPostingBatchId(batch.id)}
+                        disabled={!batch.canPost}
+                        className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <PackageCheck size={16} /> Оприходовать
+                      </button>
+                    )}
+                    {batch.status === 'Прибыла' && !isPosted && !batch.canPost && (batch.postingBlockers || []).length > 0 && (
+                      <span className="text-xs text-amber-600 max-w-md">{(batch.postingBlockers || []).join('; ')}</span>
+                    )}
+                    {(batch.postingState === 'предварительно' || batch.postingState === 'окончательно') && (
+                      <button
+                        data-testid={`btn-cancel-china-posting-${batch.id}`}
+                        onClick={() => askCancelPosting(batch)}
+                        className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-amber-600 hover:text-amber-700"
+                      >
+                        <Undo2 size={16} /> Отменить оприходование
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -826,6 +879,10 @@ export const ChinaOrdersTab: React.FC = () => {
             setImportAiCheck(null);
           }}
         />
+      )}
+
+      {postingBatch && (
+        <ChinaPostModal batch={postingBatch} onClose={() => setPostingBatchId('')} />
       )}
     </div>
   );

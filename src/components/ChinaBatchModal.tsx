@@ -96,6 +96,10 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
 
   const counts = chinaFormCounts(form.lines);
   const cargoRateHint = settings.cargoRateCnyPerUsd;
+  // Item 84 (stage 2), decision 5: the server refuses an article/quantity change of a posted
+  // batch anyway (saveChinaBatch, ChinaOrders.gs) — locking the fields here only avoids a
+  // confusing refusal after the owner has already typed something.
+  const isPosted = !!batch?.postingState;
 
   const handleSave = async () => {
     const errors = validateChinaBatchForm(form);
@@ -273,7 +277,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                       <td className="py-1 pr-2"><input className={cell} value={line.marking} onChange={(e) => setLine(i, { marking: e.target.value })} placeholder="впишите маркировку" /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.boxes} onChange={(e) => setLine(i, { boxes: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.pcsPerBox} onChange={(e) => setLine(i, { pcsPerBox: e.target.value })} /></td>
-                      <td className="py-1 pr-2"><input className={cell} value={line.qty} onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
+                      <td className="py-1 pr-2"><input className={cell} value={line.qty} disabled={isPosted} onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.priceCny} onChange={(e) => setLine(i, { priceCny: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.pallet} onChange={(e) => setLine(i, { pallet: e.target.value })} /></td>
                       <td className="py-1 pr-2"><input className={cell} value={line.palletWeightKg} onChange={(e) => setLine(i, { palletWeightKg: e.target.value })} /></td>
@@ -291,6 +295,7 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
                           data-testid="select-china-article"
                           className={`${cell} min-w-[220px]`}
                           value={line.article}
+                          disabled={isPosted}
                           onChange={(e) => setLineArticle(i, e.target.value)}
                         >
                           <option value="">— выберите артикул —</option>
@@ -316,6 +321,11 @@ export const ChinaBatchModal: React.FC<ChinaBatchModalProps> = ({ batch, initial
             {boxesOnly && (
               <p className="text-sm text-amber-600 mt-1">
                 Отправка коробками, без паллет: вес и объём накладной взяты из приёмки
+              </p>
+            )}
+            {isPosted && (
+              <p className="text-sm text-amber-600 mt-1">
+                партия оприходована — сначала отмените оприходование
               </p>
             )}
           </div>

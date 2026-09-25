@@ -76,6 +76,11 @@ interface ChinaState {
   /** Item 83i: the manual/first-run sync button — reconciles «Заказы на фабрике» and reports
    * the pipeline qty per article before/after. */
   syncChinaFactoryOrders: () => Promise<{ added: number; updated: number; removed: number; before: Record<string, number>; after: Record<string, number> } | null>;
+  /** Item 84 (stage 2): posts an arrived batch onto «Мой склад» at a provisional cost. `opId` is
+   * generated ONCE per confirmation window, by the caller, so a double click cannot post twice. */
+  postChinaBatch: (payload: { id: string; opId: string; lines: { article: string; qty: number }[] }) => Promise<boolean>;
+  /** Item 84 (stage 2): admin-only rollback of a posting — removes its receipts/corrections. */
+  cancelChinaBatchPosting: (id: string) => Promise<boolean>;
 }
 
 const callChina = async (action: string, data?: Record<string, unknown>): Promise<ChinaAnswer> => {
@@ -368,5 +373,40 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     toast.success(`Заказы на фабрике синхронизированы: добавлено ${data.summary.added}, обновлено ${data.summary.updated}, удалено ${data.summary.removed}`);
     void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
     return { ...data.summary, before: data.before, after: data.after };
+  },
+
+  postChinaBatch: async (payload) => {
+    set({ isSaving: true });
+    const result = await callChina('postChinaBatch', payload);
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось оприходовать партию');
+      return false;
+    }
+    set({ batches: result.data.batches || get().batches, loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
+    toast.success('Партия оприходована на склад по предварительной цене');
+    // Item 84 (stage 2): a posting moves stock and transactions of the MAIN spreadsheet and
+    // the batch's row of «Заказы на фабрике» (it becomes 'received') — not awaited, same
+    // pattern as the other China writes above.
+    void useWarehouseStore.getState().fetchStock().catch(() => {});
+    void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
+    return true;
+  },
+
+  cancelChinaBatchPosting: async (id) => {
+    set({ isSaving: true });
+    const result = await callChina('cancelChinaBatchPosting', { id });
+    set({ isSaving: false });
+    if (result.status !== 'success' || !result.data) {
+      toast.error(result.message || 'Не удалось отменить оприходование');
+      return false;
+    }
+    set({ batches: result.data.batches || get().batches, loaded: true, error: '' });
+    if (result.data.money) set({ money: result.data.money }); else void get().fetchChinaMoney().catch(() => {});
+    toast.success('Оприходование отменено, товар возвращён в заказ');
+    void useWarehouseStore.getState().fetchStock().catch(() => {});
+    void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
+    return true;
   }
 }));

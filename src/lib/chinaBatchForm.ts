@@ -9,6 +9,7 @@
 
 import { ChinaBatch, ChinaBatchCost, ChinaBatchLine } from '../types';
 import { ChinaParsedArrival, ChinaParsedBatch, ChinaParsedReport, chinaFreightOf, chinaOrderOf } from './chinaFileParse';
+import { formatDateRu } from './utils';
 
 export interface ChinaLineForm {
   marking: string;
@@ -959,4 +960,51 @@ export function chinaMatchArrivalBatch(draftCode: string, lines: { marking: stri
   const noBoxData = batches.filter((b) => !b.lines.some((l) => l.factoryBoxKg > 0 || l.boxLengthM > 0));
   const bySet = noBoxData.filter((b) => sameMarkingSet(normalizedMarkingSet(b.lines), wantedMarkings));
   return bySet.length === 1 ? bySet[0] : null;
+}
+
+/**
+ * Item 84 (stage 2): validates one quantity field of the posting confirmation window —
+ * a whole number, at least 1 (the server refuses anything else, `postChinaBatch` in
+ * ChinaOrders.gs). `null` means the value is fine.
+ */
+export function chinaPostQtyError(raw: string): string | null {
+  const trimmed = String(raw ?? '').trim();
+  if (trimmed === '') return 'Укажите количество';
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return 'Количество должно быть целым числом';
+  if (n < 1) return 'Количество должно быть не меньше 1';
+  return null;
+}
+
+/**
+ * Item 84 (stage 2): the DISPLAY-only provisional price per unit of the posting confirmation
+ * window (costRub ÷ entered qty, rounded to whole kopecks) — the server computes the real one
+ * from what `commitTransaction` actually posts, this is only what the owner sees before confirming.
+ */
+export function chinaPostPricePerUnit(costRub: number, qty: number): number {
+  if (!(qty > 0)) return 0;
+  return Math.round((costRub / qty) * 100) / 100;
+}
+
+/**
+ * Item 84 (stage 2): the compact mark a posted batch shows instead of the «Оприходовать»
+ * button — null for an unposted batch, so the caller renders nothing.
+ */
+export function chinaPostingBadge(batch: {
+  postingState?: string;
+  postedAt?: string;
+  postedBy?: string;
+}): { text: string; className: string } | null {
+  const state = batch.postingState || '';
+  if (!state) return null;
+  if (state === 'уже на остатке') {
+    return { text: 'Уже на остатке', className: 'bg-slate-100 text-slate-500' };
+  }
+  const date = formatDateRu((batch.postedAt || '').split(' ')[0]);
+  const who = batch.postedBy ? ` · ${batch.postedBy}` : '';
+  const priceNote = state === 'окончательно' ? 'цена окончательная' : 'цена предварительная';
+  return {
+    text: `На складе с ${date || '—'}${who} · ${priceNote}`,
+    className: state === 'окончательно' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
+  };
 }

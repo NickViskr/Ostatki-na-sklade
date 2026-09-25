@@ -274,10 +274,12 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
     kanNames.set(art, names);
   }
 
-  // Last receipt per article, any time.
+  // Last receipt per article, any time. Item 84 (stage 2): a quantity-0 «Приход» is a cost
+  // correction («Доводка себестоимости»), not new goods — skipped so it does not reset
+  // «лежит N дней» (turnoverDays.ts's lastReceiptByArticle does the same).
   const lastReceipt = new Map<string, string>();
   for (const t of input.transactions || []) {
-    if (t.type !== 'Приход') continue;
+    if (t.type !== 'Приход' || !(Number(t.quantity) > 0)) continue;
     const d = parseAppDate(t.date);
     if (!d) continue;
     const day = localDay(d);

@@ -31,11 +31,13 @@ export function coverageDays(parts: StockParts, perDay: number): number | null {
   return Math.round(total / perDay);
 }
 
-/** Date of the latest «Приход» per article, so the screen can say how long a product lies. */
+/** Date of the latest «Приход» per article, so the screen can say how long a product lies.
+ * Item 84 (stage 2): a cost-correction row («Доводка себестоимости») is a «Приход» with
+ * quantity 0 — it puts no new goods on the shelf, so it must not reset «лежит N дней». */
 export function lastReceiptByArticle(transactions: Transaction[]): Map<string, Date> {
   const out = new Map<string, Date>();
   for (const t of transactions || []) {
-    if (t.type !== 'Приход') continue;
+    if (t.type !== 'Приход' || !(Number(t.quantity) > 0)) continue;
     const d = parseAppDate(t.date);
     if (!d) continue;
     const cur = out.get(t.article);
