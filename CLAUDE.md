@@ -48,6 +48,23 @@ not translated back; files drift to English as they are edited.
   - The orchestrator does not repeat the agent's final run; it reads the diff and re-derives
     one or two key figures itself.
   - Every brief states the expected test volume (e.g. «≈5 checks, 3 mutations»), never «≥N».
+- Task speed (owner's decision 2026-09-25: a simple task took 20–30 min; measured that day —
+  agents 10–22 min each re-reading 13–54 files cold, 99 stand runs, 40 full vitest runs, 30 tsc
+  runs at 30 s; target 5–10 min for a simple task). These override the global «pipeline by
+  default» rule for this project:
+  1. **Small tasks are done by the orchestrator itself, no agents.** Small = 1–2 files, up to
+     ~50 changed lines (a label, number formatting, a small bug). Agents only for a new module
+     or a large rework.
+  2. **While working, run only the changed test file** (`npx vitest run <file>`, ≈2 s;
+     `GAS_ONLY=<name part> npm run test:gas`). The full set runs once, before deployment.
+  3. **`tsc` runs once, before deployment.** It is incremental (`tsconfig.json`, cache in
+     `node_modules/.cache/`): ≈9 s on a repeat run instead of 30 s.
+  4. **Mutations only for money-critical changes** (money, write-offs, sheet writes), at most
+     3–5 per fix; none for anything else.
+  5. **A separate tester agent only for money-critical tasks.** Otherwise whoever made the
+     change writes its tests.
+  6. **The Yekaterinburg run and the build only before deployment**, and the Yekaterinburg run
+     only when dates changed.
 - All numeric calculations are executed as code, never mental arithmetic.
 - `npm audit fix` must not be run. The classifier refuses `rm -rf node_modules` — the owner
   does that.
