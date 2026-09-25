@@ -20,6 +20,9 @@ export interface ChinaPaymentFromText {
   amountRub: number;
   rate: number;
   amountCny: number;
+  /** The owner's own sentence, trimmed as typed — the card fills it into the comment field
+   * unless one is already there by hand, so nothing he wrote is lost. */
+  comment: string;
   /** false when nothing of a payment could be made out of the sentence. */
   matched: boolean;
 }
@@ -32,21 +35,69 @@ const toNumber = (raw: string): number => {
 
 const pad = (n: number): string => String(n).padStart(2, '0');
 
-/** A date the owner may put in front: 24.09.2026, 24.09.26, 24.09, or 2026-09-24. */
+const isoOf = (year: number, month: number, day: number): string => `${year}-${pad(month)}-${pad(day)}`;
+
+/** «20» stated with no year: the owner means a day already past, never one still to come, so a
+ * day/month that would land in the future is read as the same day of LAST year instead. */
+const yearOfDayMonth = (day: number, month: number, today: Date): number => {
+  const thisYear = today.getFullYear();
+  const candidate = new Date(thisYear, month - 1, day);
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return candidate.getTime() > todayMidnight.getTime() ? thisYear - 1 : thisYear;
+};
+
+const yearOf = (stated: string | undefined, day: number, month: number, today: Date): number => {
+  if (!stated) return yearOfDayMonth(day, month, today);
+  const value = Number(stated);
+  return value < 100 ? 2000 + value : value;
+};
+
+// Three-letter stems (two for «май», the shortest month name): every case ending and every
+// abbreviation the owner might type («августа», «авг», «авг.») is the stem plus [а-я]*, so one
+// entry covers all of them. «мар» is listed before «ма» on purpose — «марта» must match the
+// March stem before the May stem gets a chance at its first two letters.
+const MONTHS: Record<string, number> = {
+  янв: 1, фев: 2, мар: 3, апр: 4, ма: 5, июн: 6, июл: 7, авг: 8, сен: 9, окт: 10, ноя: 11, дек: 12
+};
+const MONTH_STEMS = ['янв', 'фев', 'мар', 'апр', 'ма', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+/**
+ * A date the owner may put in front, in any of the shapes he actually writes:
+ * 2026-09-24 (ISO), 24.09.2026 / 24.09.26 / 24.09, the same with «/» or «-» instead of the dot,
+ * a word month («24 сентября», «24 сентября 2026», «24 сен»), or «вчера» / «позавчера».
+ *
+ * «сегодня» names no date of its own — the field is already blank and read as today, exactly as
+ * when nothing about a date is said at all, so it is not matched here on purpose.
+ */
 export function chinaDateFromText(text: string, today: Date): string {
   const iso = text.match(/(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const dotted = text.match(/(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?/);
+  if (iso) return isoOf(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+
+  // «позавчера» contains «вчера» as a substring, so it must be tried first — otherwise the
+  // engine would match «вчера» inside it and read the day before yesterday as yesterday.
+  if (/позавчера/i.test(text)) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 2);
+    return isoOf(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  }
+  if (/вчера/i.test(text)) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+    return isoOf(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  }
+
+  const wordMonth = text.match(new RegExp(
+    `(\\d{1,2})\\s+(${MONTH_STEMS.join('|')})[а-я]*\\.?\\s*(\\d{2,4})?`, 'i'));
+  if (wordMonth) {
+    const day = Number(wordMonth[1]);
+    const month = MONTHS[wordMonth[2].toLowerCase()];
+    if (day >= 1 && day <= 31) return isoOf(yearOf(wordMonth[3], day, month, today), month, day);
+  }
+
+  const dotted = text.match(/(\d{1,2})[.\/-](\d{1,2})(?:[.\/-](\d{2,4}))?/);
   if (dotted) {
     const day = Number(dotted[1]);
     const month = Number(dotted[2]);
     if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-      let year = today.getFullYear();
-      if (dotted[3]) {
-        const stated = Number(dotted[3]);
-        year = stated < 100 ? 2000 + stated : stated;
-      }
-      return `${year}-${pad(month)}-${pad(day)}`;
+      return isoOf(yearOf(dotted[3], day, month, today), month, day);
     }
   }
   return '';
@@ -54,7 +105,7 @@ export function chinaDateFromText(text: string, today: Date): string {
 
 export function parseChinaPaymentText(text: string, today: Date = new Date()): ChinaPaymentFromText {
   const source = String(text || '');
-  const empty: ChinaPaymentFromText = { date: '', amountRub: 0, rate: 0, amountCny: 0, matched: false };
+  const empty: ChinaPaymentFromText = { date: '', amountRub: 0, rate: 0, amountCny: 0, comment: '', matched: false };
   if (source.trim() === '') return empty;
 
   let rest = source;
@@ -98,7 +149,9 @@ export function parseChinaPaymentText(text: string, today: Date = new Date()): C
     });
   }
 
-  const date = chinaDateFromText(source, today);
+  // The date is read from what is left once the rate and the confirmed yuan are cut out — a rate
+  // written with a dot, «12.4», is otherwise a day and a month («12.04») in disguise.
+  const date = chinaDateFromText(rest, today);
   const matched = amountRub > 0 && (rate > 0 || amountCny > 0);
-  return { date, amountRub, rate, amountCny, matched };
+  return { date, amountRub, rate, amountCny, comment: source.trim(), matched };
 }

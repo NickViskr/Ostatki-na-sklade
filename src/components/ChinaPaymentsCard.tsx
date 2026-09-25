@@ -1,9 +1,31 @@
 import React, { useEffect, useState } from 'react';
-import { Wallet, Loader2, Trash2, Wand2 } from 'lucide-react';
+import { Wallet, Loader2, Trash2, Wand2, ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChinaStore } from '../store/useChinaStore';
+import { useWarehouseStore } from '../store/useWarehouseStore';
 import { chinaNumber } from '../lib/chinaBatchForm';
 import { parseChinaPaymentText } from '../lib/chinaPaymentText';
+
+// The choice to show or hide the orders table is a workspace preference, kept per viewer and
+// surviving a reload — same pattern as `sidebarCollapsed` in `useUIStore.ts`. Collapsed by
+// default: the table is long and the owner mostly needs the totals above it, not every order.
+const ORDERS_OPEN_KEY = (username: string) => `chinaOrdersTableOpen_${username}`;
+
+const readOrdersOpen = (username: string): boolean => {
+  try {
+    return localStorage.getItem(ORDERS_OPEN_KEY(username)) === '1';
+  } catch {
+    return false;
+  }
+};
+
+const writeOrdersOpen = (username: string, open: boolean) => {
+  try {
+    localStorage.setItem(ORDERS_OPEN_KEY(username), open ? '1' : '0');
+  } catch {
+    // Private mode or a full quota: the table still works, it just forgets the choice.
+  }
+};
 
 const money = (value: number, currency: string): string =>
   `${(Number(value) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
@@ -31,6 +53,7 @@ export const ChinaPaymentsCard: React.FC = () => {
   const matchPayment = useChinaStore((s) => s.matchChinaPayment);
   const unmatchPayment = useChinaStore((s) => s.unmatchChinaPayment);
   const fetchChinaMoney = useChinaStore((s) => s.fetchChinaMoney);
+  const username = useWarehouseStore((s) => s.currentUser?.username || '');
 
   const [text, setText] = useState('');
   const [date, setDate] = useState('');
@@ -38,8 +61,15 @@ export const ChinaPaymentsCard: React.FC = () => {
   const [rate, setRate] = useState('');
   const [comment, setComment] = useState('');
   const [picked, setPicked] = useState<Record<string, string>>({});
+  const [ordersOpen, setOrdersOpen] = useState(() => readOrdersOpen(username));
 
   useEffect(() => { fetchChinaMoney(); }, [fetchChinaMoney]);
+
+  const toggleOrdersOpen = () => {
+    const next = !ordersOpen;
+    setOrdersOpen(next);
+    writeOrdersOpen(username, next);
+  };
 
   const readText = () => {
     const parsed = parseChinaPaymentText(text);
@@ -52,7 +82,14 @@ export const ChinaPaymentsCard: React.FC = () => {
     setDate(parsed.date);
     setAmountRub(String(parsed.amountRub));
     setRate(parsed.rate ? String(parsed.rate) : '');
-    toast.success('Разобрал сообщение — проверьте поля и добавьте оплату');
+    // The owner's own sentence goes whole into the comment, so nothing he wrote is lost — unless
+    // he already typed a comment of his own, which the parse must not overwrite.
+    if (!comment.trim()) setComment(parsed.comment);
+    if (parsed.date) {
+      toast.success('Разобрал сообщение — проверьте поля и добавьте оплату');
+    } else {
+      toast.warning('Дата не найдена — проверьте поле даты, стоит сегодняшняя');
+    }
   };
 
   const add = async () => {
@@ -268,34 +305,49 @@ export const ChinaPaymentsCard: React.FC = () => {
 
       {orders.length > 0 && (
         <div className="space-y-2">
-          <h3 className="font-bold text-sm">Заказы</h3>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-[11px] uppercase text-slate-400 text-left border-b border-slate-100">
-                <th className="py-2 pr-3">Заказ</th>
-                <th className="py-2 pr-3">Получено ¥</th>
-                <th className="py-2 pr-3">По курсу ¥ / ₽</th>
-                <th className="py-2 pr-3">Не распределено</th>
-                <th className="py-2 pr-3">История</th>
-                <th className="py-2 pr-3">Средний курс</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.map((o) => (
-                <tr key={o.orderNo} className="border-b border-slate-50">
-                  <td className="py-2 pr-3 font-bold">№{o.orderNo}</td>
-                  <td className="py-2 pr-3">{money(o.receivedCny, '¥')}</td>
-                  <td className="py-2 pr-3">{money(o.knownCny, '¥')} / {money(o.knownRub, '₽')}</td>
-                  <td className="py-2 pr-3">{o.pendingCny > 0 ? money(o.pendingCny, '¥') : '—'}</td>
-                  <td className="py-2 pr-3">{o.historyCny > 0 ? money(o.historyCny, '¥') : '—'}</td>
-                  <td className="py-2 pr-3">
-                    {o.rate || '—'}
-                    {o.advanceWarning && <span className="block text-[10px] text-amber-600">аванс меньше 30 %</span>}
-                  </td>
+          <button
+            type="button"
+            data-testid="btn-china-orders-toggle"
+            onClick={toggleOrdersOpen}
+            className="flex items-center gap-2 font-bold text-sm text-slate-700 hover:text-indigo-600"
+          >
+            {ordersOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            Заказы по отчёту ({orders.length})
+            {!ordersOpen && orders.some((o) => o.advanceWarning) && (
+              <span className="text-[11px] font-normal text-amber-600">
+                аванс меньше 30 % у {orders.filter((o) => o.advanceWarning).length}
+              </span>
+            )}
+          </button>
+          {ordersOpen && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-[11px] uppercase text-slate-400 text-left border-b border-slate-100">
+                  <th className="py-2 pr-3">Заказ</th>
+                  <th className="py-2 pr-3">Получено ¥</th>
+                  <th className="py-2 pr-3">По курсу ¥ / ₽</th>
+                  <th className="py-2 pr-3">Не распределено</th>
+                  <th className="py-2 pr-3">История</th>
+                  <th className="py-2 pr-3">Средний курс</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {orders.map((o) => (
+                  <tr key={o.orderNo} className="border-b border-slate-50">
+                    <td className="py-2 pr-3 font-bold">№{o.orderNo}</td>
+                    <td className="py-2 pr-3">{money(o.receivedCny, '¥')}</td>
+                    <td className="py-2 pr-3">{money(o.knownCny, '¥')} / {money(o.knownRub, '₽')}</td>
+                    <td className="py-2 pr-3">{o.pendingCny > 0 ? money(o.pendingCny, '¥') : '—'}</td>
+                    <td className="py-2 pr-3">{o.historyCny > 0 ? money(o.historyCny, '¥') : '—'}</td>
+                    <td className="py-2 pr-3">
+                      {o.rate || '—'}
+                      {o.advanceWarning && <span className="block text-[10px] text-amber-600">аванс меньше 30 %</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 

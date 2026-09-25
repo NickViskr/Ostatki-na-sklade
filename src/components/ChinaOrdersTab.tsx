@@ -431,13 +431,13 @@ export const ChinaOrdersTab: React.FC = () => {
                     <div>
                       <div className="text-xs text-slate-400 uppercase font-bold">Курс товара</div>
                       {batch.rubRate || '—'}
-                      {batch.rubRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.rubRateSource, batch.rubRateFrom || '')}</span>}
+                      {batch.rubRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.rubRateSource, batch.rubRateFrom || '', batch.rateFromPayment || '')}</span>}
                     </div>
                     {batch.freightRate !== undefined && (
                       <div>
                         <div className="text-xs text-slate-400 uppercase font-bold">Курс перевозки</div>
                         {batch.freightRate || '—'}
-                        {batch.freightRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.freightRateSource, batch.rubRateFrom || '')}</span>}
+                        {batch.freightRateSource && <span className="block text-[10px] text-slate-400">{chinaRateSourceLabel(batch.freightRateSource, batch.rubRateFrom || '', batch.rateFromPayment || '')}</span>}
                       </div>
                     )}
                     {chinaShowWeightFactor(batch.weightFactor, batch.lines) && (
@@ -455,7 +455,7 @@ export const ChinaOrdersTab: React.FC = () => {
                       {batch.unpaidCny > 0 && <>, долг {money(batch.unpaidCny, '¥')}</>}
                       {' · '}
                       <span className={batch.rubRateSource ? 'text-slate-500' : 'text-amber-600'}>
-                        {chinaRateStatusText(batch.rubRateSource, batch.rubRateFrom || '', batch.payments.length)}
+                        {chinaRateStatusText(batch.rubRateSource, batch.rubRateFrom || '', batch.payments.length, batch.rateFromPayment || '')}
                       </span>
                     </p>
                   )}

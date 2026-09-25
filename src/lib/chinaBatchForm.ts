@@ -327,13 +327,26 @@ export function chinaMarkingMatches(lines: { marking: string }[], marking: strin
   return out;
 }
 
+/** «2026-08-20 CP3» → «20.08» — the short form of `rateFromPayment` the owner reads at a
+ * glance, the same shape `shortDate` in `ChinaPaymentsCard.tsx` gives a receipt's own date. */
+const shortDateOf = (rateFromPayment: string): string => {
+  const m = String(rateFromPayment || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}.${m[2]}` : '';
+};
+
 /** Item 81f: 'предыдущая партия' names the batch the rate was borrowed from, so the owner sees
  * at a glance that it is provisional rather than the order's own.
  * Item 81g: 'история' names a batch or receipt from before tracking started in August 2026 — no
  * rate is missing, none was ever expected, so it reads as its own sentence rather than a bare
- * word. */
-export function chinaRateSourceLabel(source: string, rubRateFrom: string): string {
+ * word. 'последняя оплата' (owner's live check of 2026-09-25) names the rate of the order's most
+ * recent payment, used before any report confirms one — `rateFromPayment` carries that payment's
+ * own date. */
+export function chinaRateSourceLabel(source: string, rubRateFrom: string, rateFromPayment: string = ''): string {
   if (source === 'история') return 'история без курса';
+  if (source === 'последняя оплата') {
+    const short = shortDateOf(rateFromPayment);
+    return short ? `предварительный курс по последней оплате от ${short}` : 'предварительный курс по последней оплате';
+  }
   return source === 'предыдущая партия' && rubRateFrom ? `курс из партии ${rubRateFrom}` : source;
 }
 
@@ -360,9 +373,15 @@ export function chinaCheckMark(checkMark: string, checkNote: string): ChinaCheck
  * even for a batch with NO rate at all (`rubRateSource: ''`). Now a batch with payments always
  * states their count, and every other source gets its own, honest sentence.
  */
-export function chinaRateStatusText(rubRateSource: string, rubRateFrom: string, paymentsCount: number): string {
+export function chinaRateStatusText(
+  rubRateSource: string, rubRateFrom: string, paymentsCount: number, rateFromPayment: string = ''
+): string {
   if (rubRateSource === 'вручную') return 'курс вписан вручную';
   if (rubRateSource === 'предыдущая партия') return `предварительный курс из партии ${rubRateFrom}`;
+  if (rubRateSource === 'последняя оплата') {
+    const short = shortDateOf(rateFromPayment);
+    return short ? `предварительный курс по последней оплате от ${short}` : 'предварительный курс по последней оплате';
+  }
   if (rubRateSource === 'оплаты') return `в базе оплат по этому заказу: ${paymentsCount}`;
   return 'курс не задан — внесите оплату или впишите курс ₽/¥ в партии, до тех пор суммы в рублях не считаются';
 }

@@ -728,6 +728,13 @@ module.exports = {
   chinaLedgerContext: (...args) => context.chinaLedgerContext(...args),
   chinaRecostAll: (...args) => context.chinaRecostAll(...args),
   chinaMergeLots: (...args) => context.chinaMergeLots(...args),
+  // ---------- Owner, 2026-09-25 (live check): last-known-payment rate fallback; named receipts
+  // in the missing-list message ----------
+  chinaLatestPaymentRate: (...args) => context.chinaLatestPaymentRate(...args),
+  chinaShortDate: (...args) => context.chinaShortDate(...args),
+  chinaJoinAnd: (...args) => context.chinaJoinAnd(...args),
+  chinaTrackingStartLabel: (...args) => context.chinaTrackingStartLabel(...args),
+  chinaLotsMissingMessages: (...args) => context.chinaLotsMissingMessages(...args),
   dumpChinaReports() { return this.dumpChinaSheet('Отчёты'); },
   vm
 };

@@ -373,6 +373,12 @@ export interface ChinaBatch {
   /** Item 81f: the code of the batch `rubRateSource: 'предыдущая партия'` borrowed its rate
    * from; '' otherwise. Absent on data saved before item 81f. */
   rubRateFrom?: string;
+  /** Item 81g, owner's live check of 2026-09-25: `rubRateSource: 'последняя оплата'` names the
+   * rate of the order's latest payment, used as a provisional rate before the report confirms
+   * one. Text like «2026-08-20 CP3» — the payment's own date and code, read by
+   * `chinaRateSourceLabel`/`chinaRateStatusText` for the short «от DD.MM» the owner sees. Absent
+   * when no such rate applies. */
+  rateFromPayment?: string;
   /** What the report of the Chinese side says about the order, kept at import time. */
   paidCny: number;
   unpaidCny: number;

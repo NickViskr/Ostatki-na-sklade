@@ -68,6 +68,9 @@ const CHINA_BATCH_HEADERS = [
   // Owner, 2026-09-24: ruble equivalents of the three currency figures, and where a borrowed
   // rate came from — see chinaWithPaymentRate / chinaBorrowedRate.
   'Товар ₽', 'Доставка по Китаю ₽', 'Перевозка ₽', 'Курс взят из партии',
+  // Owner, 2026-09-25 (live check): which payment a «последняя оплата» rate came from — its
+  // date and ID, e.g. «2026-08-20 CP3» — see chinaLatestPaymentRate / chinaWithPaymentRate.
+  'Курс взят из оплаты',
   // Owner, 2026-09-24: what one kilogram of freight cost — see the tail of chinaBatchCost.
   'Перевозка за 1 кг $', 'Перевозка за 1 кг ₽', 'Перевозка за 1 кг считается от',
   // Owner, 2026-09-24: the carrier's OWN tariff (Ставка $/кг, from the waybill) converted to
@@ -378,6 +381,9 @@ function chinaBatchFromRow(r) {
     chinaDeliveryRub: parseNumber(r['Доставка по Китаю ₽']),
     freightRub: parseNumber(r['Перевозка ₽']),
     rubRateFrom: String(r['Курс взят из партии'] || '').trim(),
+    // Owner, 2026-09-25: which payment a «последняя оплата» rate came from — see
+    // chinaLatestPaymentRate.
+    rateFromPayment: String(r['Курс взят из оплаты'] || '').trim(),
     // Owner, 2026-09-24: what one kilogram of freight cost — chinaBatchCost's own figure,
     // read back plainly here same as the rest of the derived batch columns.
     freightPerKgUsd: parseNumber(r['Перевозка за 1 кг $']),
@@ -414,12 +420,15 @@ function chinaBatchFromRow(r) {
  * Owner, 2026-09-24: the same is true of a BORROWED rate ('предыдущая партия') — without this
  * a batch that lost its typed rate but still borrows one would read back as if it had been
  * typed by hand, at whatever it was borrowing at the time it was last saved.
+ * Owner, 2026-09-25: and of the last-payment fallback ('последняя оплата') — same reasoning,
+ * same bug otherwise: the rate written to «Курс ₽/¥» would read back as manually typed the
+ * moment nothing else recomputed it.
  */
 function chinaManualRateOf(r) {
   const cell = r['Курс вручную'];
   if (cell !== undefined && cell !== null && String(cell).trim() !== '') return parseNumber(cell);
   const source = String(r['Источник курса'] || '').trim();
-  if (source === 'оплаты' || source === 'предыдущая партия') return 0;
+  if (source === 'оплаты' || source === 'предыдущая партия' || source === 'последняя оплата') return 0;
   return parseNumber(r['Курс ₽/¥']);
 }
 
@@ -1196,17 +1205,53 @@ function chinaLedgerContext(ss) {
 // same order are always the same number, computed the same way.
 function chinaOrderKnown(ledger, orderNo) {
   const o = ledger.goodsAlloc.orders[String(orderNo || '').trim()];
-  if (!o) return { knownCny: 0, knownRub: 0, pendingCny: 0, historyCny: 0, unknownCny: 0, totalCny: 0 };
+  if (!o) return { knownCny: 0, knownRub: 0, pendingCny: 0, historyCny: 0, unknownCny: 0, totalCny: 0, lots: [] };
   return {
     knownCny: o.knownCny,
     knownRub: chinaLotsKnownRub(o.lots, ledger.receiptsById, 'rubGoods', 'goodsCny'),
-    pendingCny: o.pendingCny, historyCny: o.historyCny, unknownCny: o.unknownCny, totalCny: o.totalCny
+    pendingCny: o.pendingCny, historyCny: o.historyCny, unknownCny: o.unknownCny, totalCny: o.totalCny,
+    // Coordinator, 2026-09-25: the ORDER's own lots — so a «pending» message can name the actual
+    // receipts (chinaLotsMissingMessages), not just a bare ¥ total.
+    lots: o.lots
   };
 }
 
 // The known ¥/₽/unpaid $ of a freight BILL — straight off chinaAllocateFreightLedger.
 function chinaBillKnown(ledger, code) {
   return ledger.freightAlloc.bills[String(code || '').trim()] || null;
+}
+
+/**
+ * Owner, 2026-09-25 (live check): a payment that has not been matched to any receipt yet still
+ * says something real about the world — it is money the owner actually spent, at a rate he
+ * either typed or the report later confirmed. A batch with nothing else to go on (no known
+ * order/bill money, no typed rate of its own) is far better costed at the LATEST such rate than
+ * left at zero, which is what happened before this fix: an unallocated payment contributed
+ * nothing anywhere, so a batch with no earlier batch to borrow from stayed at 0 ₽ outright.
+ *
+ * The most recent payment BY DATE wins; a tie goes to the LATER row (the array order is the
+ * sheet's own row order, so this is just "iterate and keep replacing on >="). Its ACTUAL rate
+ * («Курс фактический», set once a receipt matches it) beats the rate it was typed at — the
+ * actual rate is the one that really happened. Pure — no sheet access, `payments` is whatever
+ * the caller already read.
+ */
+function chinaLatestPaymentRate(payments) {
+  let best = null;
+  (payments || []).forEach(function (p) {
+    const date = String(p.date || '').trim();
+    const rate = Number(p.actualRate) > 0 ? Number(p.actualRate) : Number(p.rate) || 0;
+    if (!date || !(rate > 0)) return;
+    if (!best || date >= best.date) best = { date: date, id: p.id, rate: rate };
+  });
+  return best;
+}
+
+// 'yyyy-MM-dd' -> 'DD.MM', for the short date label in a «missing» message. Every date reaching
+// here already went through chinaDateText, so the fallback (the raw text) should never actually
+// show — it is here purely so a malformed value cannot throw instead of just looking odd.
+function chinaShortDate(dateText) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateText || ''));
+  return m ? m[3] + '.' + m[2] : String(dateText || '');
 }
 
 /**
@@ -1218,11 +1263,16 @@ function chinaBillKnown(ledger, code) {
  *        whose order has no report/ledger data at all (every batch tested before 81g-1 relies
  *        on exactly this, and the contract itself says old payment rows must still load);
  *     3. the rate typed by hand;
- *     4. borrowed from a previous batch's own goods rate (chinaBorrowedRate).
+ *     4. Owner, 2026-09-25: the rate of the LATEST payment known to the system at all
+ *        (chinaLatestPaymentRate), whether or not it has been matched to anything — but NEVER
+ *        for a batch that would otherwise be «история» (shipped before tracking, no money of
+ *        its own anywhere): a provisional rate on a batch nobody expects money on yet is noise;
+ *     5. borrowed from a previous batch's own goods rate (chinaBorrowedRate).
  *
  *   freight: the bill's KNOWN rate from the freight FIFO (chinaBillKnown), else the SAME typed
- *   rate (one field, one thing the owner types), else borrowed from a previous batch's own
- *   freight rate (chinaBorrowedRateOf with the freight columns), else 0.
+ *   rate (one field, one thing the owner types), else the SAME latest-payment fallback as goods
+ *   (step 4 above, same rule about «история»), else borrowed from a previous batch's own freight
+ *   rate (chinaBorrowedRateOf with the freight columns), else 0.
  *
  * `rubRate`/`rubRateSource` stay the GOODS rate/source, for backward compatibility. `history` is
  * true only when NEITHER rate has anything at all AND the batch shipped before tracking started
@@ -1241,6 +1291,11 @@ function chinaWithPaymentRate(ss, batch) {
   const orderInfo = chinaOrderKnown(ledger, batch.orderNo);
   const payments = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS).rows.map(chinaPaymentFromRow);
   const fromOldPayments = chinaRateFromPayments(payments, batch.orderNo);
+  // Owner, 2026-09-25: a batch shipped before tracking, with no money of its own anywhere, stays
+  // «история» — the last-payment fallback below is for a CURRENT supply and must never turn a
+  // batch nobody expects money on yet into one that looks provisionally costed.
+  const historyEligible = !!(String(batch.shippedAt || '') && String(batch.shippedAt) < CHINA_TRACKING_START_DATE);
+  const lastPayment = chinaLatestPaymentRate(payments);
 
   if (orderInfo.knownCny > 0.004) {
     out.goodsRate = Math.round((orderInfo.knownRub / orderInfo.knownCny) * 10000) / 10000;
@@ -1251,6 +1306,9 @@ function chinaWithPaymentRate(ss, batch) {
   } else if (manual > 0) {
     out.goodsRate = manual;
     out.goodsRateSource = 'вручную';
+  } else if (!historyEligible && lastPayment) {
+    out.goodsRate = lastPayment.rate;
+    out.goodsRateSource = 'последняя оплата';
   } else {
     const source = chinaBorrowedRate(batch, others);
     out.goodsRate = source ? source.rubRate : 0;
@@ -1270,6 +1328,9 @@ function chinaWithPaymentRate(ss, batch) {
   } else if (manual > 0) {
     out.freightRate = manual;
     out.freightRateSource = 'вручную';
+  } else if (!historyEligible && lastPayment) {
+    out.freightRate = lastPayment.rate;
+    out.freightRateSource = 'последняя оплата';
   } else {
     const source = chinaBorrowedRateOf(batch, others, 'freightRateSource', 'freightRate');
     out.freightRate = source ? source.freightRate : 0;
@@ -1285,12 +1346,19 @@ function chinaWithPaymentRate(ss, batch) {
   const freightSource = out.freightRateSource === 'предыдущая партия'
     ? chinaBorrowedRateOf(batch, others, 'freightRateSource', 'freightRate') : null;
   out.rubRateFrom = (goodsSource && goodsSource.code) || (freightSource && freightSource.code) || '';
+  // Owner, 2026-09-25: same idea, for the «последняя оплата» source — which payment (date + ID)
+  // it came from, so the sheet and the missing-list message can both point at it.
+  out.rateFromPayment = (out.goodsRateSource === 'последняя оплата' || out.freightRateSource === 'последняя оплата') && lastPayment
+    ? lastPayment.date + ' ' + lastPayment.id : '';
 
   out.history = !!(String(batch.shippedAt || '') && String(batch.shippedAt) < CHINA_TRACKING_START_DATE &&
     out.goodsRateSource === '' && out.freightRateSource === '');
 
   out.orderInfo = orderInfo;
   out.billInfo = bill;
+  // Coordinator, 2026-09-25: kept alongside orderInfo/billInfo so chinaMissingListOf can name
+  // the actual receipts a pending amount is waiting on (chinaLotsMissingMessages).
+  out.receiptsById = ledger.receiptsById;
   return out;
 }
 
@@ -1338,12 +1406,66 @@ function chinaCheckMarkOf(value) {
   return v;
 }
 
+// Russian genitive month names, for a short human date label ('августа 2026') — see
+// chinaTrackingStartLabel.
+const CHINA_MONTHS_GENITIVE = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля',
+  'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+// CHINA_TRACKING_START_DATE ('2026-08-01') read out as «августа 2026», for the missing-list
+// history clause — derived from the constant so the two never drift apart if it ever changes.
+function chinaTrackingStartLabel() {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(CHINA_TRACKING_START_DATE);
+  if (!m) return CHINA_TRACKING_START_DATE;
+  return CHINA_MONTHS_GENITIVE[Number(m[2]) - 1] + ' ' + m[1];
+}
+
+// 'a, b и c' — the owner's own way of listing a few things in Russian prose, used only for the
+// short list of pending receipts in chinaLotsMissingMessages.
+function chinaJoinAnd(parts) {
+  if (parts.length <= 1) return (parts[0] || '');
+  return parts.slice(0, -1).join(', ') + ' и ' + parts[parts.length - 1];
+}
+
+/**
+ * Coordinator, 2026-09-25 (live check): the owner could not tell what «оплата от заказа на
+ * 4056 ¥ ещё не внесена» actually meant — which receipts, which dates. This names them: every
+ * PENDING lot as its receipt's date and ¥ (with «из <receipt total> ¥» when the lot is only part
+ * of that receipt — the rest went to another order), plus a separate line for money that came in
+ * before tracking started and so has no course at all. Pure — `lots` is an order's own lots
+ * (chinaOrderKnown) or a bill's own slices (chinaBillKnown, same {receiptId, cny} shape);
+ * `historyCny` is that same order/bill's own precomputed total (NOT re-summed here — a freight
+ * bill's opening balance is a synthetic 'OPENING' lot with no receipt of its own, so walking the
+ * lots a second time would undercount it).
+ */
+function chinaLotsMissingMessages(lots, receiptsById, cnyField, subject, historyCny) {
+  const parts = [];
+  (lots || []).forEach(function (l) {
+    if (l.receiptId === 'UNKNOWN' || l.receiptId === 'OPENING') return;
+    const r = receiptsById[l.receiptId];
+    if (!r || chinaReceiptStatusBucket(r.status) !== 'pendingCny') return;
+    const lotCny = Number(l.cny) || 0;
+    const total = Number(r[cnyField]) || 0;
+    const label = (total > 0.004 && Math.abs(lotCny - total) > 0.005)
+      ? (lotCny + ' ¥ из ' + total + ' ¥') : (lotCny + ' ¥');
+    parts.push(chinaShortDate(r.date) + ' (' + label + ')');
+  });
+  const out = [];
+  if (parts.length) {
+    out.push('в отчёте есть поступления ' + chinaJoinAnd(parts) + ' ' + subject +
+      ', а оплат в приложении нет — внесите их');
+  }
+  if (Number(historyCny) > 0.004) {
+    out.push(roundToTwo(Number(historyCny)) + ' ¥ пришли до ' + chinaTrackingStartLabel() + ' — история без курса');
+  }
+  return out;
+}
+
 /**
  * Item 81g-3: what still stands between a batch and «Расчёт закрыт» — Russian text, one entry
  * per unresolved thing, in the order the owner is likeliest to fix them. A history batch (no
  * tracking-era money anywhere) is exempt outright: there is nothing for it to ever resolve.
- * `rated` is the batch AFTER chinaWithPaymentRate (carries `orderInfo`/`billInfo`/`history`);
- * `calc` is chinaBatchCost's own result for the same batch.
+ * `rated` is the batch AFTER chinaWithPaymentRate (carries `orderInfo`/`billInfo`/`history`/
+ * `receiptsById`); `calc` is chinaBatchCost's own result for the same batch.
  */
 function chinaMissingListOf(rated, calc) {
   if (rated.history) return [];
@@ -1354,11 +1476,28 @@ function chinaMissingListOf(rated, calc) {
   if (!hasWeight || !hasFreight) missing.push('не загружен файл партии (нет веса или перевозки)');
   const bill = rated.billInfo;
   if (!bill) missing.push('в отчёте нет накладной карго на эту партию');
-  const order = rated.orderInfo || { pendingCny: 0, unknownCny: 0 };
-  if (order.pendingCny > 0.004) missing.push('оплата от заказа на ' + order.pendingCny + ' ¥ ещё не внесена');
+  const receiptsById = rated.receiptsById || {};
+  const order = rated.orderInfo || { pendingCny: 0, historyCny: 0, unknownCny: 0, lots: [] };
+  if (order.pendingCny > 0.004 || order.historyCny > 0.004) {
+    missing.push.apply(missing,
+      chinaLotsMissingMessages(order.lots, receiptsById, 'goodsCny', 'на этот заказ', order.historyCny));
+  }
   if (order.unknownCny > 0.004) missing.push(order.unknownCny + ' ¥ товара без курса (не хватает поступлений)');
   if (bill && bill.unpaidUsd > 0.004) missing.push('перевозка не оплачена полностью (' + bill.unpaidUsd + ' $)');
-  if (bill && bill.pendingCny > 0.004) missing.push(bill.pendingCny + ' ¥ перевозки без курса (оплата не внесена)');
+  if (bill && (bill.pendingCny > 0.004 || bill.historyCny > 0.004)) {
+    missing.push.apply(missing,
+      chinaLotsMissingMessages(bill.slices, receiptsById, 'freightCny', 'на эту перевозку', bill.historyCny));
+  }
+  // Owner, 2026-09-25 (live check): a batch costed at a provisional rate — the last known
+  // payment, or borrowed from another batch — must still say so, so «Расчёт закрыт» is never
+  // confused with a rate the owner can actually rely on.
+  if (rated.goodsRateSource === 'последняя оплата' || rated.freightRateSource === 'последняя оплата') {
+    const paymentDate = String(rated.rateFromPayment || '').split(' ')[0];
+    missing.push('курс предварительный — по последней оплате' + (paymentDate ? ' от ' + chinaShortDate(paymentDate) : ''));
+  }
+  if (rated.goodsRateSource === 'предыдущая партия' || rated.freightRateSource === 'предыдущая партия') {
+    missing.push('курс предварительный — из партии ' + (rated.rubRateFrom || ''));
+  }
   if (!rated.rubCostsDone) missing.push('расходы РФ не подтверждены');
   return missing;
 }
@@ -1424,6 +1563,7 @@ function writeChinaBatch(ss, batchCtx, batch, lines, calc, username) {
     'Доставка по Китаю ₽': calc.chinaDeliveryRub,
     'Перевозка ₽': calc.freightRub,
     'Курс взят из партии': batch.rubRateFrom || '',
+    'Курс взят из оплаты': batch.rateFromPayment || '',
     // Owner, 2026-09-24: freight per kilogram, and the carrier's own tariff next to it.
     'Перевозка за 1 кг $': calc.freightPerKgUsd,
     'Перевозка за 1 кг ₽': calc.freightPerKgRub,

@@ -8,8 +8,14 @@ const TODAY = new Date(2026, 8, 24); // 24.09.2026
 describe('сообщение об оплате', () => {
   it('reads the sentence the owner said he would write', () => {
     expect(parseChinaPaymentText('сегодня оплатил 100000 руб по курсу 12,4', TODAY)).toEqual({
-      date: '', amountRub: 100000, rate: 12.4, amountCny: 0, matched: true
+      date: '', amountRub: 100000, rate: 12.4, amountCny: 0,
+      comment: 'сегодня оплатил 100000 руб по курсу 12,4', matched: true
     });
+  });
+
+  it('the comment is the owner\'s sentence trimmed, not padded with stray spaces', () => {
+    expect(parseChinaPaymentText('  оплатил 100000 руб по курсу 12,4  ', TODAY).comment)
+      .toBe('оплатил 100000 руб по курсу 12,4');
   });
 
   it('is not fooled into taking the rate for the amount', () => {
@@ -22,7 +28,8 @@ describe('сообщение об оплате', () => {
     // «по курсу 12,4 руб за 1 юань» — the first «number + руб» in the sentence is the rate, not the
     // payment, and reading it as the payment would put 12,4 ₽ into the wallet.
     expect(parseChinaPaymentText('сегодня оплатил 100000 руб по курсу 12,4 руб за 1 юань', TODAY)).toEqual({
-      date: '', amountRub: 100000, rate: 12.4, amountCny: 0, matched: true
+      date: '', amountRub: 100000, rate: 12.4, amountCny: 0,
+      comment: 'сегодня оплатил 100000 руб по курсу 12,4 руб за 1 юань', matched: true
     });
     // «за 1 юань» is part of the rate, not a sum of one yuan the Chinese side confirmed.
     expect(parseChinaPaymentText('оплатил 100000 р по курсу 12.4 ₽ за юань', TODAY).amountCny).toBe(0);
@@ -66,6 +73,59 @@ describe('сообщение об оплате', () => {
     expect(parseChinaPaymentText('24.09.2026 оплата 1500 курс 12', TODAY).amountRub).toBe(1500);
   });
 
+  it('does not take a rate written with a dot, «12.4», as a day and a month', () => {
+    // The rate is cut out of the sentence before the date is looked for — otherwise «12.4» would
+    // be read as the 12th of April.
+    expect(parseChinaPaymentText('оплатил 100000 р по курсу 12.4 ₽ за юань', TODAY).date).toBe('');
+  });
+
+  // Item 81g, owner's live check of 2026-09-25: a date written out in full was left blank, and
+  // the owner's own sentence was thrown away instead of becoming the comment. Real sentences,
+  // every figure checked so a date or a comment word can never turn into money by mistake.
+  describe('every real-looking sentence the owner might actually type', () => {
+    it('a word month with no year', () => {
+      const sentence = '20 августа оплатил 331303,20 руб по курсу 12,4';
+      expect(parseChinaPaymentText(sentence, TODAY)).toMatchObject({
+        date: '2026-08-20', amountRub: 331303.2, rate: 12.4, comment: sentence
+      });
+    });
+
+    it('the rate phrased in full, the date trailing at the end', () => {
+      const sentence = 'оплатил 100 000 р по курсу 12,4 руб за 1 юань 16.09.2026';
+      expect(parseChinaPaymentText(sentence, TODAY)).toMatchObject({
+        date: '2026-09-16', amountRub: 100000, rate: 12.4, amountCny: 0, comment: sentence
+      });
+    });
+
+    it('«вчера», and rubles written with no space before the ₽ sign', () => {
+      const sentence = 'вчера перевел 92541,2₽ курс 12,4';
+      expect(parseChinaPaymentText(sentence, TODAY)).toMatchObject({
+        date: '2026-09-23', amountRub: 92541.2, rate: 12.4, comment: sentence
+      });
+    });
+
+    it('«от», a slash date with no year, and a rate whose tail names no currency', () => {
+      const sentence = 'от 18/09 оплата 116600 рублей по курсу 12,5 за доставку и товар';
+      expect(parseChinaPaymentText(sentence, TODAY)).toMatchObject({
+        date: '2026-09-18', amountRub: 116600, rate: 12.5, comment: sentence
+      });
+    });
+
+    it('the owner\'s own misspelt month still reads, and the order number is not taken for money', () => {
+      const sentence = '25 сентябяр 2026 оплатил 25000 руб по курсу 13,4 это был аванс под 31 заказ';
+      expect(parseChinaPaymentText(sentence, TODAY)).toMatchObject({
+        date: '2026-09-25', amountRub: 25000, rate: 13.4, comment: sentence
+      });
+    });
+
+    it('a word month with no year, one word earlier than the misspelt one above', () => {
+      const sentence = '18 сентября оплатил 25000 руб по курсу 13,4';
+      expect(parseChinaPaymentText(sentence, TODAY)).toMatchObject({
+        date: '2026-09-18', amountRub: 25000, rate: 13.4, comment: sentence
+      });
+    });
+  });
+
   it('says plainly that it understood nothing', () => {
     expect(parseChinaPaymentText('', TODAY).matched).toBe(false);
     expect(parseChinaPaymentText('надо будет заплатить китайцам', TODAY).matched).toBe(false);
@@ -86,6 +146,40 @@ describe('дата из текста', () => {
   it('ignores a day or a month that cannot exist', () => {
     expect(chinaDateFromText('45.13.2026', TODAY)).toBe('');
   });
+
+  it('reads a word month, with and without the year, and any case ending', () => {
+    expect(chinaDateFromText('20 августа', TODAY)).toBe('2026-08-20');
+    expect(chinaDateFromText('20 августа 2026', TODAY)).toBe('2026-08-20');
+    expect(chinaDateFromText('20 авг', TODAY)).toBe('2026-08-20');
+    expect(chinaDateFromText('20 декабря', TODAY)).toBe('2025-12-20'); // in the future this year — last year instead
+  });
+
+  it('tolerates a misspelt month ending, matching by the stem alone', () => {
+    expect(chinaDateFromText('25 сентябяр 2026', TODAY)).toBe('2026-09-25');
+  });
+
+  it('«марта» is read as March, not as May with a stray tail — the two stems must not collide', () => {
+    expect(chinaDateFromText('20 марта 2026', TODAY)).toBe('2026-03-20');
+    expect(chinaDateFromText('20 мая 2026', TODAY)).toBe('2026-05-20');
+  });
+
+  it('reads a dotted, slashed or dashed date, with a two-digit or absent year', () => {
+    expect(chinaDateFromText('20.08.2026г', TODAY)).toBe('2026-08-20');
+    expect(chinaDateFromText('20/08/2026', TODAY)).toBe('2026-08-20');
+    expect(chinaDateFromText('20/08', TODAY)).toBe('2026-08-20');
+    expect(chinaDateFromText('20-08-2026', TODAY)).toBe('2026-08-20');
+    expect(chinaDateFromText('от 20.08', TODAY)).toBe('2026-08-20');
+  });
+
+  it('reads «вчера» and «позавчера», «позавчера» never read as «вчера»', () => {
+    expect(chinaDateFromText('вчера', TODAY)).toBe('2026-09-23');
+    expect(chinaDateFromText('позавчера', TODAY)).toBe('2026-09-22');
+  });
+
+  it('«сегодня» names no date of its own — same as saying nothing about a date', () => {
+    expect(chinaDateFromText('сегодня', TODAY)).toBe('');
+  });
+
 });
 
 // Item 81d/81g. Wiring guards: the payments card and the store agree on the CONTRACT's own
@@ -141,6 +235,36 @@ describe('подключение оплат', () => {
     expect(card).toContain('setDate(parsed.date);');
     expect(card).not.toContain('if (parsed.date) setDate(parsed.date);');
     expect(card).toContain("setText(''); setDate('');");
+  });
+
+  // Item 81g, owner's live check of 2026-09-25: the parsed sentence used to fill only the
+  // numbers, throwing away the owner's own words and staying silent when it found no date.
+  it('the parsed sentence fills the comment, unless the owner already typed one himself', () => {
+    expect(card).toContain('if (!comment.trim()) setComment(parsed.comment);');
+  });
+
+  it('a sentence with no date warns instead of silently leaving today', () => {
+    expect(card).toContain("toast.warning('Дата не найдена — проверьте поле даты, стоит сегодняшняя');");
+    const readText = (card.split('const readText = () => {')[1] || '').split('const add = async')[0];
+    expect(readText).toMatch(/if \(parsed\.date\) \{[\s\S]*toast\.success/);
+  });
+
+  // Item 81g, owner's live check of 2026-09-25: «общий список заказов должен сворачиваться и по
+  // умолчанию должен быть свернут».
+  it('the orders table is collapsible and starts collapsed', () => {
+    expect(card).toContain('btn-china-orders-toggle');
+    expect(card).toContain('useState(() => readOrdersOpen(username))');
+    expect(card).toContain('Заказы по отчёту ({orders.length})');
+    // The count and the advance warning still show while the table itself stays hidden.
+    expect(card).toMatch(/!ordersOpen && orders\.some\(\(o\) => o\.advanceWarning\)/);
+  });
+
+  it('the collapse choice is remembered per viewer, and never crashes without localStorage', () => {
+    expect(card).toContain('try {');
+    // With nothing saved yet (or a viewer who has never touched it), '1' is the only value that
+    // opens the table — anything else, including a missing key, leaves it collapsed.
+    expect(card).toContain("localStorage.getItem(ORDERS_OPEN_KEY(username)) === '1'");
+    expect(card).toContain('localStorage.setItem(ORDERS_OPEN_KEY(username)');
   });
 
   it('the batch card says where its rate came from and what the report says about the order', () => {

@@ -4891,11 +4891,13 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
   const lineHead = h.headerRowOf(h.getTargetSheet('Строки партий'));
   check('81e: on an old batch sheet the new columns are appended at the end',
     batchHead.slice(0, PRE_81E_BATCH_HEADERS.length).join('|') === PRE_81E_BATCH_HEADERS.join('|') &&
-    // Owner, 2026-09-24: the ruble-equivalents block ends at «Курс взят из партии», followed
-    // by the freight-per-kilogram block, then (81g-1) the report-driven rate/missing schema.
-    batchHead[batchHead.indexOf('Тариф карго ₽') - 4] === 'Курс взят из партии' &&
+    // Owner, 2026-09-24: the ruble-equivalents block ends at «Курс взят из партии» (followed,
+    // 2026-09-25, by «Курс взят из оплаты»), then the freight-per-kilogram block, then (81g-1)
+    // the report-driven rate/missing schema.
+    batchHead[batchHead.indexOf('Тариф карго ₽') - 5] === 'Курс взят из партии' &&
+    batchHead[batchHead.indexOf('Тариф карго ₽') - 4] === 'Курс взят из оплаты' &&
     batchHead[batchHead.length - 1] === 'Проверка: детали',
-    batchHead.slice(-11).join(' | '));
+    batchHead.slice(-12).join(' | '));
   check('81e: same for the lines sheet',
     lineHead.slice(0, PRE_81E_LINE_HEADERS.length).join('|') === PRE_81E_LINE_HEADERS.join('|') &&
     lineHead[lineHead.length - 1] === 'Перевозка ₽',
@@ -4969,6 +4971,12 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
     JSON.stringify({ goodsRub: batch.goodsRub, chinaDeliveryRub: batch.chinaDeliveryRub, freightRub: batch.freightRub }));
 })();
 
+// Owner, 2026-09-25 (live check): with a payment SOMEWHERE in the system, a batch with no rate
+// of its own is now costed at the LATEST payment's rate ('последняя оплата'), not straight at
+// the previous batch's rate — 'предыдущая партия' only ever applies when there is no payment
+// anywhere at all (see the dedicated block further below and the borrow-chain test, which never
+// saves a single payment). This block used to demonstrate the borrow itself; it now demonstrates
+// the new fallback pre-empting it, one payment at a time.
 (function () {
   const h = withChina();
 
@@ -4981,63 +4989,73 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
   check('81e fixes: the older batch is costed at its own payment rate',
     older.rubRateSource === 'оплаты' && older.rubRate === 12.4, older.rubRateSource + ' / ' + older.rubRate);
 
-  // The newer batch: NV-0923-4, order 30, shipped 2026-09-23 — no payment, no typed rate.
+  // The newer batch: NV-0923-4, order 30, shipped 2026-09-23 — no payment, no typed rate. The
+  // only payment in the whole system is order 29's, so THAT is what it is costed at.
   h.saveChinaBatch(china923Payload({ rubRate: 0 }), 'Николай');
   state = h.getChinaBatches();
   let newer = state.batches.find(function (b) { return b.orderNo === '30'; });
-  check('81e fixes: a batch with no rate of its own borrows the rate of the previous batch',
-    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 12.4 && newer.rubRateFrom === older.code,
+  check('81e fixes: a batch with no rate of its own is costed at the latest payment known to the system',
+    newer.rubRateSource === 'последняя оплата' && newer.rubRate === 12.4 && newer.rubRateFrom === '',
     newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
-  check('81e fixes: costed at the borrowed rate exactly as if it had been typed by hand',
+  check('81e fixes: costed at that rate exactly as if it had been typed by hand',
     newer.totalRub === 397307.79, String(newer.totalRub));
 
-  // A payment on the newer's own order: its own rate wins over the borrowed one.
+  // A payment on the newer's own order: its own rate wins over the last-payment fallback.
   h.saveChinaPayment({ amountRub: 50000, rate: 13, orderNo: '30' }, 'Николай');
   state = h.getChinaBatches();
   newer = state.batches.find(function (b) { return b.orderNo === '30'; });
   const newerPayment = state.payments.find(function (p) { return p.orderNo === '30'; });
-  check('81e fixes: a payment of the newer\'s own order beats the borrowed rate',
+  check('81e fixes: a payment of the newer\'s own order beats the last-payment fallback',
     newer.rubRateSource === 'оплаты' && newer.rubRate === 13 && newer.rubRateFrom === '',
     newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
 
-  // Drop the payment, then type a rate by hand: it also beats the borrowed rate.
+  // Drop the payment, then type a rate by hand: it also beats the fallback.
   h.deleteChinaPayment({ id: newerPayment.id }, 'Николай');
   h.saveChinaBatch(china923Payload({ id: newer.id, rubRate: 15 }), 'Николай');
   state = h.getChinaBatches();
   newer = state.batches.find(function (b) { return b.orderNo === '30'; });
-  check('81e fixes: a rate typed by hand also beats the borrowed rate',
+  check('81e fixes: a rate typed by hand also beats the last-payment fallback',
     newer.rubRateSource === 'вручную' && newer.rubRate === 15 && newer.rubRateFrom === '',
     newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
 
-  // Back to no rate of its own: the borrow kicks back in.
+  // Back to no rate of its own: the last-payment fallback kicks back in (order 29's payment is
+  // still the only one left — order 30's own payment was deleted above).
   h.saveChinaBatch(china923Payload({ id: newer.id, rubRate: 0 }), 'Николай');
   state = h.getChinaBatches();
   newer = state.batches.find(function (b) { return b.orderNo === '30'; });
-  check('81e fixes: with the typed rate gone the batch borrows again',
-    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 12.4, newer.rubRateSource + ' / ' + newer.rubRate);
+  check('81e fixes: with the typed rate gone the last-payment fallback applies again',
+    newer.rubRateSource === 'последняя оплата' && newer.rubRate === 12.4, newer.rubRateSource + ' / ' + newer.rubRate);
 
-  // Changing the older batch's payment re-costs the newer, its borrower.
+  // Changing the older batch's payment re-costs the newer through the SAME fallback (it is
+  // still the only payment in the system).
   const olderPayment = state.payments.find(function (p) { return p.orderNo === '29'; });
   h.saveChinaPayment({ id: olderPayment.id, amountRub: 100000, rate: 14, orderNo: '29' }, 'Николай');
   state = h.getChinaBatches();
   newer = state.batches.find(function (b) { return b.orderNo === '30'; });
-  check('81e fixes: changing the source batch\'s payment re-costs its borrower',
-    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 14, newer.rubRateSource + ' / ' + newer.rubRate);
+  check('81e fixes: changing the payment\'s own rate re-costs the batch that falls back to it',
+    newer.rubRateSource === 'последняя оплата' && newer.rubRate === 14, newer.rubRateSource + ' / ' + newer.rubRate);
 
-  // Deleting the older batch leaves the newer with no source at all.
+  // Deleting the older BATCH does not touch the payment row itself — the fallback is unaffected.
   older = state.batches.find(function (b) { return b.orderNo === '29'; });
   h.deleteChinaBatch({ id: older.id }, 'Николай');
   state = h.getChinaBatches();
   newer = state.batches.find(function (b) { return b.orderNo === '30'; });
-  check('81e fixes: deleting the source batch drops its borrower back to zero',
+  check('81e fixes: deleting the SOURCE BATCH leaves the last-payment fallback untouched (the payment itself survives)',
+    newer.rubRateSource === 'последняя оплата' && newer.rubRate === 14, newer.rubRateSource + ' / ' + newer.rubRate);
+
+  // Deleting the payment itself is what actually removes the fallback.
+  h.deleteChinaPayment({ id: olderPayment.id }, 'Николай');
+  state = h.getChinaBatches();
+  newer = state.batches.find(function (b) { return b.orderNo === '30'; });
+  check('81e fixes: deleting the payment itself drops the batch back to zero (no payment, no source batch)',
     newer.rubRateSource === '' && newer.rubRate === 0 && newer.rubRateFrom === '',
     newer.rubRateSource + ' / ' + newer.rubRate + ' / ' + newer.rubRateFrom);
 })();
 
 // Coordinator review, 2026-09-24: a batch saved while NEITHER it nor anyone else had a rate
-// (rubRateSource '') must still pick up a rate once the source batch gets one — not only
-// batches that already read 'предыдущая партия'. Both start with nothing; a payment on the
-// OLDER batch's order must re-cost the newer as its borrower.
+// (rubRateSource '') must still pick up a rate once a payment somewhere gives it one — not only
+// batches that already read a source. Both start with nothing; a payment on the OLDER batch's
+// order must re-cost the newer through the last-payment fallback.
 (function () {
   const h = withChina();
 
@@ -5052,13 +5070,99 @@ const PRE_81E_LINE_HEADERS = ['ID', 'ПартияID', 'Маркировка', '�
     JSON.stringify({ older: [older.rubRateSource, older.rubRate], newer: [newer.rubRateSource, newer.rubRate] }));
 
   // A payment on the OLDER batch's order gives it an own rate — the newer, which had NO
-  // source at all (not 'предыдущая партия'), must now be re-costed to borrow it.
+  // source at all, must now be re-costed through the last-payment fallback.
   h.saveChinaPayment({ amountRub: 100000, rate: 12.4, orderNo: '29' }, 'Николай');
   state = h.getChinaBatches();
   newer = state.batches.find(function (b) { return b.orderNo === '30'; });
-  check('81e fixes: a batch that had no source at all is re-costed once an older batch gets its own rate',
-    newer.rubRateSource === 'предыдущая партия' && newer.rubRate === 12.4,
+  check('81e fixes: a batch that had no source at all is re-costed once a payment gives the system a rate',
+    newer.rubRateSource === 'последняя оплата' && newer.rubRate === 12.4,
     newer.rubRateSource + ' / ' + newer.rubRate);
+})();
+
+// Owner, 2026-09-25 (live check): the exact defect reported live — an UNALLOCATED payment (no
+// receipt matched to it) contributed nothing anywhere, so a current-era batch with no earlier
+// batch to borrow from stayed at 0 ₽ outright, even though the system plainly knew a rate.
+(function () {
+  const h = withChina();
+
+  // Reproduce first: one unallocated payment, dated 2026-08-20 at 12.4, and NV-0923-4 with no
+  // other rate anywhere — before the fix this batch priced at 0 ₽.
+  h.saveChinaPayment({ date: '2026-08-20', amountRub: 100000, rate: 12.4, comment: 'not matched to anything' }, 'Николай');
+  h.saveChinaBatch(china923Payload({ rubRate: 0 }), 'Николай');
+  let batch = h.getChinaBatches().batches[0];
+  const payment = h.getChinaBatches().payments[0];
+  check('81g fix: an unallocated payment now costs the batch, not zero',
+    batch.goodsRateSource === 'последняя оплата' && batch.goodsRate === 12.4 && batch.totalRub === 397307.79,
+    JSON.stringify({ source: batch.goodsRateSource, rate: batch.goodsRate, total: batch.totalRub }));
+  check('81g fix: freight is costed at the same fallback rate',
+    batch.freightRateSource === 'последняя оплата' && batch.freightRate === 12.4,
+    JSON.stringify({ source: batch.freightRateSource, rate: batch.freightRate }));
+  check('81g fix: the sheet records WHICH payment the rate came from — date and ID',
+    batch.rateFromPayment === '2026-08-20 ' + payment.id, batch.rateFromPayment);
+  check('81g fix: «Чего не хватает» says the rate is provisional, with the payment\'s date',
+    batch.missing.indexOf('курс предварительный — по последней оплате от 20.08') !== -1,
+    JSON.stringify(batch.missing));
+
+  // A NEWER payment (2026-08-22, later date) takes over.
+  h.saveChinaPayment({ date: '2026-08-22', amountRub: 100800, rate: 12.6, comment: 'newer' }, 'Николай');
+  batch = h.getChinaBatches().batches[0];
+  check('81g fix: a newer payment by date wins over the earlier one',
+    batch.goodsRateSource === 'последняя оплата' && batch.goodsRate === 12.6, JSON.stringify(batch.goodsRateSource) + ' / ' + batch.goodsRate);
+
+  // Matching the newer payment to a receipt gives it an ACTUAL rate — that beats the typed one.
+  // The receipt is dated well outside the payment's auto-match window (+3 days) so the match
+  // stays manual, and its ¥ total is chosen to imply a DIFFERENT rate than the typed 12.6.
+  h.saveChinaReport({
+    reportDate: '2026-08-22', source: 'скрипт', orders: [],
+    receipts: [{ date: '2026-08-30', goodsCny: 10080 }]
+  }, 'Николай');
+  const newPayment = h.getChinaBatches().payments.find(function (p) { return p.date === '2026-08-22'; });
+  const receipt = h.getChinaMoney().receipts.find(function (r) { return r.date === '2026-08-30'; });
+  h.matchChinaPayment({ paymentId: newPayment.id, receiptId: receipt.id }, 'Николай');
+  batch = h.getChinaBatches().batches[0];
+  const matchedPayment = h.getChinaBatches().payments.find(function (p) { return p.id === newPayment.id; });
+  check('81g fix: once matched, the fallback uses the ACTUAL rate (100800/10080=10), not the typed 12.6',
+    matchedPayment.actualRate === 10 && batch.goodsRateSource === 'последняя оплата' && batch.goodsRate === 10,
+    JSON.stringify({ actualRate: matchedPayment.actualRate, batchRate: batch.goodsRate }));
+
+  // Deleting the newer payment falls back to the earlier one again.
+  h.deleteChinaPayment({ id: newPayment.id }, 'Николай');
+  batch = h.getChinaBatches().batches[0];
+  check('81g fix: deleting the latest payment falls back to the next latest',
+    batch.goodsRateSource === 'последняя оплата' && batch.goodsRate === 12.4, String(batch.goodsRate));
+
+  // A typed manual rate beats the last-payment fallback outright.
+  h.saveChinaBatch(china923Payload({ id: batch.id, rubRate: 20 }), 'Николай');
+  batch = h.getChinaBatches().batches[0];
+  check('81g fix: a typed manual rate beats the last-payment fallback',
+    batch.goodsRateSource === 'вручную' && batch.goodsRate === 20, batch.goodsRateSource + ' / ' + batch.goodsRate);
+
+  // An order with its OWN known money (via the ledger) beats the fallback outright.
+  h.saveChinaBatch(china923Payload({ id: batch.id, rubRate: 0 }), 'Николай');
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт',
+    orders: [{ orderNo: '30', date: '2026-09-01', receivedCny: 8000 }],
+    receipts: [{ date: '2026-09-01', goodsCny: 8000 }]
+  }, 'Николай');
+  h.saveChinaPayment({ date: '2026-09-01', amountRub: 88000, rate: 11, comment: 'order 30 own money' }, 'Николай');
+  batch = h.getChinaBatches().batches[0];
+  check('81g fix: an order with its own known money beats the last-payment fallback',
+    batch.goodsRateSource === 'оплаты' && batch.goodsRate === 11, batch.goodsRateSource + ' / ' + batch.goodsRate);
+})();
+
+// Owner, 2026-09-25: a history batch (shipped before tracking, no money of its own anywhere) is
+// NEVER given a provisional last-payment rate — that fallback is for a CURRENT supply only.
+(function () {
+  const h = withChina();
+  h.saveChinaPayment({ date: '2026-08-20', amountRub: 100000, rate: 12.4 }, 'Николай');
+  h.saveChinaBatch({
+    orderNo: '77', code: 'OLDBATCH2', status: 'Черновик', shippedAt: '2026-05-01',
+    lines: [{ marking: 'M1', name: 'x', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 10 }]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches[0];
+  check('81g fix: a history batch stays «история» even with a payment elsewhere in the system',
+    batch.history === true && batch.goodsRateSource === '' && batch.freightRateSource === '' && batch.rubRate === 0,
+    JSON.stringify({ history: batch.history, source: batch.goodsRateSource, rate: batch.rubRate }));
 })();
 
 // A borrowed rate is never used as a source itself — otherwise a chain could walk arbitrarily
@@ -6192,11 +6296,13 @@ function roundToTwoLocal(x) { return Math.round(x * 100) / 100; }
     afterReport.checkMark === 'скрипт+ИИ' && afterReport.checkNote === 'проверено ИИ, расхождений нет' && afterReport.rubCostsDone === true,
     JSON.stringify(afterReport));
   // chinaRecostAll actually RAN: BATCH40 has no bill in the empty report above, so its freight
-  // rate is lost and the total falls back to goods-only (12 400 ₽) — proves this batch, which
-  // no OTHER mechanism (chinaRecostBorrowers) would have touched, was genuinely re-costed.
+  // rate is no longer «оплаты» from the bill — owner, 2026-09-25: it now falls to the
+  // last-payment fallback instead of straight to 0 (the order-40 payment from earlier in this
+  // very test is the only payment in the system) — the SOURCE changing at all proves this batch,
+  // which no OTHER mechanism (chinaRecostBorrowers) would have touched, was genuinely re-costed.
   check('81g-3: saveChinaReport genuinely re-costs EVERY batch, not just the borrowers',
-    afterReport.freightRate === 0 && afterReport.freightRateSource === '' && afterReport.totalRub === 12400,
-    JSON.stringify({ freightRate: afterReport.freightRate, totalRub: afterReport.totalRub }));
+    afterReport.freightRate === 12.4 && afterReport.freightRateSource === 'последняя оплата' && afterReport.totalRub === 29760,
+    JSON.stringify({ freightRate: afterReport.freightRate, freightRateSource: afterReport.freightRateSource, totalRub: afterReport.totalRub }));
 })();
 
 // ---- history: a batch shipped before tracking, with no money anywhere, is exempt from «missing» ----
@@ -6243,6 +6349,114 @@ function roundToTwoLocal(x) { return Math.round(x * 100) / 100; }
   check('81g-3: goods and freight at DIFFERENT rates are each costed directly, summing exactly',
     calc.goodsRub === 10000 && calc.freightRub === 10500 && calc.totalRub === 20500,
     JSON.stringify({ goodsRub: calc.goodsRub, freightRub: calc.freightRub, totalRub: calc.totalRub }));
+})();
+
+// ================= Coordinator, 2026-09-25: name the pending RECEIPTS, not a bare ¥ total =====
+//
+// Live sheet: NV-0923-4's «Чего не хватает» said «оплата от заказа на 4056 ¥ ещё не внесена» —
+// unclear which receipts that was. It now names them by date and ¥, with «из <receipt total> ¥»
+// when a receipt is split between several orders. Unit tests first (chinaLotsMissingMessages is
+// pure), then one end-to-end batch reproducing the coordinator's own example numbers.
+
+(function () {
+  const receiptsById = {
+    CG1: { date: '2026-09-03', goodsCny: 2974, status: 'ждёт оплату' },
+    CG2: { date: '2026-09-16', goodsCny: 5001, status: 'ждёт оплату' },
+    CG3: { date: '2026-07-15', goodsCny: 300, status: 'история' }
+  };
+  const lots = [
+    { receiptId: 'CG1', cny: 2974 },
+    { receiptId: 'CG2', cny: 1082 },
+    { receiptId: 'CG3', cny: 300 }
+  ];
+  const messages = h_chinaLotsMissingMessages(lots, receiptsById, 'goodsCny', 'на этот заказ', 300);
+  check('81g fix: the coordinator\'s exact example text, receipt dates and ¥ (full and partial)',
+    messages[0] === 'в отчёте есть поступления 03.09 (2974 ¥) и 16.09 (1082 ¥ из 5001 ¥) на этот заказ, а оплат в приложении нет — внесите их',
+    JSON.stringify(messages));
+  check('81g fix: a separate line for money that came in before tracking, with no course',
+    messages[1] === '300 ¥ пришли до августа 2026 — история без курса', JSON.stringify(messages));
+})();
+
+// Helper: harness exposes chinaLotsMissingMessages directly; a short local alias keeps the block
+// above readable (the function itself takes no `h` at all — it is pure).
+function h_chinaLotsMissingMessages() {
+  return withChina().chinaLotsMissingMessages.apply(null, arguments);
+}
+
+// chinaLatestPaymentRate itself (pure, no sheet) — the tie-break and the actual-vs-typed rate.
+(function () {
+  const h = withChina();
+  check('81g fix: chinaLatestPaymentRate picks the LATER date',
+    h.chinaLatestPaymentRate([
+      { id: 'CP1', date: '2026-08-20', rate: 12.4 },
+      { id: 'CP2', date: '2026-08-22', rate: 12.6 }
+    ]).id === 'CP2',
+    JSON.stringify(h.chinaLatestPaymentRate([{ id: 'CP1', date: '2026-08-20', rate: 12.4 }, { id: 'CP2', date: '2026-08-22', rate: 12.6 }])));
+  check('81g fix: a TIE on the same date goes to the LATER row (array order)',
+    h.chinaLatestPaymentRate([
+      { id: 'CP1', date: '2026-08-20', rate: 12.4 },
+      { id: 'CP2', date: '2026-08-20', rate: 12.6 }
+    ]).id === 'CP2',
+    JSON.stringify(h.chinaLatestPaymentRate([{ id: 'CP1', date: '2026-08-20', rate: 12.4 }, { id: 'CP2', date: '2026-08-20', rate: 12.6 }])));
+  check('81g fix: an ACTUAL rate beats the typed one for the SAME payment',
+    h.chinaLatestPaymentRate([{ id: 'CP1', date: '2026-08-20', rate: 12.4, actualRate: 12.55 }]).rate === 12.55,
+    JSON.stringify(h.chinaLatestPaymentRate([{ id: 'CP1', date: '2026-08-20', rate: 12.4, actualRate: 12.55 }])));
+  check('81g fix: a payment with no date or no positive rate is ignored',
+    h.chinaLatestPaymentRate([{ id: 'CP1', date: '', rate: 12.4 }, { id: 'CP2', date: '2026-08-20', rate: 0 }]) === null,
+    JSON.stringify(h.chinaLatestPaymentRate([{ id: 'CP1', date: '', rate: 12.4 }, { id: 'CP2', date: '2026-08-20', rate: 0 }])));
+})();
+
+(function () {
+  const h = withChina();
+  check('81g fix: chinaShortDate turns a stored date into DD.MM',
+    h.chinaShortDate('2026-09-03') === '03.09' && h.chinaShortDate('2026-01-01') === '01.01',
+    h.chinaShortDate('2026-09-03') + ' / ' + h.chinaShortDate('2026-01-01'));
+  check('81g fix: chinaJoinAnd lists two or more things the owner\'s own way',
+    h.chinaJoinAnd(['a']) === 'a' && h.chinaJoinAnd(['a', 'b']) === 'a и b' &&
+    h.chinaJoinAnd(['a', 'b', 'c']) === 'a, b и c',
+    JSON.stringify([h.chinaJoinAnd(['a']), h.chinaJoinAnd(['a', 'b']), h.chinaJoinAnd(['a', 'b', 'c'])]));
+  check('81g fix: chinaTrackingStartLabel reads the tracking-start constant as prose',
+    h.chinaTrackingStartLabel() === 'августа 2026', h.chinaTrackingStartLabel());
+})();
+
+// End-to-end: a real batch whose order has exactly the coordinator's own numbers (2 974 ¥ fully
+// pending on 03.09, 1 082 ¥ of a 5 001 ¥ receipt pending on 16.09 — 4 056 ¥ total, same as the
+// live batch NV-0923-4) shows the named-receipts message, not a bare ¥ total.
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт',
+    orders: [{ orderNo: '30', date: '2026-09-01', receivedCny: 4056 }],
+    receipts: [{ date: '2026-09-03', goodsCny: 2974 }, { date: '2026-09-16', goodsCny: 5001 }]
+  }, 'Николай');
+  h.saveChinaBatch({
+    orderNo: '30', code: 'NV-PENDING', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-20',
+    weightKg: 100, freightUsd: 100, cargoRate: 7, ratePerKgUsd: 1,
+    lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-PENDING'; })[0];
+  check('81g fix: a real batch\'s «Чего не хватает» names the pending receipts by date and ¥',
+    batch.missing.indexOf('в отчёте есть поступления 03.09 (2974 ¥) и 16.09 (1082 ¥ из 5001 ¥) на этот заказ, а оплат в приложении нет — внесите их') !== -1,
+    JSON.stringify(batch.missing));
+})();
+
+// Same for freight — the wording says «на эту перевозку» instead of «на этот заказ».
+(function () {
+  const h = withChina();
+  h.saveChinaReport({
+    reportDate: '2026-09-01', source: 'скрипт',
+    orders: [], receipts: [{ date: '2026-09-05', goodsCny: 0, freightCny: 700, freightUsd: 100 }],
+    freights: [{ code: 'NV-FREIGHT', orderNo: '31', amountUsd: 100, cargoRate: 7 }]
+  }, 'Николай');
+  h.saveChinaBatch({
+    orderNo: '31', code: 'NV-FREIGHT', status: 'Прибыла', shippedAt: '2026-09-01', arrivedAt: '2026-09-20',
+    weightKg: 100, freightUsd: 100, cargoRate: 7, ratePerKgUsd: 1,
+    lines: [{ marking: 'M1', name: 'x', boxes: 10, pcsPerBox: 5, qty: 50, priceCny: 20 }]
+  }, 'Николай');
+  const batch = h.getChinaBatches().batches.filter(function (b) { return b.code === 'NV-FREIGHT'; })[0];
+  check('81g fix: the freight side of the same message says «на эту перевозку»',
+    batch.missing.indexOf('в отчёте есть поступления 05.09 (700 ¥) на эту перевозку, а оплат в приложении нет — внесите их') !== -1,
+    JSON.stringify(batch.missing));
 })();
 
 // ================= Итог =================

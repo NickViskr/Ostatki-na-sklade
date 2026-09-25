@@ -503,7 +503,7 @@ describe('подключение модуля «Заказы в Китае»', (
   });
 
   it('item 82: the payments sentence is worked out by the pure helper, not by payments.length alone', () => {
-    expect(tab).toContain("chinaRateStatusText(batch.rubRateSource, batch.rubRateFrom || '', batch.payments.length)");
+    expect(tab).toContain("chinaRateStatusText(batch.rubRateSource, batch.rubRateFrom || '', batch.payments.length, batch.rateFromPayment || '')");
     expect(tab).not.toContain('оплаты не внесены, курс взят вручную');
   });
 
@@ -814,6 +814,15 @@ describe('item 81f: the source of the ₽/¥ rate, in words', () => {
   it("item 81g: 'история' reads as its own sentence, not a bare word", () => {
     expect(chinaRateSourceLabel('история', '')).toBe('история без курса');
   });
+
+  it("item 81g owner's live check of 2026-09-25: 'последняя оплата' names the payment's own date", () => {
+    expect(chinaRateSourceLabel('последняя оплата', '', '2026-08-20 CP3'))
+      .toBe('предварительный курс по последней оплате от 20.08');
+  });
+
+  it("'последняя оплата' with no payment named still reads as a whole sentence", () => {
+    expect(chinaRateSourceLabel('последняя оплата', '')).toBe('предварительный курс по последней оплате');
+  });
 });
 
 describe('item 81g: the tick beside a batch\'s code', () => {
@@ -889,6 +898,15 @@ describe('item 82: the ₽/¥-rate sentence under the totals', () => {
   it('rubRateFrom is ignored for every source but the borrowed one', () => {
     expect(chinaRateStatusText('оплаты', 'NV-9', 1)).toBe('в базе оплат по этому заказу: 1');
     expect(chinaRateStatusText('вручную', 'NV-9', 1)).toBe('курс вписан вручную');
+  });
+
+  it("item 81g owner's live check of 2026-09-25: the latest payment's own rate, dated", () => {
+    expect(chinaRateStatusText('последняя оплата', '', 0, '2026-08-20 CP3'))
+      .toBe('предварительный курс по последней оплате от 20.08');
+  });
+
+  it("'последняя оплата' with no payment named still holds together", () => {
+    expect(chinaRateStatusText('последняя оплата', '', 0)).toBe('предварительный курс по последней оплате');
   });
 });
 
