@@ -431,6 +431,30 @@ export function calcCoverageDays(
   return (estimated - perDay * minStockDays) / perDay;
 }
 
+/**
+ * Item 85, step 1.8 (owner 2026-09-26). The colour of «Покрытие» follows the SAME thresholds as
+ * the recommendation, on the same figure (shelf + goods on their way): 'red' — below the
+ * minimum stock; 'amber' — below the target, i.e. exactly when a supply is recommended;
+ * 'green' — enough; 'none' — no sales, nothing to measure. The old colour compared «days above
+ * the minimum» with the whole target: a cluster could be amber with no recommendation, and the
+ * priority coefficient was ignored. An excluded cluster has no minimum (as in calcCoverageDays).
+ */
+export type CoverageTone = 'none' | 'red' | 'amber' | 'green';
+
+export function coverageTone(
+  estimated: number,
+  perDay: number,
+  settings: Pick<OzonCoverageSettings, 'minStockDays' | 'targetStockDays'>,
+  priorityK: number = 1,
+  excluded: boolean = false
+): CoverageTone {
+  if (!(perDay > 0)) return 'none';
+  const k = !excluded && priorityK > 1 ? priorityK : 1;
+  if (!excluded && estimated < perDay * settings.minStockDays * k) return 'red';
+  if (estimated < perDay * settings.targetStockDays * k) return 'amber';
+  return 'green';
+}
+
 export interface SupplyRecommendation {
   /** Расчётная потребность, шт (до ограничения Моим складом и округления). */
   neededQty: number;

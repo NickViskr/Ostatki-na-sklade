@@ -13,7 +13,7 @@ import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { canTickCluster } from '../lib/ozonSupplyLines';
 import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
-import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle } from '../lib/ozonCoverage';
+import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle, coverageTone, CoverageTone } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
 import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder, splitFactoryOrders } from '../lib/factoryOrderDisplay';
@@ -309,11 +309,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     if (v === null || v === undefined) return estimated > 0 ? '∞' : '—';
     return `${Math.round(v)}`;
   };
-  const coverageColor = (coverageDays: number | null | undefined, targetDays: number) => {
-    if (coverageDays === null || coverageDays === undefined) return 'text-slate-400';
-    if (coverageDays < 0) return 'text-red-600 font-bold';
-    if (coverageDays < targetDays) return 'text-amber-600 font-semibold';
-    return 'text-emerald-600 font-semibold';
+  // Item 85, step 1.8: the colour comes from coverageTone — the thresholds of the recommendation.
+  const TONE_CLASS: Record<CoverageTone, string> = {
+    none: 'text-slate-400',
+    red: 'text-red-600 font-bold',
+    amber: 'text-amber-600 font-semibold',
+    green: 'text-emerald-600 font-semibold',
   };
 
   // Item 48. The list of shops for the drop-down is the ONLY thing here that must stay
@@ -1502,7 +1503,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('coverage') && (
                           <th className="p-3 text-right">
                             Покрытие
-                            <ColHint text="На сколько дней хватит расчётного остатка сверх неснижаемого запаса. Красный — запас уже ниже неснижаемого, жёлтый — ниже целевого, зелёный — норма. «∞» означает, что продаж нет, а остаток есть." />
+                            <ColHint text="На сколько дней хватит расчётного остатка сверх неснижаемого запаса. В расчётный остаток входит и то, что уже едет в кластер по заявкам. Красный — запас ниже неснижаемого; жёлтый — ниже целевого, и по кластеру есть рекомендация поставки; зелёный — норма. У приоритетного кластера оба порога умножены на его коэффициент. «∞» означает, что продаж нет, а остаток есть." />
                           </th>
                         )}
                         {isColVisible('pending') && (
@@ -1715,7 +1716,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {isColVisible('returns') && <td className={`p-3 text-right ${art.totals.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.returns)}</td>}
                               {isColVisible('other') && <td className={`p-3 text-right ${art.totals.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.other)}</td>}
                               {isColVisible('estimated') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.totalEstimated)}</td>}
-                              {isColVisible('coverage') && <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>}
+                              {isColVisible('coverage') && <td className={`p-3 text-right ${TONE_CLASS[coverageTone(art.totalEstimated, art.perDay, ozonSettings)]}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>}
                               {isColVisible('pending') && (
                                 <td className="p-3 text-right">
                                   {art.inFlightTotal > 0 || art.pendingTotal > 0 ? (
@@ -2014,7 +2015,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     {isColVisible('returns') && <td className={`p-2.5 text-right ${cls.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.returns)}</td>}
                                     {isColVisible('other') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                     {isColVisible('estimated') && <td className="p-2.5 text-right font-medium text-slate-800">{fmtInt(cls.estimated)}</td>}
-                                    {isColVisible('coverage') && <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>}
+                                    {isColVisible('coverage') && <td className={`p-2.5 text-right ${TONE_CLASS[coverageTone(cls.estimated, cls.perDay, ozonSettings, cls.priorityK, cls.excluded)]}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>}
                                     {isColVisible('pending') && (
                                       <td className="p-2.5 text-right">
                                         {cls.inFlightQty > 0 ? (
