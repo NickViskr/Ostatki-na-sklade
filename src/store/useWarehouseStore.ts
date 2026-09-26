@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, FactoryOrder } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder } from '../types';
 import { TurnoverData } from '../lib/turnoverData';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
@@ -188,6 +188,11 @@ interface WarehouseState {
   exportKanCost: () => Promise<void>;
   ozonSales: OzonSalesRow[];
   fetchOzonSales: () => Promise<void>;
+  /** Item 86, step D: daily in-stock marks from «История остатков Ozon», used to tell a
+   *  stock-out from a slow week when computing sales speed and trend. Absent/empty behaves
+   *  exactly like before this item (calendar-days speed). */
+  ozonStockHistory: OzonStockHistoryRow[];
+  fetchOzonStockHistory: () => Promise<void>;
   /** Item 78b: «KAN дни» and «Снимки склада» for the turnover tab, as served by getTurnoverData. */
   turnoverData: TurnoverData | null;
   fetchTurnoverData: (days: number) => Promise<void>;
@@ -236,6 +241,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonStocks: [],
   ozonStocksSyncIssues: [],
   ozonSales: [],
+  ozonStockHistory: [],
   turnoverData: null,
   ozonSupplyRequests: [],
   factoryOrders: [],
@@ -1758,6 +1764,9 @@ export const useWarehouseStore = create<WarehouseState>()(
       const d = result.data;
       if (Array.isArray(d.stocks)) set({ ozonStocks: d.stocks });
       if (Array.isArray(d.sales)) set({ ozonSales: d.sales });
+      // Item 86, step D: absent — old servers without the field, or none collected yet — leaves
+      // the default [], the exact behaviour of every calculation before this item.
+      if (Array.isArray(d.stockHistory)) set({ ozonStockHistory: d.stockHistory });
       if (Array.isArray(d.factoryOrders)) set({ factoryOrders: d.factoryOrders });
 
       if (d.settings) {
@@ -1889,6 +1898,23 @@ export const useWarehouseStore = create<WarehouseState>()(
       }
     } catch (e) {
       console.error('getOzonSales error:', e);
+    }
+    // Item 86, step D: refreshed alongside the sales it explains — a stale history would still
+    // date the last stock-out correctly, but a growing one keeps the speed accurate as time passes.
+    await get().fetchOzonStockHistory();
+  },
+
+  fetchOzonStockHistory: async () => {
+    if (!get().sessionToken) return;
+    try {
+      const result = await get().fetchGas('getOzonStockHistory', { data: {} });
+      if (result.status === 'success' && Array.isArray(result.data)) {
+        set({ ozonStockHistory: result.data });
+      } else {
+        console.error('getOzonStockHistory failed:', result.message);
+      }
+    } catch (e) {
+      console.error('getOzonStockHistory error:', e);
     }
   },
 

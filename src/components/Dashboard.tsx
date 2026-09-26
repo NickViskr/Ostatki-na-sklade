@@ -59,6 +59,8 @@ export const Dashboard: React.FC = React.memo(() => {
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
   const ozonSales = useWarehouseStore((state) => state.ozonSales);
+  // Item 86, step D: history-aware sales speed. Absent/empty behaves exactly like before this item.
+  const ozonStockHistory = useWarehouseStore((state) => state.ozonStockHistory);
   const factoryOrders = useWarehouseStore((state) => state.factoryOrders);
   // Item 26 stage A1: these three reads are now part of the composite start-up call.
   // The store still exposes them individually — other screens refresh with them.
@@ -251,8 +253,9 @@ export const Dashboard: React.FC = React.memo(() => {
       pending: pendingSupplies,
       factoryOnOrder,
       kits,
+      stockHistory: ozonStockHistory,
     });
-  }, [ozonStocks, ozonSales, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
+  }, [ozonStocks, ozonSales, ozonStockHistory, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
 
   const coverageAlerts = useMemo(() => {
     if (!isAdmin || !ozonCoverage) return [];

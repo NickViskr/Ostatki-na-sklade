@@ -153,6 +153,29 @@ export interface OzonSalesRow {
   days: number;
 }
 
+/**
+ * Item 86, step D. One daily in-stock mark from the sheet «История остатков Ozon»: one row per
+ * article/cabinet/cluster/week, written by the FIRST auto-poll of each day. `daysInStock` counts
+ * the days that day was «Доступно» + «В пути» > 0 in this cluster; `daysObserved` is how many
+ * days of the week have been polled so far (1…7). A cluster with no row for a given day was NOT
+ * in stock that day — a missing row, not a zero, is how absence is recorded.
+ */
+export interface OzonStockHistoryRow {
+  /** Monday of the week, 'yyyy-MM-dd' (МСК), same grid as «Продажи Ozon». */
+  week: string;
+  cabinet: string;
+  offerId: string;
+  clusterId: string;
+  clusterName: string;
+  /** Days of the week the article was in stock in this cluster. */
+  daysInStock: number;
+  /** Days of the week polled so far (1…7): the denominator behind daysInStock. */
+  daysObserved: number;
+  /** Last day marked, 'yyyy-MM-dd'. */
+  lastDay: string;
+  updatedAt: string;
+}
+
 /** Заказ партии товара у производителя. На остатки и себестоимость не влияет. */
 export interface FactoryOrder {
   id: string;

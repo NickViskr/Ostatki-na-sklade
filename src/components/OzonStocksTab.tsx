@@ -91,6 +91,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const ozonSales = useWarehouseStore((state) => state.ozonSales);
   const fetchOzonSales = useWarehouseStore((state) => state.fetchOzonSales);
+  // Item 86, step D: history-aware sales speed. Absent/empty behaves exactly like before this item.
+  const ozonStockHistory = useWarehouseStore((state) => state.ozonStockHistory);
   const skus = useWarehouseStore((state) => state.skus);
   const kits = useWarehouseStore((state) => state.kits);
   const getEffectiveAvailability = useWarehouseStore((state) => state.getEffectiveAvailability);
@@ -295,6 +297,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     fewSales: 'мелкая выборка',
     deficit: 'распродан',
     clamped: 'упёрся в предел',
+    lookback: 'товара долго не было',
   };
   const TREND_REASON_LONG: Record<string, (t: any) => string> = {
     shortWindow: () => 'В окне меньше шести недель с данными — тренд считать не на чем.',
@@ -303,6 +306,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     fewSales: (t) => `За окно продано ${fmtInt(t.windowQty)} шт — меньше порога в 50 шт. На такой выборке наклон это шум.`,
     deficit: () => 'Товар распродан. Понижающий тренд не применяется: падение продаж неотличимо от отсутствия товара.',
     clamped: () => 'Множитель ограничен диапазоном 0,7…1,5.',
+    // Item 86, step D: a long-absent article has too few in-stock days to trust a trend line.
+    lookback: () => 'Товара долго не было — тренд не применяется.',
   };
   const fmtDays = (v: number | null | undefined, estimated: number) => {
     if (v === null || v === undefined) return estimated > 0 ? '∞' : '—';
@@ -367,6 +372,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     if (cabinetFilter === 'all') return ozonSales;
     return ozonSales.filter((s) => s.cabinet === cabinetFilter);
   }, [ozonSales, cabinetFilter]);
+
+  // Item 86, step D: same cabinet filter as sales and stocks — history of a foreign cabinet must
+  // not tell the speed of the selected one that it was in stock when it was not.
+  const filteredOzonStockHistory = useMemo(() => {
+    if (!ozonStockHistory) return [];
+    if (cabinetFilter === 'all') return ozonStockHistory;
+    return ozonStockHistory.filter((s) => s.cabinet === cabinetFilter);
+  }, [ozonStockHistory, cabinetFilter]);
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
   // Фильтр по кабинету тот же, что у остатков и продаж, иначе заявки чужого кабинета
@@ -502,10 +515,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       pending: pendingSupplies,
       factoryOnOrder,
       kits,
+      stockHistory: filteredOzonStockHistory,
     });
     console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
     return result;
-  }, [filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies, factoryOnOrder]);
+  }, [filteredOzonStocks, filteredOzonSales, filteredOzonStockHistory, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies, factoryOnOrder]);
 
   /** Окно тренда из настроек: сколько недель берём, когда распределяем весь остаток. */
   const wideWeeks = Number(ozonSettings.trendWeeks) > 0 ? Math.floor(Number(ozonSettings.trendWeeks)) : 13;
@@ -537,10 +551,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       pending: pendingSupplies,
       factoryOnOrder,
       kits,
+      stockHistory: filteredOzonStockHistory,
     });
     console.log(`OZONPERF wideCoverage total=${Math.round(performance.now() - perfStart)}ms weeks=${wideWeeks}`);
     return result;
-  }, [anyWide, wideWeeks, filteredOzonStocks, filteredOzonSales, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
+  }, [anyWide, wideWeeks, filteredOzonStocks, filteredOzonSales, filteredOzonStockHistory, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];
@@ -1569,6 +1584,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         const factoryOrderQty = art.factory ? art.factory.orderQty : 0;
                         const factoryClusterOnly = !!(art.factory && art.factory.reason === 'clusterDeficit' && art.factory.orderQty === 0);
                         const factoryBox = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
+                        // Item 86, step D. N — the pieces sold over the speed period, from the result
+                        // (not perDay × days: «Спрос вырос» may have replaced perDay since).
+                        const speedSoldQty = art.speedSoldQty;
+                        const speedTitle = art.speedSource === 'daysInStock'
+                          ? `Скорость по дням наличия: продано ${fmtInt(speedSoldQty)} шт за ${Math.round(art.speedDaysInStock)} дн. в наличии (из ${Math.round(art.speedWindowDays)} дн. окна)`
+                          : art.speedSource === 'lookback' && art.speedPeriod
+                            ? `Товара долго не было: скорость по периоду ${fmtDateShort(art.speedPeriod.from)}–${fmtDateShort(art.speedPeriod.to)} — ${fmtInt(speedSoldQty)} шт за ${Math.round(art.speedDaysInStock)} дн. в наличии${art.speedApproximate ? '\nПриблизительно: до 18.08 история наличия не велась, недели с продажами считаются днями в наличии' : ''}`
+                            : 'История наличия ещё не покрывает окно — скорость по календарным дням';
                         return (
                           <React.Fragment key={art.article}>
                             {/* LEVEL 1: ARTICLE */}
@@ -1626,6 +1649,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {isColVisible('sold') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.qtySold)}</td>}
                               {isColVisible('speed') && (
                                 <td className="p-3 text-right font-semibold text-slate-800">
+                                  {art.noSales26 && (
+                                    <span className="block text-[10px] font-bold text-red-600">Товар не продавался более 26 недель</span>
+                                  )}
                                   {art.speedCorrection ? (
                                     <span className="relative inline-flex group cursor-help">
                                       {/* Значок читается как «тренд», хотя это другой механизм — коррекция при
@@ -1649,7 +1675,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       </span>
                                     </span>
                                   ) : (
-                                    fmtSpeed(art.perDay)
+                                    <span className="cursor-help" title={speedTitle}>{fmtSpeed(art.perDay)}</span>
+                                  )}
+                                  {/* Item 86, step D: a lookback article gets a small visible mark next to the speed. */}
+                                  {art.speedSource === 'lookback' && (
+                                    <span className="block text-[10px] font-semibold text-amber-600 cursor-help" title={speedTitle}>товара долго не было</span>
                                   )}
                                   {art.demandGrowth && art.demandGrowth.applied && (
                                     /* Item 73. The last 7 days beat the window: the speed shown IS the recent one. */
@@ -1693,8 +1723,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                           </span>
                                         )}
                                         <span className="block mt-1">Расчётный множитель: {fmtTrend(art.trend.raw)}</span>
-                                        {art.trend.reason && art.trend.applied !== art.trend.raw && (
+                                        {art.trend.reason && (art.trend.applied !== art.trend.raw || art.trend.reason === 'lookback') && (
                                           <span className="block mt-1 text-amber-300">{TREND_REASON_LONG[art.trend.reason](art.trend)}</span>
+                                        )}
+                                        {/* Item 86, step D: the trend is rate-adjusted by days in stock, not raw calendar weeks. */}
+                                        {art.trend.historyBased && (
+                                          <span className="block mt-1 text-sky-300">Тренд считается по дням наличия, а не по календарным неделям.</span>
                                         )}
                                         <span className="block mt-1 text-slate-300">
                                           Окно: {art.trend.weeks.length} нед, {fmtDateShort(art.trend.weeks[0])}…{fmtDateShort(art.trend.weeks[art.trend.weeks.length - 1])}, продано {fmtInt(art.trend.windowQty)} шт

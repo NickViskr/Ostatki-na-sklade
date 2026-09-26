@@ -72,7 +72,13 @@ function makeCoverage(clusters: ClusterCoverageRow[]): OzonCoverageResult {
     clusters,
     factory: null,
     speedCorrection: null,
-    demandGrowth: null
+    demandGrowth: null,
+    speedSource: 'calendar',
+    speedDaysInStock: 0,
+    speedSoldQty: 0,
+    speedWindowDays: 0,
+    speedApproximate: false,
+    noSales26: false
   };
   return {
     speed: { perDayByArticle: {}, weeksUsed: 0 } as unknown as OzonCoverageResult['speed'],
