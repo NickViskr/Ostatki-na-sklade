@@ -700,7 +700,8 @@ export interface ArticleCoverage {
   qtySold: number;
   /** ФАКТИЧЕСКАЯ скорость продаж, шт/день. Тренд её не трогает: по ней считаются кластеры. */
   perDay: number;
-  /** Пункт 38. Прогнозная скорость = perDay × тренд × (1 + прирост, %). Только для заказа на фабрике. */
+  /** Пункт 38 / item 85 step 1.4. Прогнозная скорость для заказа на фабрике:
+   *  max(window speed × trend, 7-day speed when «Спрос вырос» fired) × (1 + прирост, %). */
   forecastPerDay: number;
   /** Пункт 38. Разбор тренда продаж. null — тренд не считался (продаж за окно нет). */
   trend: SalesTrend | null;
@@ -1616,7 +1617,16 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const forecastPerDayByArticle: Record<string, number> = {};
   for (const article of Object.keys(speed.perDayByArticle)) {
     const trend = trends[article];
-    forecastPerDayByArticle[article] = speed.perDayByArticle[article] * (trend ? trend.applied : 1) * salesGrowthK;
+    // Item 85, step 1.4 (owner 2026-09-26: «брать большее из двух»). «Спрос вырос» (item 73) has
+    // already replaced the article speed by the last 7 days, and the trend used to multiply THAT:
+    // two lifts of one demand (Полка_выдв_27см: 3.96 → 5.18 → ×1.5 = 7.76/day, 642 pcs). The
+    // factory now takes the larger of «window speed × trend» and «the 7-day speed», never their
+    // product. Supplies to the clusters keep the 7-day speed as before.
+    const growth = demandGrowth[article];
+    const windowSpeed = growth && growth.applied ? growth.basePerDay : speed.perDayByArticle[article];
+    const trended = windowSpeed * (trend ? trend.applied : 1);
+    const recent = growth && growth.applied ? growth.recentPerDay : 0;
+    forecastPerDayByArticle[article] = Math.max(trended, recent) * salesGrowthK;
   }
   const nameToId = buildClusterNameToId(input.clusters);
   const excludedIds = parseExcludedClusters(input.settings.excludedClusters);

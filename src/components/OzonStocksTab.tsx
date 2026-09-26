@@ -1655,11 +1655,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       </span>
                                       <span className={`absolute right-0 ${tipUp} hidden group-hover:block z-30 w-96 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl whitespace-normal`}>
                                         <span className="block font-bold mb-1">Тренд продаж</span>
-                                        <span className="block">
-                                          Прогноз для заказа на фабрике: {fmtSpeed(art.perDay)}{' × '}{fmtTrend(art.trend.applied)}
-                                          {ozonSettings.salesGrowthPct ? ` × ${fmtTrend(1 + ozonSettings.salesGrowthPct / 100)}` : ''}
-                                          {' = '}{fmtSpeed(art.forecastPerDay)} шт/д
-                                        </span>
+                                        {art.demandGrowth && art.demandGrowth.applied ? (
+                                          /* Item 85, step 1.4: the larger of the two, never their product. */
+                                          <span className="block">
+                                            Прогноз для заказа на фабрике — большее из двух: по окну с трендом {fmtSpeed(art.demandGrowth.basePerDay)}{' × '}{fmtTrend(art.trend.applied)}{' = '}{fmtSpeed(art.demandGrowth.basePerDay * art.trend.applied)} шт/д и за последние 7 дней {fmtSpeed(art.demandGrowth.recentPerDay)} шт/д
+                                            {ozonSettings.salesGrowthPct ? `, затем × ${fmtTrend(1 + ozonSettings.salesGrowthPct / 100)}` : ''}
+                                            {' → '}{fmtSpeed(art.forecastPerDay)} шт/д
+                                          </span>
+                                        ) : (
+                                          <span className="block">
+                                            Прогноз для заказа на фабрике: {fmtSpeed(art.perDay)}{' × '}{fmtTrend(art.trend.applied)}
+                                            {ozonSettings.salesGrowthPct ? ` × ${fmtTrend(1 + ozonSettings.salesGrowthPct / 100)}` : ''}
+                                            {' = '}{fmtSpeed(art.forecastPerDay)} шт/д
+                                          </span>
+                                        )}
                                         <span className="block mt-1">Расчётный множитель: {fmtTrend(art.trend.raw)}</span>
                                         {art.trend.reason && art.trend.applied !== art.trend.raw && (
                                           <span className="block mt-1 text-amber-300">{TREND_REASON_LONG[art.trend.reason](art.trend)}</span>
