@@ -10,8 +10,10 @@ import {
   OZON_RECOMMENDED_SETTINGS,
   applyRecommended,
   buildOzonSettingsPayload,
+  formatJournalRow,
   type OzonSettingsForm,
   type OzonSettingsFormNumeric,
+  type OzonSettingsJournalRow,
 } from './ozonSettingsFields';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonSettingsModal } from '../components/OzonSettingsModal';
@@ -404,5 +406,114 @@ describe('OzonSettingsModal: handleSave source (item 87 step 3)', () => {
     expect(src).not.toContain('Целевой запас должен быть больше Неснижаемого остатка');
     expect(src).toContain('validateOzonSettingsForm(form)');
     expect(src).toMatch(/if \(hasErrors\) \{[\s\S]*?return;/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 87 step 5: the settings-change journal viewer
+// ---------------------------------------------------------------------------
+
+describe('formatJournalRow: pure formatter', () => {
+  it('converts a UTC ISO timestamp to Moscow dd.mm.yyyy hh:mm, regardless of the machine zone', () => {
+    const row: OzonSettingsJournalRow = {
+      when: '2026-09-26T19:05:00.000Z', who: 'boss', key: 'speedWeeks',
+      field: 'Окно скорости, недель', was: 4, became: 6,
+    };
+    expect(formatJournalRow(row).when).toBe('26.09.2026 22:05');
+  });
+
+  it('an empty "was" renders as em dash, a non-empty value is stringified', () => {
+    const row: OzonSettingsJournalRow = {
+      when: '2026-09-26T19:05:00.000Z', who: 'boss', key: 'dropOffWarehouseId',
+      field: 'Точка отгрузки: ID', was: '', became: '12345',
+    };
+    const display = formatJournalRow(row);
+    expect(display.was).toBe('—');
+    expect(display.became).toBe('12345');
+    expect(display.who).toBe('boss');
+    expect(display.field).toBe('Точка отгрузки: ID');
+  });
+});
+
+const SAMPLE_JOURNAL: OzonSettingsJournalRow[] = [
+  {
+    when: '2026-09-26T19:05:00.000Z', who: 'boss', key: 'speedWeeks',
+    field: 'Окно скорости, недель', was: 4, became: 6,
+  },
+  {
+    when: '2026-09-25T10:00:00.000Z', who: 'admin', key: 'directClusters',
+    field: 'Кластеры прямой поставки', was: '', became: '[{"clusterId":"1"}]',
+  },
+];
+
+describe('OzonSettingsModal: journal viewer display', () => {
+  afterEach(() => {
+    setStoreUserForRender(null);
+  });
+
+  it('the footer button is present', () => {
+    setStoreUserForRender({ username: 'boss', role: 'admin' });
+    const html = renderToStaticMarkup(
+      createElement(OzonSettingsModal, { isOpen: true, onClose: () => {}, openBlocks: [] })
+    );
+    expect(html).toContain('История изменений');
+  });
+
+  it('injected journal rows render date, who, field and was → became, plus a back button', () => {
+    setStoreUserForRender({ username: 'boss', role: 'admin' });
+    const html = renderToStaticMarkup(
+      createElement(OzonSettingsModal, {
+        isOpen: true,
+        onClose: () => {},
+        openBlocks: [],
+        initialJournal: SAMPLE_JOURNAL,
+      })
+    );
+    expect(html).toContain('Назад к настройкам');
+    expect(html).toContain('26.09.2026 22:05');
+    expect(html).toContain('Окно скорости, недель');
+    expect(html).toContain('4 → 6');
+    expect(html).toContain('Кластеры прямой поставки');
+    expect(html).toContain('— → [{&quot;clusterId&quot;:&quot;1&quot;}]');
+  });
+
+  it('an empty journal renders the "no changes yet" message', () => {
+    setStoreUserForRender({ username: 'boss', role: 'admin' });
+    const html = renderToStaticMarkup(
+      createElement(OzonSettingsModal, {
+        isOpen: true,
+        onClose: () => {},
+        openBlocks: [],
+        initialJournal: [],
+      })
+    );
+    expect(html).toContain('Изменений пока не было');
+  });
+});
+
+describe('OzonSettingsModal: journal fetch source (item 87 step 5)', () => {
+  it("fetches getOzonSettingsJournal with limit 50", () => {
+    const src = read('src/components/OzonSettingsModal.tsx');
+    expect(src).toContain("fetchGas('getOzonSettingsJournal', { data: { limit: 50 } })");
+  });
+});
+
+describe('server.ts: getOzonSettingsJournal proxy wiring (item 87 step 5)', () => {
+  const server = read('server.ts');
+
+  it('is listed as a read-only action', () => {
+    const listMatch = server.match(/const READ_ONLY_ACTIONS = \[([\s\S]*?)\];/);
+    expect(listMatch).toBeTruthy();
+    expect(listMatch![1]).toContain("'getOzonSettingsJournal'");
+  });
+
+  it('is never given a cache TTL — the journal must never be served stale', () => {
+    const ttlMatch = server.match(/function getCacheTtlMs[\s\S]*?\n  \}\n/);
+    expect(ttlMatch).toBeTruthy();
+    expect(ttlMatch![0]).not.toContain('getOzonSettingsJournal');
+  });
+
+  it("saveOzonSettings still invalidates its own cache entries", () => {
+    expect(server).toContain("saveOzonSettings: ['getOzonSettings', 'getOzonInitialData']");
   });
 });

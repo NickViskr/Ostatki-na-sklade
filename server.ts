@@ -505,7 +505,11 @@ async function startServer() {
     'getChinaMoney',
     // Item 82: both pure reads — calcChinaForecast computes a forecast but writes nothing.
     'getChinaForecastData',
-    'calcChinaForecast'
+    'calcChinaForecast',
+    // Item 87 step 5: a pure read of the settings change journal. Deliberately given no
+    // cache lifetime below — the journal gains a row on every saveOzonSettings, so a cached
+    // answer would hide the most recent change.
+    'getOzonSettingsJournal'
   ];
 
   // API Endpoint to proxy GAS requests

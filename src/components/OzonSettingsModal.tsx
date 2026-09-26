@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { X, HelpCircle, Search, Check, ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
+import { X, HelpCircle, Search, Check, ChevronDown, ChevronUp, RotateCcw, History, ArrowLeft } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { parseDirectClusters, type DirectClusterRule } from '../lib/ozonDirectSupply';
@@ -14,8 +14,10 @@ import {
   applyRecommended,
   buildOzonSettingsPayload,
   validateOzonSettingsForm,
+  formatJournalRow,
   type OzonSettingsForm,
   type OzonSettingsFieldDef,
+  type OzonSettingsJournalRow,
 } from '../lib/ozonSettingsFields';
 
 interface OzonSettingsModalProps {
@@ -31,6 +33,9 @@ interface OzonSettingsModalProps {
    *  shows the «Что изменится после сохранения» block. Absent (TurnoverTab) — no block: turnover
    *  thresholds do not affect orders. */
   computeImpact?: (settings: OzonCoverageSettings) => OzonSettingsImpact | null;
+  /** Item 87 step 5, test-only: seeds the journal view open with given rows, without mocking
+   *  `fetchGas` — mirrors `initialForm` above. */
+  initialJournal?: OzonSettingsJournalRow[];
 }
 
 const DEFAULT_FORM: OzonSettingsForm = {
@@ -88,7 +93,7 @@ const FIELDS_BY_BLOCK: Record<string, OzonSettingsFieldDef[]> = OZON_SETTINGS_FI
   {} as Record<string, OzonSettingsFieldDef[]>
 );
 
-export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose, openBlocks, initialForm, computeImpact }) => {
+export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose, openBlocks, initialForm, computeImpact, initialJournal }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const fetchOzonInitialData = useWarehouseStore((state) => state.fetchOzonInitialData);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
@@ -127,6 +132,29 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   // Item 87 step 2. The values loaded from the server, kept aside to highlight anything the
   // user (or the «Вернуть к рекомендованным значениям» button) has changed since.
   const [loadedForm, setLoadedForm] = useState<OzonSettingsForm | null>(null);
+
+  // Item 87 step 5: the journal replaces the blocks view while open — `null` means «not open»,
+  // so the empty state ([]) still renders its own «Изменений пока не было» message.
+  const [journalRows, setJournalRows] = useState<OzonSettingsJournalRow[] | null>(initialJournal ?? null);
+  const [journalOpen, setJournalOpen] = useState(!!initialJournal);
+  const [journalLoading, setJournalLoading] = useState(false);
+
+  const handleOpenJournal = async () => {
+    setJournalOpen(true);
+    setJournalLoading(true);
+    try {
+      const res = await fetchGas('getOzonSettingsJournal', { data: { limit: 50 } });
+      if (res?.status === 'success' && Array.isArray(res.data)) {
+        setJournalRows(res.data);
+      } else {
+        toast.error(res?.message || 'Ошибка загрузки истории изменений');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Ошибка сети при загрузке истории изменений');
+    } finally {
+      setJournalLoading(false);
+    }
+  };
 
   const isFieldChanged = (key: keyof OzonSettingsForm) => loadedForm !== null && form[key] !== loadedForm[key];
 
@@ -905,7 +933,43 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         </div>
 
         <div className="p-6 overflow-y-auto flex-1 space-y-3">
-          {loading ? (
+          {journalOpen ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setJournalOpen(false)}
+                className="flex items-center gap-1.5 text-sm font-bold text-slate-600 hover:text-slate-900 transition-colors"
+              >
+                <ArrowLeft size={15} />
+                Назад к настройкам
+              </button>
+              {journalLoading ? (
+                <div className="py-12 text-center text-slate-500 font-medium">
+                  Загрузка…
+                </div>
+              ) : !journalRows || journalRows.length === 0 ? (
+                <p className="py-12 text-center text-slate-400 italic">Изменений пока не было</p>
+              ) : (
+                <div className="space-y-2">
+                  {journalRows.map((row, i) => {
+                    const display = formatJournalRow(row);
+                    return (
+                      <div key={`${row.when}-${row.key}-${i}`} className="p-3 rounded-xl border border-slate-200 bg-white">
+                        <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
+                          <span>{display.when}</span>
+                          <span className="font-semibold">{display.who}</span>
+                        </div>
+                        <div className="text-sm font-bold text-slate-800 mt-1 break-words">{display.field}</div>
+                        <div className="text-sm text-slate-600 mt-1 break-words whitespace-pre-wrap">
+                          {display.was} → {display.became}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          ) : loading ? (
             <div className="py-12 text-center text-slate-500 font-medium">
               Загрузка…
             </div>
@@ -937,19 +1001,30 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               );
             })
           )}
-          {!loading && impactBlock}
+          {!journalOpen && !loading && impactBlock}
         </div>
 
         <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center gap-3">
-          <button
-            type="button"
-            onClick={handleApplyRecommended}
-            disabled={loading || saving}
-            className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50"
-          >
-            <RotateCcw size={15} />
-            Вернуть к рекомендованным значениям
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleApplyRecommended}
+              disabled={loading || saving}
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50"
+            >
+              <RotateCcw size={15} />
+              Вернуть к рекомендованным значениям
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenJournal}
+              disabled={loading || saving}
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50"
+            >
+              <History size={15} />
+              История изменений
+            </button>
+          </div>
           <div className="flex items-center gap-3">
             {hasErrors && (
               <span className="text-xs font-semibold text-red-600">Исправьте поля, отмеченные красным</span>

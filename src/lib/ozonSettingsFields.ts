@@ -449,3 +449,63 @@ export function buildOzonSettingsPayload(form: OzonSettingsForm): OzonSettingsPa
     directClusters: form.directClusters,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Item 87 step 5: the settings-change journal viewer.
+// ---------------------------------------------------------------------------
+
+/** Raw row shape returned by Code.gs `getOzonSettingsJournal` — `field` is already the
+ *  human-readable Russian name (`OZON_SETTINGS_FIELD_NAMES`), so the client shows it as-is. */
+export interface OzonSettingsJournalRow {
+  when: string;
+  who: string;
+  key: string;
+  field: string;
+  was: unknown;
+  became: unknown;
+}
+
+export interface OzonSettingsJournalRowDisplay {
+  when: string;
+  who: string;
+  field: string;
+  was: string;
+  became: string;
+}
+
+// The owner and the spreadsheet both work in Moscow time regardless of the machine's own
+// zone — `Intl.DateTimeFormat` with an explicit `timeZone` does the conversion without any
+// manual offset math (which would break on DST).
+const MOSCOW_DATE_TIME = new Intl.DateTimeFormat('ru-RU', {
+  timeZone: 'Europe/Moscow',
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
+function formatMoscowDateTime(isoWhen: string): string {
+  const date = new Date(isoWhen);
+  if (Number.isNaN(date.getTime())) return isoWhen;
+  const parts = MOSCOW_DATE_TIME.formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${get('day')}.${get('month')}.${get('year')} ${get('hour')}:${get('minute')}`;
+}
+
+const journalValueToText = (value: unknown): string => {
+  if (value === '' || value === null || value === undefined) return '—';
+  return String(value);
+};
+
+/** One row of the journal, formatted for display — pure, so it is testable without the store. */
+export function formatJournalRow(row: OzonSettingsJournalRow): OzonSettingsJournalRowDisplay {
+  return {
+    when: formatMoscowDateTime(row.when),
+    who: row.who || '—',
+    field: row.field || row.key,
+    was: journalValueToText(row.was),
+    became: journalValueToText(row.became),
+  };
+}
