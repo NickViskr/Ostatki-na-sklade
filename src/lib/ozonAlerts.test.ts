@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildCoverageAlerts } from './ozonAlerts';
 import { isFunnelVisibleStatus } from './ozonStatus';
-import type { ArticleCoverage, ClusterCoverageRow, OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
+import type { ArticleCoverage, ClusterCoverageRow, ComponentCoverage, FactorySignal, OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
 
 const settings: OzonCoverageSettings = {
   speedWeeks: 4,
@@ -218,5 +218,157 @@ describe('Item 73. Алерт «Спрос вырос»', () => {
     const tab = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
     expect(tab).toContain('art.demandGrowth && art.demandGrowth.applied');
     expect(tab).toContain('спрос +{Math.round(art.demandGrowth.growthPct)} %');
+  });
+});
+
+// Item 86 step C: the «Пора заказать на фабрике» threshold shown in the alert text must add
+// settings.deliveryToOzonDays (D), same as calcFactorySignal itself — before this item's
+// coverage of the alerts module, this branch (buildCoverageAlerts' factory_order alert, both
+// article- and component-level) had NO test at all: art.factory was hardcoded to null in every
+// fixture in this file.
+describe('Item 86 step C: factory_order alert threshold includes deliveryToOzonDays', () => {
+  const settingsWithD: OzonCoverageSettings = { ...settings, minStockDays: 7, deliveryToOzonDays: 7 };
+
+  const makeFactory = (over: Partial<FactorySignal>): FactorySignal => ({
+    daysLeft: 5,
+    pipelineQty: 50,
+    onOrderQty: 0,
+    thresholdDays: 21,
+    thresholdQty: 210,
+    orderQty: 100,
+    orderBoxes: 10,
+    reason: 'total',
+    unmetDeficitQty: 0,
+    ...over
+  });
+
+  function makeArticleCoverage(over: Partial<ArticleCoverage>): ArticleCoverage {
+    return {
+      article: 'ART-1',
+      qtySold: 0,
+      perDay: 0,
+      forecastPerDay: 0,
+      trend: null,
+      pcsPerBox: 10,
+      leadTimeDays: 5,
+      myStockAvailable: 0,
+      totalEstimated: 0,
+      unboundEstimated: 0,
+      unboundQtySold: 0,
+      unmetDeficitQty: 0,
+      pendingTotal: 0,
+      freeMyStock: 0,
+      shippableMyStock: 0,
+      sharedLimitedBy: [],
+      clusters: [],
+      factory: null,
+      speedCorrection: null,
+      demandGrowth: null,
+      speedSource: 'calendar',
+      speedDaysInStock: 0,
+      speedSoldQty: 0,
+      speedWindowDays: 0,
+      speedApproximate: false,
+      noSales26: false,
+      ...over
+    };
+  }
+
+  it('article level: threshold text = lead + D + minStockDays, D=7 (not the old lead + minStockDays)', () => {
+    const article = makeArticleCoverage({ leadTimeDays: 5, factory: makeFactory({ daysLeft: 3, orderQty: 100, orderBoxes: 10 }) });
+    const coverage: OzonCoverageResult = {
+      speed: {} as OzonCoverageResult['speed'], articles: [article], components: [], bottlenecks: [], trends: {}
+    };
+    const alerts = buildCoverageAlerts(coverage, settingsWithD, {});
+    const factoryAlerts = alerts.filter(a => a.type === 'factory_order');
+    expect(factoryAlerts).toHaveLength(1);
+    // lead 5 + D 7 + minStockDays 7 = 19, NOT 12 (the pre-item-86 threshold without D).
+    expect(factoryAlerts[0].description).toContain('при пороге 19 дн.');
+    expect(factoryAlerts[0].description).not.toContain('при пороге 12 дн.');
+  });
+
+  it('article level: D = 0 (or absent) reproduces the old threshold exactly', () => {
+    const article = makeArticleCoverage({ leadTimeDays: 5, factory: makeFactory({}) });
+    const coverage: OzonCoverageResult = {
+      speed: {} as OzonCoverageResult['speed'], articles: [article], components: [], bottlenecks: [], trends: {}
+    };
+    const alerts = buildCoverageAlerts(coverage, settings, {});
+    expect(alerts.filter(a => a.type === 'factory_order')[0].description).toContain('при пороге 12 дн.');
+  });
+
+  it('article level: onOrderQty > 0 is reported in the text alongside the D-inclusive threshold', () => {
+    const article = makeArticleCoverage({
+      leadTimeDays: 3,
+      factory: makeFactory({ daysLeft: 2, orderQty: 40, orderBoxes: 4, onOrderQty: 30 })
+    });
+    const coverage: OzonCoverageResult = {
+      speed: {} as OzonCoverageResult['speed'], articles: [article], components: [], bottlenecks: [], trends: {}
+    };
+    const alerts = buildCoverageAlerts(coverage, settingsWithD, {});
+    const a = alerts.filter(x => x.type === 'factory_order')[0];
+    // lead 3 + D 7 + minStockDays 7 = 17.
+    expect(a.description).toContain('при пороге 17 дн.');
+    expect(a.description).toContain('дозаказать 40 шт (4 кор.), уже заказано 30 шт');
+  });
+
+  it('article level: orderQty = 0 fires no alert even with a factory signal present', () => {
+    const article = makeArticleCoverage({ factory: makeFactory({ orderQty: 0, orderBoxes: 0 }) });
+    const coverage: OzonCoverageResult = {
+      speed: {} as OzonCoverageResult['speed'], articles: [article], components: [], bottlenecks: [], trends: {}
+    };
+    const alerts = buildCoverageAlerts(coverage, settingsWithD, {});
+    expect(alerts.filter(x => x.type === 'factory_order')).toEqual([]);
+  });
+
+  function makeComponent(over: Partial<ComponentCoverage>): ComponentCoverage {
+    return {
+      component: 'COMP-1',
+      perDay: 0,
+      forecastPerDay: 0,
+      pipelineQty: 0,
+      myStockQty: 0,
+      reservedQty: 0,
+      freeMyStockQty: 0,
+      onOrderQty: 0,
+      fromKitsQty: 0,
+      leadTimeDays: 4,
+      pcsPerBox: 10,
+      factory: null,
+      usedInKits: [],
+      ...over
+    };
+  }
+
+  it('component level: threshold text also adds D, and names the kits it belongs to', () => {
+    const component = makeComponent({
+      leadTimeDays: 4,
+      usedInKits: ['KIT-1', 'KIT-2'],
+      factory: makeFactory({ daysLeft: 1, orderQty: 20, orderBoxes: 2 })
+    });
+    // buildCoverageAlerts returns [] outright when coverage.articles is empty — a virtual kit's
+    // component-only signal still needs at least one (harmless) article present to be reached.
+    const coverage: OzonCoverageResult = {
+      speed: {} as OzonCoverageResult['speed'],
+      articles: [makeArticleCoverage({ factory: null })],
+      components: [component],
+      bottlenecks: [],
+      trends: {}
+    };
+    const alerts = buildCoverageAlerts(coverage, settingsWithD, {});
+    const a = alerts.filter(x => x.type === 'factory_order');
+    expect(a).toHaveLength(1);
+    // lead 4 + D 7 + minStockDays 7 = 18.
+    expect(a[0].description).toContain('при пороге 18 дн.');
+    expect(a[0].description).toContain('входит в комплекты: KIT-1, KIT-2');
+    expect(a[0].article).toBe('COMP-1');
+  });
+
+  it('component level: orderQty <= 0 fires no alert', () => {
+    const component = makeComponent({ factory: makeFactory({ orderQty: 0, orderBoxes: 0 }) });
+    const coverage: OzonCoverageResult = {
+      speed: {} as OzonCoverageResult['speed'], articles: [], components: [component], bottlenecks: [], trends: {}
+    };
+    const alerts = buildCoverageAlerts(coverage, settingsWithD, {});
+    expect(alerts.filter(x => x.type === 'factory_order')).toEqual([]);
   });
 });

@@ -597,6 +597,46 @@ describe('buildOzonCoverage: whole path with history (item 86 step D)', () => {
     expect(art.factory).toBeNull();
   });
 
+  // Independent tester's own mutation check (not in the coder's list): wiring
+  // `historyCoveredArticles` (the set that must skip item 42's deficit correction for a
+  // history-covered article, definition 3) to an always-empty set survived EVERY existing test,
+  // including `applyDeficitSpeedCorrection`'s own direct skipArticles test — that one calls the
+  // function with an explicit Set, never through `buildOzonCoverage` itself, so a wiring defect
+  // in the aggregate function was invisible. This is the whole-path proof.
+  it('item 42 deficit correction is skipped for a history-covered article INSIDE buildOzonCoverage, not just when called directly', () => {
+    // History covers all 4 speed weeks with 7 in-stock days each — effectiveDays = 28 >= 14,
+    // source 'daysInStock', speed = qty over WEEKS ÷ 28.
+    const history = WEEKS.map((w) => hist(w, 'A', { clusterId: 'C1', daysInStock: 7, daysObserved: 7 }));
+    // Trend window needs >= MIN_WEEKS_WITH_SALES (6) present weeks: 2 old weeks with heavy sales
+    // (100 pcs) plus the 4 speed weeks with light sales (5 pcs each). Available stock is 0, so
+    // the OLD empty-stock heuristic (item 42) would always fire (daysLeft = 0 < any deficitDays > 0)
+    // and lift the speed to the best week's rate (100 ÷ 7 ≈ 14.29/day) — history must block it.
+    const sales = [
+      sale(weekBefore(2), 'A', 100, 7, 'Москва'),
+      sale(weekBefore(1), 'A', 100, 7, 'Москва'),
+      ...WEEKS.map((w) => sale(w, 'A', 5, 7, 'Москва'))
+    ];
+    const stocks: OzonStockRow[] = [makeStock({ offerId: 'A', clusterId: 'C1', clusterName: 'Москва', available: 0 })];
+    const settings = makeSettings({
+      targetStockDays: 10, minStockDays: 2, deliveryToOzonDays: 0,
+      deficitDays: 30, trendWeeks: 13, bestWeeks: 1, minSalesForCorrection: 0
+    });
+    const input: OzonCoverageInput = {
+      stocks, sales, skus, clusters, settings, myStockAvailability: { A: 10000 },
+      factoryOnOrder: {}, now: NOW, stockHistory: history
+    };
+    const result = buildOzonCoverage(input);
+    const art = result.articles.find((a) => a.article === 'A')!;
+    expect(art.speedSource).toBe('daysInStock');
+    // 4 × 5 = 20 pcs over 28 effective in-stock days — the history speed, untouched.
+    expect(art.perDay).toBeCloseTo(20 / 28, 10);
+    // The deficit correction must not have run for this article at all.
+    expect(art.speedCorrection).toBeNull();
+    // A mutant that always runs the correction would lift perDay to ~14.29/day (100 ÷ 7)
+    // instead — an order-of-magnitude difference a silent wiring bug must not produce.
+    expect(art.perDay).toBeLessThan(1);
+  });
+
   it('noSales26 → no recommendation, no factory signal, and the flag itself reaches ArticleCoverage', () => {
     const history = WEEKS.map((w) => hist(w, 'A', { clusterId: 'C1', daysInStock: 0, daysObserved: 7 }));
     const sales = WEEKS.map((w) => sale(w, 'A', 0, 7, 'Москва'));

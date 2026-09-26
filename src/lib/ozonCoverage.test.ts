@@ -1200,6 +1200,26 @@ describe('buildSalesSpeed: только недельные строки и ре�
     expect(res.speed.perDayByArticle['X']).toBe(1);
   });
 
+  // Independent tester's own mutation check (not in the coder's list): mutating the presence
+  // filter from `=== 7` to `>= 7` survived every existing test — every fixture that has a
+  // 28-day block also carries a 7-day row for the SAME week, so the block itself never decided
+  // whether the week counted as present. Here the window's oldest week has ONLY a 28-day row
+  // (no matching weekly row at all) — a `>= 7` presence check would wrongly mark it present and
+  // silently dilute the speed with an extra all-zero week in the denominator.
+  it('a window week with ONLY a 28-day archive row (no weekly row at all) is NOT counted as present', () => {
+    const sales = [
+      ...P39_WEEKS.slice(1).map(w => makeP39Sale('X', w, 7)),
+      makeP39Sale('X', P39_WEEKS[0], 400, 28) // only the archive block on the oldest window week
+    ];
+    const res = buildOzonCoverage(makeP39Input({ sales }));
+    // Same expectation as "3 недели из 4 дают 21 день" below, but this time the 4th week is
+    // "occupied" by a 28-day block rather than simply missing — the mutant conflated the two.
+    expect(res.speed.weeks).toEqual(P39_WEEKS.slice(1));
+    expect(res.speed.windowDays).toBe(21);
+    expect(res.speed.qtyByArticle['X']).toBe(21);
+    expect(res.speed.perDayByArticle['X']).toBe(1); // 21 ÷ 21, а не 21 ÷ 28
+  });
+
   it('знаменатель — только реально присутствующие недели окна: 3 недели из 4 дают 21 день', () => {
     const sales = P39_WEEKS.slice(1).map(w => makeP39Sale('X', w, 7));
     const res = buildOzonCoverage(makeP39Input({ sales }));
