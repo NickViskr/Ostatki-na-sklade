@@ -3,6 +3,8 @@ import { X, HelpCircle, Search, Check, ChevronDown, ChevronUp, RotateCcw } from 
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { parseDirectClusters, type DirectClusterRule } from '../lib/ozonDirectSupply';
+import type { OzonCoverageSettings } from '../lib/ozonCoverage';
+import type { OzonSettingsImpact } from '../lib/ozonSettingsImpact';
 import {
   canEditOzonSettings,
   OZON_SETTINGS_BLOCKS,
@@ -24,6 +26,11 @@ interface OzonSettingsModalProps {
   /** Item 87 step 3, test-only: seeds the form before the server fetch resolves — the display
    *  tests use it to render an invalid value without mocking `fetchGas`. */
   initialForm?: OzonSettingsForm;
+  /** Item 87 step 4. Recomputes `buildOzonCoverage` for given settings through the SAME call the
+   *  caller's own screen uses (`OzonStocksTab.runCoverage`) and folds it into money figures —
+   *  shows the «Что изменится после сохранения» block. Absent (TurnoverTab) — no block: turnover
+   *  thresholds do not affect orders. */
+  computeImpact?: (settings: OzonCoverageSettings) => OzonSettingsImpact | null;
 }
 
 const DEFAULT_FORM: OzonSettingsForm = {
@@ -81,10 +88,11 @@ const FIELDS_BY_BLOCK: Record<string, OzonSettingsFieldDef[]> = OZON_SETTINGS_FI
   {} as Record<string, OzonSettingsFieldDef[]>
 );
 
-export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose, openBlocks, initialForm }) => {
+export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose, openBlocks, initialForm, computeImpact }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const fetchOzonInitialData = useWarehouseStore((state) => state.fetchOzonInitialData);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
+  const ozonSettings = useWarehouseStore((state) => state.ozonSettings);
   const sessionToken = useWarehouseStore((state) => state.sessionToken);
   const devMode = useWarehouseStore((state) => state.devMode);
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -131,6 +139,48 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     return map;
   }, [fieldErrors]);
   const hasErrors = fieldErrors.length > 0;
+
+  // Item 87 step 4. Keys the form shares with `OzonCoverageSettings` — the ones a settings
+  // change can actually move a factory/supply figure by. maxBoxesPerCluster and the dropOff/
+  // direct-supply fields are not read by `buildOzonCoverage`, so they are left out on purpose.
+  const IMPACT_SETTINGS_KEYS = [
+    'speedWeeks', 'minStockDays', 'targetStockDays', 'deliveryToOzonDays', 'maxClusterDays',
+    'factoryOrderDays', 'returnsToSalePct', 'trendWeeks', 'salesGrowthPct', 'demandGrowthPct',
+    'excludedClusters', 'priorityClusters',
+  ] as const;
+
+  // «Было» — the settings already loaded into the app (`useWarehouseStore.ozonSettings`), i.e.
+  // exactly what the caller's own screen (e.g. «Остатки Озон») is showing right now.
+  const impactBefore = useMemo(
+    () => (computeImpact ? computeImpact(ozonSettings) : null),
+    [computeImpact, ozonSettings]
+  );
+
+  // «Станет» — the form merged over ozonSettings, so non-window keys (deficitDays, bestWeeks…)
+  // survive untouched.
+  const mergedSettings = useMemo(() => ({ ...ozonSettings, ...form }), [ozonSettings, form]);
+
+  const formMatchesLoaded = useMemo(
+    () => IMPACT_SETTINGS_KEYS.every((key) => (ozonSettings as any)[key] === (form as any)[key]),
+    [ozonSettings, form]
+  );
+
+  // buildOzonCoverage is heavy — a keystroke debounces the recompute by ~400ms. The FIRST value
+  // is the initial `mergedSettings` itself (lazy initializer, no effect needed for it), so the
+  // summary is correct immediately on open — including under `renderToStaticMarkup`, which never
+  // runs effects at all.
+  const [debouncedSettings, setDebouncedSettings] = useState<OzonCoverageSettings>(() => mergedSettings);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSettings(mergedSettings), 400);
+    return () => clearTimeout(timer);
+  }, [mergedSettings]);
+
+  // Item 87 step 3+4: an invalid form never reaches buildOzonCoverage — the block shows a
+  // placeholder instead (rendered below).
+  const impactAfter = useMemo(
+    () => (computeImpact && !hasErrors ? computeImpact(debouncedSettings) : null),
+    [computeImpact, debouncedSettings, hasErrors]
+  );
 
   const handleNumericChange = (key: OzonSettingsFieldDef['key'], raw: string, integer?: boolean) => {
     const value = raw === '' ? 0 : integer ? parseInt(raw, 10) : parseFloat(raw);
@@ -780,6 +830,66 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     return numericFields;
   };
 
+  // Item 87 step 4. Format helpers for the impact block only — money always with 2 decimals
+  // and «₽», pieces/counts rounded to whole numbers, both with ru-RU thousands spaces.
+  const fmtImpactQty = (v: number) => Math.round(v).toLocaleString('ru-RU');
+  const fmtImpactMoney = (v: number) => `${v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
+  // Growth costs more money tied up in stock (red), a drop frees it up (green), no change is grey.
+  const impactDiffClass = (before: number, after: number) =>
+    after > before ? 'text-red-600' : after < before ? 'text-emerald-600' : 'text-slate-400';
+
+  const renderImpactRow = (label: string, before: number, after: number, fmt: (v: number) => string) => (
+    <div key={label} className="flex items-center justify-between gap-3 text-sm">
+      <span className="text-slate-600">{label}</span>
+      <span className={`font-bold ${impactDiffClass(before, after)}`}>
+        {fmt(before)} → {fmt(after)}
+      </span>
+    </div>
+  );
+
+  const renderImpactCurrentRow = (label: string, value: string) => (
+    <div key={label} className="flex items-center justify-between gap-3 text-sm">
+      <span className="text-slate-600">{label}</span>
+      <span className="font-bold text-slate-800">{value}</span>
+    </div>
+  );
+
+  const impactBlock = computeImpact && (
+    <div className="border border-slate-200 rounded-2xl overflow-hidden">
+      <div className="px-4 py-3 bg-slate-50">
+        <span className="text-sm font-bold text-slate-800">Что изменится после сохранения</span>
+      </div>
+      <div className="p-4 space-y-2 bg-white">
+        {hasErrors ? (
+          <p className="text-xs text-red-600 font-semibold">Исправьте поля — сводка появится</p>
+        ) : !impactBefore ? (
+          <p className="text-xs text-slate-400">Нет остатков Ozon для расчёта</p>
+        ) : formMatchesLoaded || !impactAfter ? (
+          <>
+            {renderImpactCurrentRow('Заказ на фабрике, шт', fmtImpactQty(impactBefore.factoryPcs))}
+            {renderImpactCurrentRow('Заказ на фабрике, ₽', fmtImpactMoney(impactBefore.factoryRub))}
+            {renderImpactCurrentRow('Товаров с сигналом заказа на фабрике', fmtImpactQty(impactBefore.factoryArticles))}
+            {renderImpactCurrentRow('Поставка в кластеры, шт', fmtImpactQty(impactBefore.supplyPcs))}
+            <p className="text-xs text-slate-400 italic">изменений нет</p>
+            {impactBefore.noPriceArticles.length > 0 && (
+              <p className="text-xs text-amber-700">Без цены: {impactBefore.noPriceArticles.join(', ')}</p>
+            )}
+          </>
+        ) : (
+          <>
+            {renderImpactRow('Заказ на фабрике, шт', impactBefore.factoryPcs, impactAfter.factoryPcs, fmtImpactQty)}
+            {renderImpactRow('Заказ на фабрике, ₽', impactBefore.factoryRub, impactAfter.factoryRub, fmtImpactMoney)}
+            {renderImpactRow('Товаров с сигналом заказа на фабрике', impactBefore.factoryArticles, impactAfter.factoryArticles, fmtImpactQty)}
+            {renderImpactRow('Поставка в кластеры, шт', impactBefore.supplyPcs, impactAfter.supplyPcs, fmtImpactQty)}
+            {impactAfter.noPriceArticles.length > 0 && (
+              <p className="text-xs text-amber-700">Без цены: {impactAfter.noPriceArticles.join(', ')}</p>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
       <div className="bg-white rounded-3xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] modal-enter">
@@ -827,6 +937,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               );
             })
           )}
+          {!loading && impactBlock}
         </div>
 
         <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center gap-3">

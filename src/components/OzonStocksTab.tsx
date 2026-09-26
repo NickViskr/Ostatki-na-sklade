@@ -13,7 +13,8 @@ import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { canTickCluster } from '../lib/ozonSupplyLines';
 import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
-import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle, coverageTone, CoverageTone } from '../lib/ozonCoverage';
+import { buildOzonCoverage, OzonCoverageResult, OzonCoverageSettings, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle, coverageTone, CoverageTone } from '../lib/ozonCoverage';
+import { summarizeSettingsImpact, OzonSettingsImpact } from '../lib/ozonSettingsImpact';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
 import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder, splitFactoryOrders } from '../lib/factoryOrderDisplay';
@@ -486,16 +487,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const toggleWideArticle = useUIStore((state) => state.toggleOzonWideArticle);
   const anyWide = Object.keys(wideArticles).some((a) => wideArticles[a]);
 
-  const coverage = useMemo<OzonCoverageResult | null>(() => {
+  // Item 87 step 4: the ONE place that builds an OzonCoverageResult from this screen's own
+  // filtered inputs — everything but `settings` is fixed. Used by the `coverage` memo below AND
+  // handed to the settings modal as `computeImpact`, so its «было → станет» summary can never
+  // disagree with what this screen itself shows for the same settings.
+  const runCoverage = React.useCallback((settings: OzonCoverageSettings): OzonCoverageResult | null => {
     if (filteredOzonStocks.length === 0) return null;
     // Пункт 29, этап E: ждём ответ по справочнику кластеров.
     if (!clusterRefsLoaded) return null;
-    // Пункт 29, этап E: замер времени расчёта. Диагностика, логику не меняет.
-    const perfStart = performance.now();
-    const articleSet = new Set<string>();
-    for (const s of filteredOzonStocks) {
-      if (s.offerId) articleSet.add(String(s.offerId));
-    }
     const myStockAvailability: Record<string, number> = {};
     for (const s of skus) {
       myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
@@ -505,22 +504,36 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     for (const k of kits) for (const c of k.components || []) {
       if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku);
     }
-    const perfAfterAvailability = performance.now();
-    const result = buildOzonCoverage({
+    return buildOzonCoverage({
       stocks: filteredOzonStocks,
       sales: filteredOzonSales,
       skus,
       clusters: clusterRefs,
-      settings: ozonSettings,
+      settings,
       myStockAvailability,
       pending: pendingSupplies,
       factoryOnOrder,
       kits,
       stockHistory: filteredOzonStockHistory,
     });
-    console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms availability=${Math.round(perfAfterAvailability - perfStart)}ms build=${Math.round(performance.now() - perfAfterAvailability)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
+  }, [filteredOzonStocks, filteredOzonSales, filteredOzonStockHistory, skus, kits, clusterRefs, clusterRefsLoaded, getEffectiveAvailability, rawStocks, pendingSupplies, factoryOnOrder]);
+
+  const coverage = useMemo<OzonCoverageResult | null>(() => {
+    // Пункт 29, этап E: замер времени расчёта. Диагностика, логику не меняет.
+    const perfStart = performance.now();
+    const result = runCoverage(ozonSettings);
+    console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
     return result;
-  }, [filteredOzonStocks, filteredOzonSales, filteredOzonStockHistory, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, rawStocks, pendingSupplies, factoryOnOrder]);
+  }, [runCoverage, ozonSettings, filteredOzonStocks, filteredOzonSales, skus, clusterRefs]);
+
+  // Item 87 step 4. Recomputes coverage for arbitrary settings (the form in the settings modal,
+  // merged over the store's ozonSettings) and folds it into the four «было → станет» figures.
+  // Same `getOrderUnitCost` the table's «Стоимость заказа, ₽» column uses — no new price source.
+  const computeSettingsImpact = React.useCallback((settings: OzonCoverageSettings): OzonSettingsImpact | null => {
+    const result = runCoverage(settings);
+    if (!result) return null;
+    return summarizeSettingsImpact(result, (article) => getOrderUnitCost(article).price);
+  }, [runCoverage, getOrderUnitCost]);
 
   /** Окно тренда из настроек: сколько недель берём, когда распределяем весь остаток. */
   const wideWeeks = Number(ozonSettings.trendWeeks) > 0 ? Math.floor(Number(ozonSettings.trendWeeks)) : 13;
@@ -2410,7 +2423,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
             )}
           </div>
       </div>
-      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} openBlocks={['supply', 'factory']} />
+      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} openBlocks={['supply', 'factory']} computeImpact={computeSettingsImpact} />
       <OzonSupplyModal
         isOpen={supplySummaryOpen && supplyPlan.rows.length > 0}
         onClose={() => setSupplySummaryOpen(false)}
