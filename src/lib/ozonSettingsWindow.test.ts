@@ -345,3 +345,64 @@ describe('OzonSettingsModal: display via renderToStaticMarkup', () => {
     expect(html).not.toContain('GMROI (доходность вложений)');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Item 87 step 3: refusing a dangerous value before it is sent
+// ---------------------------------------------------------------------------
+
+const VALID_FORM_FOR_RENDER: OzonSettingsForm = {
+  speedWeeks: 4, minStockDays: 7, targetStockDays: 30, deliveryToOzonDays: 7, maxClusterDays: 100,
+  factoryOrderDays: 60, returnsToSalePct: 80, salesRetentionWeeks: 78, trendWeeks: 13,
+  salesGrowthPct: 0, demandGrowthPct: 30, turnoverPeriodDays: 90, turnoverSlowDays: 45,
+  turnoverFastDays: 20, gmroiGreenPct: 100, gmroiRedPct: 30, maxBoxesPerCluster: 30,
+  excludedClusters: '', priorityClusters: '', dropOffWarehouseId: '', dropOffWarehouseName: '',
+  dropOffWarehouseType: '', directClusters: '',
+};
+
+describe('OzonSettingsModal: red validation state (item 87 step 3)', () => {
+  afterEach(() => {
+    setStoreUserForRender(null);
+  });
+
+  it('a valid form renders no red message and an enabled Save', () => {
+    setStoreUserForRender({ username: 'boss', role: 'admin' });
+    const html = renderToStaticMarkup(
+      createElement(OzonSettingsModal, {
+        isOpen: true,
+        onClose: () => {},
+        openBlocks: ['supply'],
+        initialForm: VALID_FORM_FOR_RENDER,
+      })
+    );
+    expect(html).not.toContain('Исправьте поля, отмеченные красным');
+    expect(html).not.toContain('text-red-600');
+    expect(html).toMatch(/<button[^>]*type="button"[^>]*>Сохранить<\/button>/);
+  });
+
+  it('an invalid value (maxBoxesPerCluster 0) renders the exact red message, forces its block open and disables Save', () => {
+    setStoreUserForRender({ username: 'boss', role: 'admin' });
+    const invalidForm: OzonSettingsForm = { ...VALID_FORM_FOR_RENDER, maxBoxesPerCluster: 0 };
+    const html = renderToStaticMarkup(
+      createElement(OzonSettingsModal, {
+        isOpen: true,
+        onClose: () => {},
+        openBlocks: [],
+        initialForm: invalidForm,
+      })
+    );
+    expect(html).toContain('Заполните поле числом не меньше 1');
+    expect(html).toContain('Исправьте поля, отмеченные красным');
+    // The «Поставки на Ozon» block holds maxBoxesPerCluster — forced open despite openBlocks: [].
+    expect(html).toContain('Не больше коробок на кластер в одной заявке');
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Сохранить<\/button>/);
+  });
+});
+
+describe('OzonSettingsModal: handleSave source (item 87 step 3)', () => {
+  it('the old strict target>minimum toast is gone, replaced by a hasErrors guard using validateOzonSettingsForm', () => {
+    const src = read('src/components/OzonSettingsModal.tsx');
+    expect(src).not.toContain('Целевой запас должен быть больше Неснижаемого остатка');
+    expect(src).toContain('validateOzonSettingsForm(form)');
+    expect(src).toMatch(/if \(hasErrors\) \{[\s\S]*?return;/);
+  });
+});

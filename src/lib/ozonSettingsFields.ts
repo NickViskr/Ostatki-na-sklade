@@ -281,6 +281,141 @@ export function applyRecommended(form: OzonSettingsForm): OzonSettingsForm {
 
 export type OzonSettingsPayload = OzonSettingsForm;
 
+// ---------------------------------------------------------------------------
+// Item 87 step 3: window-side validation, so a dangerous value is refused BEFORE
+// the save request leaves the browser — using the SAME rules the server enforces.
+// ---------------------------------------------------------------------------
+
+export interface OzonSettingsFieldError {
+  key: string;
+  message: string;
+}
+
+/**
+ * Message wording is copied verbatim from Code.gs `OZON_SETTINGS_FIELD_NAMES` (search for it) —
+ * kept as a SEPARATE map (not `OZON_SETTINGS_FIELDS[].label`) because several window labels are
+ * shorter than the server's names, and the error text must read exactly like the server's.
+ * Tested for exact equality against the GS map in ozonSettingsRulesParity.test.ts.
+ */
+export const OZON_SETTINGS_RULE_FIELD_NAMES: Record<string, string> = {
+  speedWeeks: 'Окно скорости, недель',
+  trendWeeks: 'Окно тренда и долей кластеров, недель',
+  demandGrowthPct: 'Порог резкого роста спроса за 7 дней, %',
+  salesGrowthPct: 'Ручная надбавка к заказу на фабрике, %',
+  minStockDays: 'Неснижаемый запас в кластере, дней',
+  targetStockDays: 'Целевой запас в кластере, дней',
+  deliveryToOzonDays: 'Срок доставки до Ozon, дней',
+  maxClusterDays: 'Потолок запаса в кластере после поставки, дней',
+  maxBoxesPerCluster: 'Не больше коробок на кластер в одной заявке',
+  returnsToSalePct: 'Возвраты, которые снова идут в продажу, %',
+  factoryOrderDays: 'Заказ на фабрике — на сколько дней продаж',
+  turnoverPeriodDays: 'Оборачиваемость: период расчёта, дней',
+  turnoverSlowDays: 'Оборачиваемость: медленный — оборот дольше, дней',
+  turnoverFastDays: 'Оборачиваемость: лидер — оборот быстрее, дней',
+  gmroiGreenPct: 'GMROI: зелёный от, %',
+  gmroiRedPct: 'GMROI: красный ниже, %',
+  salesRetentionWeeks: 'Хранить историю продаж, недель',
+  priorityClusters: 'Приоритетные кластеры',
+  excludedClusters: 'Кластеры без поставок',
+  dropOffWarehouseId: 'Точка отгрузки: ID',
+  dropOffWarehouseName: 'Точка отгрузки: название',
+  dropOffWarehouseType: 'Точка отгрузки: тип',
+  directClusters: 'Кластеры прямой поставки',
+};
+
+/**
+ * TS port of Code.gs `validateOzonSettingsRules(merged)` (search for it) — identical 10 rules,
+ * identical order, identical message texts. Takes a partial numeric object (mirroring the
+ * server's `merged.key !== undefined` guards) so it can also be fed the merge of loaded + edited
+ * settings, not just a fully-populated form.
+ */
+export function validateOzonSettingsRulesTs(
+  merged: Partial<Record<keyof OzonSettingsFormNumeric, number>>
+): OzonSettingsFieldError[] {
+  const errors: OzonSettingsFieldError[] = [];
+  const fn = (key: string) => OZON_SETTINGS_RULE_FIELD_NAMES[key] || key;
+
+  if (merged.speedWeeks !== undefined && (!Number.isInteger(merged.speedWeeks) || merged.speedWeeks < 1)) {
+    errors.push({ key: 'speedWeeks', message: '«' + fn('speedWeeks') + '» должно быть целым числом не меньше 1' });
+  }
+  if (merged.trendWeeks !== undefined && merged.speedWeeks !== undefined && merged.trendWeeks < merged.speedWeeks) {
+    errors.push({ key: 'trendWeeks', message: '«' + fn('trendWeeks') + '» (' + merged.trendWeeks + ' нед.) не может быть меньше «' + fn('speedWeeks') + '» (' + merged.speedWeeks + ' нед.)' });
+  }
+  if (merged.targetStockDays !== undefined && merged.minStockDays !== undefined && merged.targetStockDays < merged.minStockDays) {
+    errors.push({ key: 'targetStockDays', message: '«' + fn('targetStockDays') + '» не может быть меньше «' + fn('minStockDays') + '»' });
+  }
+  if (merged.maxClusterDays !== undefined && merged.maxClusterDays !== 0 && merged.targetStockDays !== undefined && merged.maxClusterDays < merged.targetStockDays) {
+    errors.push({ key: 'maxClusterDays', message: '«' + fn('maxClusterDays') + '» должен быть выключен (0) или не меньше «' + fn('targetStockDays') + '»' });
+  }
+  if (merged.deliveryToOzonDays !== undefined && (merged.deliveryToOzonDays < 0 || merged.deliveryToOzonDays > 60)) {
+    errors.push({ key: 'deliveryToOzonDays', message: '«' + fn('deliveryToOzonDays') + '» должен быть от 0 до 60' });
+  }
+  if (merged.salesRetentionWeeks !== undefined && (!Number.isInteger(merged.salesRetentionWeeks) || merged.salesRetentionWeeks < 27)) {
+    errors.push({ key: 'salesRetentionWeeks', message: '«' + fn('salesRetentionWeeks') + '» должно быть целым числом не меньше 27' });
+  }
+  if (merged.returnsToSalePct !== undefined && (merged.returnsToSalePct < 0 || merged.returnsToSalePct > 100)) {
+    errors.push({ key: 'returnsToSalePct', message: '«' + fn('returnsToSalePct') + '» должен быть от 0 до 100' });
+  }
+  if (merged.turnoverSlowDays !== undefined && merged.turnoverFastDays !== undefined && merged.turnoverSlowDays <= merged.turnoverFastDays) {
+    errors.push({ key: 'turnoverSlowDays', message: '«' + fn('turnoverSlowDays') + '» должен быть больше «' + fn('turnoverFastDays') + '»' });
+  }
+  if (merged.gmroiGreenPct !== undefined && merged.gmroiRedPct !== undefined && merged.gmroiGreenPct <= merged.gmroiRedPct) {
+    errors.push({ key: 'gmroiGreenPct', message: '«' + fn('gmroiGreenPct') + '» должен быть больше «' + fn('gmroiRedPct') + '»' });
+  }
+  if (merged.maxBoxesPerCluster !== undefined && (!Number.isInteger(merged.maxBoxesPerCluster) || merged.maxBoxesPerCluster < 1)) {
+    errors.push({ key: 'maxBoxesPerCluster', message: '«' + fn('maxBoxesPerCluster') + '» должно быть целым числом не меньше 1' });
+  }
+
+  return errors;
+}
+
+/**
+ * Item 87 step 3. Validates what the user SEES in the numeric inputs (the raw form value, before
+ * `buildOzonSettingsPayload` clamps it) — a per-field check (empty / non-numeric / negative /
+ * fractional-on-an-integer-field) runs first, then the same cross-field rules the server enforces
+ * (`validateOzonSettingsRulesTs`). If a field already failed its own per-field check, the
+ * cross-field rule for that same key is skipped — one message per field is enough for the window.
+ */
+export function validateOzonSettingsForm(form: OzonSettingsForm): OzonSettingsFieldError[] {
+  const errors: OzonSettingsFieldError[] = [];
+  const perFieldKeys = new Set<string>();
+
+  for (const field of OZON_SETTINGS_FIELDS) {
+    // `form[field.key]` is typed as `number`, but at runtime a stale/malformed load can hand it
+    // '', null or undefined — hence the `unknown` cast before the emptiness checks below.
+    const raw: unknown = form[field.key];
+    const n = Number(raw);
+    const min = field.min ?? 0;
+
+    if (raw === '' || raw === null || raw === undefined || !Number.isFinite(n)) {
+      errors.push({ key: field.key, message: `Заполните поле числом не меньше ${min}` });
+      perFieldKeys.add(field.key);
+      continue;
+    }
+    if (n < min) {
+      errors.push({ key: field.key, message: `Заполните поле числом не меньше ${min}` });
+      perFieldKeys.add(field.key);
+      continue;
+    }
+    if (field.max !== undefined && n > field.max) {
+      errors.push({ key: field.key, message: `Заполните поле числом не больше ${field.max}` });
+      perFieldKeys.add(field.key);
+      continue;
+    }
+    if (field.integer && !Number.isInteger(n)) {
+      errors.push({ key: field.key, message: 'Заполните поле целым числом' });
+      perFieldKeys.add(field.key);
+    }
+  }
+
+  const ruleErrors = validateOzonSettingsRulesTs(form);
+  for (const err of ruleErrors) {
+    if (!perFieldKeys.has(err.key)) errors.push(err);
+  }
+
+  return errors;
+}
+
 /**
  * Item 87 step 2: the four item-42 fields (deficitDays, bestWeeks, minSalesForCorrection,
  * maxSpeedGrowth) left the window and are no longer sent — the server keeps their sheet values

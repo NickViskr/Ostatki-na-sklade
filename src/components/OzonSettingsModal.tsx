@@ -11,6 +11,7 @@ import {
   OZON_SETTINGS_AUTO_POLL_LINE,
   applyRecommended,
   buildOzonSettingsPayload,
+  validateOzonSettingsForm,
   type OzonSettingsForm,
   type OzonSettingsFieldDef,
 } from '../lib/ozonSettingsFields';
@@ -20,6 +21,9 @@ interface OzonSettingsModalProps {
   onClose: () => void;
   /** Item 87 step 2. Which blocks are open by default; the rest start collapsed. */
   openBlocks?: string[];
+  /** Item 87 step 3, test-only: seeds the form before the server fetch resolves — the display
+   *  tests use it to render an invalid value without mocking `fetchGas`. */
+  initialForm?: OzonSettingsForm;
 }
 
 const DEFAULT_FORM: OzonSettingsForm = {
@@ -77,7 +81,7 @@ const FIELDS_BY_BLOCK: Record<string, OzonSettingsFieldDef[]> = OZON_SETTINGS_FI
   {} as Record<string, OzonSettingsFieldDef[]>
 );
 
-export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose, openBlocks }) => {
+export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose, openBlocks, initialForm }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const fetchOzonInitialData = useWarehouseStore((state) => state.fetchOzonInitialData);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
@@ -111,12 +115,22 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   const [directory, setDirectory] = useState<{ clusterId: string; clusterName: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState<OzonSettingsForm>(DEFAULT_FORM);
+  const [form, setForm] = useState<OzonSettingsForm>(initialForm ?? DEFAULT_FORM);
   // Item 87 step 2. The values loaded from the server, kept aside to highlight anything the
   // user (or the «Вернуть к рекомендованным значениям» button) has changed since.
   const [loadedForm, setLoadedForm] = useState<OzonSettingsForm | null>(null);
 
   const isFieldChanged = (key: keyof OzonSettingsForm) => loadedForm !== null && form[key] !== loadedForm[key];
+
+  // Item 87 step 3: the same rules the server enforces, checked BEFORE the save request leaves
+  // the browser. Recomputed on every render — the form is small and validation is pure/cheap.
+  const fieldErrors = useMemo(() => validateOzonSettingsForm(form), [form]);
+  const fieldErrorByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const err of fieldErrors) map.set(err.key, err.message);
+    return map;
+  }, [fieldErrors]);
+  const hasErrors = fieldErrors.length > 0;
 
   const handleNumericChange = (key: OzonSettingsFieldDef['key'], raw: string, integer?: boolean) => {
     const value = raw === '' ? 0 : integer ? parseInt(raw, 10) : parseFloat(raw);
@@ -384,10 +398,11 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   if (!isOpen || !canEdit) return null;
 
   const handleSave = async () => {
-    const checkMinDays = Math.max(0, parseFloat(String(form.minStockDays)) || 0);
-    const checkTargetDays = Math.max(0, parseFloat(String(form.targetStockDays)) || 0);
-    if (checkTargetDays <= checkMinDays) {
-      toast.error('Целевой запас должен быть больше Неснижаемого остатка: неснижаемый входит внутрь целевого, а не прибавляется к нему');
+    // Item 87 step 3: the Save button is already disabled while fieldErrors is non-empty — this
+    // guard only covers a bypass (e.g. a stale click queued before the last keystroke re-ran
+    // validation).
+    if (hasErrors) {
+      toast.error('Исправьте поля, отмеченные красным');
       return;
     }
     setSaving(true);
@@ -413,29 +428,40 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     }
   };
 
-  const renderNumericField = (field: OzonSettingsFieldDef) => (
-    <div key={field.key}>
-      <label className="block text-xs font-bold text-slate-700 mb-1">
-        {field.label}
-        <FieldHint position="bottom" text={field.help} />
-        {isFieldChanged(field.key) && (
-          <span className="ml-2 text-[10px] font-bold text-amber-600 align-middle">изменено</span>
+  const renderNumericField = (field: OzonSettingsFieldDef) => {
+    const errorMessage = fieldErrorByKey.get(field.key);
+    return (
+      <div key={field.key}>
+        <label className="block text-xs font-bold text-slate-700 mb-1">
+          {field.label}
+          <FieldHint position="bottom" text={field.help} />
+          {isFieldChanged(field.key) && (
+            <span className="ml-2 text-[10px] font-bold text-amber-600 align-middle">изменено</span>
+          )}
+        </label>
+        <input
+          type="number"
+          min={field.min}
+          max={field.max}
+          step={field.step}
+          value={form[field.key]}
+          onChange={(e) => handleNumericChange(field.key, e.target.value, field.integer)}
+          className={`w-full px-4 py-2.5 rounded-xl border outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50 focus:ring-2 focus:ring-indigo-500 ${
+            errorMessage
+              ? 'border-red-400 ring-2 ring-red-100'
+              : isFieldChanged(field.key)
+              ? 'border-amber-300 ring-2 ring-amber-200'
+              : 'border-slate-200'
+          }`}
+        />
+        {errorMessage ? (
+          <p className="text-xs text-red-600 font-semibold mt-1">{errorMessage}</p>
+        ) : (
+          <p className="text-xs text-slate-400 mt-1">{field.hint}</p>
         )}
-      </label>
-      <input
-        type="number"
-        min={field.min}
-        max={field.max}
-        step={field.step}
-        value={form[field.key]}
-        onChange={(e) => handleNumericChange(field.key, e.target.value, field.integer)}
-        className={`w-full px-4 py-2.5 rounded-xl border outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50 focus:ring-2 focus:ring-indigo-500 ${
-          isFieldChanged(field.key) ? 'border-amber-300 ring-2 ring-amber-200' : 'border-slate-200'
-        }`}
-      />
-      <p className="text-xs text-slate-400 mt-1">{field.hint}</p>
-    </div>
-  );
+      </div>
+    );
+  };
 
   const clustersEmptyHint = (
     <p className="text-xs text-slate-400 italic">
@@ -775,7 +801,10 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
             </div>
           ) : (
             OZON_SETTINGS_BLOCKS.map((block) => {
-              const isBlockOpen = openBlockIds.has(block.id);
+              // Item 87 step 3: a block holding an invalid field is forced open, so the red
+              // message is never hidden behind a collapsed header.
+              const blockHasError = (FIELDS_BY_BLOCK[block.id] || []).some((f) => fieldErrorByKey.has(f.key));
+              const isBlockOpen = openBlockIds.has(block.id) || blockHasError;
               return (
                 <div key={block.id} className="border border-slate-200 rounded-2xl overflow-hidden">
                   <button
@@ -783,7 +812,10 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                     onClick={() => toggleBlock(block.id)}
                     className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors"
                   >
-                    <span className="text-sm font-bold text-slate-800">{block.title}</span>
+                    <span className="text-sm font-bold text-slate-800">
+                      {block.title}
+                      {blockHasError && <span className="ml-1.5 text-red-600">●</span>}
+                    </span>
                     {isBlockOpen ? <ChevronUp size={16} className="text-slate-500" /> : <ChevronDown size={16} className="text-slate-500" />}
                   </button>
                   {isBlockOpen && (
@@ -807,7 +839,10 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
             <RotateCcw size={15} />
             Вернуть к рекомендованным значениям
           </button>
-          <div className="flex gap-3">
+          <div className="flex items-center gap-3">
+            {hasErrors && (
+              <span className="text-xs font-semibold text-red-600">Исправьте поля, отмеченные красным</span>
+            )}
             <button
               type="button"
               onClick={onClose}
@@ -819,7 +854,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
             <button
               type="button"
               onClick={handleSave}
-              disabled={saving || loading}
+              disabled={saving || loading || hasErrors}
               className="px-5 py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50"
             >
               {saving ? 'Сохранение…' : 'Сохранить'}
