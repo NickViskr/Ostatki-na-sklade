@@ -37,7 +37,8 @@ const emptyManualCluster = (ref: { clusterId: string; clusterName: string }): an
   unmetQty: 0,
   pendingQty: 0,
   requestedQty: 0,
-  pendingEffective: 0,
+  ozonInFlightQty: 0,
+  inFlightQty: 0,
   needQty: 0,
   needBoxes: 0,
   recommendation: null,
@@ -60,7 +61,7 @@ const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
   { key: 'other', label: 'Прочее' },
   { key: 'estimated', label: 'Расчётный' },
   { key: 'coverage', label: 'Покрытие' },
-  { key: 'pending', label: 'Зачёт' },
+  { key: 'pending', label: 'Едет' },
   { key: 'myStock', label: 'Мой склад' },
   { key: 'recommendation', label: 'Рекомендация' },
   { key: 'factory', label: 'Заказ на фабрике' },
@@ -593,7 +594,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         recommendedQty: art.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0),
         recLimited: art.clusters.some((c) => c.recommendation !== null && c.recommendation.limitedByMyStock),
         deficitQty: clustersWithNeed.reduce((s, c) => s + (c.recommendation && c.recommendation.boxes === 0 ? c.needQty : 0), 0),
-        factoryDaysLeft: art.factory ? art.factory.daysLeft : (art.perDay > 0 ? (art.totalEstimated + Math.max(0, art.myStockAvailable) + (factoryOnOrder[art.article] || 0)) / art.perDay : null),
+        // Item 85: the same pipeline as calcFactorySignal — «Мой склад» net of the reserve and the
+        // forecast speed, so «хватит на N дн.» never disagrees with the signal itself.
+        factoryDaysLeft: art.factory ? art.factory.daysLeft : (art.forecastPerDay > 0 ? (art.totalEstimated + Math.max(0, art.freeMyStock) + (factoryOnOrder[art.article] || 0)) / art.forecastPerDay : null),
+        inFlightTotal: art.clusters.reduce((s, c) => s + (c.inFlightQty || 0), 0) + (pendingSupplies.unboundInFlightByArticle[art.article] || 0),
         factoryThreshold: (Number(art.leadTimeDays) || 0) + ozonSettings.minStockDays,
         clusters: clustersWithNeed,
       };
@@ -602,7 +606,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     // Пункт 29, этап E: замер времени. Диагностика, логику не меняет.
     console.log(`OZONPERF coverageRows total=${Math.round(performance.now() - rowsPerfStart)}ms rows=${rows.length}`);
     return rows;
-  }, [coverage, filteredOzonStocks, filteredOzonSales, skus, ozonSettings.minStockDays]);
+  }, [coverage, filteredOzonStocks, filteredOzonSales, skus, ozonSettings.minStockDays, factoryOnOrder, pendingSupplies]);
 
   // Пункт 36. Компоненты виртуальных комплектов: на фабрике заказывают их, а не комплект.
   // Порядок тот же, что в основной таблице — от самых быстрых к самым медленным.
@@ -1471,7 +1475,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('estimated') && (
                           <th className="p-3 text-right">
                             Расчётный
-                            <ColHint text="На сколько штук реально можно рассчитывать: доступно + в пути + доля возвратов. Именно эта величина сравнивается с целевым запасом." />
+                            <ColHint text="На сколько штук реально можно рассчитывать: доступно + доля возвратов + то, что уже едет в кластер (колонка «Едет»). Именно эта величина сравнивается с целевым запасом." />
                           </th>
                         )}
                         {isColVisible('coverage') && (
@@ -1482,8 +1486,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         )}
                         {isColVisible('pending') && (
                           <th className="p-3 text-right">
-                            Зачёт
-                            <ColHint text="Сколько штук уже едет по созданным заявкам на поставку. Эти штуки вычитаются из потребности сразу, не дожидаясь, пока Ozon отразит их в колонке «В заявках» — иначе один и тот же товар легко отправить дважды. По кластеру берётся наибольшее из двух чисел: нашего зачёта и колонки «В заявках» Ozon, потому что оба описывают одни и те же заявки. Зачёт снимается сам, когда заявка отменена, отклонена, просрочена или товар уже принят складом Ozon." />
+                            Едет
+                            <ColHint text="Сколько штук уже едет в кластер. Считается двумя способами: по нашим созданным заявкам (от создания до начала приёмки на складе Ozon) и по колонкам Ozon «В пути» + «В заявках». Берётся большее из двух, а не сумма — это одни и те же поставки: наши статусы свежее, а данные остатков Ozon обновляет с опозданием до полусуток. Эти штуки входят в «Расчётный» и уменьшают потребность сразу после создания заявки. Нажми на число у товара — откроется список заявок." />
                           </th>
                         )}
                         {isColVisible('myStock') && (
@@ -1683,14 +1687,14 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               {isColVisible('coverage') && <td className={`p-3 text-right ${coverageColor(art.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>}
                               {isColVisible('pending') && (
                                 <td className="p-3 text-right">
-                                  {art.pendingTotal > 0 ? (
+                                  {art.inFlightTotal > 0 || art.pendingTotal > 0 ? (
                                     <button
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setPendingModalArticle(art.article); }}
                                       className="font-semibold text-sky-600 hover:underline"
-                                      title={`По этому товару уже создано заявок на ${fmtInt(art.pendingTotal)} шт. На это количество потребность уменьшена, и столько же зарезервировано на Моём складе. Нажми, чтобы посмотреть список заявок.`}
+                                      title={`В кластеры этого товара едет ${fmtInt(art.inFlightTotal)} шт — они уже учтены в «Расчётном», и потребность на них уменьшена. На Моём складе под созданные заявки зарезервировано ${fmtInt(art.pendingTotal)} шт. Нажми, чтобы посмотреть список заявок.`}
                                     >
-                                      {fmtInt(art.pendingTotal)}
+                                      {fmtInt(art.inFlightTotal)}
                                     </button>
                                   ) : (
                                     <span className="text-slate-300">—</span>
@@ -1982,9 +1986,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     {isColVisible('coverage') && <td className={`p-2.5 text-right ${coverageColor(cls.coverageDays, ozonSettings.targetStockDays)}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>}
                                     {isColVisible('pending') && (
                                       <td className="p-2.5 text-right">
-                                        {cls.pendingEffective > 0 ? (
-                                          <span className="font-medium text-sky-600" title={`Потребность кластера уменьшена на ${fmtInt(cls.pendingEffective)} шт. Наш зачёт по созданным заявкам: ${fmtInt(cls.pendingQty)} шт. Колонка «В заявках» у Ozon: ${fmtInt(cls.requestedQty)} шт. Берём наибольшее из двух, а не сумму — это одни и те же заявки.`}>
-                                            {fmtInt(cls.pendingEffective)}
+                                        {cls.inFlightQty > 0 ? (
+                                          <span className="font-medium text-sky-600" title={`Едет в кластер ${fmtInt(cls.inFlightQty)} шт — учтены в «Расчётном». По нашим заявкам: ${fmtInt(cls.pendingQty)} шт. По данным Ozon: «В пути» ${fmtInt(cls.transit)} + «В заявках» ${fmtInt(cls.requestedQty)} = ${fmtInt(cls.ozonInFlightQty)} шт. Берём большее из двух, а не сумму — это одни и те же поставки.`}>
+                                            {fmtInt(cls.inFlightQty)}
                                           </span>
                                         ) : (
                                           <span className="text-slate-300">—</span>
@@ -2086,9 +2090,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 {isColVisible('coverage') && <td className="p-2.5 text-right text-slate-300">—</td>}
                                 {isColVisible('pending') && (
                                   <td className="p-2.5 text-right">
-                                    {(pendingSupplies.unboundByArticle[art.article] || 0) > 0 ? (
-                                      <span className="text-slate-600" title="Заявки, у которых Ozon не вернул кластер. В кластерные рекомендации они не идут, но в общий зачёт по товару входят.">
-                                        {fmtInt(pendingSupplies.unboundByArticle[art.article] || 0)}
+                                    {(pendingSupplies.unboundInFlightByArticle[art.article] || 0) > 0 ? (
+                                      <span className="text-slate-600" title="Заявки, у которых Ozon не вернул кластер. В кластерные рекомендации они не идут, но в общий итог товара и в трубу фабрики входят.">
+                                        {fmtInt(pendingSupplies.unboundInFlightByArticle[art.article] || 0)}
                                       </span>
                                     ) : (
                                       <span className="text-slate-300">—</span>
@@ -2216,10 +2220,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               <span className="font-semibold text-slate-800">{fmtInt(c.pipelineQty)}</span>
                               <span
                                 className="block text-[10px] font-normal text-slate-400"
-                                title="В резерве — остаток склада, уже расписанный по созданным заявкам на поставку. В трубе он учитывается: товар никуда не делся и будет продан, он просто едет на Ozon. Но собрать из него комплекты прямо сейчас нельзя."
+                                title="«Склад» — свободный остаток компонента. Резерв — часть склада, уже расписанная по созданным заявкам: эти штуки считаются внутри комплектов, которые едут на Ozon, поэтому второй раз в трубу не входят. Собрать из резерва новые комплекты нельзя."
                               >
-                                из комплектов {fmtInt(c.fromKitsQty)} / склад {fmtInt(c.myStockQty)} / заказано {fmtInt(c.onOrderQty)}
-                                {c.reservedQty > 0 && <> / в резерве {fmtInt(c.reservedQty)}</>}
+                                из комплектов {fmtInt(c.fromKitsQty)} / склад {fmtInt(c.freeMyStockQty)} / заказано {fmtInt(c.onOrderQty)}
+                                {c.reservedQty > 0 && <> · в резерве ещё {fmtInt(c.reservedQty)} (учтены в комплектах, которые едут)</>}
                               </span>
                             </td>
                             <td className={`py-2 pr-2 text-right ${(Number(c.leadTimeDays) || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
@@ -2418,7 +2422,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
               </button>
             </div>
             <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
-              Эти заявки уже созданы, поэтому их количества вычтены из потребности и зарезервированы на Моём складе. Зачёт снимется сам, когда заявка будет отменена, отклонена, просрочена или товар примет склад Ozon. Если статус получить не удалось, зачёт истечёт через 7 дней от даты в колонке «С какого числа». Строка «списана, едет» уже списана со склада: остаток она не резервирует, но в кластер ещё едет и из потребности вычтена. Строка «принята Ozon» уже в колонках Ozon: резерв держится до списания, в потребности не повторяется.
+              Эти заявки уже созданы, поэтому их количества вычтены из потребности, а пока товар не списан — зарезервированы на Моём складе. Заявка считается «едущей» до начала приёмки на складе Ozon; дальше товар учитывается по колонкам Ozon. Заявка выпадает сама, когда отменена, отклонена или просрочена. Если статус получить не удалось, она истечёт через 7 дней от даты в колонке «С какого числа». Строка «списана, едет» уже списана со склада: остаток она не резервирует, но в кластер ещё едет и из потребности вычтена. Строка «принята Ozon» уже на приёмке у Ozon и учтена его колонками: резерв держится до списания, в потребности не повторяется.
             </div>
             {pendingModalRows.length === 0 ? (
               <div className="text-[11px] text-slate-400">По этому товару активных заявок нет.</div>

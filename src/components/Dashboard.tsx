@@ -502,14 +502,14 @@ export const Dashboard: React.FC = React.memo(() => {
   // Ozon customer-sales speed of the supply planner. The warehouse journal is NOT the speed:
   // its «Расход» is a shipment to Ozon, and a product not yet shipped looked dead.
   const coverageByArticle = useMemo(() => {
-    const map: Record<string, { perDay: number; totalEstimated: number }> = {};
+    const map: Record<string, { perDay: number; totalEstimated: number; pendingTotal: number }> = {};
     for (const a of ozonCoverage?.articles || []) map[a.article] = a;
     return map;
   }, [ozonCoverage]);
   const lastReceipt = useMemo(() => lastReceiptByArticle(transactions), [transactions]);
   const turnoverOf = (item: { article: string; quantity: number }) => {
     const cov = coverageByArticle[item.article];
-    return coverageDays({ shelf: item.quantity, ozon: cov?.totalEstimated || 0 }, cov?.perDay || 0);
+    return coverageDays({ shelf: item.quantity, ozon: cov?.totalEstimated || 0, reserved: cov?.pendingTotal || 0 }, cov?.perDay || 0);
   };
   const turnoverWindowDays = ozonCoverage?.speed.windowDays || 0;
 
@@ -608,7 +608,8 @@ export const Dashboard: React.FC = React.memo(() => {
     let totalStock = 0;
     filteredStock.forEach(item => {
       const cov = coverageByArticle[item.article];
-      totalStock += item.quantity + (cov?.totalEstimated || 0);
+      // Item 85: the reserve is inside totalEstimated as goods on their way — once, not twice.
+      totalStock += item.quantity - Math.min(Math.max(0, item.quantity), cov?.pendingTotal || 0) + (cov?.totalEstimated || 0);
       totalPerDay += cov?.perDay || 0;
     });
     if (totalPerDay <= 0) return 0;
@@ -1197,8 +1198,8 @@ export const Dashboard: React.FC = React.memo(() => {
                           <div className="bg-indigo-500 h-full" style={{ width: `${Math.min(days, 100)}%` }}></div>
                         </div>
                         <span className="text-[10px] text-slate-400 font-bold uppercase mt-1 block">{days} дн.</span>
-                        <span className="text-[10px] text-slate-400 block whitespace-nowrap" title="Полка · остаток на Ozon · скорость продаж Ozon">
-                          {item.quantity} + Ozon {Math.round(cov?.totalEstimated || 0)} · {(cov?.perDay || 0).toFixed(1)} шт/дн
+                        <span className="text-[10px] text-slate-400 block whitespace-nowrap" title="Свободно на полке · остаток на Ozon вместе с тем, что уже едет туда по заявкам · скорость продаж Ozon">
+                          {item.quantity - Math.min(Math.max(0, item.quantity), cov?.pendingTotal || 0)} + Ozon {Math.round(cov?.totalEstimated || 0)} · {(cov?.perDay || 0).toFixed(1)} шт/дн
                         </span>
                       </>
                     );

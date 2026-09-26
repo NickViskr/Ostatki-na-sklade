@@ -333,27 +333,33 @@ export interface ClusterStockAgg {
   available: number;
   transit: number;
   returns: number;
-  /** «В заявках» по данным Ozon, шт. В расчётный остаток estimated НЕ входит. */
+  /** «В заявках» по данным Ozon, шт. */
   requested: number;
-  /** Расчётный остаток = Доступно + В пути + Возвраты × %возвратов. */
-  estimated: number;
+  /** Item 85. On the shelf = Доступно + Возвраты × %возвратов. */
+  shelf: number;
+  /** Item 85. On their way by Ozon's own columns = «В пути» + «В заявках». */
+  ozonInFlight: number;
 }
 
 export interface ArticleStockAgg {
   article: string;
-  /** Расчётный остаток по ВСЕМ строкам товара, включая строки без КластерID. */
-  totalEstimated: number;
-  /** Расчётный остаток строк без КластерID (в общие итоги, но не в кластеры). */
-  unboundEstimated: number;
+  /** Item 85. On the shelf over ALL rows of the article, rows without КластерID included. */
+  totalShelf: number;
+  /** Item 85. On the shelf in rows without КластерID (totals only, never a cluster). */
+  unboundShelf: number;
+  /** Item 85. «В пути» + «В заявках» in rows without КластерID. */
+  unboundOzonInFlight: number;
   /** Кластерные агрегаты, ключ — КластерID. */
   byCluster: Record<string, ClusterStockAgg>;
 }
 
 /**
  * Агрегация остатков Ozon по товарам и кластерам.
- * По ТЗ v3: расчётный остаток = Доступно + В пути + Возвраты × %возвратов;
- * «Готовим к продаже» и «В заявках» в расчёт не входят.
- * Строки без КластерID попадают только в totalEstimated / unboundEstimated.
+ * Item 85, step 1.1: the stock is kept in two parts. ON THE SHELF = Доступно + Возвраты ×
+ * %возвратов. ON THEIR WAY by Ozon = «В пути» + «В заявках» — kept apart because the same
+ * pieces are also known from our own supplies (buildPendingSupplies) and the coverage takes
+ * the larger of the two, never the sum. «Готовим к продаже» does not count (unchanged, TZ v3).
+ * Строки без КластерID попадают только в итоги товара (unbound*).
  */
 export function buildClusterStocks(
   stocks: OzonStockRow[],
@@ -366,7 +372,7 @@ export function buildClusterStocks(
   for (const row of stocks) {
     const article = resolveOzonArticle(skus, row.offerId, row.sku);
     if (!result[article]) {
-      result[article] = { article, totalEstimated: 0, unboundEstimated: 0, byCluster: {} };
+      result[article] = { article, totalShelf: 0, unboundShelf: 0, unboundOzonInFlight: 0, byCluster: {} };
     }
     const agg = result[article];
 
@@ -374,13 +380,14 @@ export function buildClusterStocks(
     const transit = Number(row.transit) || 0;
     const returns = Number(row.returns) || 0;
     const requested = Number(row.requested) || 0;
-    const estimated = available + transit + returns * pct;
+    const shelf = available + returns * pct;
 
-    agg.totalEstimated += estimated;
+    agg.totalShelf += shelf;
 
     const clusterId = String(row.clusterId || '').trim();
     if (!clusterId) {
-      agg.unboundEstimated += estimated;
+      agg.unboundShelf += shelf;
+      agg.unboundOzonInFlight += transit + requested;
       continue;
     }
     if (!agg.byCluster[clusterId]) {
@@ -391,7 +398,8 @@ export function buildClusterStocks(
         transit: 0,
         returns: 0,
         requested: 0,
-        estimated: 0
+        shelf: 0,
+        ozonInFlight: 0
       };
     }
     const c = agg.byCluster[clusterId];
@@ -399,7 +407,8 @@ export function buildClusterStocks(
     c.transit += transit;
     c.returns += returns;
     c.requested += requested;
-    c.estimated += estimated;
+    c.shelf += shelf;
+    c.ozonInFlight += transit + requested;
   }
 
   return result;
@@ -663,6 +672,7 @@ export interface ClusterCoverageRow {
   available: number;
   transit: number;
   returns: number;
+  /** Item 85. Shelf + on their way: what the cluster can count on. Coverage and need use it. */
   estimated: number;
   coverageDays: number | null;
   excluded: boolean;
@@ -672,12 +682,14 @@ export interface ClusterCoverageRow {
   priorityK: number;
   /** Непокрытая потребность кластера, шт: сколько не досталось из-за нехватки на Моём складе. */
   unmetQty: number;
-  /** Локальный зачёт по этому кластеру, шт (из уже созданных заявок). */
+  /** Item 85. On their way by our own supplies (status before acceptance at the storage warehouse), шт. */
   pendingQty: number;
   /** «В заявках» по данным Ozon для этого кластера, шт. */
   requestedQty: number;
-  /** Применённый к потребности зачёт = наибольшее из pendingQty и requestedQty, шт. */
-  pendingEffective: number;
+  /** Item 85. On their way by Ozon: «В пути» + «В заявках», шт. */
+  ozonInFlightQty: number;
+  /** Item 85. On their way, counted once: the larger of pendingQty and ozonInFlightQty, шт. */
+  inFlightQty: number;
   recommendation: SupplyRecommendation | null;
   /** Item 72. Deficit speed correction of this cluster. null — none. */
   speedCorrection: ClusterSpeedCorrectionInfo | null;
@@ -719,10 +731,12 @@ export interface ArticleCoverage {
  * прямой импорт создал бы кольцевую зависимость между модулями.
  */
 export interface OzonPendingLike {
-  /** Зачёт по кластерам: артикул -> КластерID -> шт. */
+  /** On their way to a cluster: артикул -> КластерID -> шт. */
   byArticleCluster: Record<string, Record<string, number>>;
-  /** Зачёт по товару целиком, шт (включая позиции без кластера). */
+  /** Reserve of «Мой склад» по товару целиком, шт (включая позиции без кластера). */
   byArticle: Record<string, number>;
+  /** Item 85. On their way without КластерID: артикул -> шт. Absent — none. */
+  unboundInFlightByArticle?: Record<string, number>;
 }
 
 // ===== Пункт 36: компоненты виртуальных комплектов =====
@@ -1383,7 +1397,8 @@ export function buildSalesTrend(
 export function buildComponentCoverage(
   kits: KitItem[],
   speed: SalesSpeedResult,
-  stocksByArticle: Record<string, ArticleStockAgg>,
+  // Item 85. What each kit can count on at Ozon — shelf AND on their way — by kit article.
+  kitTotals: Record<string, { totalEstimated: number }>,
   skus: SKUItem[],
   myStockAvailability: Record<string, number>,
   factoryOnOrder: Record<string, number>,
@@ -1415,8 +1430,8 @@ export function buildComponentCoverage(
     const kitForecastPerDay = forecastPerDayByArticle && forecastPerDayByArticle[kitSku] !== undefined
       ? Number(forecastPerDayByArticle[kitSku]) || 0
       : kitPerDay;
-    const kitStock = stocksByArticle[kitSku];
-    const kitEstimated = kitStock ? kitStock.totalEstimated : 0;
+    const kitStock = kitTotals[kitSku];
+    const kitEstimated = kitStock ? Number(kitStock.totalEstimated) || 0 : 0;
     // Заявка на поставку пишется на артикул комплекта, но забирает со склада его компоненты.
     const kitPending = pendingByArticle ? Math.max(0, Number(pendingByArticle[kitSku]) || 0) : 0;
 
@@ -1496,9 +1511,10 @@ export function buildComponentCoverage(
     // Сигнал считается той же функцией, что и по обычным товарам: роль «остатка Ozon» играет
     // запас, пришедший из расчётных остатков комплектов. Непокрытая потребность кластеров
     // приходит от комплектов, которые этот компонент держит.
+    // Item 85, step 1.2: the free stock, not the raw one — see the pipeline comment below.
     const factory = calcFactorySignal(
       row.fromKitsQty,
-      myStockQty,
+      freeMyStockQty,
       row.forecastPerDay,
       leadTimeDays,
       pcsPerBox,
@@ -1511,12 +1527,12 @@ export function buildComponentCoverage(
       component: componentSku,
       perDay: row.perDay,
       forecastPerDay: row.forecastPerDay,
-      // ТРУБА считается по СЫРОМУ остатку, резерв из неё НЕ вычитается — и это не ошибка.
-      // Зарезервированный товар физически лежит на складе и будет продан, он просто едет на Ozon.
-      // Вычесть его из трубы значило бы посчитать одну и ту же потерю дважды: сначала как нехватку
-      // на Ozon, потом как нехватку на своём складе, и заказ на фабрике вышел бы завышенным.
-      // Так же устроен сигнал фабрики на уровне комплекта: он идёт по сырому myStockAvailable.
-      pipelineQty: row.fromKitsQty + Math.max(0, myStockQty) + onOrderQty,
+      // Item 85, step 1.2. The reserve IS subtracted now. A reserved kit is counted in the kit's
+      // total at Ozon as on its way (or in Ozon's columns once in acceptance), so its components
+      // left «Мой склад» for the pipeline the moment the supply was created. Before item 85 the
+      // kit total did not see supplies on the road and the raw figure was the lesser evil; a
+      // written-off supply on the road then fell out of the pipeline altogether.
+      pipelineQty: row.fromKitsQty + freeMyStockQty + onOrderQty,
       myStockQty,
       reservedQty,
       freeMyStockQty,
@@ -1622,7 +1638,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const articles: ArticleCoverage[] = [];
 
   for (const article of articleSet) {
-    const stockAgg = stocksByArticle[article] || { article, totalEstimated: 0, unboundEstimated: 0, byCluster: {} };
+    const stockAgg: ArticleStockAgg = stocksByArticle[article] || { article, totalShelf: 0, unboundShelf: 0, unboundOzonInFlight: 0, byCluster: {} };
     const skuItem = input.skus.find(s => s.sku === article);
     const pcsPerBox = skuItem && skuItem.pcsPerBox > 0 ? skuItem.pcsPerBox : 1;
     const leadTimeDays = skuItem ? (Number(skuItem.leadTimeDays) || 0) : 0;
@@ -1669,13 +1685,28 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       ...Object.keys(pendingByCluster).filter((id) => (Number(pendingByCluster[id]) || 0) > 0)
     ]);
 
+    // Item 85, step 1.1. Pieces on their way without a cluster count once, like a cluster's.
+    const unboundOurInFlight = Math.max(0, Number(input.pending && input.pending.unboundInFlightByArticle && input.pending.unboundInFlightByArticle[article]) || 0);
+    const unboundEstimated = stockAgg.unboundShelf + Math.max(unboundOurInFlight, stockAgg.unboundOzonInFlight);
+    let totalEstimated = unboundEstimated;
+
     const clusterRows: ClusterCoverageRow[] = [];
     for (const clusterId of clusterIds) {
       const st = stockAgg.byCluster[clusterId];
       const perDay = perDayByClusterId[clusterId] || 0;
       const qtySold = qtyByClusterId[clusterId] || 0;
       const isExcluded = excludedIds.has(clusterId);
-      const estimated = st ? st.estimated : 0;
+      // Item 85, step 1.1. On their way = the LARGER of our own supplies (fresh: statuses come
+      // with every poll) and Ozon's «В пути» + «В заявках» (its stock analytics lags up to half a
+      // day). Both describe the same supplies, so never their sum. The old rule compared our
+      // supplies before the HUB with «В заявках» alone: a supply already past the hub still sat
+      // in «В заявках», and a new request replaced it instead of adding to it — the cluster was
+      // recommended again right after the owner created a supply.
+      const pendingQty = Math.max(0, Number(pendingByCluster[clusterId]) || 0);
+      const ozonInFlightQty = st ? st.ozonInFlight : 0;
+      const inFlightQty = Math.max(pendingQty, ozonInFlightQty);
+      const estimated = (st ? st.shelf : 0) + inFlightQty;
+      totalEstimated += estimated;
       const priorityK = isExcluded ? 1 : (priorityMap[clusterId] || 1);
       const isPriority = priorityK > 1;
       const effectiveSettings = isPriority
@@ -1685,16 +1716,13 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
             targetStockDays: input.settings.targetStockDays * priorityK,
           }
         : input.settings;
-      // Зачёт и колонка «В заявках» описывают одни и те же заявки — берётся наибольшее, не сумма.
-      const pendingQty = Math.max(0, Number(pendingByCluster[clusterId]) || 0);
       const requestedQty = st ? Math.max(0, Number(st.requested) || 0) : 0;
-      const pendingEffective = Math.max(pendingQty, requestedQty);
-      // Покрытие в днях считается по чистому остатку Ozon: товар в заявке ещё не приехал,
-      // продавать его нельзя. Зачёт влияет только на потребность в новой поставке.
+      // Item 85, step 1.8 (owner 2026-09-26): coverage is ONE number and it includes the goods
+      // on their way — a cluster with 24 pieces coming must not read «−12 дней» in red.
       const coverage = calcCoverageDays(estimated, perDay, effectiveSettings.minStockDays, isExcluded);
       const recommendation = isExcluded
         ? null
-        : calcSupplyRecommendation(perDay, estimated + pendingEffective, effectiveSettings, pcsPerBox, Number.MAX_SAFE_INTEGER);
+        : calcSupplyRecommendation(perDay, estimated, effectiveSettings, pcsPerBox, Number.MAX_SAFE_INTEGER);
 
       clusterRows.push({
         clusterId,
@@ -1713,7 +1741,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
         unmetQty: 0,
         pendingQty,
         requestedQty,
-        pendingEffective,
+        ozonInFlightQty,
+        inFlightQty,
         recommendation,
         speedCorrection: (clusterSpeedCorrections[article] && clusterSpeedCorrections[article][clusterNamesById[clusterId] || '']) || null
       });
@@ -1755,11 +1784,15 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     const unmetDeficitQty = clusterRows.reduce((s, r) => s + (r.unmetQty || 0), 0);
     const onOrderQty = Math.max(0, Number(input.factoryOnOrder && input.factoryOnOrder[article]) || 0);
     const forecastPerDay = forecastPerDayByArticle[article] || 0;
+    // Item 85, step 1.2. The pipeline takes «Мой склад» NET of the reserve: a reserved piece is
+    // already counted above as on its way to a cluster (or, once in acceptance, in Ozon's own
+    // columns), so the raw figure would count it twice. The old raw figure was right only while
+    // written-off pieces on the road were counted nowhere — they are now.
     const factory = virtualKitSkus.has(article)
       ? null
       : calcFactorySignal(
-          stockAgg.totalEstimated,
-          myStockAvailable,
+          totalEstimated,
+          freeMyStock,
           forecastPerDay,
           leadTimeDays,
           pcsPerBox,
@@ -1777,8 +1810,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       pcsPerBox,
       leadTimeDays,
       myStockAvailable,
-      totalEstimated: stockAgg.totalEstimated,
-      unboundEstimated: stockAgg.unboundEstimated,
+      totalEstimated,
+      unboundEstimated,
       unboundQtySold,
       unmetDeficitQty,
       pendingTotal,
@@ -1801,10 +1834,12 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     if (row.unmetDeficitQty > 0) unmetByKit[row.article] = row.unmetDeficitQty;
   }
 
+  const kitTotals: Record<string, { totalEstimated: number }> = {};
+  for (const row of articles) kitTotals[row.article] = row;
   const { components, bottlenecks } = buildComponentCoverage(
     input.kits || [],
     speed,
-    stocksByArticle,
+    kitTotals,
     input.skus,
     input.myStockAvailability,
     input.factoryOnOrder || {},

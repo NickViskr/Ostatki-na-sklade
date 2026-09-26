@@ -651,17 +651,29 @@ describe('buildOzonCoverage: резерв заявок разворачивае�
     expect(res.bottlenecks.find(b => b.kitSku === 'KIT-B')!.canAssembleQty).toBe(1);
   });
 
-  it('ТРУБА и сигнал фабрики от резерва НЕ меняются', () => {
-    // Инвариант: зарезервированный товар лежит на складе и будет продан, он просто едет на Ozon.
-    // Вычесть его из трубы — посчитать одну потерю дважды и завысить заказ на фабрике.
+  it('ТРУБА и сигнал фабрики от созданной заявки НЕ меняются: штуки переходят со склада в «едет»', () => {
+    // Item 85, step 1.2. The invariant is the same as before — creating a supply must not move
+    // the factory order — but it now holds for the right reason. A real reserve always comes
+    // with the same pieces on their way (buildPendingSupplies gives both), so they leave the
+    // FREE stock and enter the kit's total at Ozon; the pipeline is unchanged.
     const before = buildOzonCoverage(makeKitsInput());
-    const after = buildOzonCoverage(makeKitsInput({ pending: makePending({ 'KIT-A': 5, 'KIT-B': 3 }) }));
+    const after = buildOzonCoverage(makeKitsInput({
+      pending: {
+        byArticle: { 'KIT-A': 5, 'KIT-B': 3 },
+        byArticleCluster: {},
+        unboundInFlightByArticle: { 'KIT-A': 5, 'KIT-B': 3 }
+      }
+    }));
     for (const c of after.components) {
       const old = before.components.find(x => x.component === c.component)!;
       expect(c.pipelineQty).toBe(old.pipelineQty);
       expect(c.myStockQty).toBe(old.myStockQty);
       expect(c.factory?.orderQty ?? null).toBe(old.factory?.orderQty ?? null);
     }
+    // and the pieces really moved: BOTTLE free 40 → 27, from the kits 70 → 83
+    const bottle = after.components.find(x => x.component === 'BOTTLE')!;
+    expect(bottle.freeMyStockQty).toBe(27);
+    expect(bottle.fromKitsQty).toBe(83);
   });
 
   it('pending не передан: поведение прежнее, резерв нулевой', () => {
@@ -1179,7 +1191,10 @@ describe('buildOzonCoverage: кластер с созданной заявкой
     const ekb = row.clusters.find(c => c.clusterId === '4066');
     expect(ekb).toBeDefined();
     expect(ekb!.pendingQty).toBe(30);
-    expect(ekb!.estimated).toBe(0);
+    // Item 85: the 30 pieces on their way are what the cluster can count on.
+    expect(ekb!.available).toBe(0);
+    expect(ekb!.inFlightQty).toBe(30);
+    expect(ekb!.estimated).toBe(30);
   });
 
   it('заявка на ноль штук кластер не воскрешает', () => {

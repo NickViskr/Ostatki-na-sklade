@@ -17,8 +17,11 @@ import { parseAppDate } from './utils';
 export interface StockParts {
   /** Pieces on the shelf of the own warehouse, the reserve under supply orders included. */
   shelf: number;
-  /** Estimated Ozon stock (available + transit + resellable returns), all clusters. */
+  /** Estimated Ozon stock, all clusters: shelf at Ozon plus the pieces on their way (item 85). */
   ozon: number;
+  /** Item 85. The shelf's reserve under created supplies. Those pieces are already inside `ozon`
+   *  as on their way, so they are taken off the shelf once — never counted twice. */
+  reserved?: number;
 }
 
 /**
@@ -27,7 +30,9 @@ export interface StockParts {
  */
 export function coverageDays(parts: StockParts, perDay: number): number | null {
   if (!(perDay > 0)) return null;
-  const total = (Number(parts.shelf) || 0) + (Number(parts.ozon) || 0);
+  const shelf = Math.max(0, Number(parts.shelf) || 0);
+  const reserved = Math.min(shelf, Math.max(0, Number(parts.reserved) || 0));
+  const total = shelf - reserved + (Number(parts.ozon) || 0);
   return Math.round(total / perDay);
 }
 

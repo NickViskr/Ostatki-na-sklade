@@ -1,6 +1,6 @@
 import { ExternalShipment, SKUItem } from '../types';
 import { resolveOzonArticle } from './ozonCoverage';
-import { isStockDeparted } from './ozonStatus';
+import { isAcceptanceStage } from './ozonStatus';
 
 // ===== Локальный зачёт потребности после создания заявки (пункт 23) =====
 // Задача: количества из уже созданных заявок на поставку вычитаются из потребности сразу,
@@ -128,10 +128,10 @@ export interface PendingSupplyDetail {
   /**
    * Item 70. Two meanings of one list. `reservesMyStock`: the pieces still lie on «Мой склад»
    * and must not be handed to another cluster (row not yet written off). `countsForCluster`:
-   * the pieces are on their way to the cluster and are not yet in Ozon's own stock columns
-   * (status before acceptance at the hub). A written-off, not-yet-accepted supply is the
-   * second without the first; a not-yet-written-off supply Ozon has already accepted is the
-   * first without the second.
+   * the pieces are on their way to the cluster (item 85: every status before acceptance at the
+   * STORAGE warehouse, the hub and the road included). A written-off supply on the road is the
+   * second without the first; a not-yet-written-off supply already in acceptance at the storage
+   * warehouse is the first without the second.
    */
   reservesMyStock: boolean;
   countsForCluster: boolean;
@@ -144,6 +144,8 @@ export interface PendingSuppliesResult {
   byArticle: Record<string, number>;
   /** Reserve of positions without КластерID, шт — только в общие итоги. */
   unboundByArticle: Record<string, number>;
+  /** Item 85. On their way (`countsForCluster`) but without КластерID, шт — article totals only. */
+  unboundInFlightByArticle: Record<string, number>;
   /** Расшифровка всех зачтённых позиций. */
   details: PendingSupplyDetail[];
 }
@@ -209,8 +211,14 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
     // in Moscow and St. Petersburg; the old code dropped it here, and the moment a new
     // request outgrew Ozon's «В заявках» the max() of the two hid it — the clusters looked
     // short and were recommended again a second after the supply was created.
+    // Item 85, step 1.1 (audit 2026-09-26). The same hole stayed open AFTER the hub: item 70
+    // assumed Ozon moves an accepted supply into «В пути», but the live export shows IN_TRANSIT
+    // supplies kept in «В заявках» (129768876-1: St. Petersburg 24 pcs). So a supply now
+    // travels to its cluster until acceptance at the STORAGE warehouse begins; from then on
+    // Ozon's own columns carry it. The coverage takes max(our supplies, Ozon «В пути» +
+    // «В заявках») per cluster, so the same pieces are never counted twice.
     const reservesMyStock = !isShipmentSettled(localStatus);
-    const countsForCluster = !isStockDeparted(status);
+    const countsForCluster = !isAcceptanceStage(status);
     if (!reservesMyStock && !countsForCluster) continue;
 
     const clusterId = String(row.clusterId || '').trim();
@@ -281,18 +289,23 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
   const byArticleCluster: Record<string, Record<string, number>> = {};
   const byArticle: Record<string, number> = {};
   const unboundByArticle: Record<string, number> = {};
+  const unboundInFlightByArticle: Record<string, number> = {};
 
   for (const d of details) {
     if (d.reservesMyStock) {
       byArticle[d.article] = (byArticle[d.article] || 0) + d.qty;
       if (!d.clusterId) unboundByArticle[d.article] = (unboundByArticle[d.article] || 0) + d.qty;
     }
-    if (!d.countsForCluster || !d.clusterId) continue;
+    if (!d.countsForCluster) continue;
+    if (!d.clusterId) {
+      unboundInFlightByArticle[d.article] = (unboundInFlightByArticle[d.article] || 0) + d.qty;
+      continue;
+    }
     if (!byArticleCluster[d.article]) byArticleCluster[d.article] = {};
     byArticleCluster[d.article][d.clusterId] = (byArticleCluster[d.article][d.clusterId] || 0) + d.qty;
   }
 
-  return { byArticleCluster, byArticle, unboundByArticle, details };
+  return { byArticleCluster, byArticle, unboundByArticle, unboundInFlightByArticle, details };
 }
 
 /** Зачёт по конкретной паре «артикул + кластер», шт. */

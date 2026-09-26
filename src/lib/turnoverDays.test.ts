@@ -25,6 +25,16 @@ describe('coverageDays: shelf plus Ozon stock at the Ozon sales speed', () => {
   it('is 0 when nothing lies anywhere but the product sold', () => {
     expect(coverageDays({ shelf: 0, ozon: 0 }, 2)).toBe(0);
   });
+  it('item 85: the reserve is taken off the shelf once — it is already inside the Ozon part as goods on their way', () => {
+    // 100 on the shelf, 30 of them reserved by a created supply; Ozon 50 on its shelves + 30 on their way
+    expect(coverageDays({ shelf: 100, ozon: 80, reserved: 30 }, 1)).toBe(150);
+    // the same stock before the supply was created: nothing on the way, nothing reserved
+    expect(coverageDays({ shelf: 100, ozon: 50, reserved: 0 }, 1)).toBe(150);
+  });
+  it('item 85: a reserve larger than the shelf never takes more than the shelf', () => {
+    expect(coverageDays({ shelf: 10, ozon: 40, reserved: 25 }, 1)).toBe(40);
+    expect(coverageDays({ shelf: 0, ozon: 40, reserved: 25 }, 1)).toBe(40);
+  });
   it('treats a missing part as 0 rather than NaN', () => {
     expect(coverageDays({ shelf: 6, ozon: undefined as unknown as number }, 2)).toBe(3);
   });
@@ -63,10 +73,10 @@ describe('turnoverSortValue', () => {
 describe('Dashboard wiring', () => {
   const src = readFileSync(new URL('../components/Dashboard.tsx', import.meta.url), 'utf8');
   it('the column takes the shelf plus the Ozon estimate at the planner speed', () => {
-    expect(src).toMatch(/coverageDays\(\{ shelf: item\.quantity, ozon: cov\?\.totalEstimated \|\| 0 \}, cov\?\.perDay \|\| 0\)/);
+    expect(src).toMatch(/coverageDays\(\{ shelf: item\.quantity, ozon: cov\?\.totalEstimated \|\| 0, reserved: cov\?\.pendingTotal \|\| 0 \}, cov\?\.perDay \|\| 0\)/);
   });
   it('the summary card divides the same totals by the same speeds', () => {
-    expect(src).toMatch(/calculatedTurnover[\s\S]*totalStock \+= item\.quantity \+ \(cov\?\.totalEstimated \|\| 0\);[\s\S]*totalPerDay \+= cov\?\.perDay \|\| 0;/);
+    expect(src).toMatch(/calculatedTurnover[\s\S]*totalStock \+= item\.quantity - Math\.min\(Math\.max\(0, item\.quantity\), cov\?\.pendingTotal \|\| 0\) \+ \(cov\?\.totalEstimated \|\| 0\);[\s\S]*totalPerDay \+= cov\?\.perDay \|\| 0;/);
   });
   it('an article without Ozon sales shows «нет продаж на Ozon» with its age and sorts as the slowest', () => {
     expect(src).toContain('нет продаж на Ozon');

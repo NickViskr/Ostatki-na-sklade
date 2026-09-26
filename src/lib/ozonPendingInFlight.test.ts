@@ -78,14 +78,14 @@ function moscowRow(shipments: ExternalShipment[], requests: OzonSupplyRequestRow
 describe('Item 70. Списанная, но не принятая Ozon поставка едет в кластер', () => {
   it('до новой заявки: старая поставка зачтена через «В заявках» Ozon, рекомендация 72 (4 коробки)', () => {
     const { cluster } = moscowRow([oldSupply()], [], 36);
-    expect(cluster.pendingEffective).toBe(36);
+    expect(cluster.inFlightQty).toBe(36);
     expect(cluster.recommendation?.qty).toBe(72);
   });
 
   it('через секунду после заявки на 72: зачтено 108, рекомендации нет (было: зачтено 72, рекомендация 36)', () => {
     const { pending, cluster, article } = moscowRow([oldSupply()], [newRequest], 36);
     expect(pending.byArticleCluster[ARTICLE][MOSCOW]).toBe(108);
-    expect(cluster.pendingEffective).toBe(108);
+    expect(cluster.inFlightQty).toBe(108);
     expect(cluster.recommendation).toBeNull();
     // the written-off 36 do not sit on «Мой склад» any more — only the new 72 are reserved
     expect(article.pendingTotal).toBe(72);
@@ -102,21 +102,41 @@ describe('Item 70. Списанная, но не принятая Ozon пост�
     expect(fresh.countsForCluster).toBe(true);
   });
 
-  it('Ozon принял поставку на хабе — она уже в колонках Ozon и из зачёта по кластеру уходит, резерв до списания остаётся', () => {
-    // not yet written off (status new), accepted by Ozon: the 36 sit in Ozon's «В пути» now
-    const accepted = oldSupply({ status: 'new', ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE' });
-    const pending = buildPendingSupplies({ shipments: [accepted], requests: [], skus, now: NOW });
-    expect(pending.byArticle[ARTICLE]).toBe(36);
-    expect(pending.byArticleCluster[ARTICLE]).toBeUndefined();
-    const d = pending.details[0];
-    expect(d.reservesMyStock).toBe(true);
-    expect(d.countsForCluster).toBe(false);
+  it('item 85: принята на хабе и едет — по-прежнему едет в кластер (Ozon держит её в «В заявках»)', () => {
+    // Item 70 assumed Ozon moves an accepted supply into «В пути»; the live export of 26.09
+    // shows IN_TRANSIT supplies still in «В заявках» (129768876-1). The supply travels until
+    // acceptance at the storage warehouse; the max() with Ozon's columns keeps it counted once.
+    for (const st of ['ACCEPTED_AT_SUPPLY_WAREHOUSE', 'IN_TRANSIT']) {
+      const accepted = oldSupply({ status: 'new', ozonStatus: st });
+      const pending = buildPendingSupplies({ shipments: [accepted], requests: [], skus, now: NOW });
+      expect(pending.byArticle[ARTICLE]).toBe(36);
+      expect(pending.byArticleCluster[ARTICLE][MOSCOW]).toBe(36);
+      const d = pending.details[0];
+      expect(d.reservesMyStock).toBe(true);
+      expect(d.countsForCluster).toBe(true);
+    }
   });
 
-  it('списана И принята Ozon — строки в зачёте нет вовсе', () => {
-    const done = oldSupply({ status: 'processed', ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE' });
+  it('item 85: на приёмке складом Ozon и позже — в кластер уже не едет, резерв до списания остаётся', () => {
+    for (const st of ['ACCEPTANCE_AT_STORAGE_WAREHOUSE', 'REPORTS_CONFIRMATION_AWAITING', 'REPORT_REJECTED', 'COMPLETED']) {
+      const pending = buildPendingSupplies({ shipments: [oldSupply({ status: 'new', ozonStatus: st })], requests: [], skus, now: NOW });
+      expect(pending.byArticle[ARTICLE]).toBe(36);
+      expect(pending.byArticleCluster[ARTICLE]).toBeUndefined();
+      expect(pending.details[0].countsForCluster).toBe(false);
+    }
+  });
+
+  it('списана и уже на приёмке складом Ozon — строки в зачёте нет вовсе', () => {
+    const done = oldSupply({ status: 'processed', ozonStatus: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE' });
     const pending = buildPendingSupplies({ shipments: [done], requests: [], skus, now: NOW });
     expect(pending.details).toHaveLength(0);
+  });
+
+  it('item 85: списана и едет после хаба — в кластер едет, склад не резервирует', () => {
+    const onRoad = oldSupply({ status: 'processed', ozonStatus: 'IN_TRANSIT' });
+    const pending = buildPendingSupplies({ shipments: [onRoad], requests: [], skus, now: NOW });
+    expect(pending.byArticle[ARTICLE]).toBeUndefined();
+    expect(pending.byArticleCluster[ARTICLE][MOSCOW]).toBe(36);
   });
 
   it('проигнорированная поставка никуда не едет: ни резерва, ни зачёта по кластеру', () => {
