@@ -27,26 +27,28 @@ describe('useWarehouseStore: deliveryToOzonDays mapped from the raw sheet with d
 });
 
 describe('OzonSettingsModal: the field is rendered next to the target stock field with a hint', () => {
+  // Item 87 step 2 moved the field table (label/hint/help, load and save conversions) out of
+  // the modal into src/lib/ozonSettingsFields.ts — these anchors now scan that file instead.
+  const fieldsSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonSettingsFields.ts'), 'utf8');
+
   it('the form carries deliveryToOzonDays through load, state and save', () => {
-    expect(modalSrc).toContain('deliveryToOzonDays: number;');
+    expect(fieldsSrc).toContain('deliveryToOzonDays: number;');
     expect(modalSrc).toContain('deliveryToOzonDays: numSetting(res.data.deliveryToOzonDays, 7),');
-    expect(modalSrc).toContain('deliveryToOzonDays: Math.max(0, parseFloat(String(form.deliveryToOzonDays)) || 0),');
+    expect(fieldsSrc).toContain('deliveryToOzonDays: Math.max(0, parseFloat(String(form.deliveryToOzonDays)) || 0),');
   });
 
   it('renders the Russian label «Срок доставки до Ozon, дней» right after the target stock field, with a hint', () => {
-    const targetIdx = modalSrc.indexOf('Целевой запас на Ozon, дней');
-    // Item 86 step C's own field comment (near the top of the file) also mentions the label —
-    // the label markup itself is searched for AFTER the target field, not from the start.
-    const deliveryIdx = modalSrc.indexOf('Срок доставки до Ozon, дней', targetIdx);
-    const maxClusterIdx = modalSrc.indexOf('Максимальный срок продаж кластера, дней');
+    const targetIdx = fieldsSrc.indexOf('Целевой запас в кластере, дней');
+    const deliveryIdx = fieldsSrc.indexOf('Срок доставки до Ozon, дней', targetIdx);
+    const maxClusterIdx = fieldsSrc.indexOf('Потолок запаса в кластере после поставки, дней');
     expect(targetIdx).toBeGreaterThan(-1);
     expect(deliveryIdx).toBeGreaterThan(targetIdx);
     expect(deliveryIdx).toBeLessThan(maxClusterIdx);
     // The hint mentions both directions of change, as the owner asked.
-    const hintStart = modalSrc.indexOf('FieldHint', deliveryIdx);
-    const hintBlock = modalSrc.slice(deliveryIdx, hintStart + 900);
-    expect(hintBlock).toContain('крупнее и более ранние поставки');
-    expect(hintBlock).toContain('без запаса на дорогу');
+    const hintStart = fieldsSrc.indexOf('hint:', deliveryIdx);
+    const hintBlock = fieldsSrc.slice(deliveryIdx, hintStart + 200);
+    expect(hintBlock).toContain('крупнее и раньше');
+    expect(hintBlock).toContain('меньше — наоборот');
   });
 });
 

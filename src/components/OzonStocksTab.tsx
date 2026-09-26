@@ -17,6 +17,7 @@ import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
 import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder, splitFactoryOrders } from '../lib/factoryOrderDisplay';
+import { canEditOzonSettings } from '../lib/ozonSettingsFields';
 
 /** Пункт 64. Кластер, куда товар ещё ни разу не ездил: строка есть, чисел нет.
  *  Строится здесь, а не в правиле: форму строки таблицы знает только экран. */
@@ -1014,15 +1015,17 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                 </div>
               )}
             </div>
-            <button
-              type="button"
-              id="btn-ozon-settings"
-              onClick={() => setShowSettings(true)}
-              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
-            >
-              <Settings size={14} />
-              Настройки
-            </button>
+            {canEditOzonSettings(currentUser) && (
+              <button
+                type="button"
+                id="btn-ozon-settings"
+                onClick={() => setShowSettings(true)}
+                className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
+              >
+                <Settings size={14} />
+                Настройки
+              </button>
+            )}
             <button
               type="button"
               id="btn-kan-cost-export"
@@ -2407,7 +2410,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
             )}
           </div>
       </div>
-      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
+      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} openBlocks={['supply', 'factory']} />
       <OzonSupplyModal
         isOpen={supplySummaryOpen && supplyPlan.rows.length > 0}
         onClose={() => setSupplySummaryOpen(false)}

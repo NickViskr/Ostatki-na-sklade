@@ -1,45 +1,52 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { X, HelpCircle, Search, Check } from 'lucide-react';
+import { X, HelpCircle, Search, Check, ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { parseDirectClusters, type DirectClusterRule } from '../lib/ozonDirectSupply';
+import {
+  canEditOzonSettings,
+  OZON_SETTINGS_BLOCKS,
+  OZON_SETTINGS_FIELDS,
+  OZON_SETTINGS_TEXT_HINTS,
+  OZON_SETTINGS_AUTO_POLL_LINE,
+  applyRecommended,
+  buildOzonSettingsPayload,
+  type OzonSettingsForm,
+  type OzonSettingsFieldDef,
+} from '../lib/ozonSettingsFields';
 
 interface OzonSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Item 87 step 2. Which blocks are open by default; the rest start collapsed. */
+  openBlocks?: string[];
 }
 
-interface OzonSettingsData {
-  speedWeeks: number;
-  minStockDays: number;
-  targetStockDays: number;
-  /** Item 86 step C. Срок доставки до Ozon, дней: планируется поверх целевого запаса и порога заказа на фабрике. */
-  deliveryToOzonDays: number;
-  maxClusterDays: number;
-  factoryOrderDays: number;
-  returnsToSalePct: number;
-  salesRetentionWeeks: number;
-  deficitDays: number;
-  trendWeeks: number;
-  bestWeeks: number;
-  minSalesForCorrection: number;
-  maxSpeedGrowth: number;
-  salesGrowthPct: number;
-  demandGrowthPct: number;
-  turnoverPeriodDays: number;
-  turnoverSlowDays: number;
-  turnoverFastDays: number;
-  gmroiGreenPct: number;
-  gmroiRedPct: number;
-  excludedClusters: string;
-  priorityClusters: string;
-  maxBoxesPerCluster: number;
-  dropOffWarehouseId: string;
-  dropOffWarehouseName: string;
-  dropOffWarehouseType: string;
-  /** Пункт 58. Кластеры прямой поставки, JSON-строка — как она лежит в листе настроек. */
-  directClusters: string;
-}
+const DEFAULT_FORM: OzonSettingsForm = {
+  speedWeeks: 4,
+  minStockDays: 7,
+  targetStockDays: 30,
+  deliveryToOzonDays: 7,
+  maxClusterDays: 100,
+  factoryOrderDays: 60,
+  returnsToSalePct: 80,
+  salesRetentionWeeks: 78,
+  trendWeeks: 13,
+  salesGrowthPct: 0,
+  demandGrowthPct: 30,
+  turnoverPeriodDays: 90,
+  turnoverSlowDays: 45,
+  turnoverFastDays: 20,
+  gmroiGreenPct: 100,
+  gmroiRedPct: 30,
+  excludedClusters: '',
+  priorityClusters: '',
+  maxBoxesPerCluster: 30,
+  dropOffWarehouseId: '',
+  dropOffWarehouseName: '',
+  dropOffWarehouseType: '',
+  directClusters: '',
+};
 
 // Чтение числовой настройки Ozon с сервера. Не использовать `Number(value) || fallback` —
 // ноль является законным значением настройки, а `||` считает его ложью и подменяет умолчанием.
@@ -62,13 +69,33 @@ const FieldHint: React.FC<{ text: string; position?: 'top' | 'bottom' }> = ({ te
   </span>
 );
 
-export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose }) => {
+const FIELDS_BY_BLOCK: Record<string, OzonSettingsFieldDef[]> = OZON_SETTINGS_FIELDS.reduce(
+  (map, field) => {
+    (map[field.block] ||= []).push(field);
+    return map;
+  },
+  {} as Record<string, OzonSettingsFieldDef[]>
+);
+
+export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, onClose, openBlocks }) => {
   const fetchGas = useWarehouseStore((state) => state.fetchGas);
   const fetchOzonInitialData = useWarehouseStore((state) => state.fetchOzonInitialData);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
   const sessionToken = useWarehouseStore((state) => state.sessionToken);
   const devMode = useWarehouseStore((state) => state.devMode);
   const currentUser = useWarehouseStore((state) => state.currentUser);
+
+  const canEdit = canEditOzonSettings(currentUser);
+
+  const [openBlockIds, setOpenBlockIds] = useState<Set<string>>(new Set(openBlocks ?? []));
+  const toggleBlock = (id: string) => {
+    setOpenBlockIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const [dropOffQuery, setDropOffQuery] = useState('');
   const [dropOffResults, setDropOffResults] = useState<{ warehouseId: string; name: string; address: string; warehouseType: string }[]>([]);
@@ -84,35 +111,22 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   const [directory, setDirectory] = useState<{ clusterId: string; clusterName: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState<OzonSettingsData>({
-    speedWeeks: 4,
-    minStockDays: 7,
-    targetStockDays: 30,
-    deliveryToOzonDays: 7,
-    maxClusterDays: 100,
-    factoryOrderDays: 60,
-    returnsToSalePct: 80,
-    salesRetentionWeeks: 78,
-    deficitDays: 7,
-    trendWeeks: 13,
-    bestWeeks: 4,
-    minSalesForCorrection: 50,
-    maxSpeedGrowth: 5,
-    salesGrowthPct: 0,
-    demandGrowthPct: 30,
-    turnoverPeriodDays: 90,
-    turnoverSlowDays: 45,
-    turnoverFastDays: 20,
-    gmroiGreenPct: 100,
-    gmroiRedPct: 30,
-    excludedClusters: '',
-    priorityClusters: '',
-    maxBoxesPerCluster: 30,
-    dropOffWarehouseId: '',
-    dropOffWarehouseName: '',
-    dropOffWarehouseType: '',
-    directClusters: '',
-  });
+  const [form, setForm] = useState<OzonSettingsForm>(DEFAULT_FORM);
+  // Item 87 step 2. The values loaded from the server, kept aside to highlight anything the
+  // user (or the «Вернуть к рекомендованным значениям» button) has changed since.
+  const [loadedForm, setLoadedForm] = useState<OzonSettingsForm | null>(null);
+
+  const isFieldChanged = (key: keyof OzonSettingsForm) => loadedForm !== null && form[key] !== loadedForm[key];
+
+  const handleNumericChange = (key: OzonSettingsFieldDef['key'], raw: string, integer?: boolean) => {
+    const value = raw === '' ? 0 : integer ? parseInt(raw, 10) : parseFloat(raw);
+    setForm((f) => ({ ...f, [key]: Number.isNaN(value) ? 0 : value }));
+  };
+
+  const handleApplyRecommended = () => {
+    setForm((f) => applyRecommended(f));
+    toast.success('Рекомендованные значения подставлены — проверьте и нажмите «Сохранить»');
+  };
 
   const handleDropOffSearch = async () => {
     const query = dropOffQuery.trim();
@@ -300,7 +314,8 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
   };
 
   useEffect(() => {
-    if (isOpen) {
+    // Item 87 step 2. A non-admin never sees this window — and must not trigger a fetch either.
+    if (isOpen && canEdit) {
       setLoading(true);
 
       fetchGas('getOzonClusters')
@@ -322,7 +337,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
       fetchGas('getOzonSettings')
         .then((res) => {
           if (res?.status === 'success' && res.data) {
-            setForm({
+            const next: OzonSettingsForm = {
               // Счётчик недель, ноль бессмысленен — нижняя граница 1.
               speedWeeks: Math.max(1, numSetting(res.data.speedWeeks, 4)),
               minStockDays: numSetting(res.data.minStockDays, 7),
@@ -333,13 +348,8 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               returnsToSalePct: numSetting(res.data.returnsToSalePct, 80),
               // Счётчик недель, ноль бессмысленен — нижняя граница 1.
               salesRetentionWeeks: Math.max(1, numSetting(res.data.salesRetentionWeeks, 78)),
-              deficitDays: numSetting(res.data.deficitDays, 7),
               // Счётчик недель, ноль бессмысленен — нижняя граница 1.
               trendWeeks: Math.max(1, numSetting(res.data.trendWeeks, 13)),
-              // Счётчик недель, ноль бессмысленен — нижняя граница 1.
-              bestWeeks: Math.max(1, numSetting(res.data.bestWeeks, 4)),
-              minSalesForCorrection: numSetting(res.data.minSalesForCorrection, 50),
-              maxSpeedGrowth: numSetting(res.data.maxSpeedGrowth, 5),
               salesGrowthPct: numSetting(res.data.salesGrowthPct, 0),
               demandGrowthPct: numSetting(res.data.demandGrowthPct, 30),
               turnoverPeriodDays: Math.max(1, numSetting(res.data.turnoverPeriodDays, 90)),
@@ -355,7 +365,9 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               dropOffWarehouseName: String(res.data.dropOffWarehouseName || ''),
               dropOffWarehouseType: String(res.data.dropOffWarehouseType || ''),
               directClusters: String(res.data.directClusters || ''),
-            });
+            };
+            setForm(next);
+            setLoadedForm(next);
           } else if (res?.status === 'error') {
             toast.error(res.message || 'Ошибка загрузки настроек Ozon');
           }
@@ -367,9 +379,9 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
           setLoading(false);
         });
     }
-  }, [isOpen, fetchGas]);
+  }, [isOpen, canEdit, fetchGas]);
 
-  if (!isOpen) return null;
+  if (!isOpen || !canEdit) return null;
 
   const handleSave = async () => {
     const checkMinDays = Math.max(0, parseFloat(String(form.minStockDays)) || 0);
@@ -380,35 +392,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     }
     setSaving(true);
     try {
-      const payload: OzonSettingsData = {
-        speedWeeks: Math.max(1, parseInt(String(form.speedWeeks), 10) || 1),
-        minStockDays: Math.max(0, parseFloat(String(form.minStockDays)) || 0),
-        targetStockDays: Math.max(0, parseFloat(String(form.targetStockDays)) || 0),
-        deliveryToOzonDays: Math.max(0, parseFloat(String(form.deliveryToOzonDays)) || 0),
-        maxClusterDays: Math.max(0, parseFloat(String(form.maxClusterDays)) || 0),
-        factoryOrderDays: Math.max(0, parseFloat(String(form.factoryOrderDays)) || 0),
-        returnsToSalePct: Math.min(100, Math.max(0, parseFloat(String(form.returnsToSalePct)) || 0)),
-        salesRetentionWeeks: Math.max(1, parseInt(String(form.salesRetentionWeeks), 10) || 1),
-        deficitDays: Math.max(0, parseFloat(String(form.deficitDays)) || 0),
-        trendWeeks: Math.max(1, parseInt(String(form.trendWeeks), 10) || 1),
-        bestWeeks: Math.max(1, parseInt(String(form.bestWeeks), 10) || 1),
-        minSalesForCorrection: Math.max(0, parseFloat(String(form.minSalesForCorrection)) || 0),
-        maxSpeedGrowth: Math.max(0, parseFloat(String(form.maxSpeedGrowth)) || 0),
-        salesGrowthPct: Math.max(0, parseFloat(String(form.salesGrowthPct)) || 0),
-        demandGrowthPct: Math.max(0, parseFloat(String(form.demandGrowthPct)) || 0),
-        turnoverPeriodDays: Math.max(1, parseInt(String(form.turnoverPeriodDays), 10) || 1),
-        turnoverSlowDays: Math.max(0, parseFloat(String(form.turnoverSlowDays)) || 0),
-        turnoverFastDays: Math.max(0, parseFloat(String(form.turnoverFastDays)) || 0),
-        gmroiGreenPct: parseFloat(String(form.gmroiGreenPct)) || 0,
-        gmroiRedPct: parseFloat(String(form.gmroiRedPct)) || 0,
-        excludedClusters: form.excludedClusters,
-        priorityClusters: form.priorityClusters,
-        maxBoxesPerCluster: Math.max(1, parseInt(String(form.maxBoxesPerCluster), 10) || 1),
-        dropOffWarehouseId: form.dropOffWarehouseId,
-        dropOffWarehouseName: form.dropOffWarehouseName,
-        dropOffWarehouseType: form.dropOffWarehouseType,
-        directClusters: form.directClusters,
-      };
+      const payload = buildOzonSettingsPayload(form);
 
       const res = await fetchGas('saveOzonSettings', { data: payload });
       if (res?.status === 'success') {
@@ -429,9 +413,350 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     }
   };
 
+  const renderNumericField = (field: OzonSettingsFieldDef) => (
+    <div key={field.key}>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+        {field.label}
+        <FieldHint position="bottom" text={field.help} />
+        {isFieldChanged(field.key) && (
+          <span className="ml-2 text-[10px] font-bold text-amber-600 align-middle">изменено</span>
+        )}
+      </label>
+      <input
+        type="number"
+        min={field.min}
+        max={field.max}
+        step={field.step}
+        value={form[field.key]}
+        onChange={(e) => handleNumericChange(field.key, e.target.value, field.integer)}
+        className={`w-full px-4 py-2.5 rounded-xl border outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50 focus:ring-2 focus:ring-indigo-500 ${
+          isFieldChanged(field.key) ? 'border-amber-300 ring-2 ring-amber-200' : 'border-slate-200'
+        }`}
+      />
+      <p className="text-xs text-slate-400 mt-1">{field.hint}</p>
+    </div>
+  );
+
+  const clustersEmptyHint = (
+    <p className="text-xs text-slate-400 italic">
+      Кластеры появятся после первой загрузки остатков Ozon
+    </p>
+  );
+
+  const priorityClustersBlock = (
+    <div>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+        Приоритетные кластеры
+        <FieldHint
+          position="top"
+          text="Отметь кластеры, где наличие товара обязательно (обычно топ по продажам). Для них целевой и неснижаемый запас умножаются на коэффициент: при коэффициенте 1,5 и целевом запасе 30 дней приоритетный кластер получит 45 дней. Рекомендация к поставке загорается раньше и объём выше. Кластер без поставок приоритетным быть не может."
+        />
+      </label>
+      {clusters.length === 0 ? (
+        clustersEmptyHint
+      ) : (
+        <div className="space-y-2 mt-2">
+          {clusters.map((c) => {
+            const isPriority = priorityMap[c.clusterId] !== undefined;
+            const isExcluded = excludedSet.has(c.clusterId);
+            return (
+              <div key={c.clusterId} className="flex items-center justify-between gap-2">
+                <label className={`flex items-center gap-2.5 text-sm cursor-pointer select-none ${isExcluded ? 'text-slate-300 cursor-not-allowed' : 'text-slate-700 hover:text-slate-900'}`}>
+                  <input
+                    type="checkbox"
+                    checked={isPriority}
+                    disabled={isExcluded}
+                    onChange={() => handleTogglePriority(c.clusterId)}
+                    className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 accent-indigo-600 cursor-pointer disabled:cursor-not-allowed"
+                  />
+                  <span>{c.clusterName}</span>
+                </label>
+                {isPriority && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[11px] text-slate-400">коэф.</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="1"
+                      value={priorityMap[c.clusterId]}
+                      onChange={(e) => handleChangePriorityK(c.clusterId, e.target.value)}
+                      className="w-16 px-2 py-1 text-xs border border-slate-200 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300"
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="text-xs text-slate-400 mt-1">{OZON_SETTINGS_TEXT_HINTS.priorityClusters}</p>
+    </div>
+  );
+
+  const excludedClustersBlock = (
+    <div>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+        Кластеры без поставок
+        <FieldHint
+          position="top"
+          text="Отметь кластеры, в которые ты НЕ возишь товар (дорогая доставка). Для них не будут считаться рекомендации поставок и неснижаемый запас. Остатки и продажи этих кластеров продолжают учитываться в общих итогах и в сигнале «пора заказать на фабрике»."
+        />
+      </label>
+      {clusters.length === 0 ? (
+        clustersEmptyHint
+      ) : (
+        <div className="space-y-2 mt-2">
+          {clusters.map((c) => {
+            const isChecked = excludedSet.has(c.clusterId);
+            return (
+              <label
+                key={c.clusterId}
+                className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer select-none hover:text-slate-900"
+              >
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={() => handleToggleCluster(c.clusterId)}
+                  className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 accent-indigo-600 cursor-pointer"
+                />
+                <span>{c.clusterName}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+      <p className="text-xs text-slate-400 mt-1">{OZON_SETTINGS_TEXT_HINTS.excludedClusters}</p>
+    </div>
+  );
+
+  const dropOffBlock = (
+    <div>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+        Точка отгрузки Ozon
+        <FieldHint text="Склад Ozon, куда вы физически привозите коробки. Дальше Ozon развозит товар по кластерам сам. Найдите точку по части названия — например «ПЫШМА» — и выберите из списка. Ozon может сменить точку, тогда просто найдите новую." />
+      </label>
+
+      {form.dropOffWarehouseId ? (
+        <div className="mb-2 p-3 rounded-xl bg-emerald-50 border border-emerald-200">
+          <div className="text-sm font-bold text-emerald-900">{form.dropOffWarehouseName || 'Без названия'}</div>
+          <div className="text-xs text-emerald-700 mt-0.5">
+            ID {form.dropOffWarehouseId} · {form.dropOffWarehouseType || 'тип не указан'}
+          </div>
+        </div>
+      ) : (
+        <div className="mb-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+          Точка отгрузки не выбрана — оформить поставку не получится
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={dropOffQuery}
+          placeholder="Название точки, минимум 4 символа"
+          onChange={(e) => setDropOffQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleDropOffSearch(); } }}
+          className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+        />
+        <button
+          type="button"
+          onClick={handleDropOffSearch}
+          disabled={dropOffSearching}
+          className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 text-sm font-bold"
+        >
+          <Search size={16} />
+          {dropOffSearching ? 'Ищу…' : 'Найти'}
+        </button>
+      </div>
+
+      {dropOffResults.length > 0 && (
+        <div className="mt-2 space-y-1.5 max-h-52 overflow-y-auto">
+          {dropOffResults.map((w) => {
+            const isActive = w.warehouseId === form.dropOffWarehouseId;
+            return (
+              <button
+                key={w.warehouseId}
+                type="button"
+                onClick={() =>
+                  setForm({
+                    ...form,
+                    dropOffWarehouseId: w.warehouseId,
+                    dropOffWarehouseName: w.name,
+                    dropOffWarehouseType: w.warehouseType,
+                  })
+                }
+                className={`w-full text-left p-3 rounded-xl border transition-colors ${
+                  isActive
+                    ? 'bg-indigo-50 border-indigo-300'
+                    : 'bg-white border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-start gap-2">
+                  {isActive && <Check size={14} className="text-indigo-600 mt-0.5 shrink-0" />}
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-slate-800 break-words">{w.name}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{w.warehouseType}</div>
+                    <div className="text-xs text-slate-400 mt-0.5 break-words">{w.address}</div>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <p className="text-xs text-slate-400 mt-1">{OZON_SETTINGS_TEXT_HINTS.dropOff}</p>
+    </div>
+  );
+
+  // Пункт 58. Прямая поставка: кластеры, на которые груз везётся своими силами
+  // и сдаётся не на точку отгрузки, а прямо на склад размещения Ozon.
+  const directSupplyBlock = (
+    <div>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+        Прямая поставка — везу сам
+        <FieldHint text="Кластеры, куда вы доставляете груз самостоятельно, минуя точку отгрузки. Такая заявка едет ОДНА: другие кластеры к ней не добавляются, потому что Ozon не принимает смешанные заявки. Для каждого кластера выберите склад, на который вы физически привозите коробки." />
+      </label>
+
+      {directRules.length === 0 ? (
+        <p className="text-xs text-slate-400 italic mb-2">
+          Прямых кластеров нет — все заявки идут через точку отгрузки
+        </p>
+      ) : (
+        <div className="space-y-2 mb-2">
+          {directRules.map((rule) => (
+            <div key={rule.clusterId} className="p-3 rounded-xl border border-slate-200 bg-slate-50/50">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-bold text-slate-800 truncate">
+                  {rule.clusterName || `Кластер ${rule.clusterId}`}
+                  <span className="ml-1.5 text-xs font-semibold text-slate-400">ID {rule.clusterId}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveDirectCluster(rule.clusterId)}
+                  className="shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-red-600 hover:bg-red-50 transition-colors"
+                >
+                  Убрать
+                </button>
+              </div>
+
+              {rule.warehouseId ? (
+                <div className="mt-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-200">
+                  <div className="text-sm font-bold text-emerald-900 break-words">{rule.warehouseName || 'Без названия'}</div>
+                  <div className="text-xs text-emerald-700 mt-0.5">ID {rule.warehouseId}</div>
+                </div>
+              ) : (
+                <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                  Склад не выбран — заявку на этот кластер оформить не получится
+                </div>
+              )}
+
+              <div className="flex gap-2 mt-2">
+                <input
+                  type="text"
+                  value={directEditing === rule.clusterId ? directQuery : ''}
+                  placeholder="Название склада, минимум 4 символа"
+                  onFocus={() => { if (directEditing !== rule.clusterId) { setDirectEditing(rule.clusterId); setDirectQuery(''); setDirectResults([]); } }}
+                  onChange={(e) => { setDirectEditing(rule.clusterId); setDirectQuery(e.target.value); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleDirectSearch(rule.clusterId); } }}
+                  className="flex-1 px-3 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleDirectSearch(rule.clusterId)}
+                  disabled={directSearching}
+                  className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 text-sm font-bold"
+                >
+                  <Search size={15} />
+                  {directSearching && directEditing === rule.clusterId ? 'Ищу…' : 'Найти'}
+                </button>
+              </div>
+
+              {directEditing === rule.clusterId && directResults.length > 0 && (
+                <div className="mt-2 space-y-1.5 max-h-52 overflow-y-auto">
+                  {directResults.map((w) => {
+                    const isActive = w.warehouseId === rule.warehouseId;
+                    return (
+                      <button
+                        key={w.warehouseId}
+                        type="button"
+                        onClick={() => handleDirectWarehousePick(rule.clusterId, w.warehouseId, w.name)}
+                        className={`w-full text-left p-2.5 rounded-lg border transition-colors ${
+                          isActive ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          {isActive && <Check size={14} className="text-indigo-600 mt-0.5 shrink-0" />}
+                          <div className="min-w-0">
+                            <div className="text-sm font-bold text-slate-800 break-words">{w.name}</div>
+                            <div className="text-xs text-slate-500 mt-0.5">{w.warehouseType}</div>
+                            <div className="text-xs text-slate-400 mt-0.5 break-words">{w.address}</div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {clusters.length === 0 ? (
+        clustersEmptyHint
+      ) : (
+        <select
+          value=""
+          onChange={(e) => handleAddDirectCluster(e.target.value)}
+          className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+        >
+          <option value="">Добавить кластер прямой поставки…</option>
+          {clusters
+            .filter((c) => !directRules.some((r) => r.clusterId === c.clusterId))
+            .map((c) => (
+              <option key={c.clusterId} value={c.clusterId}>
+                {c.clusterName}
+              </option>
+            ))}
+        </select>
+      )}
+      <p className="text-xs text-slate-400 mt-1">{OZON_SETTINGS_TEXT_HINTS.direct}</p>
+    </div>
+  );
+
+  const renderBlockBody = (blockId: string) => {
+    const numericFields = (FIELDS_BY_BLOCK[blockId] || []).map(renderNumericField);
+    if (blockId === 'speed') {
+      return (
+        <>
+          {numericFields}
+          <p className="text-xs text-slate-400 italic">{OZON_SETTINGS_AUTO_POLL_LINE}</p>
+        </>
+      );
+    }
+    if (blockId === 'clusters') {
+      return (
+        <>
+          {priorityClustersBlock}
+          <div className="border-t border-slate-100" />
+          {excludedClustersBlock}
+        </>
+      );
+    }
+    if (blockId === 'dropoff') {
+      return (
+        <>
+          {dropOffBlock}
+          {directSupplyBlock}
+        </>
+      );
+    }
+    return numericFields;
+  };
+
   return (
     <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
-      <div className="bg-white rounded-3xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh] modal-enter">
+      <div className="bg-white rounded-3xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] modal-enter">
         <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
           <h3 className="text-xl font-bold text-slate-900">Настройки Ozon</h3>
           <button
@@ -443,666 +768,63 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
           </button>
         </div>
 
-        <div className="p-6 overflow-y-auto flex-1 space-y-4">
+        <div className="p-6 overflow-y-auto flex-1 space-y-3">
           {loading ? (
             <div className="py-12 text-center text-slate-500 font-medium">
               Загрузка…
             </div>
           ) : (
-            <>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Полных недель для скорости продаж
-                  <FieldHint position="bottom" text="Сколько последних ПОЛНЫХ недель продаж берётся для расчёта скорости. Текущая незавершённая неделя добавляется к ним своей фактической длиной: например, 4 недели и среда — скорость = продажи за 4 полные недели и с понедельника ÷ (28 + 2 дня). Больше недель — стабильнее оценка, но медленнее реакция на изменение спроса." />
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={form.speedWeeks}
-                  onChange={(e) =>
-                    setForm({ ...form, speedWeeks: e.target.value === '' ? 0 : parseInt(e.target.value, 10) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Неснижаемый остаток, дней
-                  <FieldHint position="bottom" text="Страховой запас в днях продаж, который всегда должен оставаться на складах Ozon. Вычитается при расчёте покрытия: покрытие = (расчётный остаток − скорость × эти дни) ÷ скорость. Чем больше значение, тем раньше появится рекомендация сделать поставку." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.minStockDays}
-                  onChange={(e) =>
-                    setForm({ ...form, minStockDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Целевой запас на Ozon, дней
-                  <FieldHint position="bottom" text="На сколько дней продаж пополняется запас при поставке. Рекомендация поставки = скорость × целевой запас − расчётный остаток кластера. Неснижаемый остаток входит ВНУТРЬ этого срока и отдельно не прибавляется, поэтому значение обязано быть больше неснижаемого. Чем больше значение, тем крупнее и реже поставки." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.targetStockDays}
-                  onChange={(e) =>
-                    setForm({ ...form, targetStockDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Срок доставки до Ozon, дней
-                  <FieldHint position="bottom" text="Сколько дней поставка едет от твоего склада до складов Ozon — всё это время кластер продолжает продавать. Планируется поверх целевого запаса (рекомендация = скорость × (целевой запас + этот срок) − расчётный остаток) и поверх порога заказа на фабрике (порог = срок поставки с фабрики + этот срок + неснижаемый запас). Больше значение — крупнее и более ранние поставки в кластеры, раньше срабатывает сигнал заказа на фабрике. Меньше или 0 — поставки и заказ на фабрике считаются без запаса на дорогу, как раньше." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.deliveryToOzonDays}
-                  onChange={(e) =>
-                    setForm({ ...form, deliveryToOzonDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Максимальный срок продаж кластера, дней
-                  <FieldHint position="bottom" text="Защита от заваливания медленных кластеров. Поставка идёт целыми коробками, поэтому кластеру со скоростью 0,07 шт в день одна коробка на 42 шт даёт запас почти на два года. Если после поставки расчётный запас кластера превысит это число дней, кластер из рекомендации исключается целиком и непокрытой потребности не создаёт — на сигнал заказа на фабрике он не влияет. Значение 0 полностью выключает эту защиту." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.maxClusterDays}
-                  onChange={(e) =>
-                    setForm({ ...form, maxClusterDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Порог дефицита, дней
-                  <FieldHint position="bottom" text="Признак того, что товар распродан, а не перестал продаваться. Если остатка на Ozon (Доступно + В пути) хватает меньше чем на это число дней, скорость продаж считается заниженной и берётся по лучшим неделям окна тренда. То же правило действует отдельно для каждого кластера: пустой кластер при товаре, который в целом ещё есть, получает скорость по своим лучшим неделям. Значение 0 полностью выключает коррекцию скорости." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.deficitDays}
-                  onChange={(e) =>
-                    setForm({ ...form, deficitDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Окно тренда, недель
-                  <FieldHint position="bottom" text="Сколько последних полных недель просматривается в поисках лучших недель продаж. Окно ограничено историей, которую приложение загружает с сервера: если пришло меньше недель, берётся столько, сколько есть. Учитываются только недельные строки продаж, 28-дневные блоки архива в расчёт не идут." />
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={form.trendWeeks}
-                  onChange={(e) =>
-                    setForm({ ...form, trendWeeks: e.target.value === '' ? 1 : parseInt(e.target.value, 10) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Лучших недель для коррекции
-                  <FieldHint position="bottom" text="Сколько самых удачных недель окна тренда усредняется, чтобы получить скорость товара при полном наличии. Чем больше недель, тем осторожнее оценка." />
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={form.bestWeeks}
-                  onChange={(e) =>
-                    setForm({ ...form, bestWeeks: e.target.value === '' ? 1 : parseInt(e.target.value, 10) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Минимум продаж за окно тренда, шт
-                  <FieldHint position="bottom" text="Защита от новинок и случайных всплесков: товар с продажами меньше этого числа за всё окно тренда коррекцию не получает. Второе условие защиты зашито в код: продажи должны быть хотя бы в шести неделях окна." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.minSalesForCorrection}
-                  onChange={(e) =>
-                    setForm({ ...form, minSalesForCorrection: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Максимальный рост скорости при дефиците, раз
-                  <FieldHint position="bottom" text="Потолок коррекции: скорость не может вырасти больше чем во столько раз. Страховка от единственного всплеска в далёкой неделе, который иначе раздул бы заказ. Значение меньше 1 снимает потолок совсем. К товарам с нулевой скоростью потолок неприменим." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.maxSpeedGrowth}
-                  onChange={(e) =>
-                    setForm({ ...form, maxSpeedGrowth: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Прирост объёма продаж, %
-                  <FieldHint position="bottom" text="Ручная надбавка к прогнозной скорости в контуре заказа на фабрике: прогноз = скорость × тренд × (1 + этот %). На рекомендации поставок в кластеры Ozon не влияет. 0 — надбавки нет." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.salesGrowthPct}
-                  onChange={(e) =>
-                    setForm({ ...form, salesGrowthPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Оборачиваемость: период, дней
-                  <FieldHint position="bottom" text="Вкладка «Оборачиваемость»: за сколько последних дней считаются себестоимость продаж, валовая прибыль и средний капитал (склад + Ozon). Данные KAN хранятся 400 дней." />
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={form.turnoverPeriodDays}
-                  onChange={(e) =>
-                    setForm({ ...form, turnoverPeriodDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Оборачиваемость: медленный товар, дней на оборот
-                  <FieldHint position="bottom" text="Товар считается медленным (красный), если один оборот капитала занимает дольше этого числа дней или продаж за период нет вовсе." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={form.turnoverSlowDays}
-                  onChange={(e) =>
-                    setForm({ ...form, turnoverSlowDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Оборачиваемость: лидер, дней на оборот
-                  <FieldHint position="bottom" text="Товар считается лидером (зелёный), если один оборот капитала занимает меньше этого числа дней." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={form.turnoverFastDays}
-                  onChange={(e) =>
-                    setForm({ ...form, turnoverFastDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  GMROI: зелёный от, %
-                  <FieldHint position="bottom" text="Вкладка «Оборачиваемость»: GMROI (валовая прибыль ÷ средний капитал) от этого значения и выше подсвечивается зелёным." />
-                </label>
-                <input
-                  type="number"
-                  step="1"
-                  value={form.gmroiGreenPct}
-                  onChange={(e) =>
-                    setForm({ ...form, gmroiGreenPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  GMROI: красный ниже, %
-                  <FieldHint position="bottom" text="GMROI ниже этого значения подсвечивается красным; между красным и зелёным порогом — жёлтый. Отрицательный GMROI — товар продаётся в убыток." />
-                </label>
-                <input
-                  type="number"
-                  step="1"
-                  value={form.gmroiRedPct}
-                  onChange={(e) =>
-                    setForm({ ...form, gmroiRedPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Рост спроса, %
-                  <FieldHint position="bottom" text="Сигнал оперативного роста: продажи за последние 7 дней (текущая неделя по прошедшим дням плюс хвост прошлой недели) сравниваются со скоростью окна. Если рост больше этого процента и за 7 дней продано не меньше 10 шт, рекомендации по товару считаются по скорости последних 7 дней, а на «Складе» появляется предупреждение «Спрос вырос». 0 — сигнал выключен." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.demandGrowthPct}
-                  onChange={(e) =>
-                    setForm({ ...form, demandGrowthPct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Объём заказа на фабрике, дней
-                  <FieldHint text="Размер одного заказа на фабрике в днях продаж: рекомендуемый объём = скорость продаж × это число дней. Сигнал «пора заказывать» появляется, когда общего запаса (Ozon + Мой склад) не хватает на срок поставки товара плюс неснижаемые дни." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={form.factoryOrderDays}
-                  onChange={(e) =>
-                    setForm({ ...form, factoryOrderDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  % возвратов, возвращающихся в продажу
-                  <FieldHint text="Какая доля возвратов реально возвращается в продажу. Возвраты входят в расчётный остаток с этим коэффициентом: расчётный остаток = Доступно + В пути + Возвраты × этот %." />
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="any"
-                  value={form.returnsToSalePct}
-                  onChange={(e) =>
-                    setForm({ ...form, returnsToSalePct: e.target.value === '' ? 0 : parseFloat(e.target.value) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Срок хранения продаж, недель
-                  <FieldHint text="Сколько недель истории продаж хранится в листе «Продажи Ozon». Строки старше удаляются автоматически при синхронизации. 78 недель = 18 месяцев — запас для будущего анализа сезонности." />
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={form.salesRetentionWeeks}
-                  onChange={(e) =>
-                    setForm({ ...form, salesRetentionWeeks: e.target.value === '' ? 0 : parseInt(e.target.value, 10) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Максимум коробок на кластер
-                  <FieldHint text="Тарифный лимит Ozon на бесплатную отгрузку в один кластер. Если коробок больше, превышение подсвечивается в мастере поставки и остаток лучше оформить отдельной заявкой. Технический предел Ozon на один вызов — тоже 30 коробок." />
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={form.maxBoxesPerCluster}
-                  onChange={(e) =>
-                    setForm({ ...form, maxBoxesPerCluster: e.target.value === '' ? 0 : parseInt(e.target.value, 10) })
-                  }
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Точка отгрузки Ozon
-                  <FieldHint text="Склад Ozon, куда вы физически привозите коробки. Дальше Ozon развозит товар по кластерам сам. Найдите точку по части названия — например «ПЫШМА» — и выберите из списка. Ozon может сменить точку, тогда просто найдите новую." />
-                </label>
-
-                {form.dropOffWarehouseId ? (
-                  <div className="mb-2 p-3 rounded-xl bg-emerald-50 border border-emerald-200">
-                    <div className="text-sm font-bold text-emerald-900">{form.dropOffWarehouseName || 'Без названия'}</div>
-                    <div className="text-xs text-emerald-700 mt-0.5">
-                      ID {form.dropOffWarehouseId} · {form.dropOffWarehouseType || 'тип не указан'}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mb-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
-                    Точка отгрузки не выбрана — оформить поставку не получится
-                  </div>
-                )}
-
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={dropOffQuery}
-                    placeholder="Название точки, минимум 4 символа"
-                    onChange={(e) => setDropOffQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleDropOffSearch(); } }}
-                    className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                  />
+            OZON_SETTINGS_BLOCKS.map((block) => {
+              const isBlockOpen = openBlockIds.has(block.id);
+              return (
+                <div key={block.id} className="border border-slate-200 rounded-2xl overflow-hidden">
                   <button
                     type="button"
-                    onClick={handleDropOffSearch}
-                    disabled={dropOffSearching}
-                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 text-sm font-bold"
+                    onClick={() => toggleBlock(block.id)}
+                    className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors"
                   >
-                    <Search size={16} />
-                    {dropOffSearching ? 'Ищу…' : 'Найти'}
+                    <span className="text-sm font-bold text-slate-800">{block.title}</span>
+                    {isBlockOpen ? <ChevronUp size={16} className="text-slate-500" /> : <ChevronDown size={16} className="text-slate-500" />}
                   </button>
+                  {isBlockOpen && (
+                    <div className="p-4 space-y-4 bg-white">
+                      {renderBlockBody(block.id)}
+                    </div>
+                  )}
                 </div>
-
-                {dropOffResults.length > 0 && (
-                  <div className="mt-2 space-y-1.5 max-h-52 overflow-y-auto">
-                    {dropOffResults.map((w) => {
-                      const isActive = w.warehouseId === form.dropOffWarehouseId;
-                      return (
-                        <button
-                          key={w.warehouseId}
-                          type="button"
-                          onClick={() =>
-                            setForm({
-                              ...form,
-                              dropOffWarehouseId: w.warehouseId,
-                              dropOffWarehouseName: w.name,
-                              dropOffWarehouseType: w.warehouseType,
-                            })
-                          }
-                          className={`w-full text-left p-3 rounded-xl border transition-colors ${
-                            isActive
-                              ? 'bg-indigo-50 border-indigo-300'
-                              : 'bg-white border-slate-200 hover:bg-slate-50'
-                          }`}
-                        >
-                          <div className="flex items-start gap-2">
-                            {isActive && <Check size={14} className="text-indigo-600 mt-0.5 shrink-0" />}
-                            <div className="min-w-0">
-                              <div className="text-sm font-bold text-slate-800 break-words">{w.name}</div>
-                              <div className="text-xs text-slate-500 mt-0.5">{w.warehouseType}</div>
-                              <div className="text-xs text-slate-400 mt-0.5 break-words">{w.address}</div>
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Пункт 58. Прямая поставка: кластеры, на которые груз везётся своими силами
-                  и сдаётся не на точку отгрузки, а прямо на склад размещения Ozon. */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Прямая поставка — везу сам
-                  <FieldHint text="Кластеры, куда вы доставляете груз самостоятельно, минуя точку отгрузки. Такая заявка едет ОДНА: другие кластеры к ней не добавляются, потому что Ozon не принимает смешанные заявки. Для каждого кластера выберите склад, на который вы физически привозите коробки." />
-                </label>
-
-                {directRules.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic mb-2">
-                    Прямых кластеров нет — все заявки идут через точку отгрузки
-                  </p>
-                ) : (
-                  <div className="space-y-2 mb-2">
-                    {directRules.map((rule) => (
-                      <div key={rule.clusterId} className="p-3 rounded-xl border border-slate-200 bg-slate-50/50">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-sm font-bold text-slate-800 truncate">
-                            {rule.clusterName || `Кластер ${rule.clusterId}`}
-                            <span className="ml-1.5 text-xs font-semibold text-slate-400">ID {rule.clusterId}</span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveDirectCluster(rule.clusterId)}
-                            className="shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-red-600 hover:bg-red-50 transition-colors"
-                          >
-                            Убрать
-                          </button>
-                        </div>
-
-                        {rule.warehouseId ? (
-                          <div className="mt-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-200">
-                            <div className="text-sm font-bold text-emerald-900 break-words">{rule.warehouseName || 'Без названия'}</div>
-                            <div className="text-xs text-emerald-700 mt-0.5">ID {rule.warehouseId}</div>
-                          </div>
-                        ) : (
-                          <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
-                            Склад не выбран — заявку на этот кластер оформить не получится
-                          </div>
-                        )}
-
-                        <div className="flex gap-2 mt-2">
-                          <input
-                            type="text"
-                            value={directEditing === rule.clusterId ? directQuery : ''}
-                            placeholder="Название склада, минимум 4 символа"
-                            onFocus={() => { if (directEditing !== rule.clusterId) { setDirectEditing(rule.clusterId); setDirectQuery(''); setDirectResults([]); } }}
-                            onChange={(e) => { setDirectEditing(rule.clusterId); setDirectQuery(e.target.value); }}
-                            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleDirectSearch(rule.clusterId); } }}
-                            className="flex-1 px-3 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-white"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleDirectSearch(rule.clusterId)}
-                            disabled={directSearching}
-                            className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 text-sm font-bold"
-                          >
-                            <Search size={15} />
-                            {directSearching && directEditing === rule.clusterId ? 'Ищу…' : 'Найти'}
-                          </button>
-                        </div>
-
-                        {directEditing === rule.clusterId && directResults.length > 0 && (
-                          <div className="mt-2 space-y-1.5 max-h-52 overflow-y-auto">
-                            {directResults.map((w) => {
-                              const isActive = w.warehouseId === rule.warehouseId;
-                              return (
-                                <button
-                                  key={w.warehouseId}
-                                  type="button"
-                                  onClick={() => handleDirectWarehousePick(rule.clusterId, w.warehouseId, w.name)}
-                                  className={`w-full text-left p-2.5 rounded-lg border transition-colors ${
-                                    isActive ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-slate-200 hover:bg-slate-50'
-                                  }`}
-                                >
-                                  <div className="flex items-start gap-2">
-                                    {isActive && <Check size={14} className="text-indigo-600 mt-0.5 shrink-0" />}
-                                    <div className="min-w-0">
-                                      <div className="text-sm font-bold text-slate-800 break-words">{w.name}</div>
-                                      <div className="text-xs text-slate-500 mt-0.5">{w.warehouseType}</div>
-                                      <div className="text-xs text-slate-400 mt-0.5 break-words">{w.address}</div>
-                                    </div>
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {clusters.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">
-                    Кластеры появятся после первой загрузки остатков Ozon
-                  </p>
-                ) : (
-                  <select
-                    value=""
-                    onChange={(e) => handleAddDirectCluster(e.target.value)}
-                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
-                  >
-                    <option value="">Добавить кластер прямой поставки…</option>
-                    {clusters
-                      .filter((c) => !directRules.some((r) => r.clusterId === c.clusterId))
-                      .map((c) => (
-                        <option key={c.clusterId} value={c.clusterId}>
-                          {c.clusterName}
-                        </option>
-                      ))}
-                  </select>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Приоритетные кластеры
-                  <FieldHint
-                    position="top"
-                    text="Отметь кластеры, где наличие товара обязательно (обычно топ по продажам). Для них целевой и неснижаемый запас умножаются на коэффициент: при коэффициенте 1,5 и целевом запасе 30 дней приоритетный кластер получит 45 дней. Рекомендация к поставке загорается раньше и объём выше. Кластер без поставок приоритетным быть не может."
-                  />
-                </label>
-                {clusters.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">
-                    Кластеры появятся после первой загрузки остатков Ozon
-                  </p>
-                ) : (
-                  <div className="space-y-2 mt-2">
-                    {clusters.map((c) => {
-                      const isPriority = priorityMap[c.clusterId] !== undefined;
-                      const isExcluded = excludedSet.has(c.clusterId);
-                      return (
-                        <div key={c.clusterId} className="flex items-center justify-between gap-2">
-                          <label className={`flex items-center gap-2.5 text-sm cursor-pointer select-none ${isExcluded ? 'text-slate-300 cursor-not-allowed' : 'text-slate-700 hover:text-slate-900'}`}>
-                            <input
-                              type="checkbox"
-                              checked={isPriority}
-                              disabled={isExcluded}
-                              onChange={() => handleTogglePriority(c.clusterId)}
-                              className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 accent-indigo-600 cursor-pointer disabled:cursor-not-allowed"
-                            />
-                            <span>{c.clusterName}</span>
-                          </label>
-                          {isPriority && (
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <span className="text-[11px] text-slate-400">коэф.</span>
-                              <input
-                                type="number"
-                                step="0.1"
-                                min="1"
-                                value={priorityMap[c.clusterId]}
-                                onChange={(e) => handleChangePriorityK(c.clusterId, e.target.value)}
-                                className="w-16 px-2 py-1 text-xs border border-slate-200 rounded-lg text-right focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300"
-                              />
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              <div className="border-t border-slate-100" />
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Кластеры без поставок
-                  <FieldHint
-                    position="top"
-                    text="Отметь кластеры, в которые ты НЕ возишь товар (дорогая доставка). Для них не будут считаться рекомендации поставок и неснижаемый запас. Остатки и продажи этих кластеров продолжают учитываться в общих итогах и в сигнале «пора заказать на фабрике»."
-                  />
-                </label>
-                {clusters.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">
-                    Кластеры появятся после первой загрузки остатков Ozon
-                  </p>
-                ) : (
-                  <div className="space-y-2 mt-2">
-                    {clusters.map((c) => {
-                      const isChecked = excludedSet.has(c.clusterId);
-                      return (
-                        <label
-                          key={c.clusterId}
-                          className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer select-none hover:text-slate-900"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => handleToggleCluster(c.clusterId)}
-                            className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 accent-indigo-600 cursor-pointer"
-                          />
-                          <span>{c.clusterName}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </>
+              );
+            })
           )}
         </div>
 
-        <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex justify-end gap-3">
+        <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center gap-3">
           <button
             type="button"
-            onClick={onClose}
-            disabled={saving}
-            className="px-5 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors"
+            onClick={handleApplyRecommended}
+            disabled={loading || saving}
+            className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50"
           >
-            Отмена
+            <RotateCcw size={15} />
+            Вернуть к рекомендованным значениям
           </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving || loading}
-            className="px-5 py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50"
-          >
-            {saving ? 'Сохранение…' : 'Сохранить'}
-          </button>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="px-5 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors"
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving || loading}
+              className="px-5 py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50"
+            >
+              {saving ? 'Сохранение…' : 'Сохранить'}
+            </button>
+          </div>
         </div>
       </div>
     </div>

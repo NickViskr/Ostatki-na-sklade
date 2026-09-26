@@ -311,13 +311,16 @@ describe('screen wiring (item 78c)', () => {
     expect(read('../../Code.gs')).toMatch(/gmroiGreenPct',\s*value: 100/);
     expect(read('../../Code.gs')).toMatch(/gmroiRedPct',\s*value: 30/);
     expect(read('../store/useWarehouseStore.ts')).toMatch(/gmroiRedPct: num\(s\.gmroiRedPct, 30\)/);
-    expect(read('../components/OzonSettingsModal.tsx')).toMatch(/value=\{form\.gmroiGreenPct\}/);
+    // Item 87 step 2: the settings window renders every numeric field generically from
+    // src/lib/ozonSettingsFields.ts, so the field is checked there instead of a literal
+    // `form.gmroiGreenPct` string in the modal.
+    expect(read('../lib/ozonSettingsFields.ts')).toMatch(/key: 'gmroiGreenPct'/);
   });
-  it('the three settings travel end to end: Code.gs defaults, store parse, modal form', () => {
+  it('the three settings travel end to end: Code.gs defaults, store parse, settings field table', () => {
     expect(read('../../Code.gs')).toMatch(/turnoverPeriodDays',\s*value: 90/);
     expect(read('../store/useWarehouseStore.ts')).toMatch(/turnoverPeriodDays: Math\.max\(1, num\(s\.turnoverPeriodDays, 90\)\)/);
     const modal = read('../components/OzonSettingsModal.tsx');
     expect(modal).toMatch(/turnoverSlowDays: numSetting\(res\.data\.turnoverSlowDays, 45\)/);
-    expect(modal).toMatch(/value=\{form\.turnoverFastDays\}/);
+    expect(read('../lib/ozonSettingsFields.ts')).toMatch(/key: 'turnoverFastDays'/);
   });
 });

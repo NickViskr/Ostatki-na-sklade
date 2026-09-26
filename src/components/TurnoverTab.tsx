@@ -7,6 +7,7 @@ import { formatCurrency, formatDateRu } from '../lib/utils';
 import { ArticleTurnover, buildTurnover, gmroiTone, GmroiTone, shelfFromStock, TurnoverStatus } from '../lib/turnover';
 import { buildTurnoverSnapshot, TURNOVER_PRESETS, TURNOVER_SYSTEM_PROMPT } from '../lib/turnoverPrompt';
 import { OzonSettingsModal } from './OzonSettingsModal';
+import { canEditOzonSettings } from '../lib/ozonSettingsFields';
 
 /**
  * Item 78c/78d (2026-09-21): capital turnover of the whole business, Ozon plus the own
@@ -189,10 +190,12 @@ export const TurnoverTab: React.FC = () => {
               <RefreshCw size={16} className={isProcessing ? 'animate-spin' : ''} /> Обновить из KAN
             </button>
           )}
-          <button onClick={() => setShowSettings(true)} title="Период и пороги — в настройках Ozon"
-            className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 cursor-pointer">
-            <Settings size={16} /> Пороги
-          </button>
+          {canEditOzonSettings(currentUser) && (
+            <button onClick={() => setShowSettings(true)} title="Период и пороги — в настройках Ozon"
+              className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 cursor-pointer">
+              <Settings size={16} /> Пороги
+            </button>
+          )}
         </div>
       </div>
 
@@ -324,7 +327,7 @@ export const TurnoverTab: React.FC = () => {
         </div>
       </div>
 
-      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
+      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} openBlocks={['turnover']} />
     </div>
   );
 };
