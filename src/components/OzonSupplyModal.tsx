@@ -737,9 +737,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
     if (result.status !== 'success') {
       if (result.stage === 'not_enough_stock') {
         const list = (result.data?.shortage || [])
-          .map((s: any) => `${s.article}: нужно ${s.requested}, есть ${s.available}`)
+          .map((s: any) => `${s.article}: нужно ${s.requested}, свободно ${s.available}`)
           .join('; ');
-        toast.error('Не хватает товара на Моём складе. ' + list);
+        // Item 85, step 1.5: «свободно» is stock minus what other created supplies hold.
+        toast.error('Не хватает свободного товара на Моём складе (часть уже зарезервирована под другие заявки). ' + list);
       } else {
         toast.error(result.message || 'Ozon не принял заявку');
       }

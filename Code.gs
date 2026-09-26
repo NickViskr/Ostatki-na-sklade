@@ -4315,6 +4315,137 @@ function getKitComponents(kitSku) {
  * Для виртуальных комплектов доступность = min(остаток компонента / норма), целое вниз.
  * data.items — массив { article, quantity }.
  */
+// ===== Item 85, step 1.5: the reserve of created supplies, on the server =====
+// A MIRROR of the reserve part of `buildPendingSupplies` (src/lib/ozonPending.ts): which
+// pieces still lie on «Мой склад» but are promised to a created supply. The two copies are
+// held equal by `src/lib/supplyReserveParity.test.ts`, which feeds the same rows to both.
+// Change one — change the other and run that test.
+const SUPPLY_RESERVE_SAFETY_DAYS = 7;
+const SUPPLY_RESERVE_CLEARED = ['CANCELLED', 'REJECTED_AT_SUPPLY_WAREHOUSE', 'OVERDUE'];
+const SUPPLY_RESERVE_ACTIVE = ['DATA_FILLING', 'READY_TO_SUPPLY', 'ACCEPTED_AT_SUPPLY_WAREHOUSE', 'IN_TRANSIT',
+  'ACCEPTANCE_AT_STORAGE_WAREHOUSE', 'REPORTS_CONFIRMATION_AWAITING', 'REPORT_REJECTED', 'COMPLETED'];
+
+function supplyReserveParseDate_(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const normalized = raw.indexOf('T') < 0 && raw.indexOf(' ') > 0 ? raw.replace(' ', 'T') : raw;
+  const time = new Date(normalized).getTime();
+  return isNaN(time) ? null : time;
+}
+
+function supplyReserveWithinWindow_(value, nowMs) {
+  const time = supplyReserveParseDate_(value);
+  if (time === null) return false;
+  return nowMs - time <= SUPPLY_RESERVE_SAFETY_DAYS * 24 * 60 * 60 * 1000;
+}
+
+function supplyReserveArray_(json) {
+  const raw = String(json || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/** The same matching as `resolveOzonArticle`: «ШК Ozon», then the article name, then the raw offer id. */
+function supplyReserveArticle_(skus, offerId, barcode) {
+  const offer = String(offerId || '').trim();
+  const ozon = String(barcode || '').trim();
+  if (ozon) {
+    for (let i = 0; i < skus.length; i++) {
+      if (String(skus[i].ozonBarcode || '').trim() === ozon) return skus[i].sku;
+    }
+  }
+  if (offer) {
+    for (let i = 0; i < skus.length; i++) {
+      if (String(skus[i].sku || '').toLowerCase() === offer.toLowerCase()) return skus[i].sku;
+    }
+  }
+  return offer || ozon || 'НЕИЗВЕСТНО';
+}
+
+/**
+ * Reserve of «Мой склад» by the article of the SUPPLY (a virtual kit stays a kit here).
+ * @param shipments rows as `getExternalShipments` returns them
+ * @param requests rows as `getOzonSupplyRequests` returns them
+ * @param skus rows as `getSkus` returns them
+ * @param nowMs the moment of the check
+ */
+function supplyReservesByArticle(shipments, requests, skus, nowMs) {
+  const reserve = {};
+  const add = function (article, qty) { reserve[article] = (reserve[article] || 0) + qty; };
+  const settled = function (local) {
+    const v = String(local || '').trim().toLowerCase();
+    return v === 'processed' || v === 'ignored';
+  };
+  const cleared = function (status) {
+    const v = String(status || '').toUpperCase().trim();
+    return !!v && SUPPLY_RESERVE_CLEARED.indexOf(v) >= 0;
+  };
+
+  const rowsByOrder = {};
+  (shipments || []).forEach(function (row) {
+    const orderId = String(row.orderId || '').trim();
+    if (!orderId) return;
+    (rowsByOrder[orderId] = rowsByOrder[orderId] || []).push(row);
+  });
+
+  (shipments || []).forEach(function (row) {
+    if (row.isVirtual === true) return;
+    const local = String(row.status || '').trim().toLowerCase();
+    if (local === 'ignored') return;
+    const status = String(row.ozonStatus || '').trim();
+    if (cleared(status)) return;
+    if (SUPPLY_RESERVE_ACTIVE.indexOf(status.toUpperCase()) < 0) {
+      const since = String(row.detectedAt || '').trim() || String(row.shipmentDate || '').trim();
+      if (!supplyReserveWithinWindow_(since, nowMs)) return;
+    }
+    if (settled(local)) return; // written off: nothing of it lies on the shelf
+    supplyReserveArray_(row.itemsJSON).forEach(function (item) {
+      if (!item) return;
+      const rawQty = item.quantity !== undefined && item.quantity !== null ? item.quantity : item.qty;
+      const qty = Number(rawQty) || 0;
+      if (qty <= 0) return;
+      const offerId = String(item.offerId || item.offer_id || '').trim();
+      add(supplyReserveArticle_(skus || [], offerId, String(item.barcode || '').trim()), qty);
+    });
+  });
+
+  (requests || []).forEach(function (req) {
+    if (String(req.status || '').trim().toLowerCase().indexOf('отмен') === 0) return;
+    const orderId = String(req.orderId || '').trim();
+    const rows = orderId ? (rowsByOrder[orderId] || []) : [];
+    if (rows.length > 0) {
+      const anyCleared = rows.some(function (r) { return cleared(r.ozonStatus) || settled(r.status); });
+      const anyItems = rows.some(function (r) { return supplyReserveArray_(r.itemsJSON).length > 0; });
+      if (anyCleared || anyItems) return;
+    }
+    if (!supplyReserveWithinWindow_(req.date, nowMs)) return;
+    supplyReserveArray_(req.itemsJSON).forEach(function (item) {
+      if (!item) return;
+      const qty = Number(item.qty !== undefined && item.qty !== null ? item.qty : item.quantity) || 0;
+      if (qty <= 0) return;
+      const article = String(item.article || '').trim();
+      if (!article) return;
+      add(article, qty);
+    });
+  });
+  return reserve;
+}
+
+/**
+ * The last check before a supply request goes to Ozon (the proxy calls it right before
+ * `/v2/draft/supply/create`). Item 85, step 1.5: it compared each line with the RAW stock, so
+ * pieces already promised to other created supplies looked free, and two kits sharing a
+ * component (bottles, bags) were each checked against all of it. Now every article and kit is
+ * expanded into the PHYSICAL articles on the shelf; the demand of the whole request is summed
+ * per physical article and compared with stock MINUS the reserve of the other created supplies.
+ * `available` of a line = the most this line could take while the rest of the request keeps
+ * its quantities.
+ */
 function checkSupplyAvailability(data) {
   const items = (data && Array.isArray(data.items)) ? data.items : [];
   if (items.length === 0) {
@@ -4328,35 +4459,55 @@ function checkSupplyAvailability(data) {
   }
 
   const kits = getKits();
-  const result = [];
+  const reserveBySupplyArticle = supplyReservesByArticle(getExternalShipments(), getOzonSupplyRequests(), getSkus(), Date.now());
 
-  for (let i = 0; i < items.length; i++) {
-    const article = String(items[i].article || '').trim();
-    const requested = Number(items[i].quantity) || 0;
-    let available = 0;
-
+  // A virtual kit is its components on the shelf; anything else is itself.
+  const physicalParts = function (article) {
     const kit = kits[article];
     if (kit && kit.type === 'virtual' && kit.components && kit.components.length > 0) {
-      available = Infinity;
-      for (let c = 0; c < kit.components.length; c++) {
-        const comp = kit.components[c];
-        const norm = Number(comp.quantity) || 1;
-        const compStock = Number(stockMap[String(comp.componentSku).trim()]) || 0;
-        const possible = Math.floor(compStock / norm);
-        if (possible < available) available = possible;
-      }
-      if (!Number.isFinite(available)) available = 0;
-    } else {
-      available = Number(stockMap[article]) || 0;
+      return kit.components.map(function (c) {
+        return { article: String(c.componentSku).trim(), norm: Number(c.quantity) || 1 };
+      });
     }
+    return [{ article: article, norm: 1 }];
+  };
 
-    result.push({
-      article: article,
-      requested: requested,
-      available: available,
-      enough: available >= requested
+  const reserved = {};
+  Object.keys(reserveBySupplyArticle).forEach(function (article) {
+    physicalParts(article).forEach(function (p) {
+      reserved[p.article] = (reserved[p.article] || 0) + reserveBySupplyArticle[article] * p.norm;
     });
+  });
+
+  // The request itself, summed per requested article (one article may come in several lines).
+  const requestedByArticle = {};
+  const order = [];
+  for (let i = 0; i < items.length; i++) {
+    const article = String(items[i].article || '').trim();
+    const qty = Number(items[i].quantity) || 0;
+    if (!(article in requestedByArticle)) { requestedByArticle[article] = 0; order.push(article); }
+    requestedByArticle[article] += qty;
   }
+  const demand = {};
+  order.forEach(function (article) {
+    physicalParts(article).forEach(function (p) {
+      demand[p.article] = (demand[p.article] || 0) + requestedByArticle[article] * p.norm;
+    });
+  });
+
+  const result = order.map(function (article) {
+    const requested = requestedByArticle[article];
+    let available = Infinity;
+    physicalParts(article).forEach(function (p) {
+      const free = (Number(stockMap[p.article]) || 0) - (reserved[p.article] || 0);
+      const takenByOthers = (demand[p.article] || 0) - requested * p.norm;
+      const possible = Math.floor((free - takenByOthers) / p.norm);
+      if (possible < available) available = possible;
+    });
+    if (!isFinite(available)) available = 0;
+    available = Math.max(0, available);
+    return { article: article, requested: requested, available: available, enough: available >= requested };
+  });
 
   return { items: result, checkedAt: new Date().toISOString() };
 }
