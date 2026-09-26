@@ -86,6 +86,11 @@ not translated back; files drift to English as they are edited.
   then `clasp deploy -i AKfycbxRb4HXyqUsqqk1x5ScRgL44O1YUOlmpemCn0AAcIB50Rh5kXKeaNxAWMU2NDZTU4F3 -d "<what>"`.
   Push alone moves HEAD only; the /exec deployment is pinned to a version. Verify with
   `clasp clone-script <id>` into the scratchpad + `cmp`, and `clasp list-deployments`.
+  Google caps a script at 200 versions (hit 2026-09-26 at version 200: deploy refused with
+  «Script has reached the limit of 200 versions»). clasp cannot delete versions; the OWNER
+  deletes the oldest ones in the editor (Project history → version → Delete this version —
+  irreversible, so never done by the assistant). Only the version pinned by the /exec
+  deployment must stay; check it with `clasp deployments` first.
 - Order when both change: `Code.gs` first, then Cloud Run.
 
 ## Data
