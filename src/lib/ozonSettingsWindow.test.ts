@@ -7,6 +7,7 @@ import {
   canEditOzonSettings,
   OZON_SETTINGS_BLOCKS,
   OZON_SETTINGS_FIELDS,
+  validateOzonSettingsForm,
   OZON_RECOMMENDED_SETTINGS,
   applyRecommended,
   buildOzonSettingsPayload,
@@ -515,5 +516,53 @@ describe('server.ts: getOzonSettingsJournal proxy wiring (item 87 step 5)', () =
 
   it("saveOzonSettings still invalidates its own cache entries", () => {
     expect(server).toContain("saveOzonSettings: ['getOzonSettings', 'getOzonInitialData']");
+  });
+});
+
+// Owner 2026-09-26 (live check of sklad-00101-jnw): «при удалении значений в ячейке остается 0,
+// при вводе нового значения 0 всегда остается впереди» and «если возникает ошибка … все кнопки
+// съезжают, надпись ошибки сжата».
+describe('OzonSettingsModal: emptied field and footer layout (owner 2026-09-26)', () => {
+  const renderWith = (form: OzonSettingsForm) => {
+    setStoreUserForRender({ username: 'boss', role: 'admin' });
+    return renderToStaticMarkup(
+      createElement(OzonSettingsModal, { isOpen: true, onClose: () => {}, openBlocks: ['factory'], initialForm: form })
+    );
+  };
+
+  it('an emptied field (NaN in the form) renders an EMPTY input, not 0, with the red message and Save disabled', () => {
+    const html = renderWith({ ...VALID_FORM_FOR_RENDER, factoryOrderDays: NaN });
+    const input = html.match(/<input[^>]*>/g)!.find((tag) => tag.includes('value="NaN"') || tag.includes('value=""'));
+    expect(html).not.toContain('value="NaN"');
+    expect(input).toBeDefined();
+    expect(html).toContain('Заполните поле числом не меньше');
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Сохранить<\/button>/);
+  });
+
+  it('validateOzonSettingsForm reports an emptied (NaN) field for every numeric field', () => {
+    for (const f of OZON_SETTINGS_FIELDS) {
+      const errors = validateOzonSettingsForm({ ...VALID_FORM_FOR_RENDER, [f.key]: NaN });
+      expect(errors.map((e) => e.key), f.key).toContain(f.key);
+    }
+  });
+
+  it('the input shows the typed text, and a keystroke stores NaN for empty text instead of 0', () => {
+    const src = read('src/components/OzonSettingsModal.tsx');
+    expect(src).toContain("value={drafts[field.key] ?? (Number.isFinite(form[field.key]) ? String(form[field.key]) : '')}");
+    expect(src).toContain("const value = raw.trim() === '' ? NaN : Number(raw);");
+    expect(src).not.toMatch(/raw === '' \? 0/);
+  });
+
+  it('the error line sits on its own line ABOVE the buttons, and the footer buttons never shrink', () => {
+    const html = renderWith({ ...VALID_FORM_FOR_RENDER, factoryOrderDays: NaN });
+    const errAt = html.indexOf('Исправьте поля, отмеченные красным');
+    expect(errAt).toBeGreaterThan(-1);
+    expect(html.slice(errAt - 200, errAt)).toMatch(/<p[^>]*>$/);
+    expect(errAt).toBeLessThan(html.indexOf('Вернуть к рекомендованным значениям'));
+    for (const label of ['Вернуть к рекомендованным значениям', 'История изменений', 'Отмена', 'Сохранить']) {
+      const at = html.lastIndexOf(label);
+      const open = html.lastIndexOf('<button', at);
+      expect(html.slice(open, at), label).toContain('whitespace-nowrap shrink-0');
+    }
   });
 });

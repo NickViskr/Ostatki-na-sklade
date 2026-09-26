@@ -210,13 +210,21 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     [computeImpact, debouncedSettings, hasErrors]
   );
 
-  const handleNumericChange = (key: OzonSettingsFieldDef['key'], raw: string, integer?: boolean) => {
-    const value = raw === '' ? 0 : integer ? parseInt(raw, 10) : parseFloat(raw);
-    setForm((f) => ({ ...f, [key]: Number.isNaN(value) ? 0 : value }));
+  // Owner 2026-09-26: an emptied field turned into 0 and the next digits were typed after it
+  // («040»), because the form held only a number and an empty input has none. The input now
+  // shows exactly what was typed (`drafts`); the form gets NaN for an empty or unreadable text,
+  // which validateOzonSettingsForm reports as «Заполните поле…» and which blocks Save. A
+  // fractional value in an integer field is kept as typed so the integer check can see it.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const handleNumericChange = (key: OzonSettingsFieldDef['key'], raw: string) => {
+    setDrafts((d) => ({ ...d, [key]: raw }));
+    const value = raw.trim() === '' ? NaN : Number(raw);
+    setForm((f) => ({ ...f, [key]: value }));
   };
 
   const handleApplyRecommended = () => {
     setForm((f) => applyRecommended(f));
+    setDrafts({});
     toast.success('Рекомендованные значения подставлены — проверьте и нажмите «Сохранить»');
   };
 
@@ -459,6 +467,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               directClusters: String(res.data.directClusters || ''),
             };
             setForm(next);
+            setDrafts({});
             setLoadedForm(next);
           } else if (res?.status === 'error') {
             toast.error(res.message || 'Ошибка загрузки настроек Ozon');
@@ -522,8 +531,8 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
           min={field.min}
           max={field.max}
           step={field.step}
-          value={form[field.key]}
-          onChange={(e) => handleNumericChange(field.key, e.target.value, field.integer)}
+          value={drafts[field.key] ?? (Number.isFinite(form[field.key]) ? String(form[field.key]) : '')}
+          onChange={(e) => handleNumericChange(field.key, e.target.value)}
           className={`w-full px-4 py-2.5 rounded-xl border outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50 focus:ring-2 focus:ring-indigo-500 ${
             errorMessage
               ? 'border-red-400 ring-2 ring-red-100'
@@ -1004,13 +1013,19 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
           {!journalOpen && !loading && impactBlock}
         </div>
 
-        <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center gap-3">
-          <div className="flex items-center gap-2">
+        {/* Owner 2026-09-26: the error line sat in the button row and squeezed every button.
+            It now has its own line above the row, and the buttons never shrink or wrap text. */}
+        <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex flex-col gap-3">
+          {hasErrors && (
+            <p className="text-sm font-semibold text-red-600 text-right">Исправьте поля, отмеченные красным</p>
+          )}
+          <div className="flex flex-wrap justify-between items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={handleApplyRecommended}
               disabled={loading || saving}
-              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <RotateCcw size={15} />
               Вернуть к рекомендованным значениям
@@ -1019,21 +1034,18 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               type="button"
               onClick={handleOpenJournal}
               disabled={loading || saving}
-              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors text-sm disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <History size={15} />
               История изменений
             </button>
           </div>
-          <div className="flex items-center gap-3">
-            {hasErrors && (
-              <span className="text-xs font-semibold text-red-600">Исправьте поля, отмеченные красным</span>
-            )}
+          <div className="flex items-center gap-3 ml-auto">
             <button
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="px-5 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors"
+              className="px-5 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0"
             >
               Отмена
             </button>
@@ -1041,10 +1053,11 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               type="button"
               onClick={handleSave}
               disabled={saving || loading || hasErrors}
-              className="px-5 py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50"
+              className="px-5 py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               {saving ? 'Сохранение…' : 'Сохранить'}
             </button>
+          </div>
           </div>
         </div>
       </div>
