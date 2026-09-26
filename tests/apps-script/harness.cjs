@@ -143,7 +143,10 @@ function makeFakeSheet(headers, name) {
               }
             }
           }
-        }
+        },
+        // Item 87 step 1: cosmetic in the stand — no visual representation to format — but
+        // Code.gs calls it on sheet creation, so it must exist or the call throws.
+        setNumberFormat() { return this; }
       };
     },
     // Удаление строки. Пункт 47, этап 4: без него стенд не мог пройти ни правку операции,
@@ -303,6 +306,8 @@ this.EXTERNAL_SHIPMENTS_HEADERS = EXTERNAL_SHIPMENTS_HEADERS;
 this.KAN_DAYS_HEADERS = KAN_DAYS_HEADERS;
 this.STOCK_SNAPSHOT_HEADERS = STOCK_SNAPSHOT_HEADERS;
 this.FACTORY_ORDERS_HEADERS = FACTORY_ORDERS_HEADERS;
+this.OZON_SETTINGS_FIELD_NAMES = OZON_SETTINGS_FIELD_NAMES;
+this.OZON_SETTINGS_JOURNAL_HEADERS = OZON_SETTINGS_JOURNAL_HEADERS;
 `;
 vm.runInContext(src + exportLine, context, { filename: 'Code.gs' });
 
@@ -393,7 +398,15 @@ module.exports = {
   // just want a plain object, so the REAL sheet-based function is exposed under its own name.
   getOzonSettings: (...args) => getOzonSettingsSheetBased(...args),
   saveOzonSettings: (...args) => context.saveOzonSettings(...args),
+  // Item 87 step 1: cross-field validation (pure, no sheet) and the settings-change journal.
+  validateOzonSettingsRules: (...args) => context.validateOzonSettingsRules(...args),
+  getOzonSettingsJournal: (...args) => context.getOzonSettingsJournal(...args),
+  ozonSettingFieldName: (...args) => context.ozonSettingFieldName(...args),
+  OZON_SETTINGS_FIELD_NAMES: context.OZON_SETTINGS_FIELD_NAMES,
+  OZON_SETTINGS_JOURNAL_HEADERS: context.OZON_SETTINGS_JOURNAL_HEADERS,
+  assertAdmin: (...args) => context.assertAdmin(...args),
   clearOzonSettingsSheet() { delete sheetRegistry['Настройки Ozon']; },
+  clearOzonSettingsJournalSheet() { delete sheetRegistry['Журнал настроек Ozon']; },
   getRegistrySheet(name) { return sheetRegistry[name] || null; },
   dumpRegistrySheet(name) {
     const sheet = sheetRegistry[name];

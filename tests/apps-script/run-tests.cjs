@@ -8771,21 +8771,26 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
   const settings2 = h2.getOzonSettings();
   check('86C: saveOzonSettings(\'0\') -> 0', settings2.deliveryToOzonDays === 0, String(settings2.deliveryToOzonDays));
 
-  // 3. saveOzonSettings: мусорная строка -> дефолт 7 (не NaN и не прежнее значение молча).
+  // 3. saveOzonSettings: мусорная строка -> отказ (item 87: больше не подменяется дефолтом
+  // молча), значение в листе не тронуто.
   const h3 = freshHarness();
   h3.clearOzonSettingsSheet();
   h3.getOzonSettings();
-  h3.saveOzonSettings({ deliveryToOzonDays: 'abc' });
+  let threw3 = false;
+  try { h3.saveOzonSettings({ deliveryToOzonDays: 'abc' }); } catch (e) { threw3 = true; }
+  check('87: saveOzonSettings(\'abc\') -> отказ', threw3);
   const settings3 = h3.getOzonSettings();
-  check('86C: saveOzonSettings(\'abc\') -> дефолт 7', settings3.deliveryToOzonDays === 7, String(settings3.deliveryToOzonDays));
+  check('87: отказ на \'abc\' не тронул значение в листе (осталось 7)', settings3.deliveryToOzonDays === 7, String(settings3.deliveryToOzonDays));
 
-  // 4. saveOzonSettings: отрицательное значение -> дефолт 7 (не multiplied на -1, не отрицательный срок).
+  // 4. saveOzonSettings: отрицательное значение -> отказ (item 87), значение в листе не тронуто.
   const h4 = freshHarness();
   h4.clearOzonSettingsSheet();
   h4.getOzonSettings();
-  h4.saveOzonSettings({ deliveryToOzonDays: -3 });
+  let threw4 = false;
+  try { h4.saveOzonSettings({ deliveryToOzonDays: -3 }); } catch (e) { threw4 = true; }
+  check('87: saveOzonSettings(-3) -> отказ', threw4);
   const settings4 = h4.getOzonSettings();
-  check('86C: saveOzonSettings(-3) -> дефолт 7', settings4.deliveryToOzonDays === 7, String(settings4.deliveryToOzonDays));
+  check('87: отказ на -3 не тронул значение в листе (осталось 7)', settings4.deliveryToOzonDays === 7, String(settings4.deliveryToOzonDays));
 
   // 5. saveOzonSettings: обычное положительное значение сохраняется как есть.
   const h5 = freshHarness();
@@ -8808,6 +8813,191 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
   sheet6.__setData(raw6);
   const settings6 = h6.getOzonSettings();
   check('86C: отрицательное значение в листе читается как дефолт 7', settings6.deliveryToOzonDays === 7, String(settings6.deliveryToOzonDays));
+})();
+
+// ================= Item 87 step 1: settings validation rules and change journal =================
+(function test87Step1() {
+  // A fresh stand with the sheet already holding the full set of OZON_SETTINGS_DEFAULTS.
+  function freshWithDefaults() {
+    const h = freshHarness();
+    h.clearOzonSettingsSheet();
+    h.getOzonSettings();
+    return h;
+  }
+  function expectThrow(h, payload, name) {
+    let threw = false;
+    try { h.saveOzonSettings(payload, 'tester'); } catch (e) { threw = true; }
+    check(name, threw);
+  }
+  function expectPass(h, payload, name) {
+    let threw = false;
+    try { h.saveOzonSettings(payload, 'tester'); } catch (e) { threw = true; }
+    check(name, !threw);
+  }
+
+  // ---- Boundary checks, two sides of every rule ----
+  expectPass(freshWithDefaults(), { speedWeeks: 1 }, '87: speedWeeks=1 (граница) -> ок');
+  expectThrow(freshWithDefaults(), { speedWeeks: 0 }, '87: speedWeeks=0 -> отказ');
+
+  expectPass(freshWithDefaults(), { speedWeeks: 2, trendWeeks: 2 }, '87: trendWeeks = speedWeeks -> ок');
+  expectThrow(freshWithDefaults(), { speedWeeks: 2, trendWeeks: 1 }, '87: trendWeeks < speedWeeks -> отказ');
+
+  expectPass(freshWithDefaults(), { minStockDays: 10, targetStockDays: 10 }, '87: targetStockDays = minStockDays -> ок');
+  expectThrow(freshWithDefaults(), { minStockDays: 10, targetStockDays: 9 }, '87: targetStockDays < minStockDays -> отказ');
+
+  expectPass(freshWithDefaults(), { targetStockDays: 30, maxClusterDays: 0 }, '87: maxClusterDays=0 (выключен) -> ок');
+  expectPass(freshWithDefaults(), { targetStockDays: 30, maxClusterDays: 30 }, '87: maxClusterDays = targetStockDays -> ок');
+  expectThrow(freshWithDefaults(), { targetStockDays: 30, maxClusterDays: 29 }, '87: maxClusterDays < targetStockDays (и не 0) -> отказ');
+
+  expectPass(freshWithDefaults(), { deliveryToOzonDays: 0 }, '87: deliveryToOzonDays=0 (граница) -> ок');
+  expectPass(freshWithDefaults(), { deliveryToOzonDays: 60 }, '87: deliveryToOzonDays=60 (граница) -> ок');
+  expectThrow(freshWithDefaults(), { deliveryToOzonDays: -1 }, '87: deliveryToOzonDays=-1 -> отказ');
+  expectThrow(freshWithDefaults(), { deliveryToOzonDays: 61 }, '87: deliveryToOzonDays=61 -> отказ');
+  expectThrow(freshWithDefaults(), { deliveryToOzonDays: 'abc' }, '87: deliveryToOzonDays=\'abc\' -> отказ');
+  expectThrow(freshWithDefaults(), { deliveryToOzonDays: '' }, '87: deliveryToOzonDays=\'\' -> отказ');
+
+  expectPass(freshWithDefaults(), { salesRetentionWeeks: 27 }, '87: salesRetentionWeeks=27 (граница) -> ок');
+  expectThrow(freshWithDefaults(), { salesRetentionWeeks: 26 }, '87: salesRetentionWeeks=26 -> отказ');
+
+  expectPass(freshWithDefaults(), { returnsToSalePct: 0 }, '87: returnsToSalePct=0 (граница) -> ок');
+  expectPass(freshWithDefaults(), { returnsToSalePct: 100 }, '87: returnsToSalePct=100 (граница) -> ок');
+  expectThrow(freshWithDefaults(), { returnsToSalePct: -1 }, '87: returnsToSalePct=-1 -> отказ');
+  expectThrow(freshWithDefaults(), { returnsToSalePct: 101 }, '87: returnsToSalePct=101 -> отказ');
+
+  expectThrow(freshWithDefaults(), { turnoverSlowDays: 20, turnoverFastDays: 20 }, '87: turnoverSlowDays = turnoverFastDays -> отказ');
+  expectPass(freshWithDefaults(), { turnoverSlowDays: 21, turnoverFastDays: 20 }, '87: turnoverSlowDays = turnoverFastDays+1 -> ок');
+
+  expectThrow(freshWithDefaults(), { gmroiGreenPct: 30, gmroiRedPct: 30 }, '87: gmroiGreenPct = gmroiRedPct -> отказ');
+  expectPass(freshWithDefaults(), { gmroiGreenPct: 31, gmroiRedPct: 30 }, '87: gmroiGreenPct = gmroiRedPct+1 -> ок');
+
+  expectPass(freshWithDefaults(), { maxBoxesPerCluster: 1 }, '87: maxBoxesPerCluster=1 (граница) -> ок');
+  expectThrow(freshWithDefaults(), { maxBoxesPerCluster: 0 }, '87: maxBoxesPerCluster=0 -> отказ');
+  expectThrow(freshWithDefaults(), { maxBoxesPerCluster: 1.5 }, '87: maxBoxesPerCluster=1.5 -> отказ');
+
+  // ---- Cross-field against the SHEET, not just the payload ----
+  (function crossFieldAgainstSheet() {
+    const h = freshWithDefaults();
+    h.saveOzonSettings({ speedWeeks: 2 }, 'tester'); // sheet now holds speedWeeks=2
+    expectThrow(h, { trendWeeks: 1 }, '87: только trendWeeks=1 при speedWeeks=2 в листе -> отказ');
+    expectPass(h, { speedWeeks: 1, trendWeeks: 1 }, '87: speedWeeks=1 и trendWeeks=1 вместе -> ок');
+  })();
+
+  // ---- A refused save leaves the sheet AND the journal untouched ----
+  (function refusedSaveUntouched() {
+    const h = freshWithDefaults();
+    const before = h.dumpRegistrySheet('Настройки Ozon');
+    let threw = false;
+    try { h.saveOzonSettings({ trendWeeks: 1, speedWeeks: 4 }, 'tester'); } catch (e) { threw = true; } // trend(1) < speed(4)
+    check('87: отказ на кросс-правило действительно бросает', threw);
+    const after = h.dumpRegistrySheet('Настройки Ozon');
+    check('87: отказ не изменил ни одну строку листа', JSON.stringify(before) === JSON.stringify(after));
+    const journal = h.getOzonSettingsJournal();
+    check('87: отказ не записал ни одной строки в журнал', journal.length === 0, String(journal.length));
+  })();
+
+  // ---- Journal: only changed keys, numeric vs string-numeric is not a change, who/field ----
+  (function journalContents() {
+    const h = freshWithDefaults();
+    // targetStockDays sent as the STRING '30' while the sheet already holds 30 — not a change.
+    // trendWeeks sent as 20, different from the default 13 — a real change.
+    h.saveOzonSettings({ targetStockDays: '30', trendWeeks: 20 }, 'nikolay');
+    const journal1 = h.getOzonSettingsJournal();
+    check('87: журнал: неизменённый ключ (\'30\' vs 30) не записан', !journal1.some(r => r.key === 'targetStockDays'), JSON.stringify(journal1));
+    check('87: журнал: изменённый ключ записан ровно один раз', journal1.filter(r => r.key === 'trendWeeks').length === 1, JSON.stringify(journal1));
+    const row = journal1.find(r => r.key === 'trendWeeks');
+    check('87: журнал: who = переданный пользователь', row && row.who === 'nikolay', row && row.who);
+    check('87: журнал: поле — человеческое имя из карты', row && row.field === h.OZON_SETTINGS_FIELD_NAMES.trendWeeks, row && row.field);
+    check('87: журнал: было = прежнее значение', row && String(row.was) === '13', row && row.was);
+    check('87: журнал: стало = новое значение', row && String(row.became) === '20', row && row.became);
+
+    // Second save — rows must come after the first, in order.
+    h.saveOzonSettings({ trendWeeks: 21 }, 'nikolay');
+    const journal2 = h.getOzonSettingsJournal();
+    const trendRows = journal2.filter(r => r.key === 'trendWeeks');
+    check('87: журнал: два сохранения -> две строки по ключу trendWeeks', trendRows.length === 2, String(trendRows.length));
+
+    // Appended key: remove a row from the sheet, then save it — 'Было' must be ''.
+    const sheet = h.getRegistrySheet('Настройки Ozon');
+    const raw = sheet.__dump();
+    const rowIdx = raw.findIndex(r => String(r[0]) === 'salesGrowthPct');
+    raw.splice(rowIdx, 1);
+    sheet.__setData(raw);
+    h.saveOzonSettings({ salesGrowthPct: 5 }, 'nikolay');
+    const journal3 = h.getOzonSettingsJournal();
+    const appendedRow = journal3.find(r => r.key === 'salesGrowthPct');
+    check('87: журнал: дописанный ключ -> Было = \'\'', appendedRow && appendedRow.was === '', appendedRow && JSON.stringify(appendedRow));
+  })();
+
+  // ---- getOzonSettingsJournal: newest first, limit, default, missing/empty sheet ----
+  (function journalReading() {
+    const hEmpty = freshWithDefaults();
+    check('87: getOzonSettingsJournal на пустой лист -> []', Array.isArray(hEmpty.getOzonSettingsJournal()) && hEmpty.getOzonSettingsJournal().length === 0);
+
+    const hMissing = freshHarness();
+    hMissing.clearOzonSettingsSheet();
+    check('87: getOzonSettingsJournal без листа -> []', Array.isArray(hMissing.getOzonSettingsJournal()) && hMissing.getOzonSettingsJournal().length === 0);
+
+    const h = freshWithDefaults();
+    h.saveOzonSettings({ speedWeeks: 2 }, 'u1');
+    h.saveOzonSettings({ speedWeeks: 3 }, 'u2');
+    h.saveOzonSettings({ speedWeeks: 4 }, 'u3');
+    const journal = h.getOzonSettingsJournal();
+    check('87: журнал: новые сверху', journal[0].who === 'u3' && journal[journal.length - 1].who === 'u1', JSON.stringify(journal.map(r => r.who)));
+    const limited = h.getOzonSettingsJournal(2);
+    check('87: журнал: лимит соблюдён', limited.length === 2, String(limited.length));
+    check('87: журнал: лимит вернул самые свежие', limited[0].who === 'u3' && limited[1].who === 'u2', JSON.stringify(limited.map(r => r.who)));
+    const overLimit = h.getOzonSettingsJournal(500);
+    check('87: журнал: лимит не выше 200 (тут просто все 3 строки, лимита не хватает)', overLimit.length === 3, String(overLimit.length));
+  })();
+
+  // ---- The live value set and the defaults both pass validateOzonSettingsRules ----
+  const liveValues = {
+    speedWeeks: 2, trendWeeks: 8, minStockDays: 10, targetStockDays: 20,
+    maxClusterDays: 60, deliveryToOzonDays: 7, salesRetentionWeeks: 78,
+    returnsToSalePct: 95, turnoverSlowDays: 60, turnoverFastDays: 20,
+    gmroiGreenPct: 80, gmroiRedPct: 30, maxBoxesPerCluster: 30
+  };
+  const hRules = freshHarness();
+  check('87: боевые значения (maxClusterDays=60) проходят validateOzonSettingsRules',
+    hRules.validateOzonSettingsRules(liveValues).length === 0, JSON.stringify(hRules.validateOzonSettingsRules(liveValues)));
+  check('87: боевые значения (maxClusterDays=100) проходят validateOzonSettingsRules',
+    hRules.validateOzonSettingsRules(Object.assign({}, liveValues, { maxClusterDays: 100 })).length === 0);
+
+  const hDefaults = freshWithDefaults();
+  const defaults = hDefaults.getOzonSettings();
+  check('87: дефолты OZON_SETTINGS_DEFAULTS проходят validateOzonSettingsRules',
+    hDefaults.validateOzonSettingsRules(defaults).length === 0, JSON.stringify(hDefaults.validateOzonSettingsRules(defaults)));
+
+  // ---- assertAdmin: role matrix (saveOzonSettings/getOzonSettingsJournal are router-guarded
+  // with assertAdmin(currentUser) — the harness has no doPost, so the role logic itself is
+  // exercised directly and the wiring is confirmed by the router-source checks below). ----
+  const hRole = freshHarness();
+  let threwUser = false;
+  try { hRole.assertAdmin({ username: 'someone', role: 'user' }); } catch (e) { threwUser = true; }
+  check('87: assertAdmin отказывает роли \'user\'', threwUser);
+
+  let threwEmptyRole = false;
+  try { hRole.assertAdmin({ username: 'someone', role: '' }); } catch (e) { threwEmptyRole = true; }
+  check('87: assertAdmin отказывает пустой роли', threwEmptyRole);
+
+  let threwAdminUsername = false;
+  try { hRole.assertAdmin({ username: 'admin', role: 'user' }); } catch (e) { threwAdminUsername = true; }
+  check('87: assertAdmin смотрит на role, а не на username (\'admin\' с role \'user\' -> отказ)', threwAdminUsername);
+
+  let threwAdminRole = false;
+  try { hRole.assertAdmin({ username: 'someone', role: 'admin' }); } catch (e) { threwAdminRole = true; }
+  check('87: assertAdmin принимает role \'admin\'', !threwAdminRole);
+
+  let threwRuRole = false;
+  try { hRole.assertAdmin({ username: 'someone', role: 'Администратор' }); } catch (e) { threwRuRole = true; }
+  check('87: assertAdmin принимает role \'Администратор\'', !threwRuRole);
+
+  // ---- Router wiring: both actions admin-guarded (same convention as test86Routing above) ----
+  const routerSrc = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+  check('87: router — saveOzonSettings под assertAdmin и передаёт currentUser.username',
+    /case 'saveOzonSettings': assertAdmin\(currentUser\); result = saveOzonSettings\(data, currentUser\.username\); break;/.test(routerSrc));
+  check('87: router — getOzonSettingsJournal под assertAdmin',
+    /case 'getOzonSettingsJournal': assertAdmin\(currentUser\); result = getOzonSettingsJournal\(data && data\.limit\); break;/.test(routerSrc));
 })();
 
 // ================= Итог =================

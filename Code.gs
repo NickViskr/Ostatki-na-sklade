@@ -463,7 +463,9 @@ function doPost(e) {
       case 'getOzonSales': result = getOzonSales(data && data.weeksLimit); break;
       case 'getOzonStockHistory': result = getOzonStockHistory(); break;
       case 'getOzonSettings': result = getOzonSettings(); break;
-      case 'saveOzonSettings': assertAdmin(currentUser); result = saveOzonSettings(data); break;
+      case 'saveOzonSettings': assertAdmin(currentUser); result = saveOzonSettings(data, currentUser.username); break;
+      // Item 87 step 1: read-only tail of the settings-change journal, admin only (same as the save it logs).
+      case 'getOzonSettingsJournal': assertAdmin(currentUser); result = getOzonSettingsJournal(data && data.limit); break;
       case 'saveOzonClusters': result = saveOzonClusters(data); break;
       case 'getOzonClusters': result = getOzonClusters(); break;
       case 'markOzonClustersNotified': result = markOzonClustersNotified(); break;
@@ -641,6 +643,40 @@ const OZON_SETTINGS_DEFAULTS = [
 ];
 const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType', 'directClusters', 'supplyDocsFolderId', 'supplyDocsLabelsFolder'];
 const OZON_DROPOFF_TYPES = ['SORTING_CENTER', 'CROSS_DOCK', 'FULL_FILLMENT', 'DELIVERY_POINT', 'ORDERS_RECEIVING_POINT'];
+// Item 87 step 1: human field names for the settings-change journal and for validation
+// messages, so the owner sees «Окно тренда...», not the raw key «trendWeeks».
+const OZON_SETTINGS_FIELD_NAMES = {
+  speedWeeks: 'Окно скорости, недель',
+  trendWeeks: 'Окно тренда и долей кластеров, недель',
+  demandGrowthPct: 'Порог резкого роста спроса за 7 дней, %',
+  salesGrowthPct: 'Ручная надбавка к заказу на фабрике, %',
+  minStockDays: 'Неснижаемый запас в кластере, дней',
+  targetStockDays: 'Целевой запас в кластере, дней',
+  deliveryToOzonDays: 'Срок доставки до Ozon, дней',
+  maxClusterDays: 'Потолок запаса в кластере после поставки, дней',
+  maxBoxesPerCluster: 'Не больше коробок на кластер в одной заявке',
+  returnsToSalePct: 'Возвраты, которые снова идут в продажу, %',
+  factoryOrderDays: 'Заказ на фабрике — на сколько дней продаж',
+  turnoverPeriodDays: 'Оборачиваемость: период расчёта, дней',
+  turnoverSlowDays: 'Оборачиваемость: медленный — оборот дольше, дней',
+  turnoverFastDays: 'Оборачиваемость: лидер — оборот быстрее, дней',
+  gmroiGreenPct: 'GMROI: зелёный от, %',
+  gmroiRedPct: 'GMROI: красный ниже, %',
+  salesRetentionWeeks: 'Хранить историю продаж, недель',
+  priorityClusters: 'Приоритетные кластеры',
+  excludedClusters: 'Кластеры без поставок',
+  dropOffWarehouseId: 'Точка отгрузки: ID',
+  dropOffWarehouseName: 'Точка отгрузки: название',
+  dropOffWarehouseType: 'Точка отгрузки: тип',
+  directClusters: 'Кластеры прямой поставки'
+};
+// Keys not in the map above fall back to their desc in OZON_SETTINGS_DEFAULTS.
+function ozonSettingFieldName(key) {
+  if (OZON_SETTINGS_FIELD_NAMES[key]) return OZON_SETTINGS_FIELD_NAMES[key];
+  const def = OZON_SETTINGS_DEFAULTS.find(function(d) { return d.key === key; });
+  return def ? def.desc : key;
+}
+const OZON_SETTINGS_JOURNAL_HEADERS = ['Когда', 'Кто', 'Ключ', 'Поле', 'Было', 'Стало'];
 const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
 // Item 86 step A (2026-09-26): widened from 13 to 27 so a full 26-week speed lookback stays
 // weekly (7-day rows) — the archive's 28-day blocks would otherwise blur the last week of it.
@@ -859,6 +895,7 @@ function setupDatabase(targetSs) {
   getOrCreateSheet(ss, 'Продажи Ozon', OZON_SALES_HEADERS);
   getOrCreateSheet(ss, OZON_SALES_ARCHIVE_SHEET_NAME, OZON_SALES_HEADERS);
   getOrCreateSheet(ss, 'Настройки Ozon', OZON_SETTINGS_HEADERS);
+  getOrCreateSheet(ss, 'Журнал настроек Ozon', OZON_SETTINGS_JOURNAL_HEADERS);
   getOrCreateSheet(ss, 'Кластеры Ozon', OZON_CLUSTERS_HEADERS);
   getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
   getOrCreateSheet(ss, 'Себестоимость Озон', OZON_COST_HEADERS);
@@ -5609,7 +5646,120 @@ function normalizeDirectClustersSetting(raw) {
   return out.length === 0 ? '' : JSON.stringify(out);
 }
 
-function saveOzonSettings(data) {
+/**
+ * Item 87 step 1. Cross-field and range rules that only make sense once every setting is
+ * known — evaluated on the MERGED result (current sheet values overlaid with the incoming
+ * change), never on a partial save alone: a save touching only trendWeeks must still see the
+ * sheet's own speedWeeks to judge whether the trend window still makes sense.
+ * Returns [] when every rule passes. Pure (no sheet access) so a client-side TS copy of the
+ * same rules can be tested against it for parity.
+ */
+function validateOzonSettingsRules(merged) {
+  const errors = [];
+  const fn = ozonSettingFieldName;
+
+  if (merged.speedWeeks !== undefined && (!Number.isInteger(merged.speedWeeks) || merged.speedWeeks < 1)) {
+    errors.push({ key: 'speedWeeks', message: '«' + fn('speedWeeks') + '» должно быть целым числом не меньше 1' });
+  }
+  if (merged.trendWeeks !== undefined && merged.speedWeeks !== undefined && merged.trendWeeks < merged.speedWeeks) {
+    errors.push({ key: 'trendWeeks', message: '«' + fn('trendWeeks') + '» (' + merged.trendWeeks + ' нед.) не может быть меньше «' + fn('speedWeeks') + '» (' + merged.speedWeeks + ' нед.)' });
+  }
+  if (merged.targetStockDays !== undefined && merged.minStockDays !== undefined && merged.targetStockDays < merged.minStockDays) {
+    errors.push({ key: 'targetStockDays', message: '«' + fn('targetStockDays') + '» не может быть меньше «' + fn('minStockDays') + '»' });
+  }
+  if (merged.maxClusterDays !== undefined && merged.maxClusterDays !== 0 && merged.targetStockDays !== undefined && merged.maxClusterDays < merged.targetStockDays) {
+    errors.push({ key: 'maxClusterDays', message: '«' + fn('maxClusterDays') + '» должен быть выключен (0) или не меньше «' + fn('targetStockDays') + '»' });
+  }
+  if (merged.deliveryToOzonDays !== undefined && (merged.deliveryToOzonDays < 0 || merged.deliveryToOzonDays > 60)) {
+    errors.push({ key: 'deliveryToOzonDays', message: '«' + fn('deliveryToOzonDays') + '» должен быть от 0 до 60' });
+  }
+  if (merged.salesRetentionWeeks !== undefined && (!Number.isInteger(merged.salesRetentionWeeks) || merged.salesRetentionWeeks < 27)) {
+    errors.push({ key: 'salesRetentionWeeks', message: '«' + fn('salesRetentionWeeks') + '» должно быть целым числом не меньше 27' });
+  }
+  if (merged.returnsToSalePct !== undefined && (merged.returnsToSalePct < 0 || merged.returnsToSalePct > 100)) {
+    errors.push({ key: 'returnsToSalePct', message: '«' + fn('returnsToSalePct') + '» должен быть от 0 до 100' });
+  }
+  if (merged.turnoverSlowDays !== undefined && merged.turnoverFastDays !== undefined && merged.turnoverSlowDays <= merged.turnoverFastDays) {
+    errors.push({ key: 'turnoverSlowDays', message: '«' + fn('turnoverSlowDays') + '» должен быть больше «' + fn('turnoverFastDays') + '»' });
+  }
+  if (merged.gmroiGreenPct !== undefined && merged.gmroiRedPct !== undefined && merged.gmroiGreenPct <= merged.gmroiRedPct) {
+    errors.push({ key: 'gmroiGreenPct', message: '«' + fn('gmroiGreenPct') + '» должен быть больше «' + fn('gmroiRedPct') + '»' });
+  }
+  if (merged.maxBoxesPerCluster !== undefined && (!Number.isInteger(merged.maxBoxesPerCluster) || merged.maxBoxesPerCluster < 1)) {
+    errors.push({ key: 'maxBoxesPerCluster', message: '«' + fn('maxBoxesPerCluster') + '» должно быть целым числом не меньше 1' });
+  }
+
+  return errors;
+}
+
+function getOzonSettingsJournalSheet() {
+  const ss = getSpreadsheet();
+  const existed = !!ss.getSheetByName('Журнал настроек Ozon');
+  const sheet = getOrCreateSheet(ss, 'Журнал настроек Ozon', OZON_SETTINGS_JOURNAL_HEADERS);
+  ensureColumns(sheet, OZON_SETTINGS_JOURNAL_HEADERS);
+  if (!existed) {
+    // 'Было'/'Стало' can hold numeric-looking text (cluster IDs, directClusters JSON) — force
+    // plain text so Sheets never silently turns a value into a number or a date.
+    const wasCol = OZON_SETTINGS_JOURNAL_HEADERS.indexOf('Было') + 1;
+    const becameCol = OZON_SETTINGS_JOURNAL_HEADERS.indexOf('Стало') + 1;
+    sheet.getRange(1, wasCol, 2000, 1).setNumberFormat('@');
+    sheet.getRange(1, becameCol, 2000, 1).setNumberFormat('@');
+  }
+  return sheet;
+}
+
+/**
+ * Item 87 step 1. Appends one row per changed setting. Called only after a save has already
+ * passed every validation rule, so the journal never records an attempted-but-refused change.
+ */
+function appendOzonSettingsJournal(username, entries) {
+  if (!entries || entries.length === 0) return;
+  const sheet = getOzonSettingsJournalSheet();
+  const when = new Date();
+  entries.forEach(function(e) {
+    sheet.appendRow([when, username || '', e.key, e.field, e.was, e.became]);
+  });
+}
+
+/**
+ * Item 87 step 1. Last `limit` rows of the settings journal, newest first. Reads only the
+ * tail of the sheet (getRange on the last N rows), never the whole history.
+ */
+function getOzonSettingsJournal(limit) {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('Журнал настроек Ozon');
+  if (!sheet) return [];
+
+  let n = Number(limit);
+  if (!Number.isFinite(n) || n <= 0) n = 50;
+  n = Math.min(Math.floor(n), 200);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+
+  const rowsAvailable = lastRow - 1;
+  const take = Math.min(n, rowsAvailable);
+  const startRow = lastRow - take + 1;
+  const data = sheet.getRange(startRow, 1, take, OZON_SETTINGS_JOURNAL_HEADERS.length).getValues();
+
+  const result = [];
+  for (let i = data.length - 1; i >= 0; i--) {
+    const row = data[i];
+    const whenRaw = row[0];
+    const whenIso = whenRaw instanceof Date ? whenRaw.toISOString() : new Date(whenRaw).toISOString();
+    result.push({
+      when: whenIso,
+      who: String(row[1] || ''),
+      key: String(row[2] || ''),
+      field: String(row[3] || ''),
+      was: row[4] === undefined ? '' : row[4],
+      became: row[5] === undefined ? '' : row[5]
+    });
+  }
+  return result;
+}
+
+function saveOzonSettings(data, username) {
   if (!data || typeof data !== 'object') {
     throw new Error('Некорректные данные для сохранения настроек Ozon');
   }
@@ -5635,13 +5785,17 @@ function saveOzonSettings(data) {
       keysToSave[k] = normalizeDirectClustersSetting(rawVal);
       continue;
     }
-    // Item 86 step C: deliveryToOzonDays is non-negative (0 allowed — no delay planned for);
-    // an invalid, empty or negative value is saved as the default (7) rather than as garbage.
+    // Item 86 step C / item 87 step 1: deliveryToOzonDays is non-negative (0 allowed — no
+    // delay planned for). CHANGE (item 87): an invalid, empty or negative value now REFUSES
+    // the save instead of silently becoming the default 7 — a silent default hid the mistake
+    // from whoever typed it. The upper bound (60) is checked later, in
+    // validateOzonSettingsRules, alongside the other range rules.
     if (k === 'deliveryToOzonDays') {
       const n = Number(rawVal);
-      keysToSave[k] = (rawVal === '' || rawVal === null || rawVal === undefined || isNaN(n) || n < 0)
-        ? defaultsMap[k].value
-        : n;
+      if (rawVal === '' || rawVal === null || rawVal === undefined || !Number.isFinite(n) || n < 0) {
+        throw new Error('Значение настройки "' + ozonSettingFieldName(k) + '" должно быть числом от 0 до 60');
+      }
+      keysToSave[k] = n;
       continue;
     }
     if (k === 'dropOffWarehouseName') {
@@ -5729,18 +5883,76 @@ function saveOzonSettings(data) {
     }
   }
 
+  // Item 87 step 1: cross-field/range rules run on the MERGED result — current sheet values
+  // (read straight from sheetData above, the same way getOzonSettings() parses them — a bare
+  // call to getOzonSettings() would do, but the sheet is already in hand) overlaid with this
+  // (possibly partial) change — BEFORE anything is written. A failed rule throws and the sheet
+  // and the journal stay untouched.
+  const currentSettings = {};
+  for (let i = 1; i < sheetData.length; i++) {
+    const rowKey = String(sheetData[i][keyIdx] || '').trim();
+    if (!rowKey) continue;
+    const rawVal = sheetData[i][valIdx];
+    if (OZON_SETTINGS_STRING_KEYS.includes(rowKey)) {
+      currentSettings[rowKey] = String(rawVal || '').trim();
+    } else {
+      const numVal = Number(rawVal);
+      if (!isNaN(numVal) && rawVal !== '' && rawVal !== null) {
+        currentSettings[rowKey] = numVal;
+      }
+    }
+  }
+  OZON_SETTINGS_DEFAULTS.forEach(function(def) {
+    if (currentSettings[def.key] === undefined) currentSettings[def.key] = def.value;
+  });
+  const merged = Object.assign({}, currentSettings, keysToSave);
+  const ruleErrors = validateOzonSettingsRules(merged);
+  if (ruleErrors.length > 0) {
+    throw new Error(ruleErrors.map(function(e) { return e.message; }).join('; '));
+  }
+
+  // Item 87 step 1: one journal row per key whose value actually changed — compared against
+  // the RAW cell (not getOzonSettings(), which would already show the default for a row that
+  // is only about to be appended). Numbers compare numerically (30 vs '30' vs 30.0 is not a
+  // change); strings compare trimmed.
+  const journalEntries = [];
   for (const k in keysToSave) {
     const val = keysToSave[k];
+    const isStringKey = OZON_SETTINGS_STRING_KEYS.includes(k);
+    let wasCell = '';
+    let changed = true;
+
     if (keyToRowIndex[k]) {
       const rowIndex = keyToRowIndex[k];
+      const oldRaw = sheetData[rowIndex - 1][valIdx];
+      if (isStringKey) {
+        wasCell = String(oldRaw == null ? '' : oldRaw).trim();
+        changed = wasCell !== String(val == null ? '' : val).trim();
+      } else {
+        const oldNum = Number(oldRaw);
+        wasCell = (oldRaw === '' || oldRaw === null || oldRaw === undefined) ? '' : String(oldRaw);
+        changed = !(Number.isFinite(oldNum) && oldNum === Number(val));
+      }
       sheet.getRange(rowIndex, valIdx + 1).setValue(val);
     } else {
       const def = defaultsMap[k];
       sheet.appendRow([k, val, def ? def.desc : '']);
+      wasCell = '';
+      changed = true;
+    }
+
+    if (changed) {
+      journalEntries.push({
+        key: k,
+        field: ozonSettingFieldName(k),
+        was: wasCell,
+        became: isStringKey ? String(val == null ? '' : val) : String(val)
+      });
     }
   }
 
   SpreadsheetApp.flush();
+  appendOzonSettingsJournal(username, journalEntries);
   return getOzonSettings();
 }
 
