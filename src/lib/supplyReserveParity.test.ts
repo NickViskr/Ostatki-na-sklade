@@ -39,8 +39,10 @@ function rq(over: Partial<OzonSupplyRequestRow> & { items?: any[] }): OzonSupply
   return { id: 'R', date: ago(0.5), cabinet: 'M', draftId: '', orderId: '', dropOffName: '', clusters: '', itemsJSON: JSON.stringify(items || []), who: '', status: 'Создана', ...rest };
 }
 
+// supplyReservesByArticle reads no sheet, so one stand serves every comparison.
+const reserveStand = freshStand();
 function both(shipments: ExternalShipment[], requests: OzonSupplyRequestRow[]) {
-  const stand = freshStand();
+  const stand = reserveStand;
   const ts = buildPendingSupplies({ shipments, requests, skus: SKUS, now: NOW }).byArticle;
   const gs = stand.context.supplyReservesByArticle(shipments, requests, SKUS, NOW.getTime());
   return { ts, gs: JSON.parse(JSON.stringify(gs)) };

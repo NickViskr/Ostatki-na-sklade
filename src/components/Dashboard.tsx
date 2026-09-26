@@ -237,6 +237,10 @@ export const Dashboard: React.FC = React.memo(() => {
     for (const s of skus) {
       myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
     }
+    // Item 85, step 1.6: the same availability as the «Остатки Озон» tab, components included.
+    for (const k of kits) for (const c of k.components || []) {
+      if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku);
+    }
     return buildOzonCoverage({
       stocks: ozonStocks,
       sales: ozonSales || [],

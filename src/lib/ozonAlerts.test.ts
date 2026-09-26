@@ -67,6 +67,8 @@ function makeCoverage(clusters: ClusterCoverageRow[]): OzonCoverageResult {
     unmetDeficitQty: clusters.reduce((s, c) => s + c.unmetQty, 0),
     pendingTotal: 0,
     freeMyStock: 0,
+    shippableMyStock: 0,
+    sharedLimitedBy: [],
     clusters,
     factory: null,
     speedCorrection: null,

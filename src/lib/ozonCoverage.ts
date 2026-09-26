@@ -716,8 +716,15 @@ export interface ArticleCoverage {
   unmetDeficitQty: number;
   /** Весь локальный зачёт по товару, шт (включая позиции без кластера). */
   pendingTotal: number;
-  /** Свободный остаток Моего склада после резерва под созданные заявки, шт. */
+  /** Свободный остаток Моего склада после резерва под созданные заявки, шт. Item 85, step 1.6:
+   *  the reserve is taken per PHYSICAL article, so a kit's reserve of shared bottles lowers every
+   *  other kit (and the bottles themselves) too. */
   freeMyStock: number;
+  /** Item 85, step 1.6. What the recommendation may hand out: freeMyStock, cut further when a
+   *  component shared with other kits is short and is split between them. */
+  shippableMyStock: number;
+  /** Item 85, step 1.6. Shared components whose split cut this article below its free stock. */
+  sharedLimitedBy: string[];
   clusters: ClusterCoverageRow[];
   factory: FactorySignal | null;
   /** Пункт 42. Разбор коррекции скорости при дефиците. null — коррекция не применялась. */
@@ -1645,7 +1652,53 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       .filter(Boolean)
   );
 
-  const articles: ArticleCoverage[] = [];
+  // Item 85, step 1.6. A virtual kit is its components on the shelf; anything else is itself.
+  const kitParts = new Map<string, { article: string; norm: number }[]>();
+  for (const kit of input.kits || []) {
+    if (!kit || kit.type !== 'virtual') continue;
+    const kitSku = String(kit.kitSku || '').trim();
+    const parts = (kit.components || [])
+      .map((c) => ({ article: String(c.componentSku || '').trim(), norm: Number(c.quantity) || 0 }))
+      .filter((c) => c.article && c.norm > 0);
+    if (kitSku && parts.length) kitParts.set(kitSku, parts);
+  }
+  const partsOf = (article: string) => kitParts.get(article) || [{ article, norm: 1 }];
+  const hasStock = (article: string) => Object.prototype.hasOwnProperty.call(input.myStockAvailability, article);
+  const stockOf = (article: string) => Number(input.myStockAvailability[article]) || 0;
+  // The reserve of created supplies per PHYSICAL article: a kit supply holds its components.
+  const physReserve: Record<string, number> = {};
+  const reserveByArticle = (input.pending && input.pending.byArticle) || {};
+  for (const supplyArticle of Object.keys(reserveByArticle)) {
+    const qty = Math.max(0, Number(reserveByArticle[supplyArticle]) || 0);
+    for (const p of partsOf(supplyArticle)) physReserve[p.article] = (physReserve[p.article] || 0) + qty * p.norm;
+  }
+  /** Free on «Мой склад», counting every reserve on the same physical pieces. Without the stock
+   *  of every component the old per-article figure stays (the caller's availability minus the
+   *  article's own reserve). */
+  const ownFreeOf = (article: string, fallback: number): number => {
+    const parts = kitParts.get(article);
+    if (!parts) return hasStock(article) ? Math.max(0, stockOf(article) - (physReserve[article] || 0)) : fallback;
+    if (!parts.every((p) => hasStock(p.article))) return fallback;
+    let units = Number.POSITIVE_INFINITY;
+    for (const p of parts) units = Math.min(units, Math.floor((stockOf(p.article) - (physReserve[p.article] || 0)) / p.norm));
+    return Math.max(0, isFinite(units) ? units : 0);
+  };
+
+  interface ArticleDraft {
+    article: string;
+    stockAgg: ArticleStockAgg;
+    pcsPerBox: number;
+    leadTimeDays: number;
+    myStockAvailable: number;
+    pendingTotal: number;
+    freeMyStock: number;
+    clusterRows: ClusterCoverageRow[];
+    articleQtySold: number;
+    unboundQtySold: number;
+    unboundEstimated: number;
+    totalEstimated: number;
+  }
+  const drafts: ArticleDraft[] = [];
 
   for (const article of articleSet) {
     const stockAgg: ArticleStockAgg = stocksByArticle[article] || { article, totalShelf: 0, unboundShelf: 0, unboundOzonInFlight: 0, byCluster: {} };
@@ -1658,7 +1711,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     // и не может быть повторно распределён в другой кластер.
     const pendingByCluster = (input.pending && input.pending.byArticleCluster[article]) || {};
     const pendingTotal = Math.max(0, Number(input.pending && input.pending.byArticle[article]) || 0);
-    const freeMyStock = Math.max(0, myStockAvailable - pendingTotal);
+    const freeMyStock = ownFreeOf(article, Math.max(0, myStockAvailable - pendingTotal));
 
     const qtyByClusterId: Record<string, number> = {};
     const perDayByClusterId: Record<string, number> = {};
@@ -1759,6 +1812,93 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     }
     clusterRows.sort((a, b) => b.qtySold - a.qtySold);
 
+    drafts.push({
+      article, stockAgg, pcsPerBox, leadTimeDays, myStockAvailable, pendingTotal, freeMyStock,
+      clusterRows, articleQtySold, unboundQtySold, unboundEstimated, totalEstimated
+    });
+  }
+
+  // ===== Item 85, step 1.6: a component shared by several kits is split between them =====
+  // Each kit used to see ALL the bottles as its own, so two kits could be recommended more
+  // bottles together than lie on the shelf. When the kits' combined need of a shared component
+  // exceeds what is free of it, the component is split in proportion to each kit's need, the
+  // kits limited elsewhere (their own bowls) are given only what they can use, and the rest
+  // goes to the others — repeated until nothing moves. A component sold on Ozon by itself takes
+  // part as one more claimant with norm 1.
+  const wantByArticle: Record<string, number> = {};
+  for (const d of drafts) {
+    wantByArticle[d.article] = d.clusterRows.reduce((sum, r) => sum + (r.recommendation ? r.recommendation.wantQty : 0), 0);
+  }
+  const claimants = new Map<string, { article: string; norm: number }[]>();
+  for (const d of drafts) {
+    for (const p of partsOf(d.article)) {
+      const list = claimants.get(p.article) || [];
+      list.push({ article: d.article, norm: p.norm });
+      claimants.set(p.article, list);
+    }
+  }
+  const freeByDraft: Record<string, number> = {};
+  for (const d of drafts) freeByDraft[d.article] = d.freeMyStock;
+  // alloc[article][component] — units of the ARTICLE the component allows; absent = no limit.
+  const alloc: Record<string, Record<string, number>> = {};
+  const sharedComponents = Array.from(claimants.keys())
+    .filter((c) => (claimants.get(c) || []).length > 1 && hasStock(c))
+    .sort();
+  const capExcept = (article: string, skip: string) => {
+    let cap = freeByDraft[article];
+    const own = alloc[article] || {};
+    for (const c of Object.keys(own)) if (c !== skip) cap = Math.min(cap, own[c]);
+    return cap;
+  };
+  for (let round = 0; round < 20; round++) {
+    let changed = false;
+    for (const c of sharedComponents) {
+      const list = claimants.get(c) || [];
+      const budget = Math.max(0, stockOf(c) - (physReserve[c] || 0));
+      const demand = list.map((x) => ({ ...x, units: Math.max(0, Math.min(wantByArticle[x.article] || 0, capExcept(x.article, c))) }));
+      const total = demand.reduce((sum, x) => sum + x.units * x.norm, 0);
+      const next: Record<string, number> = {};
+      if (total <= budget) {
+        for (const x of demand) next[x.article] = Number.POSITIVE_INFINITY;
+      } else {
+        let left = budget;
+        for (const x of demand) {
+          next[x.article] = Math.floor((budget * (x.units * x.norm) / total) / x.norm);
+          left -= next[x.article] * x.norm;
+        }
+        // Pieces left by the rounding go one unit at a time to the largest unmet need.
+        let moved = true;
+        while (moved) {
+          moved = false;
+          const order = demand
+            .filter((x) => next[x.article] < x.units && x.norm <= left)
+            .sort((a, b) => ((b.units - next[b.article]) - (a.units - next[a.article])) || a.article.localeCompare(b.article));
+          if (order.length) {
+            next[order[0].article] += 1;
+            left -= order[0].norm;
+            moved = true;
+          }
+        }
+      }
+      for (const x of demand) {
+        const prev = alloc[x.article] && alloc[x.article][c];
+        if (prev !== next[x.article]) {
+          if (!alloc[x.article]) alloc[x.article] = {};
+          alloc[x.article][c] = next[x.article];
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+
+  const articles: ArticleCoverage[] = [];
+  for (const d of drafts) {
+    const { article, stockAgg, pcsPerBox, leadTimeDays, myStockAvailable, pendingTotal, freeMyStock, clusterRows,
+      articleQtySold, unboundQtySold, unboundEstimated, totalEstimated } = d;
+    const shippableMyStock = capExcept(article, '');
+    const sharedLimitedBy = Object.keys(alloc[article] || {}).filter((c) => alloc[article][c] < freeMyStock).sort();
+
     // Распределение остатка Моего склада между кластерами: остаток один на всех, поэтому
     // рекомендации выдаются по очереди — сначала приоритетные (по убыванию коэффициента),
     // затем остальные по возрастанию покрытия. Кому не хватило — урезанная рекомендация.
@@ -1767,7 +1907,7 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     // of a slow cluster included. Before, boxesNeeded was recomputed from neededQty here, so
     // the box rounding lived in two places at once and would have drifted apart.
     const boxSize = pcsPerBox > 0 ? pcsPerBox : 1;
-    let remainingStock = freeMyStock;
+    let remainingStock = shippableMyStock;
     const distributionOrder = clusterRows
       .filter(r => r.recommendation !== null)
       .sort((a, b) => {
@@ -1826,6 +1966,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       unmetDeficitQty,
       pendingTotal,
       freeMyStock,
+      shippableMyStock,
+      sharedLimitedBy,
       clusters: clusterRows,
       factory,
       speedCorrection: speedCorrections[article] || null,

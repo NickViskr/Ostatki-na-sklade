@@ -484,6 +484,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     for (const s of skus) {
       myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
     }
+    // Item 85, step 1.6: shared kit components are split by their own stock — give every
+    // component its figure even when it has no SKU card.
+    for (const k of kits) for (const c of k.components || []) {
+      if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku);
+    }
     const perfAfterAvailability = performance.now();
     const result = buildOzonCoverage({
       stocks: filteredOzonStocks,
@@ -515,6 +520,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     const myStockAvailability: Record<string, number> = {};
     for (const sku of skus) {
       myStockAvailability[sku.sku] = getEffectiveAvailability(sku.sku);
+    }
+    for (const k of kits) for (const c of k.components || []) {
+      if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku);
     }
     const perfStart = performance.now();
     const result = buildOzonCoverage({
@@ -828,6 +836,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
           name: row.name,
           myStockAvailable: row.myStockAvailable,
           freeMyStock: row.freeMyStock,
+          shippableMyStock: row.shippableMyStock,
+          sharedLimitedBy: row.sharedLimitedBy || [],
           pendingTotal: row.pendingTotal,
           minCoverage,
           clusters,
@@ -1152,6 +1162,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                 >
                                   свободно {fmtInt(s.freeMyStock)} шт
                                   {s.pendingTotal > 0 && <span className="text-amber-500"> (из {fmtInt(s.myStockAvailable)})</span>}
+                                  {/* Item 85, step 1.6: a shared component is split between the kits. */}
+                                  {s.sharedLimitedBy.length > 0 && s.shippableMyStock < s.freeMyStock && (
+                                    <span
+                                      className="block text-orange-600"
+                                      title={`Компоненты ${s.sharedLimitedBy.join(', ')} общие с другими комплектами, и на все их потребности не хватает. Они поделены между комплектами пропорционально потребности кластеров; этому товару досталось на ${fmtInt(s.shippableMyStock)} шт.`}
+                                    >
+                                      доля общих компонентов: {fmtInt(s.shippableMyStock)} шт
+                                    </span>
+                                  )}
                                 </span>
                               </div>
                               {s.name && <div className="text-[11px] text-slate-500 truncate" title={s.name}>{s.name}</div>}
