@@ -608,7 +608,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
         // forecast speed, so «хватит на N дн.» never disagrees with the signal itself.
         factoryDaysLeft: art.factory ? art.factory.daysLeft : (art.forecastPerDay > 0 ? (art.totalEstimated + Math.max(0, art.freeMyStock) + (factoryOnOrder[art.article] || 0)) / art.forecastPerDay : null),
         inFlightTotal: art.clusters.reduce((s, c) => s + (c.inFlightQty || 0), 0) + (pendingSupplies.unboundInFlightByArticle[art.article] || 0),
-        factoryThreshold: (Number(art.leadTimeDays) || 0) + ozonSettings.minStockDays,
+        // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
+        factoryThreshold: (Number(art.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays,
         clusters: clustersWithNeed,
       };
     });
@@ -616,7 +617,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     // Пункт 29, этап E: замер времени. Диагностика, логику не меняет.
     console.log(`OZONPERF coverageRows total=${Math.round(performance.now() - rowsPerfStart)}ms rows=${rows.length}`);
     return rows;
-  }, [coverage, filteredOzonStocks, filteredOzonSales, skus, ozonSettings.minStockDays, factoryOnOrder, pendingSupplies]);
+  }, [coverage, filteredOzonStocks, filteredOzonSales, skus, ozonSettings.minStockDays, ozonSettings.deliveryToOzonDays, factoryOnOrder, pendingSupplies]);
 
   // Пункт 36. Компоненты виртуальных комплектов: на фабрике заказывают их, а не комплект.
   // Порядок тот же, что в основной таблице — от самых быстрых к самым медленным.
@@ -1502,7 +1503,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('coverage') && (
                           <th className="p-3 text-right">
                             Покрытие
-                            <ColHint text="На сколько дней хватит расчётного остатка сверх неснижаемого запаса. В расчётный остаток входит и то, что уже едет в кластер по заявкам. Красный — запас ниже неснижаемого; жёлтый — ниже целевого, и по кластеру есть рекомендация поставки; зелёный — норма. У приоритетного кластера оба порога умножены на его коэффициент. «∞» означает, что продаж нет, а остаток есть." />
+                            <ColHint text="На сколько дней хватит расчётного остатка сверх неснижаемого запаса. В расчётный остаток входит и то, что уже едет в кластер по заявкам. Красный — поставка, отправленная сегодня, всё равно приедет уже после того, как запас упадёт ниже неснижаемого (учитывает «Срок доставки до Ozon»); жёлтый — ниже целевого, и по кластеру есть рекомендация поставки; зелёный — норма. У приоритетного кластера оба порога умножены на его коэффициент (срок доставки — нет, он не зависит от приоритета). «∞» означает, что продаж нет, а остаток есть." />
                           </th>
                         )}
                         {isColVisible('pending') && (
@@ -1520,13 +1521,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         {isColVisible('recommendation') && (
                           <th className="p-3 text-right">
                             Рекомендация
-                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому. Неснижаемый остаток входит внутрь целевого запаса, а не прибавляется к нему. Кратно коробке, кроме двух случаев: медленному кластеру, которому целая коробка дала бы запас дольше настройки «Максимальный срок продаж кластера, дней», предлагается неполная коробка ровно на потребность, и неполная коробка предлагается тогда, когда на складе не набирается целой. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
+                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому, с учётом времени на дорогу до Ozon. Неснижаемый остаток входит внутрь целевого запаса, а не прибавляется к нему; срок доставки — прибавляется поверх целевого запаса (настройка «Срок доставки до Ozon, дней»): пока коробка едет, кластер продолжает продавать. Кратно коробке, кроме двух случаев: медленному кластеру, которому целая коробка дала бы запас дольше настройки «Максимальный срок продаж кластера, дней» (считается уже ПОСЛЕ приезда поставки), предлагается неполная коробка ровно на потребность, и неполная коробка предлагается тогда, когда на складе не набирается целой. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
                           </th>
                         )}
                         {isColVisible('factory') && (
                           <th className="p-3 text-right">
                             Заказ на фабрике
-                            <ColHint text="Сигнал «пора заказывать новую партию». Загорается по одной из двух причин: «кончается везде» — товара на Ozon и на твоём складе вместе хватит меньше, чем на срок поставки плюс неснижаемый запас; «нечем пополнить» — кластерам нужна поставка, а на твоём складе пусто, и перебросить остаток между кластерами Ozon нельзя. Объём заказа — больший из расчёта по настройке «Объём заказа на фабрике, дней» и непокрытой потребности кластеров. Наведи курсор на ячейку: там видно, на сколько дней хватит запаса и какой порог срабатывания." />
+                            <ColHint text="Сигнал «пора заказывать новую партию». Загорается по одной из двух причин: «кончается везде» — товара на Ozon и на твоём складе вместе хватит меньше, чем на срок поставки с фабрики плюс срок доставки до Ozon плюс неснижаемый запас; «нечем пополнить» — кластерам нужна поставка, а на твоём складе пусто, и перебросить остаток между кластерами Ozon нельзя. Объём заказа — больший из расчёта по настройке «Объём заказа на фабрике, дней» и непокрытой потребности кластеров. Наведи курсор на ячейку: там видно, на сколько дней хватит запаса и какой порог срабатывания." />
                           </th>
                         )}
                         {isColVisible('orderCost') && (
@@ -1810,7 +1811,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
                                       className="text-rose-600 font-bold text-right hover:underline"
-                                      title={`Запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + неснижаемый запас). В запас входят остаток на Ozon, Мой склад и заказанное на фабрике ${fmtInt(factoryWaitingQty)} шт. Нажми, чтобы отметить размещённый заказ.\n${factoryOrdersDetail}`}
+                                      title={`Запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + срок доставки до Ozon ${Number(ozonSettings.deliveryToOzonDays) || 0} дн. + неснижаемый запас). В запас входят остаток на Ozon, Мой склад и заказанное на фабрике ${fmtInt(factoryWaitingQty)} шт. Нажми, чтобы отметить размещённый заказ.\n${factoryOrdersDetail}`}
                                     >
                                       {factoryWaitingQty > 0 ? 'дозаказать ' : ''}{fmtInt(factoryOrderQty)} шт
                                       <span className="block text-[10px] font-semibold text-rose-400">
@@ -2190,7 +2191,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                     <tbody>
                       {componentRows.map((c) => {
                         const needOrder = !!(c.factory && c.factory.orderQty > 0);
-                        const threshold = (Number(c.leadTimeDays) || 0) + ozonSettings.minStockDays;
+                        // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
+                        const threshold = (Number(c.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays;
                         // Разбор заказов на фабрике для компонента — по образцу основной таблицы (строки 1129-1134),
                         // иначе после оформления заказа он пропадал бы из вида: сигнал гас, а сам заказ было не видно и не открыть.
                         const list = factoryOrdersByArticle[c.component] || [];
@@ -2257,7 +2259,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               ) : c.factory ? (
                                 <span
                                   className="font-semibold text-slate-700"
-                                  title={`Запаса хватит на ${Math.round(c.factory.daysLeft)} дн. при пороге ${Math.round(threshold)} дн. (срок поставки компонента ${fmtInt(c.leadTimeDays)} дн. + неснижаемый запас).`}
+                                  title={`Запаса хватит на ${Math.round(c.factory.daysLeft)} дн. при пороге ${Math.round(threshold)} дн. (срок поставки компонента ${fmtInt(c.leadTimeDays)} дн. + срок доставки до Ozon ${Number(ozonSettings.deliveryToOzonDays) || 0} дн. + неснижаемый запас).`}
                                 >
                                   {Math.round(c.factory.daysLeft)} дн
                                 </span>

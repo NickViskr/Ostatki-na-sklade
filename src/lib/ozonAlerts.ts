@@ -265,7 +265,8 @@ export function buildCoverageAlerts(
     // Пункт 35. Алерт зажигается только тогда, когда есть что дозаказать.
     // Размещённый заказ входит в ТРУБУ и алерт больше не гасит, а уменьшает объём дозаказа.
     if (art.factory && art.factory.orderQty > 0) {
-      const threshold = Math.round((Number(art.leadTimeDays) || 0) + settings.minStockDays);
+      // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
+      const threshold = Math.round((Number(art.leadTimeDays) || 0) + (Number(settings.deliveryToOzonDays) || 0) + settings.minStockDays);
       const onOrder = Math.round(Number(art.factory.onOrderQty) || 0);
       const reasonText = `хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${threshold} дн.`;
       const orderText = onOrder > 0
@@ -373,7 +374,8 @@ export function buildCoverageAlerts(
 
       const name = namesByArticle && namesByArticle[comp.component] ? String(namesByArticle[comp.component]).trim() : '';
       const namePart = name ? `${name} (компонент ${comp.component})` : `компонент ${comp.component}`;
-      const threshold = Math.round((Number(comp.leadTimeDays) || 0) + settings.minStockDays);
+      // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
+      const threshold = Math.round((Number(comp.leadTimeDays) || 0) + (Number(settings.deliveryToOzonDays) || 0) + settings.minStockDays);
       const onOrder = Math.round(Number(comp.factory.onOrderQty) || 0);
       const reasonText = `хватит на ${Math.round(comp.factory.daysLeft)} дн. при пороге ${threshold} дн.`;
       const orderText = onOrder > 0

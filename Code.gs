@@ -609,6 +609,9 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'speedWeeks',          value: 4,  desc: 'Полных недель для расчёта скорости продаж' },
   { key: 'minStockDays',        value: 7,  desc: 'Неснижаемый остаток, дней продаж' },
   { key: 'targetStockDays',     value: 30, desc: 'Целевой запас на Ozon, дней' },
+  // Item 86 step C (owner, 26.09.2026): a supply travels this many days while the cluster keeps
+  // selling, and a factory order must also cover the same days from «Мой склад» to Ozon.
+  { key: 'deliveryToOzonDays',  value: 7,  desc: 'Срок доставки до Ozon, дней' },
   { key: 'maxClusterDays',      value: 100, desc: 'Максимальный срок продаж кластера после поставки, дней; 0 — отсекатель выключен' },
   { key: 'factoryOrderDays',    value: 60, desc: 'Объём заказа на фабрике, дней' },
   { key: 'deficitDays',         value: 7,  desc: 'Порог дефицита, дней: ниже этого запаса товар считается распроданным; 0 — коррекция скорости выключена' },
@@ -5529,6 +5532,13 @@ function getOzonSettings() {
     }
   }
 
+  // Item 86 step C: deliveryToOzonDays is non-negative (0 allowed — no delay planned for); a
+  // negative value written directly into the sheet falls back to the default instead of
+  // planning for a negative travel time.
+  if (result.deliveryToOzonDays !== undefined && !(result.deliveryToOzonDays >= 0)) {
+    delete result.deliveryToOzonDays;
+  }
+
   let appended = false;
   for (let d = 0; d < OZON_SETTINGS_DEFAULTS.length; d++) {
     const def = OZON_SETTINGS_DEFAULTS[d];
@@ -5623,6 +5633,15 @@ function saveOzonSettings(data) {
     }
     if (k === 'directClusters') {
       keysToSave[k] = normalizeDirectClustersSetting(rawVal);
+      continue;
+    }
+    // Item 86 step C: deliveryToOzonDays is non-negative (0 allowed — no delay planned for);
+    // an invalid, empty or negative value is saved as the default (7) rather than as garbage.
+    if (k === 'deliveryToOzonDays') {
+      const n = Number(rawVal);
+      keysToSave[k] = (rawVal === '' || rawVal === null || rawVal === undefined || isNaN(n) || n < 0)
+        ? defaultsMap[k].value
+        : n;
       continue;
     }
     if (k === 'dropOffWarehouseName') {

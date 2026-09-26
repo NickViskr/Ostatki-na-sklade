@@ -8752,6 +8752,64 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
   check('86: getOzonStockHistory — есть ветка в switch', /case 'getOzonStockHistory': result = getOzonStockHistory\(\); break;/.test(src));
 })();
 
+// ================= Item 86 step C: deliveryToOzonDays settings plumbing =================
+(function test86StepCSettings() {
+  // 1. Отсутствующая настройка — дефолт 7, и дефолт дописывается в лист (как любая другая).
+  const h = freshHarness();
+  h.clearOzonSettingsSheet();
+  const settings1 = h.getOzonSettings();
+  check('86C: deliveryToOzonDays отсутствует в листе -> дефолт 7', settings1.deliveryToOzonDays === 7, String(settings1.deliveryToOzonDays));
+  const sheetRows1 = h.dumpRegistrySheet('Настройки Ozon');
+  const hasRow = sheetRows1.some(r => String(r[0]) === 'deliveryToOzonDays' && Number(r[1]) === 7);
+  check('86C: дефолт дописан строкой в лист «Настройки Ozon»', hasRow, JSON.stringify(sheetRows1));
+
+  // 2. saveOzonSettings: '0' сохраняется как 0 (выключено планирование срока доставки).
+  const h2 = freshHarness();
+  h2.clearOzonSettingsSheet();
+  h2.getOzonSettings(); // создаёт лист с дефолтами
+  h2.saveOzonSettings({ deliveryToOzonDays: '0' });
+  const settings2 = h2.getOzonSettings();
+  check('86C: saveOzonSettings(\'0\') -> 0', settings2.deliveryToOzonDays === 0, String(settings2.deliveryToOzonDays));
+
+  // 3. saveOzonSettings: мусорная строка -> дефолт 7 (не NaN и не прежнее значение молча).
+  const h3 = freshHarness();
+  h3.clearOzonSettingsSheet();
+  h3.getOzonSettings();
+  h3.saveOzonSettings({ deliveryToOzonDays: 'abc' });
+  const settings3 = h3.getOzonSettings();
+  check('86C: saveOzonSettings(\'abc\') -> дефолт 7', settings3.deliveryToOzonDays === 7, String(settings3.deliveryToOzonDays));
+
+  // 4. saveOzonSettings: отрицательное значение -> дефолт 7 (не multiplied на -1, не отрицательный срок).
+  const h4 = freshHarness();
+  h4.clearOzonSettingsSheet();
+  h4.getOzonSettings();
+  h4.saveOzonSettings({ deliveryToOzonDays: -3 });
+  const settings4 = h4.getOzonSettings();
+  check('86C: saveOzonSettings(-3) -> дефолт 7', settings4.deliveryToOzonDays === 7, String(settings4.deliveryToOzonDays));
+
+  // 5. saveOzonSettings: обычное положительное значение сохраняется как есть.
+  const h5 = freshHarness();
+  h5.clearOzonSettingsSheet();
+  h5.getOzonSettings();
+  h5.saveOzonSettings({ deliveryToOzonDays: 10 });
+  const settings5 = h5.getOzonSettings();
+  check('86C: saveOzonSettings(10) -> 10', settings5.deliveryToOzonDays === 10, String(settings5.deliveryToOzonDays));
+
+  // 6. Прямая запись отрицательного значения в лист (не через сохранение) -> getOzonSettings
+  // подменяет его дефолтом, а не отдаёт наверх отрицательный срок доставки.
+  const h6 = freshHarness();
+  h6.clearOzonSettingsSheet();
+  h6.getOzonSettings(); // создаёт лист с полным набором дефолтов
+  const rows6 = h6.dumpRegistrySheet('Настройки Ozon');
+  const rowIdx = rows6.findIndex(r => String(r[0]) === 'deliveryToOzonDays');
+  const sheet6 = h6.getRegistrySheet('Настройки Ozon');
+  const raw6 = sheet6.__dump();
+  raw6[rowIdx][1] = -5;
+  sheet6.__setData(raw6);
+  const settings6 = h6.getOzonSettings();
+  check('86C: отрицательное значение в листе читается как дефолт 7', settings6.deliveryToOzonDays === 7, String(settings6.deliveryToOzonDays));
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

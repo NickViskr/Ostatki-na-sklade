@@ -13,6 +13,8 @@ interface OzonSettingsData {
   speedWeeks: number;
   minStockDays: number;
   targetStockDays: number;
+  /** Item 86 step C. Срок доставки до Ozon, дней: планируется поверх целевого запаса и порога заказа на фабрике. */
+  deliveryToOzonDays: number;
   maxClusterDays: number;
   factoryOrderDays: number;
   returnsToSalePct: number;
@@ -86,6 +88,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
     speedWeeks: 4,
     minStockDays: 7,
     targetStockDays: 30,
+    deliveryToOzonDays: 7,
     maxClusterDays: 100,
     factoryOrderDays: 60,
     returnsToSalePct: 80,
@@ -324,6 +327,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
               speedWeeks: Math.max(1, numSetting(res.data.speedWeeks, 4)),
               minStockDays: numSetting(res.data.minStockDays, 7),
               targetStockDays: numSetting(res.data.targetStockDays, 30),
+              deliveryToOzonDays: numSetting(res.data.deliveryToOzonDays, 7),
               maxClusterDays: numSetting(res.data.maxClusterDays, 100),
               factoryOrderDays: numSetting(res.data.factoryOrderDays, 60),
               returnsToSalePct: numSetting(res.data.returnsToSalePct, 80),
@@ -380,6 +384,7 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
         speedWeeks: Math.max(1, parseInt(String(form.speedWeeks), 10) || 1),
         minStockDays: Math.max(0, parseFloat(String(form.minStockDays)) || 0),
         targetStockDays: Math.max(0, parseFloat(String(form.targetStockDays)) || 0),
+        deliveryToOzonDays: Math.max(0, parseFloat(String(form.deliveryToOzonDays)) || 0),
         maxClusterDays: Math.max(0, parseFloat(String(form.maxClusterDays)) || 0),
         factoryOrderDays: Math.max(0, parseFloat(String(form.factoryOrderDays)) || 0),
         returnsToSalePct: Math.min(100, Math.max(0, parseFloat(String(form.returnsToSalePct)) || 0)),
@@ -491,6 +496,23 @@ export const OzonSettingsModal: React.FC<OzonSettingsModalProps> = ({ isOpen, on
                   value={form.targetStockDays}
                   onChange={(e) =>
                     setForm({ ...form, targetStockDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
+                  }
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Срок доставки до Ozon, дней
+                  <FieldHint position="bottom" text="Сколько дней поставка едет от твоего склада до складов Ozon — всё это время кластер продолжает продавать. Планируется поверх целевого запаса (рекомендация = скорость × (целевой запас + этот срок) − расчётный остаток) и поверх порога заказа на фабрике (порог = срок поставки с фабрики + этот срок + неснижаемый запас). Больше значение — крупнее и более ранние поставки в кластеры, раньше срабатывает сигнал заказа на фабрике. Меньше или 0 — поставки и заказ на фабрике считаются без запаса на дорогу, как раньше." />
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.deliveryToOzonDays}
+                  onChange={(e) =>
+                    setForm({ ...form, deliveryToOzonDays: e.target.value === '' ? 0 : parseFloat(e.target.value) })
                   }
                   className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-semibold text-slate-800 bg-slate-50/50"
                 />

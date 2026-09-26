@@ -5,7 +5,9 @@ import {
   buildComponentCoverage,
   buildOzonCoverage,
   calcCoverageDays,
+  calcFactorySignal,
   calcSupplyRecommendation,
+  coverageTone,
   factoryOnOrderByArticle,
   getLastFullWeeks,
   getMskWeekMonday,
@@ -234,6 +236,160 @@ describe('calcSupplyRecommendation', () => {
     expect(rec!.qty).toBe(50);
   });
 });
+
+// ===== Item 86, step C: deliveryToOzonDays (D) widens the need and the maxClusterDays ceiling =====
+describe('calcSupplyRecommendation: срок доставки до Ozon (item 86 step C)', () => {
+  it('D = 0 воспроизводит старое поведение день в день (регрессия)', () => {
+    const withD0 = calcSupplyRecommendation(10, 50, makeSettings({ targetStockDays: 20, deliveryToOzonDays: 0 }), 12, 1000);
+    const withoutD = calcSupplyRecommendation(10, 50, makeSettings({ targetStockDays: 20 }), 12, 1000);
+    expect(withD0).toEqual(withoutD);
+  });
+
+  it('need растёт на perDay × D: need = perDay × (target + D) − estimated', () => {
+    // need = 10 × (20 + 7) − 50 = 220, box = 12 → ceil(220/12) = 19 коробок = 228 шт
+    const rec = calcSupplyRecommendation(10, 50, makeSettings({ targetStockDays: 20, deliveryToOzonDays: 7 }), 12, 1000);
+    expect(rec).not.toBeNull();
+    expect(rec!.neededQty).toBe(220);
+    expect(rec!.boxes).toBe(19);
+    expect(rec!.qty).toBe(228);
+  });
+
+  it('maxClusterDays теперь — дни продаж ПОСЛЕ приезда поставки: (estimated + wantQty) / perDay − D', () => {
+    // need = 10*(10+5) - 0 = 150, box=1 → wantQty=150. (0+150)/10 - 5 = 10 дней <= maxClusterDays 10 — не срабатывает.
+    const ok = calcSupplyRecommendation(10, 0, makeSettings({ targetStockDays: 10, deliveryToOzonDays: 5, maxClusterDays: 10 }), 1, 1000);
+    expect(ok).not.toBeNull();
+    expect(ok!.partialByMaxDays).toBe(false);
+    expect(ok!.qty).toBe(150);
+
+    // Тот же кластер медленнее: perDay=1. need = 1*(10+5) - 0 = 15, box=42 → wantQty=42.
+    // (0+42)/1 - 5 = 37 дней > maxClusterDays 10 → неполная коробка ровно на потребность (15 шт),
+    // после чего (0+15)/1 - 5 = 10 <= 10 — не отсекается.
+    const partial = calcSupplyRecommendation(1, 0, makeSettings({ targetStockDays: 10, deliveryToOzonDays: 5, maxClusterDays: 10 }), 42, 1000);
+    expect(partial).not.toBeNull();
+    expect(partial!.partialByMaxDays).toBe(true);
+    expect(partial!.qty).toBe(15);
+    expect(partial!.fullBoxDays).toBe(37);
+  });
+
+  it('страховка: потолок ниже целевого запаса даже с учётом D — рекомендации нет', () => {
+    // need = 10*(10+5) - 0 = 150. (0+150)/10 - 5 = 10 > maxClusterDays 5 → неполная коробка = need = 150.
+    // Проверка (0+150)/10 - 5 = 10 всё ещё > 5 → null.
+    const rec = calcSupplyRecommendation(10, 0, makeSettings({ targetStockDays: 10, deliveryToOzonDays: 5, maxClusterDays: 5 }), 1, 1000);
+    expect(rec).toBeNull();
+  });
+
+  it('приоритетный кластер: D не умножается на коэффициент, а targetStockDays приходит уже умноженным вызывающей стороной', () => {
+    // Имитация effectiveSettings из buildOzonCoverage: targetStockDays × k = 20 × 1.5 = 30, D остаётся 7.
+    // need = 10 × (30 + 7) − 0 = 370.
+    const rec = calcSupplyRecommendation(10, 0, makeSettings({ targetStockDays: 30, deliveryToOzonDays: 7 }), 1, 1000);
+    expect(rec!.neededQty).toBe(370);
+  });
+});
+
+// ===== Item 86, step C: calcFactorySignal's threshold widens by D =====
+describe('calcFactorySignal: срок доставки до Ozon входит в порог (item 86 step C)', () => {
+  // perDay=10, lead=3, minStockDays=7, factoryOrderDays=14, D=7, box=1, totalEstimated=100.
+  const SETTINGS = makeSettings({ minStockDays: 7, factoryOrderDays: 14, deliveryToOzonDays: 7 });
+
+  it('D = 0 воспроизводит старый порог lead + minStockDays день в день (регрессия)', () => {
+    const withD0 = calcFactorySignal(100, 0, 10, 3, 1, { ...SETTINGS, deliveryToOzonDays: 0 });
+    const withoutD = calcFactorySignal(100, 0, 10, 3, 1, { ...SETTINGS, deliveryToOzonDays: undefined });
+    expect(withD0).toEqual(withoutD);
+    // thresholdDays = 3 + 0 + 7 = 10, thresholdQty = 100; труба (100) НЕ ниже порога — сигнала нет.
+    expect(withoutD).toBeNull();
+  });
+
+  it('thresholdDays = lead + D + minStockDays; тот же запас теперь ниже порога', () => {
+    // thresholdDays = 3 + 7 + 7 = 17, thresholdQty = 170 > труба 100 → сигнал загорается,
+    // хотя при D = 0 (тест выше) тот же запас порога не пробивал.
+    const sig = calcFactorySignal(100, 0, 10, 3, 1, SETTINGS);
+    expect(sig).not.toBeNull();
+    expect(sig!.thresholdDays).toBe(17);
+    expect(sig!.thresholdQty).toBe(170);
+    // targetQty = 10 × (17 + 14) = 310; orderQty = ceil((310 − 100)/1) × 1 = 210.
+    expect(sig!.orderQty).toBe(210);
+  });
+
+  it('приоритет не участвует: D читается из settings как есть, никакого умножения на коэффициент внутри calcFactorySignal', () => {
+    const sig1 = calcFactorySignal(100, 0, 10, 3, 1, { ...SETTINGS, deliveryToOzonDays: 7 });
+    const sig2 = calcFactorySignal(100, 0, 10, 3, 1, { ...SETTINGS, deliveryToOzonDays: 7 });
+    expect(sig1!.thresholdDays).toBe(sig2!.thresholdDays);
+  });
+});
+
+describe('calcFactorySignal: 500 сгенерированных наборов (item 86 step C)', () => {
+  it('pipelineQty >= thresholdQty ⇔ нет сигнала \'total\' (при нулевом дефиците кластеров — сигнала нет вовсе)', () => {
+    let seed = 8608;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let n = 0; n < 500; n++) {
+      const perDay = rnd() * 20 + 0.1;
+      const totalEstimated = Math.floor(rnd() * 500);
+      const myStock = Math.floor(rnd() * 500);
+      const lead = Math.floor(rnd() * 20);
+      const deliveryToOzonDays = Math.floor(rnd() * 15);
+      const minStockDays = Math.floor(rnd() * 20);
+      const settings = makeSettings({ minStockDays, deliveryToOzonDays, factoryOrderDays: 14 });
+      const sig = calcFactorySignal(totalEstimated, myStock, perDay, lead, 1, settings, 0, 0);
+      const thresholdQty = perDay * (lead + deliveryToOzonDays + minStockDays);
+      const pipelineQty = totalEstimated + myStock;
+      const isBelow = pipelineQty < thresholdQty;
+      expect(isBelow, `set ${n}`).toBe(sig !== null);
+      if (sig) expect(sig.reason, `set ${n}`).toBe('total');
+    }
+  });
+});
+
+describe('buildOzonCoverage: сквозной путь с deliveryToOzonDays (item 86 step C)', () => {
+  const NOW = new Date('2024-01-10T10:00:00Z');
+  const WEEKS = ['2023-12-11', '2023-12-18', '2023-12-25', '2024-01-01'];
+  const skus: SKUItem[] = [{ sku: 'A', price: 0, minStock: 0, pcsPerBox: 10, boxesPerPallet: 0, volumeLiters: 0, leadTimeDays: 5 }];
+  const sales: OzonSalesRow[] = WEEKS.map((week) => ({ week, cabinet: 'M', offerId: 'A', clusterName: 'Москва', qty: 70, updatedAt: '', days: 7 }));
+  // Продажи 70 шт/неделю × 4 недели / 28 дней = 10 шт/день.
+  const stock: OzonStockRow = { cabinet: 'M', sku: '', offerId: 'A', name: 'A', warehouseName: 'W', clusterName: 'Москва', clusterId: 'C1', available: 50, preparing: 0, requested: 0, transit: 0, excess: 0, returns: 0, other: 0, updatedAt: '' };
+
+  function run(deliveryToOzonDays: number | undefined, myStock: number) {
+    const settings: OzonCoverageSettings = {
+      speedWeeks: 4, minStockDays: 7, targetStockDays: 20, deliveryToOzonDays, maxClusterDays: 0,
+      factoryOrderDays: 14, returnsToSalePct: 0, excludedClusters: '', deficitDays: 0, demandGrowthPct: 0
+    };
+    const res = buildOzonCoverage({
+      stocks: [stock], sales, skus, clusters: [{ clusterId: 'C1', clusterName: 'Москва' }], settings,
+      myStockAvailability: { A: myStock }, now: NOW
+    });
+    return res.articles.find((a) => a.article === 'A')!;
+  }
+
+  it('рекомендация: D = 0 воспроизводит старое значение, D = 7 растит need на perDay × D (склада с избытком, чтобы не срезать)', () => {
+    const artD0 = run(0, 10000);
+    const artNoD = run(undefined, 10000);
+    expect(artD0.clusters[0].recommendation).toEqual(artNoD.clusters[0].recommendation);
+    // need = 10 × 20 − 50 = 150, box 10 → 150 шт ровно.
+    expect(artD0.clusters[0].recommendation!.qty).toBe(150);
+
+    const artD7 = run(7, 10000);
+    // need = 10 × (20 + 7) − 50 = 220, box 10 → ceil(220/10) = 22 коробки = 220 шт.
+    expect(artD7.clusters[0].recommendation!.qty).toBe(220);
+  });
+
+  it('заказ на фабрике: D = 0 воспроизводит старый порог, D = 7 растит thresholdQty/orderQty (склада мало, чтобы сигнал сработал)', () => {
+    const artD0 = run(0, 5);
+    const artNoD = run(undefined, 5);
+    expect(artD0.factory).toEqual(artNoD.factory);
+    // thresholdDays = 5 + 0 + 7 = 12, thresholdQty = 120; труба = 50 + 5 = 55 < 120 → сигнал есть.
+    expect(artD0.factory!.thresholdDays).toBe(12);
+    expect(artD0.factory!.thresholdQty).toBe(120);
+    // targetQty = 10 × (12 + 14) = 260; orderQty = ceil((260 − 55)/10) × 10 = 210.
+    expect(artD0.factory!.orderQty).toBe(210);
+
+    const artD7 = run(7, 5);
+    // thresholdDays = 5 + 7 + 7 = 19, thresholdQty = 190.
+    expect(artD7.factory!.thresholdDays).toBe(19);
+    expect(artD7.factory!.thresholdQty).toBe(190);
+    // targetQty = 10 × (19 + 14) = 330; orderQty = ceil((330 − 55)/10) × 10 = 280.
+    expect(artD7.factory!.orderQty).toBe(280);
+  });
+});
+
 // ===== Пункт 36: компоненты виртуальных комплектов =====
 
 const NOW = new Date('2024-01-10T10:00:00Z'); // среда; последняя полная неделя — 2024-01-01

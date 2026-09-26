@@ -327,6 +327,12 @@ this.CHINA_CARRYOVER_RECEIPT_DATE = CHINA_CARRYOVER_RECEIPT_DATE;
 vm.runInContext(chinaSrc + chinaExportLine, context, { filename: 'ChinaOrders.gs' });
 
 // ---------- Заглушки настроек и листа истории, подставляемые ПОСЛЕ загрузки файла ----------
+// Item 86 step C: the REAL sheet-based getOzonSettings is captured here, before it is shadowed
+// by the simple in-memory stub below (most tests want the stub — they set the window settings
+// directly via setOzonSettings without building a fake «Настройки Ozon» sheet). The settings
+// plumbing test (deliveryToOzonDays defaults/parsing) needs the real function, exposed
+// separately as getOzonSettingsSheetBased.
+const getOzonSettingsSheetBased = context.getOzonSettings;
 let ozonSettingsStore = { stockHistoryRetentionWeeks: 15 };
 context.getOzonSettings = function () {
   return Object.assign({}, ozonSettingsStore);
@@ -381,6 +387,13 @@ module.exports = {
   getTurnoverData: (...args) => context.getTurnoverData(...args),
   KAN_DAYS_HEADERS: context.KAN_DAYS_HEADERS,
   STOCK_SNAPSHOT_HEADERS: context.STOCK_SNAPSHOT_HEADERS,
+  // Item 86 step C: settings plumbing (getOzonSettings / saveOzonSettings) exercised against
+  // the FAKE «Настройки Ozon» sheet — same active-spreadsheet fakes every other sheet uses.
+  // getOzonSettings itself is stubbed above (context.getOzonSettings) for the many tests that
+  // just want a plain object, so the REAL sheet-based function is exposed under its own name.
+  getOzonSettings: (...args) => getOzonSettingsSheetBased(...args),
+  saveOzonSettings: (...args) => context.saveOzonSettings(...args),
+  clearOzonSettingsSheet() { delete sheetRegistry['Настройки Ozon']; },
   getRegistrySheet(name) { return sheetRegistry[name] || null; },
   dumpRegistrySheet(name) {
     const sheet = sheetRegistry[name];

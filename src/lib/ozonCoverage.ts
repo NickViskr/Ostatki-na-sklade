@@ -287,6 +287,12 @@ export interface OzonCoverageSettings {
   gmroiGreenPct?: number;
   /** Item 78e. GMROI below this % is red; between the two — yellow. */
   gmroiRedPct?: number;
+  /** Item 86, step C (owner, 26.09.2026): «Срок доставки до Ozon, дней» — how long a supply
+   *  travels while the cluster keeps selling. NOT multiplied by the priority coefficient (a
+   *  faraway cluster does not travel faster because it is important). Absent or 0 — no delay is
+   *  planned for (old behaviour). Default when the setting is missing is 7 — see the getters
+   *  in `Code.gs` and `useWarehouseStore.ts`. */
+  deliveryToOzonDays?: number;
 }
 
 export interface OzonClusterRef {
@@ -438,20 +444,32 @@ export function calcCoverageDays(
  * 'green' — enough; 'none' — no sales, nothing to measure. The old colour compared «days above
  * the minimum» with the whole target: a cluster could be amber with no recommendation, and the
  * priority coefficient was ignored. An excluded cluster has no minimum (as in calcCoverageDays).
+ *
+ * Item 86, step C (owner, 26.09.2026): a settings.deliveryToOzonDays (D) widens both thresholds
+ * by the time a supply spends on the road, D itself NOT multiplied by the priority coefficient:
+ *   red   ⇔ coverageDays (days above the minimum, calcCoverageDays' own meaning) < D — a supply
+ *           sent today would still arrive AFTER the stock crosses the minimum;
+ *   amber ⇔ estimated < perDay × (targetStockDays × k + D) — exactly calcSupplyRecommendation's
+ *           own «need > 0» (settings there already carries targetStockDays × k, D added once).
+ * D = 0 reproduces the old thresholds exactly (0 < 0 is false, the amber term loses +D).
  */
 export type CoverageTone = 'none' | 'red' | 'amber' | 'green';
 
 export function coverageTone(
   estimated: number,
   perDay: number,
-  settings: Pick<OzonCoverageSettings, 'minStockDays' | 'targetStockDays'>,
+  settings: Pick<OzonCoverageSettings, 'minStockDays' | 'targetStockDays' | 'deliveryToOzonDays'>,
   priorityK: number = 1,
   excluded: boolean = false
 ): CoverageTone {
   if (!(perDay > 0)) return 'none';
+  const D = Math.max(0, Number(settings.deliveryToOzonDays) || 0);
   const k = !excluded && priorityK > 1 ? priorityK : 1;
-  if (!excluded && estimated < perDay * settings.minStockDays * k) return 'red';
-  if (estimated < perDay * settings.targetStockDays * k) return 'amber';
+  if (!excluded) {
+    const coverageDays = (estimated - perDay * settings.minStockDays * k) / perDay;
+    if (coverageDays < D) return 'red';
+  }
+  if (estimated < perDay * (settings.targetStockDays * k + D)) return 'amber';
   return 'green';
 }
 
@@ -487,6 +505,18 @@ export interface SupplyRecommendation {
  * recommendation — that is a settings mismatch, not a slow cluster.
  * ITEM 51, second half: the stock of «Мой склад» is also cut IN PIECES, not in whole boxes.
  * A cluster short of a full box used to get nothing at all.
+ *
+ * Item 86, step C (owner, 26.09.2026): a supply travels settings.deliveryToOzonDays (D) days
+ * while the cluster keeps selling, so the need must cover the target stock PLUS that time on
+ * the road: need = perDay × (targetStockDays + D) − estimated. D is NOT multiplied by the
+ * priority coefficient — the caller already folds priority into targetStockDays (and
+ * minStockDays) before calling this function, so D is added on top, once.
+ * The maxClusterDays ceiling reads «days of sales left AFTER the supply arrives»: at arrival
+ * (D days from now) perDay × D more pieces will have sold, so the days left are
+ * (estimated + wantQty) / perDay − D, compared with maxDays. Same net-of-D figure is used for
+ * the insurance return-null check and for fullBoxDays (the days a FULL box would leave AFTER
+ * arrival) — one convention, so the UI hint stays true to what tripped the ceiling.
+ * D = 0 reproduces the old numbers exactly.
  */
 export function calcSupplyRecommendation(
   perDay: number,
@@ -496,8 +526,9 @@ export function calcSupplyRecommendation(
   myStockAvailable: number
 ): SupplyRecommendation | null {
   if (!(perDay > 0)) return null;
+  const D = Math.max(0, Number(settings.deliveryToOzonDays) || 0);
 
-  const need = perDay * settings.targetStockDays - estimated;
+  const need = perDay * (settings.targetStockDays + D) - estimated;
   if (need <= 0) return null;
 
   const box = pcsPerBox > 0 ? pcsPerBox : 1;
@@ -507,12 +538,12 @@ export function calcSupplyRecommendation(
   let partialByMaxDays = false;
   let fullBoxDays = 0;
   const maxDays = Number(settings.maxClusterDays) || 0;
-  if (maxDays > 0 && (estimated + wantQty) / perDay > maxDays) {
-    fullBoxDays = (estimated + wantQty) / perDay;
+  if (maxDays > 0 && (estimated + wantQty) / perDay - D > maxDays) {
+    fullBoxDays = (estimated + wantQty) / perDay - D;
     wantQty = Math.ceil(need);
     partialByMaxDays = true;
     // Insurance: a ceiling below the target stock — not even the exact need fits under it.
-    if ((estimated + wantQty) / perDay > maxDays) return null;
+    if ((estimated + wantQty) / perDay - D > maxDays) return null;
   }
 
   const stock = Math.floor(Math.max(0, myStockAvailable));
@@ -649,6 +680,10 @@ export interface FactorySignal {
  * Если ТРУБЫ хватает, но у кластеров есть непокрытая потребность, возвращается reason
  * 'clusterDeficit' с orderQty = 0: товар есть, он просто лежит не в том кластере, заказывать не надо.
  * Остатки исключённых кластеров и строки без КластерID входят в ТРУБУ.
+ *
+ * Item 86, step C (owner, 26.09.2026): a factory order must ALSO cover the week the goods spend
+ * travelling from «Мой склад» to Ozon (settings.deliveryToOzonDays, D) — thresholdDays widens to
+ * lead + D + minStockDays. D = 0 reproduces the old threshold exactly.
  */
 export function calcFactorySignal(
   totalEstimated: number,
@@ -662,9 +697,10 @@ export function calcFactorySignal(
 ): FactorySignal | null {
   if (!(perDay > 0)) return null;
   const lead = Number(leadTimeDays) || 0;
+  const deliveryDays = Math.max(0, Number(settings.deliveryToOzonDays) || 0);
   const onOrder = Math.max(0, Number(onOrderQty) || 0);
   const pipelineQty = totalEstimated + Math.max(0, myStockAvailable) + onOrder;
-  const thresholdDays = lead + settings.minStockDays;
+  const thresholdDays = lead + deliveryDays + settings.minStockDays;
   const thresholdQty = perDay * thresholdDays;
   const belowThreshold = pipelineQty < thresholdQty;
   const unmet = Math.max(0, Number(unmetDeficitQty) || 0);

@@ -243,6 +243,9 @@ export const useWarehouseStore = create<WarehouseState>()(
     speedWeeks: 4,
     minStockDays: 7,
     targetStockDays: 30,
+    // Item 86 step C: how many days a supply travels to Ozon; planned into the target stock
+    // and into the factory order threshold.
+    deliveryToOzonDays: 7,
     factoryOrderDays: 60,
     returnsToSalePct: 80,
     excludedClusters: '',
@@ -1739,6 +1742,12 @@ export const useWarehouseStore = create<WarehouseState>()(
       const n = Number(v);
       return Number.isFinite(n) ? n : def;
     };
+    // Item 86 step C: deliveryToOzonDays is also non-negative — a negative delivery time is
+    // nonsensical, and it falls back to the default rather than silently going negative.
+    const numNonNeg = (v: any, def: number): number => {
+      const n = num(v, def);
+      return n >= 0 ? n : def;
+    };
     try {
       const result = await get().fetchGas('getOzonInitialData', { data: {} });
       if (result.status !== 'success' || !result.data) {
@@ -1759,6 +1768,7 @@ export const useWarehouseStore = create<WarehouseState>()(
             speedWeeks: Math.max(1, num(s.speedWeeks, 4)),
             minStockDays: num(s.minStockDays, 7),
             targetStockDays: num(s.targetStockDays, 30),
+            deliveryToOzonDays: numNonNeg(s.deliveryToOzonDays, 7),
             maxClusterDays: num(s.maxClusterDays, 100),
             factoryOrderDays: num(s.factoryOrderDays, 60),
             returnsToSalePct: num(s.returnsToSalePct, 80),
