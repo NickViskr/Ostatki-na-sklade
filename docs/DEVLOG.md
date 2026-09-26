@@ -594,3 +594,4 @@
 | 2026-09-25 | Live timing after the faster save | Cloud Run log | Owner save 10,4 s (was 18–21 s); refresh of factory orders 4 s in the background. Status block rewritten for the compact. |
 | 2026-09-25 | Item 83 closed on the owner's word; stage 2 of «Заказы в Китае» next (batches «В пути» only; «Прибыла» were posted by hand) | docs | — |
 | 2026-09-26 | Item 84 steps 1–2 built (a346891, 99cc9df); Code.gs 198 deployed by the owner, Cloud Run `sklad-00097-7hc` | clasp + gcloud | Before-snapshots: Drive copies of both spreadsheets «… — резервная копия перед пунктом 84 (2026-09-26)» and xlsx exports; «БД Склад» unchanged between start and deploy (Остатки 18, История 363, Заказы на фабрике 16, Удаленное 12 rows). |
+| 2026-09-26 | Item 84 deployed but NOT checked live: owner postponed the check (first open of the module, after-snapshot comparison, first real posting and correction) until the next batches arrive; checklist in the plan status block | docs | — |

@@ -333,7 +333,7 @@
 Status on 2026-09-25. Full history of revisions, dated notes and defect
 dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
 
-- **Items:** 80 of 84 closed (83 closed 2026-09-25 on the owner's word). OPEN: 53, 84 (stage 2 of «Заказы в Китае»: plan agreed with the owner 2026-09-26, waiting for his «делай»). Also 27 (optional) and 37 (deferred: not reproducible on production data).
+- **Items:** 80 of 84 closed (83 closed 2026-09-25 on the owner's word). OPEN: 53, 84 (stage 2 of «Заказы в Китае»: built and deployed 2026-09-26 — Code.gs 198 + `sklad-00097-7hc`; NOT YET CHECKED LIVE: the owner has not yet opened the module after deployment (the first China action marks NV-0825-2 «уже на остатке»), the after-snapshot comparison was not done, and no real posting/correction has happened — the owner decided on 2026-09-26 to do the live check when the next batches (NV-0923-4, NV-0916-24) arrive; see «Item 84 live check» below). Also 27 (optional) and 37 (deferred: not reproducible on production data).
 - **Live:** Cloud Run `sklad-00097-7hc` (2026-09-26, commit `99cc9df`: item 84 posting window, marks, cancel; `index.html`, the main chunk and `ChinaOrdersTab` (holds the posting window) equal to the local build of the same export modulo hashes and the label). Before it: `sklad-00096-j5w` (`f9e3c53`: faster China save —
   `index.html`, the main chunk and `ChinaOrdersTab` verified byte for byte against the local build of
   the same export, modulo hashes and the label). The owner's first save on it took 10,4 s (Cloud Run log)
@@ -374,8 +374,8 @@ dossiers: `docs/HISTORY.md`; step-by-step: `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
   cancelled by hand his manual «Миска_двойная» order (dated 18.09, one day after the China row NV-0916-24 of
   17.09, so the hide rule «China orderedAt >= manual orderedAt» did not hide it); only the China row is left.
   He declined changing the hide rule. OPEN: the «БД Склад» factory sheet is still read twice per sync; leading zeros in SKU articles; whether a manual
-  edit after an AI check should drop ✓✓. DEFERRED: stage 2 (posting an arrived batch onto the warehouse, with
-  an «already on stock» mark for old batches like NV-0825-2), on the owner’s word.
+  edit after an AI check should drop ✓✓. Stage 2 = item 84 (see below).
+- **Item 84 live check (pending, do it when a batch arrives):** (1) after the first open of «Заказы в Китае»: NV-0825-2 shows «Уже на остатке» with no buttons; download both spreadsheets and compare with the before-snapshots (Drive copies «… — резервная копия перед пунктом 84 (2026-09-26)»; «БД Склад» then had Остатки 18, История 363, Заказы на фабрике 16, Удаленное 12 rows): «Остатки»/«История»/«Удаленное» unchanged, «Партии» gains 5 columns («Оприходование», «Дата оприходования», «Кто оприходовал», «Операция оприходования», «Учёт по артикулам (JSON)»). (2) first real posting: «История» rows «Склад [Китай: партия …]», stock qty/avg/cap up exactly, factory row 'received', batch mark «цена предварительная»; while arrived-unposted the row stays in the pipeline. (3) first correction on a report with debt 0: a qty-0 «Приход» «[Доводка себестоимости]», capitalization moves by the diff, mark «цена окончательная», a second upload writes nothing. Known limits: cancel works only within the 30-day receipt edit window; posting needs both the goods and the freight rate; `chinaRecostAll` from payment match/unmatch still recosts every batch (no money change for posted ones, but a row write).
 - **Git:** branch `work/cloud-run-and-tests`; everything up to this record pushed to GitHub 2026-09-25 on the
   owner’s word — `git push` only on the owner’s word.
 - **Production contour:** the auto-poll writes to the production DB (Script Property
