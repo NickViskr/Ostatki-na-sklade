@@ -198,19 +198,22 @@ function doPost(e) {
         sales: getOzonSales(payload.data && payload.data.weeksLimit),
         settings: getOzonSettings(),
         clusters: getOzonClusters(),
-        factoryOrders: getFactoryOrders()
+        factoryOrders: getFactoryOrders(),
+        // Item 86 step A: the speed calculation needs the stock-history sheet too.
+        stockHistory: getOzonStockHistory()
       };
       return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: ozonInitial }))
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    if (action === 'getOzonStocks' || action === 'getOzonSales' || action === 'getOzonSyncStatus' || action === 'getOzonSettings' || action === 'getOzonClusters' || action === 'getFactoryOrders') {
+    if (action === 'getOzonStocks' || action === 'getOzonSales' || action === 'getOzonSyncStatus' || action === 'getOzonSettings' || action === 'getOzonClusters' || action === 'getFactoryOrders' || action === 'getOzonStockHistory') {
       let readResult;
       if (action === 'getOzonStocks') readResult = getOzonStocks();
       else if (action === 'getOzonSales') readResult = getOzonSales(payload.data && payload.data.weeksLimit);
       else if (action === 'getOzonSyncStatus') readResult = getOzonSyncStatusInfo();
       else if (action === 'getOzonSettings') readResult = getOzonSettings();
       else if (action === 'getFactoryOrders') readResult = getFactoryOrders();
+      else if (action === 'getOzonStockHistory') readResult = getOzonStockHistory();
       else readResult = getOzonClusters();
       return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: readResult }))
         .setMimeType(ContentService.MimeType.JSON);
@@ -247,6 +250,8 @@ function doPost(e) {
       'getOzonSales',
       'getFactoryOrders',
       'getOzonSyncStatus',
+      // Item 86 step A: same reasoning — a pure read of «История остатков Ozon».
+      'getOzonStockHistory',
       // Item 81b: a pure read of the module's own spreadsheet. It writes nothing, and
       // queueing it behind a commit would make the tab wait for the warehouse.
       'getChinaBatches',
@@ -456,6 +461,7 @@ function doPost(e) {
       case 'saveOzonSales': result = saveOzonSales(data); break;
       case 'getOzonStocks': result = getOzonStocks(); break;
       case 'getOzonSales': result = getOzonSales(data && data.weeksLimit); break;
+      case 'getOzonStockHistory': result = getOzonStockHistory(); break;
       case 'getOzonSettings': result = getOzonSettings(); break;
       case 'saveOzonSettings': assertAdmin(currentUser); result = saveOzonSettings(data); break;
       case 'saveOzonClusters': result = saveOzonClusters(data); break;
@@ -617,7 +623,7 @@ const OZON_SETTINGS_DEFAULTS = [
   { key: 'turnoverFastDays',    value: 20, desc: 'Оборачиваемость: лидер — один оборот быстрее стольких дней' },
   { key: 'gmroiGreenPct',       value: 100, desc: 'GMROI, %: от этого значения и выше — зелёный' },
   { key: 'gmroiRedPct',         value: 30, desc: 'GMROI, %: ниже этого значения — красный; между порогами — жёлтый' },
-  { key: 'stockHistoryRetentionWeeks', value: 15, desc: 'Срок хранения истории остатков Ozon, недель' },
+  { key: 'stockHistoryRetentionWeeks', value: 26, desc: 'Срок хранения истории остатков Ozon, недель' },
   { key: 'returnsToSalePct',    value: 80, desc: '% возвратов, возвращающихся в продажу' },
   { key: 'salesRetentionWeeks', value: 78, desc: 'Срок хранения продаж, недель' },
   { key: 'excludedClusters',    value: '', desc: 'КластерID без поставок, через запятую' },
@@ -633,7 +639,9 @@ const OZON_SETTINGS_DEFAULTS = [
 const OZON_SETTINGS_STRING_KEYS = ['excludedClusters', 'priorityClusters', 'dropOffWarehouseId', 'dropOffWarehouseName', 'dropOffWarehouseType', 'directClusters', 'supplyDocsFolderId', 'supplyDocsLabelsFolder'];
 const OZON_DROPOFF_TYPES = ['SORTING_CENTER', 'CROSS_DOCK', 'FULL_FILLMENT', 'DELIVERY_POINT', 'ORDERS_RECEIVING_POINT'];
 const OZON_SALES_RETENTION_WEEKS = 78; // дефолт ретенции продаж; действующее значение — в листе «Настройки Ozon»
-const OZON_SALES_WEEKLY_ZONE_WEEKS = 13; // свежая зона: столько последних недель хранится по 7 дней
+// Item 86 step A (2026-09-26): widened from 13 to 27 so a full 26-week speed lookback stays
+// weekly (7-day rows) — the archive's 28-day blocks would otherwise blur the last week of it.
+const OZON_SALES_WEEKLY_ZONE_WEEKS = 27; // свежая зона: столько последних недель хранится по 7 дней
 const OZON_SALES_PERIOD_ANCHOR_MS = Date.parse('2024-01-01T00:00:00Z'); // понедельник — якорь 28-дневных блоков
 const OZON_SALES_PERIOD_MS = 28 * 24 * 60 * 60 * 1000;
 
@@ -6081,12 +6089,14 @@ function updateOzonStockHistory(finalRows, headers) {
     combos[key].transit += Number(row[transitIdx]) || 0;
   });
 
-  // Срок хранения истории — из настроек, при ошибке используем дефолт 15 недель.
-  let retentionWeeks = 15;
+  // Срок хранения истории — из настроек, при ошибке используем дефолт 26 недель.
+  // Item 86 step A: the speed calculation looks back 26 weeks, so the kept history is never
+  // allowed to be shorter than that regardless of the setting — the setting can only extend it.
+  let retentionWeeks = 26;
   try {
     const settings = getOzonSettings();
     const val = Number(settings.stockHistoryRetentionWeeks);
-    if (Number.isFinite(val) && val >= 1) retentionWeeks = val;
+    if (Number.isFinite(val) && val >= 1) retentionWeeks = Math.max(val, 26);
   } catch (e) {
     // используем дефолт
   }
@@ -6427,11 +6437,10 @@ function saveOzonSales(payload) {
   };
 }
 
-// Пункт 29: необязательный параметр weeksLimit ограничивает выдачу
-// последними N неделями. Без параметра поведение прежнее — отдаётся
-// вся история, поэтому существующие вызовы не ломаются.
-function getOzonSales(weeksLimit) {
-  const sheet = getOzonSalesSheet();
+// Читает лист продаж Ozon (основной либо архивный — у обоих одни и те же колонки
+// OZON_SALES_HEADERS) в общем формате { week, cabinet, offerId, clusterName, qty, updatedAt,
+// days }. Вынесено в отдельную функцию пунктом 86, шаг A: getOzonSales теперь читает ДВА листа.
+function readOzonSalesSheetRows(sheet, sheetLabel, tz) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return [];
 
@@ -6448,10 +6457,9 @@ function getOzonSales(weeksLimit) {
   const daysIdx = headers.indexOf('Дней');
 
   if (weekIdx === -1 || cabinetIdx === -1 || articleIdx === -1 || clusterIdx === -1 || qtyIdx === -1 || updatedIdx === -1 || daysIdx === -1) {
-    throw new Error('Некоторые обязательные колонки не найдены в листе "Продажи Ozon"');
+    throw new Error('Некоторые обязательные колонки не найдены в листе "' + sheetLabel + '"');
   }
 
-  const tz = Session.getScriptTimeZone();
   const rows = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -6489,6 +6497,15 @@ function getOzonSales(weeksLimit) {
       days: parseNumber(row[daysIdx])
     });
   }
+  return rows;
+}
+
+// Пункт 29: необязательный параметр weeksLimit ограничивает выдачу
+// последними N неделями. Без параметра поведение прежнее — отдаётся
+// вся история, поэтому существующие вызовы не ломаются.
+function getOzonSales(weeksLimit) {
+  const tz = Session.getScriptTimeZone();
+  const rows = readOzonSalesSheetRows(getOzonSalesSheet(), 'Продажи Ozon', tz);
 
   // Пункт 29: отдаём не всю историю, а только нужное окно недель.
   //
@@ -6503,12 +6520,21 @@ function getOzonSales(weeksLimit) {
   // ВТОРАЯ: если окно не задано вызывающей стороной, оно берётся ИЗ НАСТРОЕК —
   // самое длинное из окон расчёта плюс запас в две недели. Иначе увеличение
   // настройки «Окно тренда» молча упиралось бы в жёсткое число на клиенте.
+  //
+  // Item 86 step A (2026-09-26): the speed calculation now looks back 26 weeks, so the default
+  // window is at least 26 too — otherwise raising it in the client would silently starve for
+  // data on a fresh deploy. Once the window can reach 26 weeks it routinely spans PAST the
+  // weekly zone (widened to 27 weeks in the same change, so in practice it rarely does) into
+  // the archive's 28-day blocks, which is why they are now read here explicitly instead of
+  // being skipped as before (item 26): the archive sheet carries the SAME columns, its rows
+  // just have «Дней»=28, and the client already ignores non-7 rows in the calculations that
+  // are not meant to see them.
   let limit = Number(weeksLimit);
   if (!(limit > 0)) {
     const s = getOzonSettings();
     const trend = Number(s.trendWeeks) > 0 ? Number(s.trendWeeks) : 13;
     const speed = Number(s.speedWeeks) > 0 ? Number(s.speedWeeks) : 4;
-    limit = Math.max(trend, speed) + 2;
+    limit = Math.max(trend, speed, 26) + 2;
   }
 
   const todayStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
@@ -6518,11 +6544,99 @@ function getOzonSales(weeksLimit) {
   monday.setDate(monday.getDate() - (dow - 1) - limit * 7);
   const keepFrom = Utilities.formatDate(monday, tz, 'yyyy-MM-dd');
 
+  // The archive is written by every sync (saveOzonSales), so in practice it already exists;
+  // getOzonSalesArchiveSheet creates it via getOrCreateSheet if it somehow doesn't, mirroring
+  // getOzonStockHistorySheet's behaviour, and an empty sheet simply contributes no rows.
+  const archiveRows = readOzonSalesSheetRows(getOzonSalesArchiveSheet(), OZON_SALES_ARCHIVE_SHEET_NAME, tz);
+
   const filtered = [];
   for (let i = 0; i < rows.length; i++) {
     if (rows[i].week && rows[i].week >= keepFrom) filtered.push(rows[i]);
   }
+  for (let i = 0; i < archiveRows.length; i++) {
+    if (archiveRows[i].week && archiveRows[i].week >= keepFrom) filtered.push(archiveRows[i]);
+  }
   return filtered;
+}
+
+// Item 86 step A (2026-09-26): pure read of «История остатков Ozon», written by
+// updateOzonStockHistory. Mirrors getOzonSales's Date-cell handling and header-by-name lookup.
+function getOzonStockHistory() {
+  const sheet = getOzonStockHistorySheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+
+  const lastCol = sheet.getLastColumn();
+  const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = data[0].map(h => String(h).trim());
+
+  const weekIdx = headers.indexOf('Неделя');
+  const cabinetIdx = headers.indexOf('Кабинет');
+  const articleIdx = headers.indexOf('Артикул');
+  const clusterIdIdx = headers.indexOf('КластерID');
+  const clusterIdx = headers.indexOf('Кластер');
+  const daysAvailIdx = headers.indexOf('Дней в наличии');
+  const daysObsIdx = headers.indexOf('Дней наблюдений');
+  const lastDayIdx = headers.indexOf('Последний учтённый день');
+  const updatedIdx = headers.indexOf('Обновлено');
+
+  if (weekIdx === -1 || cabinetIdx === -1 || articleIdx === -1 || clusterIdIdx === -1 || clusterIdx === -1 || daysAvailIdx === -1 || daysObsIdx === -1 || lastDayIdx === -1 || updatedIdx === -1) {
+    throw new Error('Некоторые обязательные колонки не найдены в листе "История остатков Ozon"');
+  }
+
+  const tz = Session.getScriptTimeZone();
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row.join('').trim() === '') continue;
+
+    let weekVal = '';
+    if (row[weekIdx] instanceof Date) {
+      try {
+        weekVal = Utilities.formatDate(row[weekIdx], tz, 'yyyy-MM-dd');
+      } catch (e) {
+        weekVal = String(row[weekIdx] || '');
+      }
+    } else {
+      weekVal = String(row[weekIdx] || '').trim();
+    }
+
+    let lastDayVal = '';
+    if (row[lastDayIdx] instanceof Date) {
+      try {
+        lastDayVal = Utilities.formatDate(row[lastDayIdx], tz, 'yyyy-MM-dd');
+      } catch (e) {
+        lastDayVal = String(row[lastDayIdx] || '');
+      }
+    } else {
+      lastDayVal = String(row[lastDayIdx] || '').trim();
+    }
+
+    let updatedVal = '';
+    if (row[updatedIdx] instanceof Date) {
+      try {
+        updatedVal = Utilities.formatDate(row[updatedIdx], tz, 'yyyy-MM-dd HH:mm:ss');
+      } catch (e) {
+        updatedVal = String(row[updatedIdx] || '');
+      }
+    } else {
+      updatedVal = String(row[updatedIdx] || '');
+    }
+
+    rows.push({
+      week: weekVal,
+      cabinet: String(row[cabinetIdx] || ''),
+      offerId: String(row[articleIdx] || ''),
+      clusterId: String(row[clusterIdIdx] || ''),
+      clusterName: String(row[clusterIdx] || ''),
+      daysInStock: parseNumber(row[daysAvailIdx]),
+      daysObserved: parseNumber(row[daysObsIdx]),
+      lastDay: lastDayVal,
+      updatedAt: updatedVal
+    });
+  }
+
+  return rows;
 }
 
 function getOzonStocks() {
@@ -8387,16 +8501,19 @@ function runOzonSyncOnce() {
 
 function setupOzonSyncTriggers() {
   removeOzonSyncTriggers();
+  // Item 86 step A (2026-09-26): moved from 05:00/17:00 to 11:00/20:00 Europe/Moscow — Ozon
+  // refreshes its stock analytics around 07:00/16:00 UTC (10:00/19:00 МСК), so the earlier
+  // hours polled data that was itself still stale.
   ScriptApp.newTrigger('scheduledOzonCheck')
     .timeBased()
     .everyDays(1)
-    .atHour(5)
+    .atHour(11)
     .inTimezone('Europe/Moscow')
     .create();
   ScriptApp.newTrigger('scheduledOzonCheck')
     .timeBased()
     .everyDays(1)
-    .atHour(17)
+    .atHour(20)
     .inTimezone('Europe/Moscow')
     .create();
 }

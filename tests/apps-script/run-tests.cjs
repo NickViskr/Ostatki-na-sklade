@@ -226,26 +226,11 @@ function freshHarness() {
 })();
 
 // ================= Пункт 6: срок хранения =================
+// Item 86 step A (2026-09-26): the speed calculation looks back 26 weeks, so the effective
+// retention is now max(setting, 26) — a setting below 26 no longer shortens the kept history,
+// it can only extend it.
 (function test6() {
-  const h = freshHarness();
-  const stockHeaders = h.OZON_STOCKS_HEADERS;
-  const H = h.OZON_STOCK_HISTORY_HEADERS;
-
-  // Настройка retention=2 недели, а не дефолт 15 -- чтобы доказать что настройка реально читается.
-  h.setRetentionWeeks(2);
-  h.setNow('2026-06-01T09:00:00Z'); // понедельник, текущая неделя
-
-  // Определим понедельник текущей недели через сам стенд (используя getIsoWeekMonday из Code.gs).
-  const todayStr = h.context.Utilities.formatDate(new h.context.Date(), 'Europe/Moscow', 'yyyy-MM-dd');
-  const curMonday = h.context.getIsoWeekMonday(todayStr);
-  // "Заведомо старше срока" (20 недель назад) -- генерическая проверка удаления вообще.
-  const veryOldWeek = h.context.shiftIsoWeek(curMonday, -20);
-  // 5 недель назад: при retention=2 (oldestKept = curMonday-1 неделя) должна быть УДАЛЕНА,
-  // а при дефолтном retention=15 (oldestKept = curMonday-14 недель) была бы СОХРАНЕНА.
-  // Это и доказывает, что применяется именно настройка 2, а не жёстко зашитые 15.
-  const midOldWeek = h.context.shiftIsoWeek(curMonday, -5);
-
-  function makeOldRow(week, article) {
+  function makeOldRow(H, week, article) {
     const row = new Array(H.length).fill('');
     row[H.indexOf('Неделя')] = week;
     row[H.indexOf('Кабинет')] = 'Cab1';
@@ -258,34 +243,48 @@ function freshHarness() {
     row[H.indexOf('Обновлено')] = week + ' 10:00:00';
     return row;
   }
-  h.setHistoryRaw([makeOldRow(veryOldWeek, 'ARTVERYOLD'), makeOldRow(midOldWeek, 'ARTMIDOLD')]);
-
   const combos = [
     { cabinet: 'Cab1', article: 'ART1', clusterId: 'CL1', clusterName: 'Центр', warehouses: [{ warehouse: 'W1', available: 5, transit: 0 }] }
   ];
-  const rows = buildFinalRows(stockHeaders, combos);
-  h.updateOzonStockHistory(rows, stockHeaders);
+
+  // Настройка (15) НИЖЕ пола (26): пол побеждает -- строка 20 недель назад сохранена,
+  // строка 27 недель назад (за полом) удалена.
+  const h = freshHarness();
+  const stockHeaders = h.OZON_STOCKS_HEADERS;
+  const H = h.OZON_STOCK_HISTORY_HEADERS;
+  h.setRetentionWeeks(15);
+  h.setNow('2026-06-01T09:00:00Z'); // понедельник, текущая неделя
+  const todayStr = h.context.Utilities.formatDate(new h.context.Date(), 'Europe/Moscow', 'yyyy-MM-dd');
+  const curMonday = h.context.getIsoWeekMonday(todayStr);
+  const week20Ago = h.context.shiftIsoWeek(curMonday, -20);
+  const week27Ago = h.context.shiftIsoWeek(curMonday, -27);
+  h.setHistoryRaw([makeOldRow(H, week20Ago, 'ART20AGO'), makeOldRow(H, week27Ago, 'ART27AGO')]);
+  h.updateOzonStockHistory(buildFinalRows(stockHeaders, combos), stockHeaders);
 
   const hist = h.dumpHistory();
-  const veryOldStill = hist.find(r => r[H.indexOf('Артикул')] === 'ARTVERYOLD');
-  const midOldStill = hist.find(r => r[H.indexOf('Артикул')] === 'ARTMIDOLD');
+  const kept20 = hist.find(r => r[H.indexOf('Артикул')] === 'ART20AGO');
+  const kept27 = hist.find(r => r[H.indexOf('Артикул')] === 'ART27AGO');
   const curRow = hist.find(r => r[H.indexOf('Артикул')] === 'ART1');
 
-  check('П6: заведомо старая строка (20 недель назад) удалена', !veryOldStill, `осталась ли строка ARTVERYOLD: ${!!veryOldStill}`);
+  check('П6: setting=15 ниже пола 26 -- строка 20 недель назад сохранена (пол защищает)', !!kept20, `осталась ли ART20AGO: ${!!kept20}`);
+  check('П6: setting=15 ниже пола 26 -- строка 27 недель назад удалена (старше пола)', !kept27, `осталась ли ART27AGO: ${!!kept27}`);
   check('П6: текущая неделя на месте', !!curRow, `curRow найден: ${!!curRow}`);
-  check('П6: настройка stockHistoryRetentionWeeks=2 реально применяется (не дефолт 15)', !midOldStill,
-    `строка 5 недель назад (${midOldWeek}) при retention=2 должна быть удалена, а при дефолте 15 -- сохранена; осталась: ${!!midOldStill}`);
 
-  // Контрольный прогон: та же строка 5-недельной давности при ДЕФОЛТНОМ retention (15) должна СОХРАНИТЬСЯ.
-  // Доказывает, что удаление в основном прогоне вызвано именно значением настройки 2, а не постоянной 15.
+  // Настройка (40) ВЫШЕ пола: настройка соблюдена -- строка 35 недель назад сохранена
+  // (при поле 26 она была бы удалена), а строка 41 недель назад всё равно удалена.
   const h2 = freshHarness();
-  h2.setNow('2026-06-01T09:00:00Z'); // без setRetentionWeeks -- остаётся дефолт 15
-  h2.setHistoryRaw([makeOldRow(midOldWeek, 'ARTMIDOLD')]);
+  h2.setRetentionWeeks(40);
+  h2.setNow('2026-06-01T09:00:00Z');
+  const week35Ago = h2.context.shiftIsoWeek(curMonday, -35);
+  const week41Ago = h2.context.shiftIsoWeek(curMonday, -41);
+  h2.setHistoryRaw([makeOldRow(H, week35Ago, 'ART35AGO'), makeOldRow(H, week41Ago, 'ART41AGO')]);
   h2.updateOzonStockHistory(buildFinalRows(h2.OZON_STOCKS_HEADERS, combos), h2.OZON_STOCKS_HEADERS);
   const hist2 = h2.dumpHistory();
-  const midOldKeptAtDefault = hist2.find(r => r[H.indexOf('Артикул')] === 'ARTMIDOLD');
-  check('П6 (контроль): при дефолтном retention=15 та же строка 5 недель назад СОХРАНЕНА', !!midOldKeptAtDefault,
-    `осталась ли строка ARTMIDOLD при дефолте: ${!!midOldKeptAtDefault}`);
+  const kept35 = hist2.find(r => r[H.indexOf('Артикул')] === 'ART35AGO');
+  const kept41 = hist2.find(r => r[H.indexOf('Артикул')] === 'ART41AGO');
+
+  check('П6: setting=40 выше пола -- строка 35 недель назад сохранена (настройка соблюдена)', !!kept35, `осталась ли ART35AGO: ${!!kept35}`);
+  check('П6: setting=40 выше пола -- строка 41 недель назад всё равно удалена', !kept41, `осталась ли ART41AGO: ${!!kept41}`);
 })();
 
 // ================= Пункт 7: новое сочетание среди недели =================
@@ -753,9 +752,10 @@ function buildSkuRow(headers, obj) {
   // «Сейчас» — среда 07.01.2026, понедельник текущей недели 05.01.2026.
   H.setNow('2026-01-07T09:00:00Z');
 
-  // Ряд недельных строк на 20 понедельников назад от текущего.
+  // Item 86 step A: the default window is now max(trend, speed, 26) + 2, so the mock series
+  // needs to reach back further than the old 20 weeks to still exercise the widening checks.
   const mondays = [];
-  for (let i = 0; i < 21; i++) {
+  for (let i = 0; i < 40; i++) {
     const dt = new Date(Date.UTC(2026, 0, 5) - i * 7 * 86400000);
     mondays.push(dt.toISOString().slice(0, 10));
   }
@@ -768,18 +768,19 @@ function buildSkuRow(headers, obj) {
   const current = '2026-01-05';
   const fullAuto = autoWeeks.filter(w => w < current);
 
-  check('П71: без явного окна getOzonSales берёт его из настроек (13 тренд + 2 запаса = 15 полных недель)',
-    fullAuto.length === 15, `получено полных недель: ${fullAuto.length} (${autoWeeks.length} всего, с ${autoWeeks[0]})`);
+  check('П71: без явного окна getOzonSales берёт его из настроек, floor 26 недель + 2 запаса = 28 полных недель',
+    fullAuto.length === 28, `получено полных недель: ${fullAuto.length} (${autoWeeks.length} всего, с ${autoWeeks[0]})`);
   check('П71: текущая незавершённая неделя тоже отдаётся, но НЕ занимает место полной',
-    autoWeeks.indexOf(current) !== -1 && autoWeeks.length === 16,
+    autoWeeks.indexOf(current) !== -1 && autoWeeks.length === 29,
     `недель всего: ${autoWeeks.length}`);
 
   // Рост настройки должен сразу расширять окно — раньше он упирался в число на клиенте.
-  H.setOzonSettings({ trendWeeks: 18, speedWeeks: 4 });
+  // trendWeeks поднят выше пола 26, иначе рост настройки ничего бы не поменял.
+  H.setOzonSettings({ trendWeeks: 30, speedWeeks: 4 });
   const wider = H.getOzonSales();
   const widerFull = Array.from(new Set(wider.map(r => r.week))).filter(w => w < current);
-  check('П72: увеличение настройки «Окно тренда» сразу расширяет окно выдачи',
-    widerFull.length === 20, `получено полных недель: ${widerFull.length}`);
+  check('П72: увеличение настройки «Окно тренда» выше пола 26 сразу расширяет окно выдачи',
+    widerFull.length === 32, `получено полных недель: ${widerFull.length}`);
 
   // Явно переданное окно имеет приоритет над настройками.
   H.setOzonSettings({ trendWeeks: 13, speedWeeks: 4 });
@@ -806,18 +807,26 @@ function buildSkuRow(headers, obj) {
 })();
 
 // ========== Item 26: sales sheet split into weekly and archive ==========
-// Weekly zone is 13 weeks; anything older is compacted into 28-day blocks. Before this change both
-// zones lived in one sheet, and getOzonSales read all of it on every start-up: 1805 of 3194 rows
-// were archive rows the date window always discards.
+// Item 86 step A (2026-09-26): weekly zone widened from 13 to 27 weeks, so a full 26-week
+// speed lookback stays weekly. Before this change both zones lived in one sheet, and
+// getOzonSales read all of it on every start-up: 1805 of 3194 rows were archive rows the date
+// window always discards.
 (() => {
+  // Same Monday-of-N-weeks-ago math as the production formula, used to derive test weeks
+  // whose zone side is unambiguous rather than guessed at.
+  function mondayAgo(weeksAgo) {
+    return new Date(Date.UTC(2026, 0, 5) - weeksAgo * 7 * 86400000).toISOString().slice(0, 10);
+  }
+
   const H = freshHarness();
   H.setNow('2026-01-05T09:00:00Z');           // понедельник 05.01.2026
   H.setOzonSettings({ salesRetentionWeeks: 78 });
 
-  // Свежая неделя остаётся недельной; 2025-09-08 старше границы уплотнения и уходит в блок.
+  // 20 недель назад — внутри расширенной недельной зоны (27), остаётся недельной строкой.
+  // 30 недель назад — за зоной, уходит в 28-дневный блок.
   H.setOzonSalesSheet([
-    { week: '2025-12-29', offerId: 'ART', qty: 10, days: 7 },
-    { week: '2025-09-08', offerId: 'ART', qty: 5, days: 7 }
+    { week: mondayAgo(20), offerId: 'ART', qty: 10, days: 7 },
+    { week: mondayAgo(30), offerId: 'ART', qty: 5, days: 7 }
   ]);
   H.setOzonSalesArchiveSheet([]);
   H.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
@@ -825,12 +834,10 @@ function buildSkuRow(headers, obj) {
   const weekly = H.dumpSalesSheet('Продажи Ozon');
   const archive = H.dumpSalesSheet('Продажи Ozon Архив');
 
-  check('П75: недельные строки остались в основном листе',
-    weekly.length === 1 && weekly[0].week === '2025-12-29' && weekly[0].qty === 10,
+  check('П75: неделя 20 недель назад осталась недельной строкой в основном листе (зона 27)',
+    weekly.length === 1 && weekly[0].week === mondayAgo(20) && weekly[0].qty === 10 && weekly[0].days === 7,
     `получено: ${JSON.stringify(weekly)}`);
-  check('П75: в основном листе НЕТ 28-дневных блоков — их и читал зря старт приложения',
-    weekly.every(r => r.days === 7), `получено: ${JSON.stringify(weekly.map(r => r.days))}`);
-  check('П75: уплотнённый блок ушёл в архивный лист',
+  check('П75: неделя 30 недель назад ушла в архивный 28-дневный блок',
     archive.length === 1 && archive[0].days === 28 && archive[0].qty === 5,
     `получено: ${JSON.stringify(archive)}`);
 
@@ -838,8 +845,8 @@ function buildSkuRow(headers, obj) {
   const H2 = freshHarness();
   H2.setNow('2026-01-05T09:00:00Z');
   H2.setOzonSettings({ salesRetentionWeeks: 78 });
-  H2.setOzonSalesSheet([{ week: '2025-12-29', offerId: 'ART', qty: 10, days: 7 }]);
-  H2.setOzonSalesArchiveSheet([{ week: '2025-09-08', offerId: 'ART', qty: 100, days: 28 }]);
+  H2.setOzonSalesSheet([{ week: mondayAgo(20), offerId: 'ART', qty: 10, days: 7 }]);
+  H2.setOzonSalesArchiveSheet([{ week: mondayAgo(30), offerId: 'ART', qty: 100, days: 28 }]);
   H2.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
   const arch2 = H2.dumpSalesSheet('Продажи Ozon Архив');
   check('П76: существующий архивный блок прочитан и сохранён, а не потерян',
@@ -849,8 +856,8 @@ function buildSkuRow(headers, obj) {
   const H3 = freshHarness();
   H3.setNow('2026-01-05T09:00:00Z');
   H3.setOzonSettings({ salesRetentionWeeks: 78 });
-  H3.setOzonSalesSheet([{ week: '2025-09-15', offerId: 'ART', qty: 7, days: 7 }]);
-  H3.setOzonSalesArchiveSheet([{ week: '2025-09-08', offerId: 'ART', qty: 100, days: 28 }]);
+  H3.setOzonSalesSheet([{ week: mondayAgo(31), offerId: 'ART', qty: 7, days: 7 }]);
+  H3.setOzonSalesArchiveSheet([{ week: mondayAgo(30), offerId: 'ART', qty: 100, days: 28 }]);
   H3.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
   const arch3 = H3.dumpSalesSheet('Продажи Ozon Архив');
   check('П77: строка того же 28-дневного периода долилась в блок (100 + 7 = 107)',
@@ -869,6 +876,54 @@ function buildSkuRow(headers, obj) {
   check('П78: свежая недельная строка ретенцией не тронута',
     H4.dumpSalesSheet('Продажи Ozon').length === 1,
     `получено: ${JSON.stringify(H4.dumpSalesSheet('Продажи Ozon'))}`);
+
+  // ================= Item 86 step A: getOzonSales reads the archive within its window =================
+  // Total: the window now (default max(trend,speed,26)+2 = 28 weeks) reaches PAST the 27-week
+  // weekly zone into the archive's 28-day blocks — they carry the SAME columns, only «Дней»=28.
+  const H5 = freshHarness();
+  H5.setNow('2026-01-05T09:00:00Z');
+  H5.setOzonSettings({ trendWeeks: 13, speedWeeks: 4, salesRetentionWeeks: 78 });
+  H5.setOzonSalesSheet([{ week: mondayAgo(1), offerId: 'ART', qty: 10, days: 7 }]);
+  H5.setOzonSalesArchiveSheet([
+    { week: mondayAgo(28), offerId: 'ART', qty: 40, days: 28 },  // внутри окна 28 недель
+    { week: mondayAgo(60), offerId: 'ART', qty: 999, days: 28 }  // старше окна — не должна попасть
+  ]);
+  const withArchive = H5.getOzonSales();
+  const insideBlock = withArchive.find(r => r.week === mondayAgo(28));
+  const outsideBlock = withArchive.find(r => r.week === mondayAgo(60));
+  check('П79: getOzonSales включает архивный 28-дневный блок внутри окна',
+    !!insideBlock && insideBlock.days === 28 && insideBlock.qty === 40, `получено: ${JSON.stringify(insideBlock)}`);
+  check('П79: блок старше окна не отдаётся', !outsideBlock, `получено outsideBlock: ${JSON.stringify(outsideBlock)}`);
+
+  // ================= Item 86 step A: qty conserved across a sync (nothing gained or lost) =================
+  const H6 = freshHarness();
+  H6.setNow('2026-01-05T09:00:00Z');
+  H6.setOzonSettings({ salesRetentionWeeks: 78 });
+  H6.setOzonSalesSheet([
+    { week: mondayAgo(20), offerId: 'ART', qty: 11, days: 7 },
+    { week: mondayAgo(30), offerId: 'ART', qty: 13, days: 7 } // will be compacted this sync
+  ]);
+  H6.setOzonSalesArchiveSheet([{ week: mondayAgo(35), offerId: 'ART', qty: 17, days: 28 }]);
+  const sumBefore = 11 + 13 + 17;
+  H6.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
+  const sumAfter = H6.dumpSalesSheet('Продажи Ozon').reduce((s, r) => s + r.qty, 0)
+    + H6.dumpSalesSheet('Продажи Ozon Архив').reduce((s, r) => s + r.qty, 0);
+  check('П80: сумма Количество по артикулу сохранена через синхронизацию (17+11+13)',
+    sumAfter === sumBefore, `было: ${sumBefore}, стало: ${sumAfter}`);
+
+  // ================= Item 86 step A: idempotency — two syncs the same day give the same sheet =================
+  const H7 = freshHarness();
+  H7.setNow('2026-01-05T09:00:00Z');
+  H7.setOzonSettings({ salesRetentionWeeks: 78 });
+  H7.setOzonSalesSheet([{ week: mondayAgo(20), offerId: 'ART', qty: 10, days: 7 }]);
+  H7.setOzonSalesArchiveSheet([{ week: mondayAgo(35), offerId: 'ART', qty: 50, days: 28 }]);
+  H7.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
+  const afterFirst = { weekly: H7.dumpSalesSheet('Продажи Ozon'), archive: H7.dumpSalesSheet('Продажи Ozon Архив') };
+  H7.saveOzonSales({ rows: [], okCabinets: [], mode: 'recent', replacedWeeks: [] });
+  const afterSecond = { weekly: H7.dumpSalesSheet('Продажи Ozon'), archive: H7.dumpSalesSheet('Продажи Ozon Архив') };
+  check('П81: повторная синхронизация в тот же день не меняет лист (идемпотентность)',
+    JSON.stringify(afterFirst) === JSON.stringify(afterSecond),
+    `1-й прогон: ${JSON.stringify(afterFirst)}, 2-й прогон: ${JSON.stringify(afterSecond)}`);
 })();
 
 // ================= Item 71: the row of the current week carries its real length =================
@@ -8589,6 +8644,112 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
   check('84 follow-up: cancelChinaBatchPosting itself is unaffected — regression check',
     h.stockOf('ART-POST-1').quantity === 0 && h.stockOf('ART-POST-1').capitalization === 0,
     JSON.stringify(h.stockOf('ART-POST-1')));
+})();
+
+// ================= Item 86 step A: auto-poll moved to 11:00/20:00 МСК =================
+// setupOzonSyncTriggers is not runnable on the stand (ScriptApp is not stubbed), so this is a
+// source check like «78a: getTurnoverData обслуживается…» above — it reads the function body
+// literally rather than executing it.
+(function test86Triggers() {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+  const fnMatch = src.match(/function setupOzonSyncTriggers\(\) \{[\s\S]*?\n\}/);
+  const fnBody = fnMatch ? fnMatch[0] : '';
+  check('86: setupOzonSyncTriggers создаёт триггер в 11:00', /\.atHour\(11\)/.test(fnBody), fnBody);
+  check('86: setupOzonSyncTriggers создаёт триггер в 20:00', /\.atHour\(20\)/.test(fnBody), fnBody);
+  check('86: старые часы 5 и 17 нигде не остались в этой функции', !/\.atHour\(5\)/.test(fnBody) && !/\.atHour\(17\)/.test(fnBody), fnBody);
+  check('86: оба триггера — Europe/Moscow', (fnBody.match(/inTimezone\('Europe\/Moscow'\)/g) || []).length === 2, fnBody);
+})();
+
+// ================= Item 86 step A: getOzonStockHistory =================
+(function test86StockHistory() {
+  // 1. Пустой лист -> [].
+  const h1 = freshHarness();
+  const Hh = h1.OZON_STOCK_HISTORY_HEADERS;
+  h1.resetHistorySheet();
+  const empty = h1.getOzonStockHistory();
+  check('86: getOzonStockHistory на пустом листе возвращает []', Array.isArray(empty) && empty.length === 0, JSON.stringify(empty));
+
+  // 2. Дата-ячейки (Неделя, Последний учтённый день, Обновлено) и строковые ячейки в одном листе.
+  const h2 = freshHarness();
+  function makeRow(vals) {
+    const row = new Array(Hh.length).fill('');
+    Object.keys(vals).forEach(k => { row[Hh.indexOf(k)] = vals[k]; });
+    return row;
+  }
+  const dateRow = makeRow({
+    'Неделя': new h2.context.Date('2026-01-05T00:00:00Z'),
+    'Кабинет': 'Cab1',
+    'Артикул': 'ART1',
+    'КластерID': 'CL1',
+    'Кластер': 'Центр',
+    'Дней в наличии': 5,
+    'Дней наблюдений': 7,
+    'Последний учтённый день': new h2.context.Date('2026-01-11T00:00:00Z'),
+    'Обновлено': new h2.context.Date('2026-01-11T10:00:00Z')
+  });
+  const stringRow = makeRow({
+    'Неделя': '2025-12-29',
+    'Кабинет': 'Cab2',
+    'Артикул': 'ART2',
+    'КластерID': 'CL2',
+    'Кластер': 'Юг',
+    'Дней в наличии': 3,
+    'Дней наблюдений': 4,
+    'Последний учтённый день': '2026-01-01',
+    'Обновлено': '2026-01-01 09:00:00'
+  });
+  h2.setHistoryRaw([dateRow, stringRow]);
+  const rows = h2.getOzonStockHistory();
+  const r1 = rows.find(r => r.offerId === 'ART1');
+  const r2 = rows.find(r => r.offerId === 'ART2');
+
+  check('86: строка с Date-ячейками — «Неделя» приведена к yyyy-MM-dd (МСК)', r1 && r1.week === '2026-01-05', JSON.stringify(r1));
+  check('86: строка с Date-ячейками — «Последний учтённый день» приведён к yyyy-MM-dd', r1 && r1.lastDay === '2026-01-11', JSON.stringify(r1));
+  check('86: строка с Date-ячейками — остальные поля на месте', r1 && r1.cabinet === 'Cab1' && r1.clusterId === 'CL1'
+    && r1.clusterName === 'Центр' && r1.daysInStock === 5 && r1.daysObserved === 7, JSON.stringify(r1));
+  check('86: строка со строковыми ячейками читается без изменений', r2 && r2.week === '2025-12-29' && r2.lastDay === '2026-01-01'
+    && r2.cabinet === 'Cab2' && r2.clusterId === 'CL2' && r2.daysInStock === 3 && r2.daysObserved === 4, JSON.stringify(r2));
+
+  // 3. Отсутствует обязательная колонка -- ошибка в стиле соседних чтений (getOzonSales/getOzonStocks).
+  const h3 = freshHarness();
+  const shortHeaders = Hh.filter(x => x !== 'КластерID');
+  const shortDataRow = shortHeaders.map(() => '');
+  shortDataRow[shortHeaders.indexOf('Артикул')] = 'ARTX'; // непустая строка -- иначе getLastRow() сочтёт лист пустым
+  h3.getHistorySheet().__setData([shortHeaders, shortDataRow]);
+  let missingColErr = '';
+  try { h3.getOzonStockHistory(); } catch (e) { missingColErr = String(e.message || e); }
+  check('86: отсутствующая колонка -- понятная ошибка (без падения стенда)',
+    /Некоторые обязательные колонки не найдены в листе "История остатков Ozon"/.test(missingColErr), missingColErr);
+
+  // 4. Перемешанный порядок колонок -- чтение по имени заголовка, а не по позиции.
+  const h4 = freshHarness();
+  const shuffled = Hh.slice().reverse();
+  const shuffledRow = new Array(shuffled.length).fill('');
+  shuffledRow[shuffled.indexOf('Артикул')] = 'ART3';
+  shuffledRow[shuffled.indexOf('Кабинет')] = 'Cab3';
+  shuffledRow[shuffled.indexOf('Неделя')] = '2026-01-05';
+  shuffledRow[shuffled.indexOf('КластерID')] = 'CL3';
+  shuffledRow[shuffled.indexOf('Кластер')] = 'Восток';
+  shuffledRow[shuffled.indexOf('Дней в наличии')] = 6;
+  shuffledRow[shuffled.indexOf('Дней наблюдений')] = 6;
+  shuffledRow[shuffled.indexOf('Последний учтённый день')] = '2026-01-05';
+  shuffledRow[shuffled.indexOf('Обновлено')] = '2026-01-05 09:00:00';
+  h4.getHistorySheet().__setData([shuffled, shuffledRow]);
+  const shuffledRows = h4.getOzonStockHistory();
+  const r3 = shuffledRows.find(r => r.offerId === 'ART3');
+  check('86: перемешанный порядок колонок читается корректно по имени заголовка',
+    r3 && r3.cabinet === 'Cab3' && r3.clusterId === 'CL3' && r3.clusterName === 'Восток' && r3.daysInStock === 6,
+    JSON.stringify(r3));
+})();
+
+// ================= Item 86 step A: routing (getOzonInitialData, LOCK_FREE_ACTIONS, switch) =================
+(function test86Routing() {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+  check('86: getOzonInitialData отдаёт stockHistory', /stockHistory: getOzonStockHistory\(\)/.test(src));
+  check('86: getOzonStockHistory — в списке действий без замка (быстрый путь getOzonStocks/getOzonSales)',
+    /action === 'getOzonStocks'[\s\S]{0,300}action === 'getOzonStockHistory'/.test(src));
+  check('86: getOzonStockHistory — в LOCK_FREE_ACTIONS', /'getOzonSyncStatus',\s*\/\/[^\n]*\n\s*'getOzonStockHistory',/.test(src));
+  check('86: getOzonStockHistory — есть ветка в switch', /case 'getOzonStockHistory': result = getOzonStockHistory\(\); break;/.test(src));
 })();
 
 // ================= Итог =================

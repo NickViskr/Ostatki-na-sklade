@@ -363,6 +363,8 @@ module.exports = {
   OZON_STOCKS_HEADERS: context.OZON_STOCKS_HEADERS,
   OZON_STOCK_HISTORY_HEADERS: context.OZON_STOCK_HISTORY_HEADERS,
   updateOzonStockHistory: (...args) => context.updateOzonStockHistory(...args),
+  // Item 86 step A: pure read of «История остатков Ozon».
+  getOzonStockHistory: (...args) => context.getOzonStockHistory(...args),
   // rows — массив массивов данных (без заголовка) листа SKU; headers — заголовки листа.
   // ---- Стоимость остатков: свойства скрипта и таблица календаря ----
   targetSpreadsheetId,
