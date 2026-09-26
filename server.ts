@@ -8,6 +8,7 @@ import dotenv from "dotenv";
 import { buildCompositionXlsxBase64, readCargoIds } from "./src/lib/ozonComposition";
 import { layoutFromBundle } from "./src/lib/ozonSupplyDocs";
 import { parseOzonJson } from "./src/lib/ozonJson";
+import { analyticsItemToStockRow } from "./src/lib/ozonStockRow";
 import { chooseDirectWarehouse, directWarehouseMessage, readDraftWarehouses } from "./src/lib/ozonDirectDraft";
 import { draftErrorLogLine, draftFailureHint, draftFailureTitle, readDraftErrors } from "./src/lib/ozonDraftErrors";
 
@@ -1474,34 +1475,10 @@ async function startServer() {
             const stocksData = await fetchOzonApi("/v1/analytics/stocks", cabKeys, { skus: batch });
             const items = stocksData.items || [];
             for (const item of items) {
-              const available = Number(item.available_stock_count || 0);
-              const preparing = Number(item.valid_stock_count || 0);
-              const requested = Number(item.requested_stock_count || 0);
-              const transit = Number(item.transit_stock_count || 0);
-              const excess = Number(item.excess_stock_count || 0);
-              const returns = Number(item.return_from_customer_stock_count || 0) + Number(item.return_to_seller_stock_count || 0);
-              const other = Number(item.waiting_docs_stock_count || 0) + Number(item.expiring_stock_count || 0) + Number(item.transit_defect_stock_count || 0) + Number(item.stock_defect_stock_count || 0) + Number(item.other_stock_count || 0);
-
-              if (available === 0 && preparing === 0 && requested === 0 && transit === 0 && excess === 0 && returns === 0 && other === 0) {
-                continue;
-              }
-
-              cabRows.push({
-                cabinet: name,
-                sku: String(item.sku || ''),
-                offerId: String(item.offer_id || ''),
-                name: String(item.name || ''),
-                warehouseName: (item.warehouse_id && item.warehouse_name) ? String(item.warehouse_name) : 'Без склада (агрегат кластера)',
-                clusterName: String(item.cluster_name || ''),
-                clusterId: String(item.macrolocal_cluster_id || ''),
-                available,
-                preparing,
-                requested,
-                transit,
-                excess,
-                returns,
-                other
-              });
+              // Item 85, step 1.3: the mapping lives in src/lib/ozonStockRow.ts (tested); goods Ozon
+              // sends back to the seller go to «Прочее», never to «Возвраты».
+              const row = analyticsItemToStockRow(item, name);
+              if (row) cabRows.push(row);
             }
           }
 
