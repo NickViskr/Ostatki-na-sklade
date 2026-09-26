@@ -1679,7 +1679,7 @@ export const useWarehouseStore = create<WarehouseState>()(
       const result = await get().fetchGas(action);
       if (result.status === 'success') {
         set({ ozonSyncStatus: result.data });
-        toast.success(enabled ? 'Автоопрос включён: 05:00 и 17:00 МСК' : 'Автоопрос отключён');
+        toast.success(enabled ? 'Автоопрос включён: 11:00 и 20:00 МСК' : 'Автоопрос отключён');
       } else {
         toast.error(result.message || 'Ошибка управления автоопросом');
       }

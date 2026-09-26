@@ -415,7 +415,7 @@ export const SettingsTab: React.FC = React.memo(() => {
                   </label>
                   {ozonSyncStatus.enabled ? (
                     <span className="text-emerald-600 font-semibold text-sm block">
-                      Автоопрос включён: ежедневно в 05:00 и 17:00 МСК
+                      Автоопрос включён: ежедневно в 11:00 и 20:00 МСК
                     </span>
                   ) : (
                     <span className="text-slate-500 font-semibold text-sm block">
@@ -526,7 +526,7 @@ export const SettingsTab: React.FC = React.memo(() => {
                         className="w-full bg-sky-500 text-white py-3 rounded-xl font-bold hover:bg-sky-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
                       >
                         {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
-                        Включить автоопрос (05:00 и 17:00 МСК)
+                        Включить автоопрос (11:00 и 20:00 МСК)
                       </button>
                     )}
 
@@ -553,7 +553,7 @@ export const SettingsTab: React.FC = React.memo(() => {
                 )}
 
                 <p className="text-[11px] text-slate-500 text-center leading-normal">
-                  Триггеры Google срабатывают в течение часа после указанного времени (5:00–6:00 и 17:00–18:00 МСК)
+                  Триггеры Google срабатывают в течение часа после указанного времени (11:00–12:00 и 20:00–21:00 МСК)
                 </p>
               </div>
             )}
