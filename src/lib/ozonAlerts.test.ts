@@ -24,7 +24,6 @@ function makeCluster(over: { clusterName: string; boxes: number; unmetQty: numbe
     clusterName: over.clusterName,
     qtySold: 0,
     perDay: 0,
-    sharePct: 0,
     available: 0,
     transit: 0,
     returns: 0,
@@ -38,7 +37,8 @@ function makeCluster(over: { clusterName: string; boxes: number; unmetQty: numbe
     requestedQty: 0,
     ozonInFlightQty: 0,
     inFlightQty: 0,
-    speedCorrection: null,
+    speedSharePct: 0,
+    shareWindowWeeks: 0,
     recommendation: {
       neededQty: over.boxes * 10 + over.unmetQty,
       wantQty: over.boxes * 10 + over.unmetQty,

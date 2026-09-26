@@ -691,8 +691,6 @@ export interface ClusterCoverageRow {
   clusterName: string;
   qtySold: number;
   perDay: number;
-  /** Доля кластера в продажах этого товара, % (0–100). */
-  sharePct: number;
   available: number;
   transit: number;
   returns: number;
@@ -715,8 +713,11 @@ export interface ClusterCoverageRow {
   /** Item 85. On their way, counted once: the larger of pendingQty and ozonInFlightQty, шт. */
   inFlightQty: number;
   recommendation: SupplyRecommendation | null;
-  /** Item 72. Deficit speed correction of this cluster. null — none. */
-  speedCorrection: ClusterSpeedCorrectionInfo | null;
+  /** Item 86, step B. Share (%) of the article's sales over `shareWindowWeeks` this cluster took
+   *  in the LONG share window — the multiplier behind `perDay` (= article speed × this share). */
+  speedSharePct: number;
+  /** Item 86, step B. Length of the share window, weeks (full weeks, +1 for a part-week). */
+  shareWindowWeeks: number;
 }
 
 export interface ArticleCoverage {
@@ -1007,145 +1008,140 @@ export function applyDeficitSpeedCorrection(
   return out;
 }
 
-/** Item 72. Breakdown of the deficit speed correction of one cluster of an article. */
-export interface ClusterSpeedCorrectionInfo {
-  clusterName: string;
-  /** Cluster speed before the correction, pcs/day. */
-  base: number;
-  /** Cluster speed after the correction, pcs/day. */
-  corrected: number;
-  /** Speed by the best weeks of the cluster before the growth cap, pcs/day. */
-  raw: number;
-  capped: boolean;
-  /** Sold in the cluster over the trend window, pcs. */
-  windowQty: number;
-  weeksWithSales: number;
-  windowWeeks: number;
-  /** Days the cluster's Ozon stock lasted at the old cluster speed. 0 when the base is 0. */
-  daysLeft: number;
-  bestWeeks: { week: string; qty: number }[];
+export interface ClusterShareWindow {
+  /** Full weeks used, ascending (present in data, «Дней» = 7). */
+  weeks: string[];
+  /** Item 71. Monday of the current week when its partial row entered the window; null otherwise. */
+  currentWeek: string | null;
+  /** Elapsed days of the current week counted in the window (0 — it did not enter). */
+  currentWeekDays: number;
+  /** weeks.length, plus one more when the current part-week entered — for the tooltip («за N нед.»). */
+  windowWeeksLabel: number;
+  /** Sold per article over the window, incl. rows without a cluster («Без кластера»). */
+  qtyByArticle: Record<string, number>;
+  /** Sold per article and cluster over the window (incl. «Без кластера»). */
+  qtyByArticleCluster: Record<string, Record<string, number>>;
 }
 
 /**
- * Item 72. The deficit correction per CLUSTER, for articles the article-level correction
- * (item 42) left alone. The article as a whole may hold weeks of stock while its fastest
- * clusters stand empty: their speed over the last weeks is then the speed of an empty shelf,
- * and the recommendation for them comes out too small (BowlGrayMini_01, 18.09.2026: ≈21 days
- * of stock in total, six empty clusters, weekly sales 151 → 112 for lack of goods).
- * A cluster whose Ozon stock (available + in transit) lasts less than deficitDays at its own
- * speed gets the mean of its bestWeeks best weeks of the trend window, with the same guards:
- * at least MIN_WEEKS_WITH_SALES weeks with sales and minSalesForCorrection pieces in the
- * window, growth capped by maxSpeedGrowth, and only ever upwards. The article speed grows by
- * the same difference, so the sum over clusters and the article stay consistent.
- * The function CHANGES the passed speed object and returns article → cluster → breakdown.
+ * Item 86, step B (owner, 26.09.2026): «Остатки Озон» rework. Replaces item 72's per-cluster
+ * deficit lift — two lifts of one empty cluster (item 42's article lift AND item 72's own)
+ * could overstock it. A cluster that stood empty in the SHORT speed window (`speedWeeks`) still
+ * sold in the LONGER trend window: instead of guessing its speed from its own best weeks, it
+ * gets a SHARE of the article's (already corrected) speed equal to its share of the article's
+ * sales over that longer window — see `rebuildClusterSpeedByShare`.
+ * Window = max(trendWeeks, speedWeeks) full weeks PRESENT in data (same presence rule as
+ * `buildSalesTrend`) plus the current part-week (item 71 rule of `buildSalesSpeed`), so the
+ * short speed window always sits inside this one — a cluster with any sales in the short window
+ * necessarily has sales here too.
+ * 28-day archive rows never enter: full weeks require «Дней» = 7 exactly, and the current
+ * part-week row is always < 7 days by definition.
+ * Function is pure: it only reads `sales`, never mutates anything.
  */
-export function applyClusterDeficitSpeedCorrection(
-  speed: SalesSpeedResult,
-  stocks: OzonStockRow[],
+export function buildClusterShareWindow(
   sales: OzonSalesRow[],
   skus: SKUItem[],
-  settings: OzonCoverageSettings,
+  weeksCount: number,
   now: Date,
-  articleCorrections: Record<string, SpeedCorrectionInfo>,
   offerIdToArticle?: Record<string, string>
-): Record<string, Record<string, ClusterSpeedCorrectionInfo>> {
-  const out: Record<string, Record<string, ClusterSpeedCorrectionInfo>> = {};
-  const deficitDays = Number(settings.deficitDays);
-  if (!(deficitDays > 0)) return out;
-  const trendWeeks = Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 13;
-  const bestWeeksN = Number(settings.bestWeeks) > 0 ? Math.floor(Number(settings.bestWeeks)) : 4;
-  const minSales = Number(settings.minSalesForCorrection) >= 0 ? Number(settings.minSalesForCorrection) : 50;
-  const maxGrowth = Number(settings.maxSpeedGrowth);
-
-  // Ozon stock per article and cluster: available + in transit, as in the article-level pass.
-  const onHand: Record<string, Record<string, number>> = {};
-  for (const row of stocks) {
-    const cluster = String(row.clusterName || '').trim();
-    if (!cluster) continue;
-    const article = resolveOzonArticle(skus, row.offerId, row.sku);
-    if (!onHand[article]) onHand[article] = {};
-    onHand[article][cluster] = (onHand[article][cluster] || 0) + (Number(row.available) || 0) + (Number(row.transit) || 0);
-  }
-
+): ClusterShareWindow {
   const presentWeeks = new Set<string>();
   for (const row of sales) {
     if ((Number(row.days) || 0) === 7) presentWeeks.add(String(row.week || '').trim());
   }
-  const window = getLastFullWeeks(now, trendWeeks).filter(w => presentWeeks.has(w));
-  if (window.length < MIN_WEEKS_WITH_SALES) return out;
-  const windowSet = new Set(window);
+  const weeks = getLastFullWeeks(now, weeksCount).filter(w => presentWeeks.has(w));
+  const weekSet = new Set(weeks);
 
-  // Weekly series per article and cluster.
-  const byClusterWeek: Record<string, Record<string, Record<string, number>>> = {};
+  // Item 71. Same rule as buildSalesSpeed: the current week's partial row, by its elapsed days.
+  const current = getMskWeekMonday(now);
+  let currentWeekDays = 0;
   for (const row of sales) {
-    if ((Number(row.days) || 0) !== 7) continue;
+    if (String(row.week || '').trim() !== current) continue;
+    const days = Number(row.days) || 0;
+    if (days > 0 && days < 7 && days > currentWeekDays) currentWeekDays = days;
+  }
+  const isCurrentPartial = (row: OzonSalesRow): boolean =>
+    currentWeekDays > 0 && String(row.week || '').trim() === current && (Number(row.days) || 0) < 7;
+
+  const qtyByArticle: Record<string, number> = {};
+  const qtyByArticleCluster: Record<string, Record<string, number>> = {};
+  for (const row of sales) {
     const week = String(row.week || '').trim();
-    if (!windowSet.has(week)) continue;
-    const qty = Number(row.qty) || 0;
-    if (!(qty > 0)) continue;
-    const cluster = String(row.clusterName || '').trim();
-    if (!cluster) continue;
-    const article = resolveSalesArticle(skus, row.offerId, offerIdToArticle);
-    if (!byClusterWeek[article]) byClusterWeek[article] = {};
-    if (!byClusterWeek[article][cluster]) byClusterWeek[article][cluster] = {};
-    byClusterWeek[article][cluster][week] = (byClusterWeek[article][cluster][week] || 0) + qty;
-  }
-
-  const articles = new Set<string>([...Object.keys(speed.perDayByArticleCluster), ...Object.keys(byClusterWeek)]);
-  for (const article of articles) {
-    // The whole article was empty: item 42 has already lifted every cluster of it.
-    if (articleCorrections[article]) continue;
-    const clusterSpeeds = speed.perDayByArticleCluster[article] || {};
-    const series = byClusterWeek[article] || {};
-    const clusters = new Set<string>([...Object.keys(clusterSpeeds), ...Object.keys(series)]);
-    for (const cluster of clusters) {
-      const base = Number(clusterSpeeds[cluster]) || 0;
-      const stock = (onHand[article] && onHand[article][cluster]) || 0;
-      let daysLeft = 0;
-      if (base > 0) {
-        daysLeft = stock / base;
-        if (daysLeft >= deficitDays) continue;
-      } else if (stock > 0) {
-        continue; // no speed with stock on the shelf is no demand, not a deficit
-      }
-
-      const weekQty = series[cluster] || {};
-      const values = window.map(w => weekQty[w] || 0);
-      const weeksWithSales = values.filter(v => v > 0).length;
-      if (weeksWithSales < MIN_WEEKS_WITH_SALES) continue;
-      const windowQty = values.reduce((sum, v) => sum + v, 0);
-      if (windowQty < minSales) continue;
-
-      const ranked = window.map(w => ({ week: w, qty: weekQty[w] || 0 }))
-        .sort((a, b) => b.qty - a.qty)
-        .slice(0, bestWeeksN);
-      if (!ranked.length) continue;
-      const raw = ranked.reduce((sum, r) => sum + r.qty, 0) / ranked.length / 7;
-      if (!(raw > base)) continue;
-
-      const capApplies = base > 0 && maxGrowth >= 1;
-      const corrected = capApplies ? Math.min(raw, base * maxGrowth) : raw;
-
-      if (!speed.perDayByArticleCluster[article]) speed.perDayByArticleCluster[article] = {};
-      speed.perDayByArticleCluster[article][cluster] = corrected;
-      speed.perDayByArticle[article] = (Number(speed.perDayByArticle[article]) || 0) + (corrected - base);
-
-      if (!out[article]) out[article] = {};
-      out[article][cluster] = {
-        clusterName: cluster,
-        base,
-        corrected,
-        raw,
-        capped: capApplies && corrected < raw,
-        windowQty,
-        weeksWithSales,
-        windowWeeks: window.length,
-        daysLeft,
-        bestWeeks: ranked
-      };
+    if (isCurrentPartial(row)) {
+      // counted below, like any week of the window
+    } else {
+      if ((Number(row.days) || 0) !== 7) continue;
+      if (!weekSet.has(week)) continue;
     }
+
+    const qty = Number(row.qty) || 0;
+    if (qty === 0) continue;
+
+    const article = resolveSalesArticle(skus, row.offerId, offerIdToArticle);
+    const clusterName = String(row.clusterName || '').trim() || NO_CLUSTER_NAME;
+    qtyByArticle[article] = (qtyByArticle[article] || 0) + qty;
+    if (!qtyByArticleCluster[article]) qtyByArticleCluster[article] = {};
+    qtyByArticleCluster[article][clusterName] = (qtyByArticleCluster[article][clusterName] || 0) + qty;
   }
-  return out;
+
+  return {
+    weeks,
+    currentWeek: currentWeekDays > 0 ? current : null,
+    currentWeekDays,
+    windowWeeksLabel: weeks.length + (currentWeekDays > 0 ? 1 : 0),
+    qtyByArticle,
+    qtyByArticleCluster
+  };
+}
+
+/**
+ * Item 86, step B. Rebuilds `speed.perDayByArticleCluster` AFTER every article-level speed pass
+ * (item 42 deficit correction, item 73 demand growth) as `perDayByArticle[article] × share`,
+ * share = qty of the cluster in `shareWindow` ÷ total qty of the article in `shareWindow`
+ * (denominator includes rows without a cluster, «Без кластера» — its own share stays unbound).
+ * Invariant: Σ over clusters (incl. no-cluster) of the rebuilt speed = perDayByArticle[article].
+ * Fallback (should not happen: sales only in weeks the share window filtered out as corrupted):
+ * an article with speed > 0 but NO sales at all in the share window keeps the short-window
+ * split (`speed.clusterSharesPctByArticle`, built once in `buildSalesSpeed` and never mutated
+ * by the speed passes) instead of losing every cluster.
+ * Mutates `speed.perDayByArticleCluster` in place; returns the share, in %, actually applied per
+ * article and cluster — for display only (the tooltip «доля кластера в продажах»).
+ */
+export function rebuildClusterSpeedByShare(
+  speed: SalesSpeedResult,
+  shareWindow: ClusterShareWindow
+): Record<string, Record<string, number>> {
+  const sharePctByArticleCluster: Record<string, Record<string, number>> = {};
+  const articles = new Set<string>([
+    ...Object.keys(speed.perDayByArticle),
+    ...Object.keys(shareWindow.qtyByArticleCluster)
+  ]);
+  for (const article of articles) {
+    const perDay = Number(speed.perDayByArticle[article]) || 0;
+    const windowQty = shareWindow.qtyByArticle[article] || 0;
+    const clusterQty = shareWindow.qtyByArticleCluster[article] || {};
+    const fresh: Record<string, number> = {};
+    const pct: Record<string, number> = {};
+
+    if (windowQty > 0) {
+      for (const clusterName of Object.keys(clusterQty)) {
+        const share = clusterQty[clusterName] / windowQty;
+        fresh[clusterName] = perDay * share;
+        pct[clusterName] = share * 100;
+      }
+    } else if (perDay > 0) {
+      // Fallback: nothing sold anywhere in the share window — split by the short window instead.
+      const shortShares = speed.clusterSharesPctByArticle[article] || {};
+      for (const clusterName of Object.keys(shortShares)) {
+        fresh[clusterName] = perDay * (shortShares[clusterName] / 100);
+        pct[clusterName] = shortShares[clusterName];
+      }
+    }
+
+    speed.perDayByArticleCluster[article] = fresh;
+    sharePctByArticleCluster[article] = pct;
+  }
+  return sharePctByArticleCluster;
 }
 
 // ===== Item 73: demand growth over the last 7 days =====
@@ -1636,10 +1632,14 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   const speed = buildSalesSpeed(input.sales, input.skus, weeks, offerIdToArticle, getMskWeekMonday(now));
   const stocksByArticle = buildClusterStocks(input.stocks, input.skus, input.settings.returnsToSalePct);
   const speedCorrections = applyDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, offerIdToArticle);
-  // Item 72. Clusters that stand empty inside an article that is not: corrected one by one.
-  const clusterSpeedCorrections = applyClusterDeficitSpeedCorrection(speed, input.stocks, input.sales, input.skus, input.settings, now, speedCorrections, offerIdToArticle);
   // Item 73. The last 7 days against the window: above the threshold the larger speed wins.
   const demandGrowth = applyDemandGrowth(speed, buildRecentSpeed(input.sales, input.skus, now, offerIdToArticle), input.settings);
+  // Item 86, step B. AFTER every article-level pass: split the (corrected) article speed between
+  // its clusters by their share of sales over the longer share window, replacing item 72's
+  // per-cluster deficit lift (two lifts of one empty cluster would have overstocked it).
+  const trendWeeksForShare = Number(input.settings.trendWeeks) > 0 ? Math.floor(Number(input.settings.trendWeeks)) : 13;
+  const shareWindow = buildClusterShareWindow(input.sales, input.skus, Math.max(trendWeeksForShare, speedWeeks), now, offerIdToArticle);
+  const clusterSharesPctByArticle = rebuildClusterSpeedByShare(speed, shareWindow);
   // Пункт 38. Тренд считается ПОСЛЕ коррекции скорости: сработавшая коррекция гасит тренд.
   const trends = buildSalesTrend(input.sales, input.skus, input.settings, now, speed, input.stocks, speedCorrections, offerIdToArticle);
   // Прогнозная скорость = факт × тренд × (1 + прирост, %). Используется ТОЛЬКО в контуре заказа
@@ -1744,8 +1744,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
 
     const articleClusterQty = speed.qtyByArticleCluster[article] || {};
     const articleClusterPerDay = speed.perDayByArticleCluster[article] || {};
-    // Item 72. A cluster corrected by its trend window may have no sales in the speed
-    // window at all: it is still a cluster with a speed.
+    // Item 86, step B. A cluster that sold in the long share window may have no sales in the
+    // speed window at all: it still has a speed (article speed × its share).
     const clusterNames = new Set<string>([...Object.keys(articleClusterQty), ...Object.keys(articleClusterPerDay)]);
     for (const clusterName of clusterNames) {
       const qty = articleClusterQty[clusterName] || 0;
@@ -1816,7 +1816,6 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
         clusterName: (st && st.clusterName) || clusterNamesById[clusterId] || clusterId,
         qtySold,
         perDay,
-        sharePct: articleQtySold > 0 ? (qtySold / articleQtySold) * 100 : 0,
         available: st ? st.available : 0,
         transit: st ? st.transit : 0,
         returns: st ? st.returns : 0,
@@ -1831,7 +1830,8 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
         ozonInFlightQty,
         inFlightQty,
         recommendation,
-        speedCorrection: (clusterSpeedCorrections[article] && clusterSpeedCorrections[article][clusterNamesById[clusterId] || '']) || null
+        speedSharePct: (clusterSharesPctByArticle[article] && clusterSharesPctByArticle[article][clusterNamesById[clusterId] || '']) || 0,
+        shareWindowWeeks: shareWindow.windowWeeksLabel
       });
     }
     clusterRows.sort((a, b) => b.qtySold - a.qtySold);

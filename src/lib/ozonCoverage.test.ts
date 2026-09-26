@@ -1115,29 +1115,35 @@ const clusterRec = (res: any, clusterId: string) => {
   return art.clusters.find((c: any) => c.clusterId === clusterId);
 };
 
-describe('Окно скорости решает, попадёт ли кластер в распределение', () => {
-  it('обычное окно 4 недели: кластер без свежих продаж рекомендации НЕ получает', () => {
-    const res = buildOzonCoverage(wideInput());
+// Item 86, step B (owner, 26.09.2026): this describe used to show that WIDENING speedWeeks
+// brought a stale cluster back into distribution. That mechanism is gone — item 72's per-cluster
+// deficit lift is replaced by a SHARE of the article's sales over the share window
+// (max(trendWeeks, speedWeeks), default trendWeeks 13), so a cluster's participation is now
+// governed by trendWeeks, not by speedWeeks. Rewritten to test the actual current rule; values
+// verified by hand below.
+describe('окно доли решает, попадёт ли кластер в распределение (item 86, step B)', () => {
+  it('trendWeeks 4 = speedWeeks: доля кластера считается только по этим 4 неделям, Казань туда не попала — рекомендации нет', () => {
+    const res = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 4, trendWeeks: 4, minStockDays: 7, targetStockDays: 20 }) }));
+    // Москва — единственная с продажами в окне доли, вся скорость товара 1.0 шт/д достаётся ей.
     expect(clusterRec(res, 'C1')!.recommendation).not.toBeNull();
-    expect(clusterRec(res, 'C1')!.recommendation!.qty).toBeGreaterThan(0);
-    // Казань продавала 13 недель назад — в окно 4 недели не попала.
+    expect(clusterRec(res, 'C1')!.recommendation!.qty).toBe(20); // 20 target days × 1.0 шт/д
     expect(clusterRec(res, 'C2')!.recommendation).toBeNull();
   });
 
-  it('окно тренда 13 недель: кластер возвращается в распределение', () => {
-    const res = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 13, minStockDays: 7, targetStockDays: 20 }) }));
-    expect(clusterRec(res, 'C1')!.recommendation!.qty).toBeGreaterThan(0);
+  it('trendWeeks по умолчанию (13) шире speedWeeks 4: Казань возвращается своей ДОЛЕЙ, а не собственной скоростью', () => {
+    // Окно доли = max(13, 4) = 13 недель — в нём Москва и Казань продали поровну (28 и 28 шт),
+    // поэтому скорость товара 1.0 шт/д делится 50/50: по 0.5 шт/д каждому кластеру.
+    const res = buildOzonCoverage(wideInput());
+    expect(clusterRec(res, 'C1')!.perDay).toBeCloseTo(0.5, 10);
+    expect(clusterRec(res, 'C1')!.recommendation!.qty).toBe(10); // 20 × 0.5
     expect(clusterRec(res, 'C2')!.recommendation).not.toBeNull();
-    expect(clusterRec(res, 'C2')!.recommendation!.qty).toBeGreaterThan(0);
+    expect(clusterRec(res, 'C2')!.perDay).toBeCloseTo(0.5, 10);
+    expect(clusterRec(res, 'C2')!.recommendation!.qty).toBe(10);
   });
 
-  it('ВАЖНО: общий объём НЕ растёт — те же продажи делятся между большим числом кластеров', () => {
-    // Знаменатель скорости — недели, реально присутствующие в данных, а не длина окна.
-    // Поэтому скорость по товару в обоих случаях 1 шт/день, а вот по кластеру она делится.
-    // Узкое окно: Москва 1.0 шт/д -> 20 шт, Казань 0 -> ничего. Итого 20.
-    // Широкое окно: обе по 0.5 шт/д -> по 10 шт. Итого те же 20, но на два кластера.
-    const narrow = buildOzonCoverage(wideInput());
-    const wide = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 13, minStockDays: 7, targetStockDays: 20 }) }));
+  it('общий объём НЕ растёт — те же продажи делятся между большим числом кластеров по мере расширения окна доли (trendWeeks)', () => {
+    const narrowShare = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 4, trendWeeks: 4, minStockDays: 7, targetStockDays: 20 }) }));
+    const wideShare = buildOzonCoverage(wideInput()); // default trendWeeks 13
     const total = (res: any) => res.articles
       .find((a: any) => a.article === 'MISKA')!.clusters
       .reduce((s: number, c: any) => s + (c.recommendation ? c.recommendation.qty : 0), 0);
@@ -1145,20 +1151,25 @@ describe('Окно скорости решает, попадёт ли класт
       .find((a: any) => a.article === 'MISKA')!.clusters
       .filter((c: any) => c.recommendation && c.recommendation.qty > 0).length;
 
-    expect(withRec(narrow)).toBe(1);
-    expect(withRec(wide)).toBe(2);
-    expect(total(narrow)).toBe(20);
-    expect(total(wide)).toBe(20);
-    expect(clusterRec(narrow, 'C1')!.recommendation!.qty).toBe(20);
-    expect(clusterRec(wide, 'C1')!.recommendation!.qty).toBe(10);
-    expect(clusterRec(wide, 'C2')!.recommendation!.qty).toBe(10);
+    expect(withRec(narrowShare)).toBe(1);
+    expect(withRec(wideShare)).toBe(2);
+    expect(total(narrowShare)).toBe(20);
+    expect(total(wideShare)).toBe(20);
   });
 
-  it('широкое окно растягивает те же продажи: скорость по кластеру падает', () => {
-    const narrow = buildOzonCoverage(wideInput());
-    const wide = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 13, minStockDays: 7, targetStockDays: 20 }) }));
-    // Москва: те же 28 шт, но поделённые на 91 день вместо 28.
-    expect(clusterRec(wide, 'C1')!.perDay).toBeLessThan(clusterRec(narrow, 'C1')!.perDay);
+  it('более широкое окно доли (не speedWeeks) снижает долю и скорость Москвы: 1.0 шт/д при trendWeeks 4 против 0.5 шт/д при trendWeeks 13', () => {
+    const narrowShare = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 4, trendWeeks: 4, minStockDays: 7, targetStockDays: 20 }) }));
+    const wideShare = buildOzonCoverage(wideInput());
+    expect(clusterRec(wideShare, 'C1')!.perDay).toBeLessThan(clusterRec(narrowShare, 'C1')!.perDay);
+  });
+
+  it('доля кластера и окно доли записаны в строке для показа: Москва 100 % при trendWeeks 4, 50 % при trendWeeks 13 (обе за 4 нед.)', () => {
+    const narrowShare = buildOzonCoverage(wideInput({ settings: makeSettings({ speedWeeks: 4, trendWeeks: 4, minStockDays: 7, targetStockDays: 20 }) }));
+    const wideShare = buildOzonCoverage(wideInput());
+    expect(clusterRec(narrowShare, 'C1')!.speedSharePct).toBeCloseTo(100, 10);
+    expect(clusterRec(narrowShare, 'C1')!.shareWindowWeeks).toBe(4);
+    expect(clusterRec(wideShare, 'C1')!.speedSharePct).toBeCloseTo(50, 10);
+    expect(clusterRec(wideShare, 'C1')!.shareWindowWeeks).toBe(8); // 8 недель реально присутствуют в данных из 13 запрошенных
   });
 });
 
