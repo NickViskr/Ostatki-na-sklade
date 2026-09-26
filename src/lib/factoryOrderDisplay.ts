@@ -7,6 +7,32 @@ export function isChinaFactoryOrder(order: FactoryOrder): boolean {
   return source === 'Китай' || source === 'Китай прогноз';
 }
 
+/**
+ * Item 85, step 1.7. The factory orders of one article as the screen shows them, by the SAME
+ * rule as the pipeline (`factoryOnOrderByArticle`): `waiting` is exactly what the pipeline
+ * counts, `overdue` is a manual order whose date has passed (it dropped out of the pipeline and
+ * waits for the owner). A China row is never overdue — late, it stays in the pipeline with
+ * «задерживается N дн» (item 83d). Received and «replaced» rows, and manual rows hidden by a China
+ * row of the article (`hiddenIds`), are in neither list. Both tables of «Остатки Озон» use it:
+ * the components table used to call a late China order «просрочен — в запас не входит», and
+ * both counted replaced and hidden rows into «уже заказано».
+ */
+export function splitFactoryOrders(
+  orders: FactoryOrder[],
+  todayIso: string,
+  hiddenIds: Set<string> = new Set()
+): { waiting: FactoryOrder[]; overdue: FactoryOrder[] } {
+  const live = (orders || []).filter((o) => {
+    const status = String(o.status || '').trim();
+    return status !== 'received' && status !== 'replaced' && !hiddenIds.has(o.id);
+  });
+  const late = (o: FactoryOrder) => !!o.expectedAt && o.expectedAt < todayIso;
+  return {
+    waiting: live.filter((o) => isChinaFactoryOrder(o) || !late(o)),
+    overdue: live.filter((o) => !isChinaFactoryOrder(o) && late(o))
+  };
+}
+
 /** Item 83g: badge text next to a factory-order row — «Китай · NV-0923-4» for a shipped batch,
  * «Китай · прогноз, заказ 31» for a saved forecast that has not shipped yet; '' for a manual row. */
 export function factoryOrderBadge(order: FactoryOrder): string {

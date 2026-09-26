@@ -16,7 +16,7 @@ import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCa
 import { buildOzonCoverage, OzonCoverageResult, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle } from '../lib/ozonCoverage';
 import { buildPendingSupplies } from '../lib/ozonPending';
 import { getStatusDetails } from '../lib/ozonStatus';
-import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder } from '../lib/factoryOrderDisplay';
+import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder, splitFactoryOrders } from '../lib/factoryOrderDisplay';
 
 /** Пункт 64. Кластер, куда товар ещё ни разу не ездил: строка есть, чисел нет.
  *  Строится здесь, а не в правиле: форму строки таблицы знает только экран. */
@@ -427,6 +427,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return factoryOnOrderByArticle(factoryOrders || [], today);
   }, [factoryOrders]);
   const factoryOnOrder = factoryPipeline.qty;
+  // Item 85, step 1.7: the ids of manual orders the pipeline hides — kept out of «уже заказано».
+  const hiddenManualIds = useMemo(() => new Set(factoryPipeline.hiddenManual.map((o) => o.id)), [factoryPipeline]);
 
   // Item 83e: manual orders hidden from the ТРУБА by an active China row of the same article,
   // grouped by article for the table's notice.
@@ -1545,9 +1547,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         // Item 83d: a China row NEVER drops into the «просрочен» state — it stays in the
                         // ТРУБА even late, only «задерживается N дн» tells the owner about it.
                         const factoryList = factoryOrdersByArticle[art.article] || [];
-                        const factoryOverdueList = factoryList.filter((o) => !isChinaFactoryOrder(o) && o.expectedAt && o.expectedAt < todayIso);
+                        const factorySplit = splitFactoryOrders(factoryList, todayIso, hiddenManualIds);
+                        const factoryOverdueList = factorySplit.overdue;
                         const factoryOverdueQty = factoryOverdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-                        const factoryWaitingList = factoryList.filter((o) => isChinaFactoryOrder(o) || !o.expectedAt || o.expectedAt >= todayIso);
+                        const factoryWaitingList = factorySplit.waiting;
                         const factoryWaitingQty = factoryWaitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
                         const factoryNearest = factoryWaitingList[0] || null;
                         // Item 83e: manual orders hidden from the ТРУБА for this article, shown as a
@@ -2208,9 +2211,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         // Разбор заказов на фабрике для компонента — по образцу основной таблицы (строки 1129-1134),
                         // иначе после оформления заказа он пропадал бы из вида: сигнал гас, а сам заказ было не видно и не открыть.
                         const list = factoryOrdersByArticle[c.component] || [];
-                        const overdueList = list.filter((o) => o.expectedAt && o.expectedAt < todayIso);
+                        // Item 85, step 1.7: the same rule as the main table and the pipeline — a late
+                        // China order stays waiting («задерживается N дн»), never «просрочен».
+                        const compSplit = splitFactoryOrders(list, todayIso, hiddenManualIds);
+                        const overdueList = compSplit.overdue;
                         const overdueQty = overdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-                        const waitingList = list.filter((o) => !o.expectedAt || o.expectedAt >= todayIso);
+                        const waitingList = compSplit.waiting;
                         const waitingQty = waitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
                         const nearest = waitingList[0] || null;
                         // Сколько дней хватит запаса без сигнала — нужно показывать даже когда заказывать не надо,
@@ -2327,7 +2333,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   title={`Заказано на фабрике ${waitingQty} шт. Заказ входит в запас, дозаказывать не нужно. Нажми, чтобы изменить заказ или отметить приход партии.`}
                                 >
                                   заказано {fmtInt(waitingQty)} шт
-                                  <span className="block text-[10px] font-semibold text-sky-600">ждём {nearest && nearest.expectedAt ? fmtDateShort(nearest.expectedAt) : '—'}</span>
+                                  <span className="block text-[10px] font-semibold text-sky-600">
+                                    ждём {nearest && nearest.expectedAt ? fmtDateShort(nearest.expectedAt) : '—'}
+                                    {nearest && factoryOrderBadge(nearest) ? ` · ${factoryOrderBadge(nearest)}` : ''}
+                                    {nearest && factoryLateLabel(factoryPipeline.late[nearest.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[nearest.id])}` : ''}
+                                  </span>
                                 </button>
                               ) : (
                                 <button
