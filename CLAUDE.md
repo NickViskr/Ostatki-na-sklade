@@ -106,3 +106,17 @@ not translated back; files drift to English as they are edited.
 - Diagnose calculation questions by replaying the production modules on an xlsx export
   through `npx vite-node <script>.ts`, and read the Cloud Run log lines `GASDIAG …` /
   `SUPPLYDOCS …`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as markdown files in `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Standard five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
