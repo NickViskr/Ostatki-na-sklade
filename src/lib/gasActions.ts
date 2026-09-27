@@ -14,6 +14,9 @@
 // Пункт 29, этап B: раздельные сроки жизни кэша вместо общих 30 секунд.
 // Справочники почти не меняются, данные Ozon обновляются триггерами
 // дважды в сутки, а оперативные остатки должны быть свежими.
+// Любое пишущее действие по-прежнему сбрасывает весь кэш целиком,
+// поэтому длинные сроки не могут показать устаревшие данные.
+// (Since stage C, a write listed in GAS_ACTIONS drops only the reads it names.)
 // Item 26 (2026-08-20): Ozon raised from 5 to 60 minutes. Measurement showed the whole start-up
 // is one request — getOzonSales takes 9-13 s because it reads the entire «Продажи Ozon»
 // sheet, of which 57% are archive rows the date window always discards. Served from cache
@@ -41,10 +44,14 @@ type GasAction =
 const read = (cache?: GasCacheTier): GasAction => ({ read: true, cache });
 const write = (...invalidates: string[]): GasAction => ({ read: false, invalidates });
 
-// Item 26 (2026-08-20): the China writes below touch the module's own spreadsheet only.
+// Item 81: the module «Заказы в Китае». Its writes touch nothing but its own spreadsheet, so only
+// its own reads have to be dropped.
 const CHINA_READS = ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'];
-// Item 84 (stage 1): posting, cost correction and a report upload also write «Остатки»/
-// «Транзакции» of the MAIN spreadsheet and move rows of «Заказы на фабрике».
+// Item 84 (stage 1): posting/cancelling touches the module's own spreadsheet AND the MAIN
+// spreadsheet's «Остатки»/«Транзакции» (commitTransaction/deleteTransaction) plus «Заказы на
+// фабрике» (the posted batch's row moves in the pipeline) — every read any of that feeds must
+// drop. saveChinaBatch and saveChinaReport can run the automatic cost correction of a posted
+// batch, which writes the same main-spreadsheet sheets.
 const CHINA_AND_MAIN_READS = [...CHINA_READS, 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions'];
 
 export const GAS_ACTIONS: Record<string, GasAction> = {
@@ -71,8 +78,11 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   getFactoryOrders: read('ozon'),
   // Item 26 stage A1: the composite read is cached like the Ozon data it carries. It also
   // carries settings and clusters, which on their own live 10 minutes — the shorter of the two
-  // lifetimes is used deliberately. It was first LEFT OUT of both the reads and the lifetimes:
-  // not cached at all, and every miss on it wiped the whole cache.
+  // lifetimes is used deliberately, so nothing is served staler than it would have been when
+  // fetched separately. LEFT OUT OF THE LIFETIMES BY MISTAKE when the action was introduced: it
+  // was not cached at all and start-up got SLOWER, not faster — five cached reads had been
+  // replaced by one uncached one. It was also missing from the reads at first, so every cache
+  // miss on it wiped the whole cache and made every other read on the same page load miss too.
   getOzonInitialData: read('ozon'),
   // Item 89 (2026-09-27): read after every sales refresh since item 86 but never listed, so
   // every call wiped the whole cache. Written only by saveOzonStocks (updateOzonStockHistory).
@@ -135,17 +145,21 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   deleteChinaBatchCost: write(...CHINA_READS),
   saveChinaPayment: write(...CHINA_READS),
   deleteChinaPayment: write(...CHINA_READS),
-  // Item 81g-2: matching moves money between a payment and a receipt.
+  // Item 81g-2: matching moves money between a payment and a receipt — both reads must drop.
   matchChinaPayment: write(...CHINA_READS),
   unmatchChinaPayment: write(...CHINA_READS),
+  // Item 81g-3.
   setChinaRubCostsDone: write(...CHINA_READS),
   // Owner, 2026-09-25: the owner's own «история» mark on a receipt.
   setChinaReceiptHistory: write(...CHINA_READS),
   // Item 83c: deleting a batch also syncs «Заказы на фабрике».
   deleteChinaBatch: write(...CHINA_READS, 'getFactoryOrders', 'getOzonInitialData'),
-  // Items 83c/84: a batch save or a report upload syncs «Заказы на фабрике» and may run the
-  // automatic cost correction of a posted batch; posting and cancelling write the main stock.
+  // Items 83c/84: a batch save syncs «Заказы на фабрике» and may run the automatic cost
+  // correction of a posted batch; posting and cancelling write the main stock.
   saveChinaBatch: write(...CHINA_AND_MAIN_READS),
+  // Item 81g-1: the report touches its own spreadsheet's read. Item 3: it now also fills
+  // batches' order/arrival from the report's bills and syncs «Заказы на фабрике»
+  // (chinaFillBatchesFromReport + syncChinaFactoryOrders) — same entries as saveChinaBatch.
   saveChinaReport: write(...CHINA_AND_MAIN_READS),
   postChinaBatch: write(...CHINA_AND_MAIN_READS),
   cancelChinaBatchPosting: write(...CHINA_AND_MAIN_READS),
