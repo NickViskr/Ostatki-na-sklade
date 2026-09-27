@@ -1,5 +1,4 @@
 // ===== Модуль планирования поставок Ozon =====
-// Часть 1: недели по МСК, сопоставление артикулов, скорость продаж.
 // Все функции чистые: без обращения к стору, без побочных эффектов.
 
 // Item 88, ticket 02: split by topic; this file keeps buildComponentCoverage/buildOzonCoverage and re-exports the rest.

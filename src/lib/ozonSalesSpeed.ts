@@ -1,4 +1,5 @@
 // Item 88, ticket 02. Sales speed: MSK weeks, article resolution, deficit correction, demand growth.
+// Часть 1: недели по МСК, сопоставление артикулов, скорость продаж.
 import { OzonSalesRow, OzonStockRow, SKUItem } from '../types';
 import type { OzonCoverageSettings } from './ozonClusters';
 

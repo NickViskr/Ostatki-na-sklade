@@ -11,3 +11,9 @@
 - [ ] Rendered HTML from ticket 01 identical for every cabinet and the dashboard
 - [ ] `OZONPERF` timings no worse than the ticket-01 record
 - [ ] «ТРУБА» in code means the pipeline only
+
+**Carried over from ticket 02:** `src/lib/ozonClusterShare.test.ts` (~line 296, «the library
+exports no trace of item 72») reads only `src/lib/ozonCoverage.ts`; make it read every coverage
+library file (the split left it nearly empty). Also consider moving kit components out of
+`ozonCoverage.ts` once the text guards of `ozonCoverage.test.ts` (~1445) and
+`ozonSpeedCurrentWeek.test.ts` (~86) point at the right files.

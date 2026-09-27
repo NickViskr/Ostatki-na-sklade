@@ -36,7 +36,9 @@ browser ──/api/gas──▶ server.ts ──▶ Code.gs /exec ──▶ «Б
   `ManualTab.tsx`/`UploadTab.tsx` (receipts and expenses), `ShipmentCostTab.tsx` (write-off of
   Ozon requests with extra costs).
 - `src/lib/*` — pure logic with tests next to it (`*.test.ts`, vitest). Key modules:
-  `ozonCoverage.ts` (speed, corrections, demand growth, trend, recommendations),
+  `ozonCoverage.ts` (the coverage build and kit components; re-exports the topic files
+  `ozonSalesSpeed.ts`, `ozonSalesTrend.ts`, `ozonStockHistory.ts`, `ozonClusters.ts`,
+  `ozonSupplyRecommendation.ts`, `ozonFactorySignal.ts`, `ozonCoverageTypes.ts` — import from it),
   `ozonPending.ts` (reserve of created requests), `ozonAlerts.ts`, `ozonCargo.ts` /
   `ozonComposition.ts` / `ozonSupplyDocs.ts` (cargoes, composition files, documents),
   `ozonDirectDraft.ts` / `ozonDirectSupply.ts` (direct supplies), `ozonSupplyLines.ts` /
