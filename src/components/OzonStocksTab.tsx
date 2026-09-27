@@ -425,27 +425,27 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return map;
   }, [factoryOrders]);
 
-  // Item 35/83/88 ticket 03: the open-factory-orders pipeline — «ordered, not received» — now
+  // Item 35/83/88 ticket 03: open factory orders — «ordered, not received» — now
   // built once inside coverageSource, shared with Dashboard.tsx. Item 83e/83d: the same call
   // also gives the hidden-manual notice and the «задерживается N дн» label of a late China row —
   // both used by the table below.
-  const factoryPipeline = coverageSource.factoryPipeline;
-  const factoryOnOrder = factoryPipeline.qty;
+  const openFactoryOrders = coverageSource.openFactoryOrders;
+  const factoryOnOrder = openFactoryOrders.qty;
   // Item 85, step 1.7: the ids of manual orders the pipeline hides — kept out of «уже заказано».
-  const hiddenManualIds = useMemo(() => new Set(factoryPipeline.hiddenManual.map((o) => o.id)), [factoryPipeline]);
+  const hiddenManualIds = useMemo(() => new Set(openFactoryOrders.hiddenManual.map((o) => o.id)), [openFactoryOrders]);
 
   // Item 83e: manual orders hidden from the ТРУБА by an active China row of the same article,
   // grouped by article for the table's notice.
   const hiddenManualByArticle = useMemo(() => {
     const map: Record<string, FactoryOrder[]> = {};
-    for (const o of factoryPipeline.hiddenManual) {
+    for (const o of openFactoryOrders.hiddenManual) {
       const key = String(o.article || '').trim();
       if (!key) continue;
       if (!map[key]) map[key] = [];
       map[key].push(o);
     }
     return map;
-  }, [factoryPipeline]);
+  }, [openFactoryOrders]);
 
   const resolveFactoryOrderConflict = useWarehouseStore((state) => state.resolveFactoryOrderConflict);
   const setConfirmDialog = useUIStore((state) => state.setConfirmDialog);
@@ -480,8 +480,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   // coverageSource — everything but `settings` is fixed. Used by the `coverage` memo below AND
   // handed to the settings modal as `computeImpact`, so its «было → станет» summary can never
   // disagree with what this screen itself shows for the same settings. `coverageSource.ready`
-  // carries the old length/clusterRefsLoaded gate (Пункт 29, этап E: ждём ответ по справочнику
-  // кластеров).
+  // carries the old length/clusterRefsLoaded gate (item 29 stage E: wait for the cluster
+  // reference).
   const runCoverage = React.useCallback((settings: OzonCoverageSettings): OzonCoverageResult | null => {
     return computeCoverage(coverageSource, settings);
   }, [coverageSource]);
@@ -1543,7 +1543,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         const factoryOrdersDetail = factoryList
                           .map((o) => {
                             const badge = factoryOrderBadge(o);
-                            const late = factoryLateLabel(factoryPipeline.late[o.id]);
+                            const late = factoryLateLabel(openFactoryOrders.late[o.id]);
                             return `${fmtInt(o.qty)} шт${badge ? ` · ${badge}` : ''}${o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}${late ? ` · ${late}` : ''}`;
                           })
                           .join('\n');
@@ -1800,7 +1800,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         {factoryList.filter((o) => o.id !== factoryOverdueList[0].id).map((o) => (
                                           <React.Fragment key={o.id}>
                                             {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}
-                                            {factoryLateLabel(factoryPipeline.late[o.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[o.id])}` : ''}<br />
+                                            {factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}<br />
                                           </React.Fragment>
                                         ))}
                                         Нажми, чтобы изменить заказ или отметить приход партии.
@@ -1821,7 +1821,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                           here — show every waiting order with its China batch and arrival. */}
                                       {factoryWaitingList.map((o) => (
                                         <span key={o.id} className="block text-[10px] font-semibold text-sky-600">
-                                          заказ {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(factoryPipeline.late[o.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[o.id])}` : ''}
+                                          заказ {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}
                                         </span>
                                       ))}
                                     </button>
@@ -2152,7 +2152,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         <span className="font-mono font-bold text-slate-800">{a}</span>
                         {liveOrders(a).map((o) => (
                           <span key={o.id} className="text-sky-700">
-                            {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(factoryPipeline.late[o.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[o.id])}` : ''}
+                            {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}
                           </span>
                         ))}
                       </div>
@@ -2321,7 +2321,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   <span className="block text-[10px] font-semibold text-sky-600">
                                     ждём {nearest && nearest.expectedAt ? fmtDateShort(nearest.expectedAt) : '—'}
                                     {nearest && factoryOrderBadge(nearest) ? ` · ${factoryOrderBadge(nearest)}` : ''}
-                                    {nearest && factoryLateLabel(factoryPipeline.late[nearest.id]) ? ` · ${factoryLateLabel(factoryPipeline.late[nearest.id])}` : ''}
+                                    {nearest && factoryLateLabel(openFactoryOrders.late[nearest.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[nearest.id])}` : ''}
                                   </span>
                                 </button>
                               ) : (

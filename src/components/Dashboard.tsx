@@ -216,7 +216,7 @@ export const Dashboard: React.FC = React.memo(() => {
 
   // Item 88 ticket 03: one shared coverage source, shared with OzonStocksTab.tsx. Cabinet 'all' —
   // the dashboard never splits by shop — and `waitForClusterRefs: false`, so it keeps not
-  // waiting for the cluster reference (Q4 а), now expressed as a parameter, not a copy.
+  // waiting for the cluster reference (spec Q4, option a), now expressed as a parameter, not a copy.
   const coverageSource = useMemo(() => {
     const d = new Date();
     const todayIsoNow = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -230,9 +230,9 @@ export const Dashboard: React.FC = React.memo(() => {
   // На главной кабинеты не разделяются — берутся все записи.
   const pendingSupplies = coverageSource.pending;
 
-  // Item 35/83. The open-factory-orders pipeline — «ordered, not received» — shared with
+  // Item 35/83. Open factory orders — «ordered, not received» — shared with
   // OzonStocksTab.tsx (not the ТРУБА itself, see CONTEXT.md).
-  const factoryOnOrder = coverageSource.factoryPipeline.qty;
+  const factoryOnOrder = coverageSource.openFactoryOrders.qty;
 
   const ozonCoverage = useMemo<OzonCoverageResult | null>(() => computeCoverage(coverageSource, ozonSettings), [coverageSource, ozonSettings]);
 

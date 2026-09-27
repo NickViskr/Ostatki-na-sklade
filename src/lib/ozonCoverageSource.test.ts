@@ -213,9 +213,9 @@ describe('buildCoverageSource: open factory orders are not filtered by cabinet',
     const sourceA = buildCoverageSource(makeData(), { cabinet: 'A', todayIso: TODAY_ISO, waitForClusterRefs: false });
     const sourceB = buildCoverageSource(makeData(), { cabinet: 'B', todayIso: TODAY_ISO, waitForClusterRefs: false });
     // Cabinet A's stocks do not even carry ART-B, yet its factory pipeline still knows about it.
-    expect(sourceA.factoryPipeline.qty['ART-B']).toBe(15);
-    expect(sourceB.factoryPipeline.qty['ART-A']).toBe(20);
-    expect(sourceA.factoryPipeline.qty).toEqual(sourceB.factoryPipeline.qty);
+    expect(sourceA.openFactoryOrders.qty['ART-B']).toBe(15);
+    expect(sourceB.openFactoryOrders.qty['ART-A']).toBe(20);
+    expect(sourceA.openFactoryOrders.qty).toEqual(sourceB.openFactoryOrders.qty);
   });
 });
 
@@ -245,10 +245,11 @@ describe('buildCoverageSource: the wide window only changes speed-driven figures
     const wideArt = wide.articles.find((a) => a.article === 'ART-A')!;
     // No sales before the 4-week window in this fixture, so the wider window dilutes speed.
     expect(wideArt.perDay).not.toBe(narrowArt.perDay);
-    // Same underlying source object — availability, reserve and factory pipeline are untouched.
+    // Same underlying source object — availability, reserve and open factory orders are untouched.
     expect(narrowArt.myStockAvailable).toBe(wideArt.myStockAvailable);
     expect(narrowArt.pendingTotal).toBe(wideArt.pendingTotal);
-    expect(source.factoryPipeline.qty).toEqual(source.factoryPipeline.qty);
+    expect(wideArt.freeMyStock).toBe(narrowArt.freeMyStock);
+    expect(wideArt.factory?.onOrderQty).toBe(narrowArt.factory?.onOrderQty);
   });
 });
 

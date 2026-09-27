@@ -39,7 +39,7 @@ export interface CoverageSource {
   sales: OzonSalesRow[];
   stockHistory: OzonStockHistoryRow[];
   pending: PendingSuppliesResult;
-  factoryPipeline: FactoryOnOrderResult;
+  openFactoryOrders: FactoryOnOrderResult;
   myStockAvailability: Record<string, number>;
   skus: SKUItem[];
   kits: KitItem[];
@@ -77,7 +77,7 @@ export function buildCoverageSource(data: CoverageStoreData, opts: CoverageSourc
 
   // Item 35/83. Open factory orders — «ordered, not received» — are never filtered by cabinet:
   // a factory order is not tied to one Ozon shop. Not the «ТРУБА» itself — see CONTEXT.md.
-  const factoryPipeline = factoryOnOrderByArticle(data.factoryOrders || [], opts.todayIso);
+  const openFactoryOrders = factoryOnOrderByArticle(data.factoryOrders || [], opts.todayIso);
 
   // Item 85, step 1.6: the same availability the tab and the dashboard used, kit components
   // included — a shared component gets its own figure even without an SKU card of its own.
@@ -96,7 +96,7 @@ export function buildCoverageSource(data: CoverageStoreData, opts: CoverageSourc
     sales,
     stockHistory,
     pending,
-    factoryPipeline,
+    openFactoryOrders,
     myStockAvailability,
     skus: data.skus,
     kits: data.kits,
@@ -116,7 +116,7 @@ export function computeCoverage(source: CoverageSource, settings: OzonCoverageSe
     settings,
     myStockAvailability: source.myStockAvailability,
     pending: source.pending,
-    factoryOnOrder: source.factoryPipeline.qty,
+    factoryOnOrder: source.openFactoryOrders.qty,
     kits: source.kits,
     stockHistory: source.stockHistory,
   });

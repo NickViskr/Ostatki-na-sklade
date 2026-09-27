@@ -294,19 +294,13 @@ describe('item 86 step B: display', () => {
 
   it('the library exports no trace of item 72 (removed together with its badge and tests)', () => {
     // Item 88 ticket 03: the coverage library split across several files (ozonCoverage.ts is
-    // now near-empty of logic) — the guard must read every file the split produced, or a
+    // now near-empty of logic) — the guard reads every ozon*.ts library file, or a
     // reintroduced `applyClusterDeficitSpeedCorrection` could hide in one of them unnoticed.
-    const libFiles = [
-      'src/lib/ozonCoverage.ts',
-      'src/lib/ozonSalesSpeed.ts',
-      'src/lib/ozonClusters.ts',
-      'src/lib/ozonSupplyRecommendation.ts',
-      'src/lib/ozonFactorySignal.ts',
-      'src/lib/ozonCoverageTypes.ts',
-      'src/lib/ozonStockHistory.ts',
-      'src/lib/ozonSalesTrend.ts',
-      'src/lib/ozonCoverageSource.ts'
-    ];
+    const libDir = path.join(process.cwd(), 'src/lib');
+    const libFiles = fs.readdirSync(libDir)
+      .filter((f) => /^ozon.*\.ts$/.test(f) && !f.endsWith('.test.ts'))
+      .map((f) => `src/lib/${f}`);
+    expect(libFiles).toContain('src/lib/ozonClusters.ts');
     for (const file of libFiles) {
       const src = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
       expect(src, `${file} must not contain applyClusterDeficitSpeedCorrection`).not.toContain('applyClusterDeficitSpeedCorrection');

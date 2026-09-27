@@ -1841,5 +1841,9 @@ describe('factoryOnOrderByArticle', () => {
     expect(stocks).toMatch(/import \{[^}]*buildCoverageSource[^}]*\} from '..\/lib\/ozonCoverageSource'/);
     expect(dashboard).toMatch(/import \{[^}]*buildCoverageSource[^}]*\} from '..\/lib\/ozonCoverageSource'/);
     expect((source.match(/factoryOnOrderByArticle/g) || []).length).toBeGreaterThan(0);
+    for (const screen of [stocks, dashboard]) {
+      expect(screen).not.toMatch(/buildOzonCoverage\(/);
+      expect(screen).not.toMatch(/buildPendingSupplies\(/);
+    }
   });
 });
