@@ -313,6 +313,9 @@ describe('подключение пункта 60 к экранам', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
   const stocks = read('src/components/OzonStocksTab.tsx');
   const modal = read('src/components/OzonSupplyModal.tsx');
+  // Item 88 ticket 04: the supply-plan and cluster-shares stages moved into
+  // buildSupplyPlan/buildClusterShares in the tab model.
+  const tabModel = read('src/lib/ozonStocksTabModel.ts');
 
   it('«Рекомендации»: галочка рисуется по правилу, а не по одним коробкам', () => {
     expect(stocks).toContain('canTickCluster(c.recommendation.boxes, c.needBoxes)');
@@ -320,12 +323,12 @@ describe('подключение пункта 60 к экранам', () => {
   });
 
   it('«Рекомендации»: кластер с нулём попадает в заявку по тому же правилу', () => {
-    expect(stocks).toMatch(/if \(!canTickCluster\(c\.recommendation\.boxes, c\.needBoxes\)\) continue;/);
+    expect(tabModel).toMatch(/if \(!canTickCluster\(c\.recommendation\.boxes, c\.needBoxes\)\) continue;/);
   });
 
   it('«Рекомендации»: доли кластеров уезжают в мастер', () => {
     expect(stocks).toContain('clusterSalesShare={clusterShares.byClusterId}');
-    expect(stocks).toContain('byClusterId[clusterId] = total > 0');
+    expect(tabModel).toContain('byClusterId[clusterId] = total > 0');
   });
 
   it('Мастер: список кластеров сортируется правилом', () => {

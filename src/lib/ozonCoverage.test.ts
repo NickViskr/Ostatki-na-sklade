@@ -1424,14 +1424,16 @@ describe('дефицит компонента и честная подпись �
   });
 
   it('компонент, держащий сборку, показан отдельным состоянием с количеством', () => {
+    // Item 88 ticket 04: the condition itself is now the model's discriminant («clusterDeficit»
+    // for a component, decided by buildComponentFactoryCellState) — the JSX it opens is unchanged.
     expect(stocks).toMatch(
-      /\) : c\.factory && c\.factory\.unmetDeficitQty > 0 \? \([\s\S]{0,1600}?держит сборку · \{fmtInt\(c\.factory\.unmetDeficitQty\)\} шт/
+      /\) : compFactoryCell\.kind === 'clusterDeficit' && c\.factory \? \([\s\S]{0,1600}?держит сборку · \{fmtInt\(c\.factory\.unmetDeficitQty\)\} шт/
     );
   });
 
   it('состояние кликабельно — по нему можно оформить заказ на фабрике', () => {
     expect(stocks).toMatch(
-      /c\.factory && c\.factory\.unmetDeficitQty > 0 \? \([\s\S]{0,900}?onClick=\{\(\) => setFactoryModalArticle\(c\.component\)\}/
+      /compFactoryCell\.kind === 'clusterDeficit' && c\.factory \? \([\s\S]{0,900}?onClick=\{\(\) => setFactoryModalArticle\(c\.component\)\}/
     );
   });
 
@@ -1468,9 +1470,13 @@ describe('заказ на фабрике вне рекомендаций', () =>
   });
 
   it('состояние «срок не задан» открывает окно заказа', () => {
+    // Item 88 ticket 04: the condition is now the model's 'noLeadTime' kind — decided by
+    // buildArticleFactoryCellState from the SAME `(Number(leadTimeDays) || 0) === 0` check.
     expect(stocks).toMatch(
-      /\(Number\(art\.leadTimeDays\) \|\| 0\) === 0 \? \(\s*\n\s*<button/
+      /factoryCell\.kind === 'noLeadTime' \? \(\s*\n\s*<button/
     );
+    const tabModel = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');
+    expect(tabModel).toContain("else if ((Number(params.leadTimeDays) || 0) === 0) kind = 'noLeadTime';");
     expect(stocks).toMatch(/срок не задан\s*\n\s*<\/button>/);
   });
 
@@ -1651,9 +1657,13 @@ describe('пункт 51: экран показывает неполную кор
   const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
 
   it('полная потребность берётся из wantQty в ОБОИХ местах, а не пересчитывается из neededQty', () => {
-    const fromWant = stocks.match(/cls\.recommendation\.wantQty/g) || [];
+    // Item 88 ticket 04: both places (coverageRows and the recommendations' wide-window
+    // enrichment) moved into buildCoverageRows/buildRecommendations in the tab model.
+    const tabModel = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');
+    const fromWant = tabModel.match(/cls\.recommendation\.wantQty/g) || [];
     expect(fromWant).toHaveLength(2);
-    expect(stocks).not.toMatch(/Math\.ceil\(cls\.recommendation\.neededQty/);
+    expect(stocks).not.toMatch(/cls\.recommendation\.wantQty/);
+    expect(tabModel).not.toMatch(/Math\.ceil\(cls\.recommendation\.neededQty/);
   });
 
   it('неполная коробка подписана в обоих местах: и в панели, и в строке кластера', () => {

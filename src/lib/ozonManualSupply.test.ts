@@ -288,6 +288,9 @@ describe('в ручном режиме видны все кластеры пос
 describe('ручной выбор на экране остатков', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
   const stocks = read('src/components/OzonStocksTab.tsx');
+  // Item 88 ticket 04: manualInfos (with it, this same manualClusterList call and the excluded-
+  // clusters filter) moved into buildManualInfos/buildSupplyClusterRefs in the tab model.
+  const tabModel = read('src/lib/ozonStocksTabModel.ts');
 
   it('режим включается кнопкой и выключение стирает галочки', () => {
     expect(stocks).toContain("id=\"btn-ozon-manual-supply\"");
@@ -321,12 +324,12 @@ describe('ручной выбор на экране остатков', () => {
 
   it('сборка заявки берёт тот же полный список, что и таблица', () => {
     // Иначе отмеченный новый кластер молча исчезнет из поставки.
-    expect(stocks).toMatch(/clusters: manualClusterList\(\s*\n\s*row\.clusters \|\| \[\],\s*\n\s*supplyClusterRefs,/);
+    expect(tabModel).toContain('clusters: manualClusterList(row.clusters || [], supplyClusterRefs, clusterSharesByClusterId, emptyManualCluster).map((c) => ({');
   });
 
   it('исключённые настройкой кластеры сами не добавляются', () => {
-    expect(stocks).toContain("const excluded = parseExcludedClusters(ozonSettings ? ozonSettings.excludedClusters : '');");
-    expect(stocks).toContain('.filter((c: any) => c.clusterId && !excluded.has(String(c.clusterId)))');
+    expect(tabModel).toContain("const excluded = parseExcludedClusters(excludedClustersSetting || '');");
+    expect(tabModel).toContain('.filter((c) => c.clusterId && !excluded.has(String(c.clusterId)))');
   });
 
   it('строка товара показывает, сколько ещё свободно', () => {

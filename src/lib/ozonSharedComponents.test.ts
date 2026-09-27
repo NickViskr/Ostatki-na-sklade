@@ -185,6 +185,9 @@ describe('item 85, step 1.6 / item 88 ticket 03: every kit component gets its ow
   it('the recommendation card says when a kit got only its share of a shared component', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
     expect(src).toContain('доля общих компонентов: {fmtInt(s.shippableMyStock)} шт');
-    expect(src).toContain('shippableMyStock: row.shippableMyStock,');
+    // Item 88 ticket 04: the recommendations stage (with it, this field) moved into
+    // buildRecommendations in the tab model.
+    const tabModel = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');
+    expect(tabModel).toContain('shippableMyStock: row.shippableMyStock,');
   });
 });

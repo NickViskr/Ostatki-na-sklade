@@ -12,39 +12,15 @@ import { OzonSupplyModal } from './OzonSupplyModal';
 import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { canTickCluster } from '../lib/ozonSupplyLines';
-import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
-import { OzonCoverageResult, OzonCoverageSettings, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, coverageTone, CoverageTone } from '../lib/ozonCoverage';
+import { clampManualQty, manualClusterList, manualKey, remainingForArticle } from '../lib/ozonManualSupply';
+import { OzonCoverageResult, OzonCoverageSettings, coverageTone, CoverageTone } from '../lib/ozonCoverage';
 import { summarizeSettingsImpact, OzonSettingsImpact } from '../lib/ozonSettingsImpact';
 import { buildCoverageSource, computeCoverage } from '../lib/ozonCoverageSource';
 import { getStatusDetails } from '../lib/ozonStatus';
-import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder, splitFactoryOrders } from '../lib/factoryOrderDisplay';
+import { factoryOrderBadge, factoryLateLabel } from '../lib/factoryOrderDisplay';
 import { canEditOzonSettings } from '../lib/ozonSettingsFields';
-
-/** Пункт 64. Кластер, куда товар ещё ни разу не ездил: строка есть, чисел нет.
- *  Строится здесь, а не в правиле: форму строки таблицы знает только экран. */
-const emptyManualCluster = (ref: { clusterId: string; clusterName: string }): any => ({
-  clusterId: ref.clusterId,
-  clusterName: ref.clusterName,
-  qtySold: 0,
-  perDay: 0,
-  available: 0,
-  transit: 0,
-  returns: 0,
-  estimated: 0,
-  coverageDays: null,
-  excluded: false,
-  priority: false,
-  priorityK: 1,
-  unmetQty: 0,
-  pendingQty: 0,
-  requestedQty: 0,
-  ozonInFlightQty: 0,
-  inFlightQty: 0,
-  needQty: 0,
-  needBoxes: 0,
-  recommendation: null,
-  warehouses: []
-});
+import { emptyManualCluster, resolveWideWeeks } from '../lib/ozonStocksTabModel';
+import { useOzonStocksTabModel } from './useOzonStocksTabModel';
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
 
@@ -407,45 +383,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
       .sort((a, b) => String(b.since || '').localeCompare(String(a.since || '')));
   }, [pendingModalArticle, pendingSupplies]);
 
-  // Пункт 35. Все активные заказы по артикулу, отсортированы по дате ожидания.
-  // Нужны, чтобы показать в плашке весь список, а не только последний заказ.
-  // Объявлено ДО расчёта покрытия: расчёт этими данными пользуется.
-  const factoryOrdersByArticle = useMemo(() => {
-    const map: Record<string, FactoryOrder[]> = {};
-    for (const o of factoryOrders || []) {
-      if (String(o.status || '').trim() === 'received') continue;
-      const key = String(o.article || '').trim();
-      if (!key) continue;
-      if (!map[key]) map[key] = [];
-      map[key].push(o);
-    }
-    for (const key of Object.keys(map)) {
-      map[key].sort((a, b) => String(a.expectedAt || '').localeCompare(String(b.expectedAt || '')));
-    }
-    return map;
-  }, [factoryOrders]);
-
   // Item 35/83/88 ticket 03: open factory orders — «ordered, not received» — now
   // built once inside coverageSource, shared with Dashboard.tsx. Item 83e/83d: the same call
   // also gives the hidden-manual notice and the «задерживается N дн» label of a late China row —
-  // both used by the table below.
+  // both used by the table below. `factoryOrdersByArticle`, `hiddenManualIds` and
+  // `hiddenManualByArticle` (item 88 ticket 04) now come from the tab model hook below.
   const openFactoryOrders = coverageSource.openFactoryOrders;
   const factoryOnOrder = openFactoryOrders.qty;
-  // Item 85, step 1.7: the ids of manual orders the pipeline hides — kept out of «уже заказано».
-  const hiddenManualIds = useMemo(() => new Set(openFactoryOrders.hiddenManual.map((o) => o.id)), [openFactoryOrders]);
-
-  // Item 83e: manual orders hidden from the ТРУБА by an active China row of the same article,
-  // grouped by article for the table's notice.
-  const hiddenManualByArticle = useMemo(() => {
-    const map: Record<string, FactoryOrder[]> = {};
-    for (const o of openFactoryOrders.hiddenManual) {
-      const key = String(o.article || '').trim();
-      if (!key) continue;
-      if (!map[key]) map[key] = [];
-      map[key].push(o);
-    }
-    return map;
-  }, [openFactoryOrders]);
 
   const resolveFactoryOrderConflict = useWarehouseStore((state) => state.resolveFactoryOrderConflict);
   const setConfirmDialog = useUIStore((state) => state.setConfirmDialog);
@@ -474,7 +418,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
    */
   const wideArticles = useUIStore((state) => state.ozonWideArticles);
   const toggleWideArticle = useUIStore((state) => state.toggleOzonWideArticle);
-  const anyWide = Object.keys(wideArticles).some((a) => wideArticles[a]);
 
   // Item 87 step 4, item 88 ticket 03: the ONE place that runs coverage over this screen's own
   // coverageSource — everything but `settings` is fixed. Used by the `coverage` memo below AND
@@ -486,14 +429,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return computeCoverage(coverageSource, settings);
   }, [coverageSource]);
 
-  const coverage = useMemo<OzonCoverageResult | null>(() => {
-    // Пункт 29, этап E: замер времени расчёта. Диагностика, логику не меняет.
-    const perfStart = performance.now();
-    const result = runCoverage(ozonSettings);
-    console.log(`OZONPERF coverage total=${Math.round(performance.now() - perfStart)}ms stocks=${filteredOzonStocks.length} sales=${filteredOzonSales.length} skus=${skus.length} clusters=${clusterRefs.length}`);
-    return result;
-  }, [runCoverage, ozonSettings, filteredOzonStocks, filteredOzonSales, skus, clusterRefs]);
-
   // Item 87 step 4. Recomputes coverage for arbitrary settings (the form in the settings modal,
   // merged over the store's ozonSettings) and folds it into the four «было → станет» figures.
   // Same `getOrderUnitCost` the table's «Стоимость заказа, ₽» column uses — no new price source.
@@ -504,153 +439,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   }, [runCoverage, getOrderUnitCost]);
 
   /** Окно тренда из настроек: сколько недель берём, когда распределяем весь остаток. */
-  const wideWeeks = Number(ozonSettings.trendWeeks) > 0 ? Math.floor(Number(ozonSettings.trendWeeks)) : 13;
-
-  /**
-   * Тот же расчёт покрытия, но скорость продаж считается за окно тренда. Считается только
-   * тогда, когда хотя бы один товар переключён кнопкой: расчёт тяжёлый, а нужен он редко.
-   * Из результата берутся ТОЛЬКО кластеры переключённых товаров — всё остальное на экране
-   * по-прежнему живёт по обычному окну скорости.
-   */
-  const wideCoverage = useMemo<OzonCoverageResult | null>(() => {
-    if (!anyWide) return null;
-    if (!coverageSource.ready) return null;
-    const perfStart = performance.now();
-    const result = computeCoverage(coverageSource, { ...ozonSettings, speedWeeks: wideWeeks });
-    console.log(`OZONPERF wideCoverage total=${Math.round(performance.now() - perfStart)}ms weeks=${wideWeeks}`);
-    return result;
-  }, [anyWide, wideWeeks, coverageSource, ozonSettings]);
-
-  const coverageRows = useMemo(() => {
-    if (!coverage || !coverage.articles) return [];
-    // Пункт 29, этап E: начало отсчёта времени. Диагностика.
-    const rowsPerfStart = performance.now();
-    const sumBy = (list: OzonStockRow[]) => ({
-      available: list.reduce((s, w) => s + (w.available || 0), 0),
-      preparing: list.reduce((s, w) => s + (w.preparing || 0), 0),
-      requested: list.reduce((s, w) => s + (w.requested || 0), 0),
-      transit: list.reduce((s, w) => s + (w.transit || 0), 0),
-      excess: list.reduce((s, w) => s + (w.excess || 0), 0),
-      returns: list.reduce((s, w) => s + (w.returns || 0), 0),
-      other: list.reduce((s, w) => s + (w.other || 0), 0),
-    });
-    // Запасной источник кабинетов: у распроданного в ноль товара строк остатков нет,
-    // а бейдж кабинета показать всё равно надо. Карта строится один раз — продаж тысячи строк,
-    // а фильтр внутри цикла по артикулам дал бы квадрат.
-    const cabinetsByArticle: Record<string, Set<string>> = {};
-    for (const sale of filteredOzonSales) {
-      const cab = String(sale.cabinet || '').trim();
-      if (!cab) continue;
-      const article = resolveOzonArticle(skus, sale.offerId);
-      if (!cabinetsByArticle[article]) cabinetsByArticle[article] = new Set<string>();
-      cabinetsByArticle[article].add(cab);
-    }
-    const rows = coverage.articles.map((art) => {
-      const stockRows = filteredOzonStocks.filter(
-        (s) => resolveOzonArticle(skus, s.offerId, s.sku) === art.article
-      );
-      const unboundRows = stockRows.filter((s) => !String(s.clusterId || '').trim());
-      const artCoverageDays = art.perDay > 0
-        ? (art.totalEstimated - art.perDay * ozonSettings.minStockDays) / art.perDay
-        : null;
-      const box = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
-      const clustersWithNeed = art.clusters.map((cls) => {
-        // Item 51. The full need is wantQty: whole boxes normally, a partial box for a slow
-        // cluster. Recomputing it from neededQty here would round a 3-piece need up to a box.
-        const needQty = cls.recommendation ? cls.recommendation.wantQty : 0;
-        return {
-          ...cls,
-          needBoxes: Math.ceil(needQty / box),
-          needQty,
-          warehouses: stockRows.filter((s) => String(s.clusterId || '').trim() === cls.clusterId),
-        };
-      });
-      // Название и кабинеты берутся из остатков, но у распроданного товара остатков нет:
-      // название тогда достаётся из карточки SKU, кабинеты — из продаж.
-      const stockName = stockRows.length > 0 ? (stockRows[0].name || '') : '';
-      const skuCard = skus.find((s) => s.sku === art.article);
-      const stockCabinets = Array.from(new Set(stockRows.map((s) => s.cabinet).filter(Boolean)));
-      return {
-        ...art,
-        name: stockName || (skuCard ? (skuCard.name || '') : ''),
-        cabinets: stockCabinets.length > 0
-          ? stockCabinets
-          : Array.from(cabinetsByArticle[art.article] || []),
-        totals: sumBy(stockRows),
-        unboundRows,
-        unboundTotals: sumBy(unboundRows),
-        coverageDays: artCoverageDays,
-        recommendedQty: art.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0),
-        recLimited: art.clusters.some((c) => c.recommendation !== null && c.recommendation.limitedByMyStock),
-        deficitQty: clustersWithNeed.reduce((s, c) => s + (c.recommendation && c.recommendation.boxes === 0 ? c.needQty : 0), 0),
-        // Item 85: the same pipeline as calcFactorySignal — «Мой склад» net of the reserve and the
-        // forecast speed, so «хватит на N дн.» never disagrees with the signal itself.
-        factoryDaysLeft: art.factory ? art.factory.daysLeft : (art.forecastPerDay > 0 ? (art.totalEstimated + Math.max(0, art.freeMyStock) + (factoryOnOrder[art.article] || 0)) / art.forecastPerDay : null),
-        inFlightTotal: art.clusters.reduce((s, c) => s + (c.inFlightQty || 0), 0) + (pendingSupplies.unboundInFlightByArticle[art.article] || 0),
-        // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
-        factoryThreshold: (Number(art.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays,
-        clusters: clustersWithNeed,
-      };
-    });
-    rows.sort((a, b) => (b.perDay - a.perDay) || (b.totals.available - a.totals.available));
-    // Пункт 29, этап E: замер времени. Диагностика, логику не меняет.
-    console.log(`OZONPERF coverageRows total=${Math.round(performance.now() - rowsPerfStart)}ms rows=${rows.length}`);
-    return rows;
-  }, [coverage, filteredOzonStocks, filteredOzonSales, skus, ozonSettings.minStockDays, ozonSettings.deliveryToOzonDays, factoryOnOrder, pendingSupplies]);
-
-  // Пункт 36. Компоненты виртуальных комплектов: на фабрике заказывают их, а не комплект.
-  // Порядок тот же, что в основной таблице — от самых быстрых к самым медленным.
-  const componentRows = useMemo<ComponentCoverage[]>(() => {
-    if (!coverage || !Array.isArray(coverage.components)) return [];
-    return [...coverage.components].sort((a, b) => b.perDay - a.perDay);
-  }, [coverage]);
-
-  // Пункт 36. Узкое место по артикулу комплекта: у самого комплекта сигнала заказа нет,
-  // поэтому в колонке «Заказ на фабрике» показывается его самый дефицитный компонент.
-  const bottleneckByKit = useMemo<Record<string, KitBottleneck>>(() => {
-    const map: Record<string, KitBottleneck> = {};
-    if (!coverage || !Array.isArray(coverage.bottlenecks)) return map;
-    for (const b of coverage.bottlenecks) map[b.kitSku] = b;
-    return map;
-  }, [coverage]);
-
-  const visibleRows = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return coverageRows.filter((row: any) => {
-      if (onlyWithRecommendations && row.recommendedQty <= 0 && row.deficitQty <= 0 && !row.factory) return false;
-      if (!q) return true;
-      return String(row.article).toLowerCase().includes(q) || String(row.name || '').toLowerCase().includes(q);
-    });
-  }, [coverageRows, searchQuery, onlyWithRecommendations]);
-
-  const clusterShares = useMemo(() => {
-    const map: Record<string, { clusterName: string; qty: number; priority: boolean; priorityK: number }> = {};
-    let total = 0;
-    for (const row of coverageRows as any[]) {
-      for (const cls of row.clusters) {
-        if (!map[cls.clusterId]) {
-          map[cls.clusterId] = { clusterName: cls.clusterName, qty: 0, priority: false, priorityK: 1 };
-        }
-        map[cls.clusterId].qty += cls.qtySold || 0;
-        if (cls.priority) {
-          map[cls.clusterId].priority = true;
-          map[cls.clusterId].priorityK = cls.priorityK;
-        }
-        total += cls.qtySold || 0;
-      }
-    }
-    const list = Object.values(map)
-      .filter((c) => c.qty > 0)
-      .map((c) => ({ ...c, pct: total > 0 ? (c.qty / total) * 100 : 0 }))
-      .sort((a, b) => b.qty - a.qty);
-    // Пункт 60. Тот же расчёт в виде «КластерID -> доля»: по нему мастер поставки
-    // сортирует список кластеров, чтобы порядок совпадал с графиком долей.
-    const byClusterId: Record<string, number> = {};
-    Object.keys(map).forEach((clusterId) => {
-      byClusterId[clusterId] = total > 0 ? (map[clusterId].qty / total) * 100 : 0;
-    });
-    return { list, total, byClusterId };
-  }, [coverageRows]);
+  const wideWeeks = resolveWideWeeks(ozonSettings);
 
   const fmtDateShort = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}` : '');
   const fmtDateFull = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : '—');
@@ -660,110 +449,33 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }, []);
 
-  // Item 83f/83g: MANUAL row only — the modal's «new order» form edits a manual order, never a
-  // China row (those are read-only, «управляется во вкладке «Заказы в Китае»»).
-  const activeFactoryOrders = useMemo(() => {
-    const map: Record<string, FactoryOrder> = {};
-    for (const o of factoryOrders || []) {
-      if (String(o.status || '').trim() === 'received') continue;
-      if (isChinaFactoryOrder(o)) continue;
-      const key = String(o.article || '').trim();
-      if (key) map[key] = o;
-    }
-    return map;
-  }, [factoryOrders]);
-
-  const factoryModalRow = useMemo(() => {
-    if (!factoryModalArticle) return null;
-    const row = (coverageRows as any[]).find((r) => r.article === factoryModalArticle);
-    if (row) return row;
-    // Пункт 36. Заказ открывают и по компоненту комплекта, а его в строках основной таблицы
-    // нет. Без этой подстановки в окно ушли бы коробка 1 и срок поставки 0 — заказ посчитался
-    // бы неверно. Название берём пустым: в SKU Базе названий нет, окно покажет артикул.
-    const comp = componentRows.find((c) => c.component === factoryModalArticle);
-    if (!comp) return null;
-    return {
-      article: comp.component,
-      name: '',
-      factory: comp.factory,
-      pcsPerBox: comp.pcsPerBox,
-      leadTimeDays: comp.leadTimeDays,
-    };
-  }, [coverageRows, componentRows, factoryModalArticle]);
-
-
-  /** Item 45. Everything the supply window may offer for hand-adding: the article, its name
-   *  and how much of it is free to ship. Built from the whole coverage table, not from the
-   *  recommendations, so an article the recommendation never proposed can still be added. */
-  // Пункт 59. Заявка принадлежит ОДНОМУ магазину: ключи API у кабинетов разные, и SKU
-  // одного магазина в другом не существуют. Магазин задаёт первая галочка.
-  const cabinetsByArticleMap = useMemo(() => {
-    const map: Record<string, string[]> = {};
-    for (const row of coverageRows as any[]) map[row.article] = row.cabinets || [];
-    return map;
-  }, [coverageRows]);
-
-  const selectedCabinetSets = useMemo(() => {
-    const sets: string[][] = [];
-    Object.keys(selectedSupply).forEach((key) => {
-      if (!selectedSupply[key]) return;
-      const article = key.split('|||')[0] || '';
-      if (article) sets.push(cabinetsByArticleMap[article] || []);
-    });
-    return sets;
-  }, [selectedSupply, cabinetsByArticleMap]);
-
-  const supplyStockOptions = useMemo(
-    () => (coverageRows as any[]).map((row) => ({
-      article: row.article,
-      name: row.name || '',
-      freeMyStock: Number(row.freeMyStock) || 0,
-      // Пункт 59: без магазина список «Добавить позицию» предлагал артикулы чужого кабинета.
-      cabinets: (row.cabinets || []) as string[]
-    })),
-    [coverageRows]
-  );
-
-  // Пункт 63. Ручной выбор: правила пунктов 58 и 59 применяются к НЕМУ, а не к галочкам
-  // рекомендаций — иначе запрет прямой поставки обходился бы переключением списка.
-  // Пункт 64. Куда вообще можно везти: справочник кластеров минус исключённые настройкой.
-  // Исключённый кластер САМ не добавляется, но если товар там уже лежит, своя строка
-  // остаётся — прятать остаток нельзя.
-  const supplyClusterRefs = useMemo(() => {
-    const excluded = parseExcludedClusters(ozonSettings ? ozonSettings.excludedClusters : '');
-    return (clusterRefs || [])
-      .filter((c: any) => c.clusterId && !excluded.has(String(c.clusterId)))
-      .map((c: any) => ({ clusterId: String(c.clusterId), clusterName: String(c.clusterName || '') }));
-  }, [clusterRefs, ozonSettings]);
-
-  const manualPicks = useMemo(() => readManualPicks(manualQty), [manualQty]);
-  const manualClusterIds = useMemo(() => pickedClusterIds(manualPicks), [manualPicks]);
-  const manualCabinetSets = useMemo(
-    () => pickedCabinetSets(manualPicks, cabinetsByArticleMap),
-    [manualPicks, cabinetsByArticleMap]
-  );
-  const manualInfos = useMemo(
-    () => (coverageRows as any[]).map((row) => ({
-      article: row.article,
-      name: row.name || '',
-      pcsPerBox: Number(row.pcsPerBox) || 0,
-      freeMyStock: Number(row.freeMyStock) || 0,
-      cabinets: (row.cabinets || []) as string[],
-      // Пункт 64. ТОТ ЖЕ список, что рисует таблица. Если брать только свои кластеры
-      // товара, отмеченный новый кластер молча исчезнет из заявки.
-      clusters: manualClusterList(
-        row.clusters || [],
-        supplyClusterRefs,
-        clusterShares.byClusterId,
-        emptyManualCluster
-      ).map((c: any) => ({
-        clusterId: String(c.clusterId),
-        clusterName: String(c.clusterName || '')
-      }))
-    })),
-    [coverageRows, supplyClusterRefs, clusterShares]
-  );
-  const manualPlan = useMemo(() => buildManualPlan(manualPicks, manualInfos), [manualPicks, manualInfos]);
+  // Item 88, ticket 04: every computed value the tab shows — coverage rows, component rows,
+  // kit bottlenecks, visible rows, cluster shares, factory-order bookkeeping, the manual and
+  // recommendation supply plans — now comes from the tab model, one stage per `useMemo` inside
+  // the hook, same dependency granularity as the memos it replaces.
+  const {
+    coverage, wideCoverage, coverageRows, componentRows, bottleneckByKit, visibleRows,
+    clusterShares, factoryOrdersByArticle, activeFactoryOrders, hiddenManualIds,
+    hiddenManualByArticle, factoryCellByArticle, factoryCellByComponent, factoryModalRow,
+    cabinetsByArticleMap, selectedCabinetSets, supplyStockOptions, supplyClusterRefs,
+    manualPicks, manualClusterIds, manualCabinetSets, manualInfos, manualPlan,
+    recommendations, supplyPlan,
+  } = useOzonStocksTabModel({
+    coverageSource,
+    ozonSettings,
+    runCoverage,
+    skus,
+    clusterRefs,
+    factoryOrders,
+    wideArticles,
+    selectedSupply,
+    manualQty,
+    searchQuery,
+    onlyWithRecommendations,
+    factoryModalArticle,
+    maxBoxesPerCluster: supplySettings.maxBoxesPerCluster,
+    todayIso,
+  });
 
   const toggleManualPick = (article: string, clusterId: string) => {
     const key = manualKey(article, clusterId);
@@ -787,63 +499,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     setManualQty({});
   };
 
-  const recommendations = useMemo(() => {
-    const supplies: any[] = [];
-    const factories: any[] = [];
-    let orderedCount = 0;
-    let clusterDeficitCount = 0;
-    for (const row of coverageRows as any[]) {
-      // «Распределить весь остаток»: у переключённого товара кластеры берутся из расчёта по
-      // окну тренда. Обогащение (needBoxes/needQty) повторяет то, что делает coverageRows,
-      // потому что панель рисует обе выдачи одним и тем же кодом.
-      const wideArticle = wideArticles[row.article] && wideCoverage
-        ? wideCoverage.articles.find((a) => a.article === row.article)
-        : undefined;
-      const box = row.pcsPerBox > 0 ? row.pcsPerBox : 1;
-      const sourceClusters = wideArticle
-        ? wideArticle.clusters.map((cls) => {
-            const needQty = cls.recommendation ? cls.recommendation.wantQty : 0;
-            return { ...cls, needBoxes: Math.ceil(needQty / box), needQty };
-          })
-        : row.clusters;
-      const clusters = sourceClusters.filter((c: any) => c.recommendation && (c.recommendation.boxes > 0 || c.needQty > 0));
-      if (clusters.length > 0) {
-        let minCoverage = Number.POSITIVE_INFINITY;
-        for (const c of clusters) {
-          const cov = c.coverageDays === null || c.coverageDays === undefined ? Number.POSITIVE_INFINITY : c.coverageDays;
-          if (cov < minCoverage) minCoverage = cov;
-        }
-        supplies.push({
-          article: row.article,
-          name: row.name,
-          myStockAvailable: row.myStockAvailable,
-          freeMyStock: row.freeMyStock,
-          shippableMyStock: row.shippableMyStock,
-          sharedLimitedBy: row.sharedLimitedBy || [],
-          pendingTotal: row.pendingTotal,
-          minCoverage,
-          clusters,
-          wide: Boolean(wideArticle),
-          // Сколько свободного остатка расчёт НЕ разложил: чтобы «весь остаток» не оказалось
-          // обещанием, которого расчёт не выполнил.
-          leftover: Math.max(0, (Number(row.freeMyStock) || 0) - clusters.reduce(
-            (sum: number, c: any) => sum + (c.recommendation ? c.recommendation.qty : 0), 0
-          )),
-        });
-      }
-      // Пункт 35. В список попадает то, что реально надо дозаказать.
-      // Размещённый заказ входит в ТРУБУ и сам по себе позицию из списка не убирает.
-      if (row.factory && row.factory.orderQty > 0) {
-        factories.push({ article: row.article, name: row.name, factory: row.factory, leadTimeDays: row.leadTimeDays });
-      }
-      if (row.factory && row.factory.orderQty === 0 && row.factory.reason === 'clusterDeficit') clusterDeficitCount++;
-      if ((factoryOnOrder[row.article] || 0) > 0) orderedCount++;
-    }
-    supplies.sort((a, b) => a.minCoverage - b.minCoverage);
-    factories.sort((a, b) => a.factory.daysLeft - b.factory.daysLeft);
-    return { supplies, factories, orderedCount, clusterDeficitCount };
-  }, [coverageRows, activeFactoryOrders, factoryOnOrder, wideArticles, wideCoverage]);
-
   // Item 82: «Прогноз Китай» — the signal «Заказ на фабрике» sent straight to the forecast
   // calculator of the module «Заказы в Китае», admin only. Reads the stores directly instead of
   // subscribing, since this is a one-shot action, not something the render depends on.
@@ -852,62 +507,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     useChinaStore.getState().setForecastPrefill(lines);
     useUIStore.getState().setActiveTab('china');
   };
-
-  const supplyPlan = useMemo(() => {
-    const rows: any[] = [];
-    const boxesByCluster: Record<string, { clusterId: string; clusterName: string; boxes: number }> = {};
-    const cabinets = new Set<string>();
-
-    // Заявка собирается ИЗ ТОГО ЖЕ СПИСКА, в котором пользователь ставил галочки.
-    // Раньше здесь перебирался coverageRows — обычный расчёт, — а галочки ставились в
-    // «Рекомендациях», где у товара, переключённого кнопкой «Распределить весь остаток»,
-    // кластеры приходят из расчёта по окну тренда. Кластер, которого в обычном расчёте нет,
-    // до окна не доезжал: отметил восемь, в окне оказалось четыре.
-    const cabinetsByArticle: Record<string, string[]> = {};
-    for (const row of coverageRows as any[]) cabinetsByArticle[row.article] = row.cabinets || [];
-
-    for (const row of recommendations.supplies as any[]) {
-      for (const c of row.clusters) {
-        // Пункт 60. Кластер, которому поставка нужна, но свободного остатка на него не
-        // хватило, тоже попадает в заявку — с нулём. Количество владелец распределяет сам
-        // в окне оформления, там же где уменьшает другие кластеры.
-        if (!c.recommendation) continue;
-        if (!canTickCluster(c.recommendation.boxes, c.needBoxes)) continue;
-        if (!selectedSupply[supplyKey(row.article, c.clusterId)]) continue;
-
-        rows.push({
-          article: row.article,
-          name: row.name,
-          clusterId: String(c.clusterId),
-          clusterName: String(c.clusterName || ''),
-          boxes: c.recommendation.boxes,
-          qty: c.recommendation.qty,
-          limitedByMyStock: c.recommendation.limitedByMyStock === true,
-        });
-
-        (cabinetsByArticle[row.article] || []).forEach((cab: string) => { if (cab) cabinets.add(cab); });
-
-        const cid = String(c.clusterId);
-        if (!boxesByCluster[cid]) {
-          boxesByCluster[cid] = { clusterId: cid, clusterName: String(c.clusterName || ''), boxes: 0 };
-        }
-        boxesByCluster[cid].boxes += c.recommendation.boxes;
-      }
-    }
-
-    const limit = Number(supplySettings.maxBoxesPerCluster) || 30;
-    const overLimit = Object.values(boxesByCluster).filter((c) => c.boxes > limit);
-
-    return {
-      rows,
-      clusters: Object.values(boxesByCluster),
-      cabinets: Array.from(cabinets),
-      totalBoxes: rows.reduce((s, r) => s + r.boxes, 0),
-      totalQty: rows.reduce((s, r) => s + r.qty, 0),
-      overLimit,
-      limit,
-    };
-  }, [recommendations, coverageRows, selectedSupply, supplySettings]);
 
   if (!isAdmin) return null;
 
@@ -1119,7 +718,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
 
                           {supplyPlan.overLimit.length > 0 && (
                             <div className="mt-2 text-[11px] font-semibold text-amber-700">
-                              Превышен лимит {supplyPlan.limit} кор на кластер: {supplyPlan.overLimit.map((c: any) => `${c.clusterName} — ${c.boxes} кор`).join('; ')}. Остаток лучше оформить отдельной заявкой.
+                              Превышен лимит {supplyPlan.limit} кор на кластер: {supplyPlan.overLimit.map((c) => `${c.clusterName} — ${c.boxes} кор`).join('; ')}. Остаток лучше оформить отдельной заявкой.
                             </div>
                           )}
 
@@ -1255,7 +854,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         </div>
                       ) : (
                         <div className="flex flex-col gap-2">
-                          {recommendations.factories.map((f: any) => (
+                          {recommendations.factories.map((f) => (
                             <button
                               key={f.article}
                               type="button"
@@ -1525,19 +1124,20 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         // Подсказки раскрываются вверх, а у первых строк сверху нет места: таблица лежит
                         // в контейнере с прокруткой и обрезает всё, что вышло за его край. У них раскрываем вниз.
                         const tipUp = rowIdx > 1 ? 'bottom-full mb-1.5' : 'top-full mt-1.5';
-                        // Пункт 35. Разбор заказов на фабрике для пяти состояний ячейки.
+                        // Пункт 35, item 88 ticket 04: разбор заказов на фабрике для восьми состояний
+                        // ячейки — теперь читается из модели, посчитанный один раз для всех строк.
                         // Item 83d: a China row NEVER drops into the «просрочен» state — it stays in the
                         // ТРУБА even late, only «задерживается N дн» tells the owner about it.
                         const factoryList = factoryOrdersByArticle[art.article] || [];
-                        const factorySplit = splitFactoryOrders(factoryList, todayIso, hiddenManualIds);
-                        const factoryOverdueList = factorySplit.overdue;
-                        const factoryOverdueQty = factoryOverdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-                        const factoryWaitingList = factorySplit.waiting;
-                        const factoryWaitingQty = factoryWaitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-                        const factoryNearest = factoryWaitingList[0] || null;
                         // Item 83e: manual orders hidden from the ТРУБА for this article, shown as a
                         // separate notice next to the article, with the two owner buttons.
                         const factoryHiddenManual = hiddenManualByArticle[art.article] || [];
+                        const factoryCell = factoryCellByArticle[art.article];
+                        const factoryOverdueList = factoryCell.overdueList;
+                        const factoryOverdueQty = factoryCell.overdueQty;
+                        const factoryWaitingList = factoryCell.waitingList;
+                        const factoryWaitingQty = factoryCell.waitingQty;
+                        const factoryNearest = factoryCell.nearest;
                         // Item 83g: one line per active order — badge and «задерживается N дн» when a
                         // China row is late — appended to the cell's tooltips below.
                         const factoryOrdersDetail = factoryList
@@ -1547,9 +1147,9 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                             return `${fmtInt(o.qty)} шт${badge ? ` · ${badge}` : ''}${o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}${late ? ` · ${late}` : ''}`;
                           })
                           .join('\n');
-                        const factoryOrderQty = art.factory ? art.factory.orderQty : 0;
-                        const factoryClusterOnly = !!(art.factory && art.factory.reason === 'clusterDeficit' && art.factory.orderQty === 0);
-                        const factoryBox = art.pcsPerBox > 0 ? art.pcsPerBox : 1;
+                        const factoryOrderQty = factoryCell.orderQty;
+                        const factoryClusterOnly = factoryCell.clusterOnly;
+                        const factoryBox = factoryCell.box;
                         // Item 86, step D. N — the pieces sold over the speed period, from the result
                         // (not perDay × days: «Спрос вырос» may have replaced perDay since).
                         const speedSoldQty = art.speedSoldQty;
@@ -1778,7 +1378,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   and their own cells live in the components table below. */}
                               {isColVisible('factory') && (
                                 <td className="p-3 text-right">
-                                  {factoryOverdueList.length > 0 ? (
+                                  {factoryCell.kind === 'overdue' ? (
                                     <span className="relative inline-flex group justify-end">
                                       <button
                                         type="button"
@@ -1806,7 +1406,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         Нажми, чтобы изменить заказ или отметить приход партии.
                                       </span>
                                     </span>
-                                  ) : factoryOrderQty > 0 ? (
+                                  ) : factoryCell.kind === 'order' ? (
                                     <button
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
@@ -1825,8 +1425,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         </span>
                                       ))}
                                     </button>
-                                  ) : factoryClusterOnly ? (
-                                    factoryWaitingQty > 0 ? (
+                                  ) : (factoryCell.kind === 'clusterDeficitWaiting' || factoryCell.kind === 'clusterDeficit') ? (
+                                    factoryCell.kind === 'clusterDeficitWaiting' ? (
                                       <button
                                         type="button"
                                         onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
@@ -1847,7 +1447,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         <span className="block text-[10px] font-normal text-slate-400">товар есть, лежит не там</span>
                                       </button>
                                     )
-                                  ) : factoryWaitingQty > 0 ? (
+                                  ) : factoryCell.kind === 'waiting' ? (
                                     <button
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
@@ -1860,7 +1460,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         {factoryNearest && factoryOrderBadge(factoryNearest) ? ` · ${factoryOrderBadge(factoryNearest)}` : ''}
                                       </span>
                                     </button>
-                                  ) : bottleneckByKit[art.article] ? (
+                                  ) : factoryCell.kind === 'bottleneck' ? (
                                     <span
                                       className="text-[10px] font-semibold text-slate-500"
                                       title={`Комплект на фабрике не заказывают — заказывают его компоненты. Самый дефицитный компонент комплекта: ${bottleneckByKit[art.article].componentSku}. Заказ по нему — в блоке «Заказ на фабрике — компоненты» под таблицей. «Собрать» — сколько комплектов можно собрать из остатков компонентов на Моём складе прямо сейчас.`}
@@ -1870,7 +1470,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                         хватит на {bottleneckByKit[art.article].daysLeft === null ? '∞' : `${Math.round(bottleneckByKit[art.article].daysLeft as number)} дн`} · собрать: {fmtInt(bottleneckByKit[art.article].canAssembleQty)} шт
                                       </span>
                                     </span>
-                                  ) : (Number(art.leadTimeDays) || 0) === 0 ? (
+                                  ) : factoryCell.kind === 'noLeadTime' ? (
                                     <button
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
@@ -2193,17 +1793,16 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                         const needOrder = !!(c.factory && c.factory.orderQty > 0);
                         // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
                         const threshold = (Number(c.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays;
-                        // Разбор заказов на фабрике для компонента — по образцу основной таблицы (строки 1129-1134),
+                        // Разбор заказов на фабрике для компонента — по образцу основной таблицы,
                         // иначе после оформления заказа он пропадал бы из вида: сигнал гас, а сам заказ было не видно и не открыть.
-                        const list = factoryOrdersByArticle[c.component] || [];
                         // Item 85, step 1.7: the same rule as the main table and the pipeline — a late
                         // China order stays waiting («задерживается N дн»), never «просрочен».
-                        const compSplit = splitFactoryOrders(list, todayIso, hiddenManualIds);
-                        const overdueList = compSplit.overdue;
-                        const overdueQty = overdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-                        const waitingList = compSplit.waiting;
-                        const waitingQty = waitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-                        const nearest = waitingList[0] || null;
+                        const compFactoryCell = factoryCellByComponent[c.component];
+                        const overdueList = compFactoryCell.overdueList;
+                        const overdueQty = compFactoryCell.overdueQty;
+                        const waitingList = compFactoryCell.waitingList;
+                        const waitingQty = compFactoryCell.waitingQty;
+                        const nearest = compFactoryCell.nearest;
                         // Сколько дней хватит запаса без сигнала — нужно показывать даже когда заказывать не надо,
                         // иначе после оформления заказа рост покрытия остаётся невидимым.
                         // Пункт 38: делить надо на ПРОГНОЗНУЮ скорость — по ней же считается и сам сигнал,
@@ -2273,7 +1872,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                               )}
                             </td>
                             <td className="py-2 pr-2 text-right">
-                              {overdueList.length > 0 ? (
+                              {compFactoryCell.kind === 'overdue' ? (
                                 <button
                                   type="button"
                                   onClick={() => setFactoryModalArticle(c.component)}
@@ -2283,7 +1882,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                   просрочен · {fmtDateShort(overdueList[0].expectedAt)}
                                   <span className="block text-[10px] font-semibold text-amber-600">{fmtInt(overdueQty)} шт · нажми, чтобы решить</span>
                                 </button>
-                              ) : c.factory && c.factory.orderQty > 0 ? (
+                              ) : compFactoryCell.kind === 'order' && c.factory ? (
                                 <button
                                   type="button"
                                   onClick={() => setFactoryModalArticle(c.component)}
@@ -2294,7 +1893,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     {fmtInt(c.factory.orderBoxes)} кор · {waitingQty > 0 ? `уже заказано ${fmtInt(waitingQty)} шт` : `хватит на ${Math.round(c.factory.daysLeft)} дн.`}
                                   </span>
                                 </button>
-                              ) : c.factory && c.factory.unmetDeficitQty > 0 ? (
+                              ) : compFactoryCell.kind === 'clusterDeficit' && c.factory ? (
                                 /* 29.08.2026. Дефицит кластеров комплекта теперь доходит до компонента,
                                    который держит сборку. Заказа на фабрике при этом может и не быть:
                                    общего запаса хватает надолго, не хватает именно свободного склада
@@ -2310,7 +1909,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                                     свободно {fmtInt(c.freeMyStockQty)} шт{waitingQty > 0 ? ` · заказано ${fmtInt(waitingQty)} шт` : ''}
                                   </span>
                                 </button>
-                              ) : waitingQty > 0 ? (
+                              ) : compFactoryCell.kind === 'waiting' ? (
                                 <button
                                   type="button"
                                   onClick={() => setFactoryModalArticle(c.component)}

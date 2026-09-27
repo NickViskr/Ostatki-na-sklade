@@ -15,6 +15,9 @@ import path from 'node:path';
 const storeSrc = fs.readFileSync(path.join(process.cwd(), 'src/store/useWarehouseStore.ts'), 'utf8');
 const modalSrc = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonSettingsModal.tsx'), 'utf8');
 const tabSrc = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+// Item 88 ticket 04: coverageRows (with it, the article-level factoryThreshold) moved into
+// buildCoverageRows in the tab model — the anchor below now reads that file instead.
+const tabModelSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');
 
 describe('useWarehouseStore: deliveryToOzonDays mapped from the raw sheet with default 7', () => {
   it('the initial store default is 7', () => {
@@ -59,8 +62,8 @@ describe('OzonStocksTab: coverageTone and the factory threshold both see deliver
   });
 
   it('the article-level and component-level factory thresholds add deliveryToOzonDays', () => {
-    expect(tabSrc).toContain(
-      "factoryThreshold: (Number(art.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays,"
+    expect(tabModelSrc).toContain(
+      "factoryThreshold: (Number(art.leadTimeDays) || 0) + (Number(deliveryToOzonDays) || 0) + minStockDays,"
     );
     expect(tabSrc).toContain(
       "const threshold = (Number(c.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays;"
