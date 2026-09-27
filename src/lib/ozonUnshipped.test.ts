@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { arrivedByVirtualSupply, buildUnshippedLines, findShortShipments, parseShippedRecord, shortShipmentOf } from './ozonUnshipped';
 import type { ExternalShipment, SKUItem } from '../types';
+import { gasReadsInvalidatedBy } from './gasActions';
 
 // ============================================================================================
 // Item 68, stages 2 and 3 (15.09.2026). The owner's live case: supply 2000065651020 of order
@@ -192,8 +193,8 @@ describe('подключение этапа 2 к экрану, хранилищ�
   });
 
   it('прокси знает действие: сбрасывает ровно то, что возврат меняет, а не весь кэш', () => {
-    const server = fs.readFileSync(path.join(process.cwd(), 'server.ts'), 'utf8');
-    expect(server).toMatch(/commitUnshippedReturn: \['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments'\]/);
+    // Item 89: the invalidation list moved from server.ts into src/lib/gasActions.ts.
+    expect(gasReadsInvalidatedBy('commitUnshippedReturn')).toEqual(['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments']);
   });
 
   it('строка поставки: сетка сжимаема, номер обрезается многоточием, блок бейджей ограничен половиной', () => {

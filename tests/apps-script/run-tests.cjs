@@ -3571,8 +3571,9 @@ function fakeKan(opts) {
   check('78a: runKanPullNow — только администратору', /case 'runKanPullNow': assertAdmin\(currentUser\); result = kanTurnoverDaily\(\); break;/.test(src));
   check('78a: токен читается только из свойства скрипта, в файле его нет', /getProperty\(KAN_TOKEN_PROPERTY\)/.test(src) && !/Bearer [A-Za-z0-9_\-]{20,}/.test(src));
   check('78a: пороги оборачиваемости в настройках Ozon: 90 / 45 / 20', /turnoverPeriodDays',\s*value: 90/.test(src) && /turnoverSlowDays',\s*value: 45/.test(src) && /turnoverFastDays',\s*value: 20/.test(src));
-  const proxy = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'server.ts'), 'utf8');
-  check('78a: прокси знает getTurnoverData как чтение с кэшем Ozon', /'getTurnoverData',/.test(proxy) && /'getOzonInitialData', 'getTurnoverData'\]\.includes\(action\)/.test(proxy));
+  // Item 89: the proxy's action lists moved from server.ts into src/lib/gasActions.ts.
+  const proxy = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'src', 'lib', 'gasActions.ts'), 'utf8');
+  check('78a: прокси знает getTurnoverData как чтение с кэшем Ozon', /\n  getTurnoverData: read\('ozon'\),/.test(proxy));
 })();
 
 // ================= clasp: what leaves for script.google.com =================

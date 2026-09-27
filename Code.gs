@@ -1035,24 +1035,28 @@ const TRANS_HEADERS = [
  *
  * Both shapes end with the total, so the LAST amount of the part is the one to take — the
  * earlier «x 5₽» is the price of a single piece, not a cost of its own.
+ *
+ * Item 89 (2026-09-27): the label is matched regardless of case, like isExtrasTag and the
+ * screen's parseShipmentExtras — a hand-typed «упаковка: 500₽» counted 500 ₽ on the screen and
+ * 0 ₽ here. Held equal by src/lib/twinRulesParity.test.ts.
  */
 function parseLabelledAmount(destination, label) {
-  var part = destination.match(new RegExp(label + ':([^|\\]]*)'));
+  var part = destination.match(new RegExp(label + ':([^|\\]]*)', 'i'));
   if (!part) return 0;
   var re = /([\d.,]+)\s*₽/g, m, last = 0;
   while ((m = re.exec(part[1])) !== null) last = parseNumber(m[1]);
   return last;
 }
 
+/**
+ * Item 89 (owner 2026-09-27, Q13): the commit reads the extras with the SAME parser as the later
+ * edit (updateShipmentExtras) and the screen. It used to have its own reader, which missed
+ * «Доп. услуги», a lower-case «услуги:» and rounded fractional service sums differently. No live
+ * row of «История» on 27.09.2026 changes its total by this.
+ */
 function parseAdditionalCostsFromDestination(destination) {
   if (!destination) return 0;
-  var total = parseLabelledAmount(destination, 'Упаковка') + parseLabelledAmount(destination, 'Прочее');
-  var servBlock = destination.match(/Услуги:([^\]]*)/);
-  if (servBlock) {
-    var re = /\(([\d.,]+)\s*₽\)/g, m;
-    while ((m = re.exec(servBlock[1])) !== null) total += parseNumber(m[1]);
-  }
-  return roundToTwo(total);
+  return extrasTotalGs(parseShipmentExtrasGs(destination));
 }
 
 function parseNumber(val) {
