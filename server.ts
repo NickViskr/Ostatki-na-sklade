@@ -8,6 +8,7 @@ import dotenv from "dotenv";
 import { buildCompositionXlsxBase64, readCargoIds } from "./src/lib/ozonComposition";
 import { layoutFromBundle } from "./src/lib/ozonSupplyDocs";
 import { parseOzonJson } from "./src/lib/ozonJson";
+import { gasCacheTtlMs, gasReadsInvalidatedBy, isGasRead } from "./src/lib/gasActions";
 import { analyticsItemToStockRow } from "./src/lib/ozonStockRow";
 import { chooseDirectWarehouse, directWarehouseMessage, readDraftWarehouses } from "./src/lib/ozonDirectDraft";
 import { draftErrorLogLine, draftFailureHint, draftFailureTitle, readDraftErrors } from "./src/lib/ozonDraftErrors";
@@ -314,89 +315,8 @@ async function startServer() {
   // ── Server-side GAS Response Cache ─────────────────────────────────────
   const gasCache = new Map<string, { data: any; cachedAt: number; action: string }>();
 
-  // Пункт 29, этап C: точечная очистка кэша.
-  // Ключ — пишущее действие, значение — список читающих действий,
-  // чьи записи оно делает устаревшими. Действие, которого нет в этой
-  // карте, по-прежнему очищает весь кэш целиком. Список намеренно узкий:
-  // сюда попали только действия, про которые точно известно, что склад,
-  // историю, SKU и комплекты они не затрагивают.
-  const CACHE_INVALIDATION: Record<string, string[]> = {
-    logout: [],
-    saveOzonSettings: ['getOzonSettings', 'getOzonInitialData'],
-    saveOzonClusters: ['getOzonClusters', 'getOzonInitialData'],
-    markOzonClustersNotified: ['getOzonClusters', 'getOzonInitialData'],
-    saveOzonSales: ['getOzonSales', 'getOzonInitialData'],
-    saveOzonStocks: ['getOzonStocks', 'getOzonInitialData'],
-    saveExternalShipments: ['getExternalShipments'],
-    updateExternalShipmentStatus: ['getExternalShipments'],
-    saveOzonSupplyRequest: ['getOzonSupplyRequests', 'getExternalShipments'],
-    addUser: ['getUsers'],
-    deleteUser: ['getUsers'],
-    saveGlobalSettings: ['getGlobalSettings'],
-    addService: ['getServices'],
-    updateService: ['getServices'],
-    deleteService: ['getServices'],
-    addServiceRate: ['getServiceRates'],
-    saveFactoryOrder: ['getFactoryOrders', 'getOzonInitialData'],
-    // Item 47, stage 3: stamping the exported rows touches nothing any other read returns,
-    // so the list is deliberately empty. It must still be present here: an action missing
-    // from this map wipes the whole cache.
-    markOzonCostExported: [],
-    // Item 68 stage 2: a return moves stock, adds history rows and marks the supply row.
-    commitUnshippedReturn: ['getInitialData', 'getStock', 'getTransactions', 'getExternalShipments'],
-    // Item 79b: the documents record lands in the journal from /api/ozon/supply/docs, which
-    // calls Apps Script directly and must clear the journal read itself (see that route).
-    saveOzonSupplyDocs: ['getOzonSupplyRequests'],
-    // Item 81: the module «Заказы в Китае». Its writes touch nothing but its own
-    // spreadsheet, so only its own read has to be dropped.
-    // Item 82: tariffs/boxes/vs-fact all derive from batches, lines, payments and reports, so
-    // every China write below also drops getChinaForecastData, not just its own read(s).
-    setupChinaSpreadsheet: ['getChinaBatches'],
-    // Item 83c: saveChinaBatch/deleteChinaBatch also sync «Заказы на фабрике» (main spreadsheet),
-    // so both its own read and the composite start-up read must drop too.
-    // Item 84 (stage 1): saveChinaBatch can now trigger the automatic cost correction on a
-    // posted batch, which writes «Остатки»/«Транзакции» in the MAIN spreadsheet — the stock and
-    // transaction reads must drop alongside the China ones, same as postChinaBatch below.
-    saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions'],
-    deleteChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
-    saveChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    deleteChinaBatchCost: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    saveChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    deleteChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    // Item 81g-1: the report touches only its own spreadsheet's read, same as every other
-    // China write above.
-    // Item 3: saveChinaReport now also fills batches' order/arrival from the report's bills and
-    // syncs «Заказы на фабрике» (chinaFillBatchesFromReport + syncChinaFactoryOrders) — same
-    // cache entries as saveChinaBatch, for the same reason.
-    // Item 84 (stage 1): a report upload can now run the automatic cost correction of a posted
-    // 'предварительно' batch — same main-spreadsheet cache entries as saveChinaBatch above.
-    saveChinaReport: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions'],
-    // Item 81g-2: matching moves money between a payment and a receipt — both reads must drop.
-    matchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    unmatchChinaPayment: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    // Item 81g-3.
-    setChinaRubCostsDone: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    // Owner, 2026-09-25: the owner's own «история» mark on a receipt — same reasoning as every
-    // other 81g write, both reads must drop.
-    setChinaReceiptHistory: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData'],
-    // Item 82d/83c: a saved/deleted forecast changes its own read, and — once it carries an
-    // order number and a shipping date — «Заказы на фабрике» too.
-    saveChinaForecast: ['getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
-    deleteChinaForecast: ['getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'],
-    // Item 83i: the manual/first-run sync button — same reads as the writes it reconciles.
-    syncChinaFactoryOrders: ['getFactoryOrders', 'getOzonInitialData'],
-    // Item 83e: the owner's manual/China conflict resolution touches only «Заказы на фабрике».
-    resolveFactoryOrderConflict: ['getFactoryOrders', 'getOzonInitialData'],
-    // Item 84 (stage 1): posting/cancelling touches the module's own spreadsheet AND the MAIN
-    // spreadsheet's «Остатки»/«Транзакции» (commitTransaction/deleteTransaction) plus «Заказы
-    // на фабрике» (the posted batch's row moves in the pipeline) — every read any of that
-    // feeds must drop.
-    postChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions'],
-    cancelChinaBatchPosting: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions']
-  };
-
   function invalidateCacheFor(writeAction: string): void {
-    const affected = CACHE_INVALIDATION[writeAction];
+    const affected = gasReadsInvalidatedBy(writeAction);
     if (!affected) {
       gasCache.clear();
       return;
@@ -407,45 +327,6 @@ async function startServer() {
       }
     }
   }
-  // Пункт 29, этап B: раздельные сроки жизни кэша вместо общих 30 секунд.
-  // Справочники почти не меняются, данные Ozon обновляются триггерами
-  // дважды в сутки, а оперативные остатки должны быть свежими.
-  // Любое пишущее действие по-прежнему сбрасывает весь кэш целиком,
-  // поэтому длинные сроки не могут показать устаревшие данные.
-  const CACHE_TTL_REFERENCE_MS = 10 * 60 * 1000; // справочники, 10 минут
-  // Item 26 (2026-08-20): raised from 5 to 60 minutes. Measurement showed the whole start-up
-  // is one request — getOzonSales takes 9-13 s because it reads the entire «Продажи Ozon»
-  // sheet, of which 57% are archive rows the date window always discards. Served from cache
-  // the same call takes 250 ms, so keeping the cache alive is worth far more than bundling
-  // calls together. STALENESS TRADE-OFF, stated plainly: the twice-daily sync trigger runs
-  // INSIDE Apps Script and never passes through this proxy, so it cannot invalidate this
-  // cache — after a sync the app may show data up to one hour old. Three things keep that
-  // acceptable: the screen always shows the data's own «Обновлено» timestamp, any write
-  // action through the proxy clears the cache, and with max-instances=1 an idle night scales
-  // the container to zero, so the first visit of the day starts from an empty cache anyway.
-  const CACHE_TTL_OZON_MS = 60 * 60 * 1000;     // данные Ozon, 60 минут
-  const CACHE_TTL_OPERATIONAL_MS = 30_000;       // оперативные данные, 30 секунд
-
-  function getCacheTtlMs(action: string): number {
-    if (['getServices', 'getServiceRates', 'getUsers', 'getOzonSettings', 'getOzonClusters'].includes(action)) {
-      return CACHE_TTL_REFERENCE_MS;
-    }
-    // Item 26 stage A1: the composite read is cached like the Ozon data it carries.
-    // It also carries settings and clusters, which on their own live 10 minutes — the
-    // shorter of the two lifetimes is used deliberately, so nothing is served staler
-    // than it would have been when fetched separately. LEFT OUT OF THIS LIST BY MISTAKE
-    // when the action was introduced: getCacheTtlMs returns 0 for anything unknown, so the
-    // composite was not cached at all and start-up got SLOWER, not faster — five cached
-    // reads had been replaced by one uncached one.
-    if (['getOzonStocks', 'getOzonSales', 'getFactoryOrders', 'getOzonInitialData', 'getTurnoverData'].includes(action)) {
-      return CACHE_TTL_OZON_MS;
-    }
-    if (['getInitialData', 'getTransactions', 'getSkus', 'getArchivedItems', 'getStock', 'getExternalShipments', 'getOzonSupplyRequests', 'getLastPurchasePrices'].includes(action)) {
-      return CACHE_TTL_OPERATIONAL_MS;
-    }
-    return 0;
-  }
-
   // Пункт 29: диагностика. Счётчик запросов к Apps Script, выполняющихся
   // прямо сейчас. Нужен, чтобы проверить, связаны ли сбои с параллельностью.
   let gasInFlight = 0;
@@ -474,44 +355,6 @@ async function startServer() {
     }
   }
 
-  // This list does three separate jobs, so a read missing from it misbehaves three ways:
-  // an action not listed here is treated as a WRITE, which (1) invalidates the response cache —
-  // and, when the action is absent from CACHE_INVALIDATION too, wipes the cache ENTIRELY,
-  // (2) is never retried automatically after a transport failure, and (3) goes down the write path.
-  // Item 26 stage A1: getOzonInitialData was missing here at first, so every cache miss on it
-  // wiped the whole cache and made every other read on the same page load miss as well.
-  const READ_ONLY_ACTIONS = [
-    'getInitialData', 'getTransactions', 'getSkus', 'getServices', 'getUsers', 'getArchivedItems',
-    'verifySession', 'login', 'getGlobalSettings', 'getExternalShipments', 'getOzonSupplyRequests',
-    'getOzonSettings', 'getOzonClusters', 'getOzonSyncStatus', 'getFactoryOrders', 'getGeminiKey', 'getOzonKeys',
-    'getStock', 'getServiceRates', 'getOzonStocks', 'getOzonSales', 'checkSupplyAvailability',
-    'getOzonInitialData',
-    // Item 78a: a pure read of «KAN дни» and «Снимки склада»; runKanPullNow stays a write.
-    'getTurnoverData',
-    // Item 26 (2026-08-20): getLastPurchasePrices was missing here from the day it was added.
-    // It is a pure read — it only calls getValues on the history sheet — but the dashboard fires
-    // it on EVERY load, so on every load the proxy treated it as a write and, finding no entry in
-    // CACHE_INVALIDATION, wiped the entire response cache. That is why the cache never helped at
-    // start-up, before or after the composite read was introduced.
-    'getLastPurchasePrices',
-    // Item 47, stage 3: a pure read of the cost journal. Deliberately NOT given a cache
-    // lifetime below — the button stamps the rows it exported, so a cached answer would
-    // offer the same rows twice.
-    'getOzonCostExport',
-    // Item 81: a pure read of the module's own spreadsheet. Deliberately given no cache
-    // lifetime below — every write of the module answers with the whole state anyway.
-    'getChinaBatches',
-    // Item 81g-2: same reasoning.
-    'getChinaMoney',
-    // Item 82: both pure reads — calcChinaForecast computes a forecast but writes nothing.
-    'getChinaForecastData',
-    'calcChinaForecast',
-    // Item 87 step 5: a pure read of the settings change journal. Deliberately given no
-    // cache lifetime below — the journal gains a row on every saveOzonSettings, so a cached
-    // answer would hide the most recent change.
-    'getOzonSettingsJournal'
-  ];
-
   // API Endpoint to proxy GAS requests
   app.post("/api/gas", async (req, res) => {
     try {
@@ -525,7 +368,7 @@ async function startServer() {
       const { sessionToken, ...cacheableBody } = req.body;
       const cacheKey = JSON.stringify(cacheableBody);
       
-      const cacheTtlMs = action ? getCacheTtlMs(action) : 0;
+      const cacheTtlMs = action ? gasCacheTtlMs(action) : 0;
       if (cacheTtlMs > 0 && token && isTokenCached(token)) {
         const cached = gasCache.get(cacheKey);
         if (cached && Date.now() - cached.cachedAt < cacheTtlMs) {
@@ -533,7 +376,7 @@ async function startServer() {
         }
       }
 
-      if (action && !READ_ONLY_ACTIONS.includes(action)) {
+      if (action && !isGasRead(action)) {
         invalidateCacheFor(action);
       }
 
@@ -562,7 +405,7 @@ async function startServer() {
       // иначе возвращается авария 01.08.2026 с двойным списанием.
       const opIdRaw = req.body?.opId;
       const hasOpId = typeof opIdRaw === 'string' && opIdRaw.trim() !== '';
-      const canRetry = !!action && (READ_ONLY_ACTIONS.includes(action) || (action === 'commit' && hasOpId));
+      const canRetry = !!action && (isGasRead(action) || (action === 'commit' && hasOpId));
       const maxTries = canRetry ? 2 : 1;
       // Пункт 29, шаг 1: пауза перед повтором увеличена с 1 с до 20 с.
       // Причина: при обрыве по таймауту выполнение Apps Script продолжается
@@ -576,7 +419,7 @@ async function startServer() {
       // to finish rather than dying on it. Measured on 21.08.2026: 90 s of timeout + 20 s of
       // pause + 5,1 s of the repeat = the 115,1 s the owner spent in front of an open form.
       const retryDelayMs = 5_000;
-      const isWriteAction = action === 'commit' || (action && !READ_ONLY_ACTIONS.includes(action));
+      const isWriteAction = action === 'commit' || (action && !isGasRead(action));
       // Пункт 28, этап D. Замеры 01.08.2026: обычная запись укладывается в 8 с,
       // самая долгая наблюдавшаяся — около 30 с. Порог 90 с даёт трёхкратный запас
       // и при этом не заставляет пользователя ждать ошибку пять минут.

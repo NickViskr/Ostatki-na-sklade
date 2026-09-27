@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { SKUItem } from '../types';
 import { layoutFromBundle, orderDocsStatus, parseSupplyDocs, SUPPLY_DOCS_SINCE } from './ozonSupplyDocs';
+import { gasReadsInvalidatedBy } from './gasActions';
 
 const sku = (name: string, pcsPerBox: number, ozonBarcode: string): SKUItem => ({
   sku: name, price: 0, minStock: 0, pcsPerBox, ozonBarcode, boxesPerPallet: 0, volumeLiters: 0, leadTimeDays: 0
@@ -182,7 +183,8 @@ describe('подключение серверной сборки докумен�
   // Item 79b. The docs route writes the journal past /api/gas, so it must clear the cached
   // journal read itself, and the tab must draw nothing for a legacy row.
   it('proxy: the docs route clears the cached journal read right after the record is written', () => {
-    expect(server).toMatch(/saveOzonSupplyDocs: \['getOzonSupplyRequests'\]/);
+    // Item 89: the invalidation list moved from server.ts into src/lib/gasActions.ts.
+    expect(gasReadsInvalidatedBy('saveOzonSupplyDocs')).toEqual(['getOzonSupplyRequests']);
     expect(server).toMatch(/callGasAction\('saveOzonSupplyDocs'[^;]*;[\s\S]{0,600}?invalidateCacheFor\('saveOzonSupplyDocs'\);/);
   });
 

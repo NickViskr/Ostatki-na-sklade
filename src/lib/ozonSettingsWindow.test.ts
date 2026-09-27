@@ -18,6 +18,7 @@ import {
 } from './ozonSettingsFields';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonSettingsModal } from '../components/OzonSettingsModal';
+import { gasCacheTtlMs, gasReadsInvalidatedBy, isGasRead } from './gasActions';
 
 /**
  * Item 87 step 2: reworked «Настройки Ozon» window — collapsible blocks, plain names, one
@@ -499,23 +500,18 @@ describe('OzonSettingsModal: journal fetch source (item 87 step 5)', () => {
   });
 });
 
+// Item 89: the proxy's action lists moved from server.ts into src/lib/gasActions.ts.
 describe('server.ts: getOzonSettingsJournal proxy wiring (item 87 step 5)', () => {
-  const server = read('server.ts');
-
   it('is listed as a read-only action', () => {
-    const listMatch = server.match(/const READ_ONLY_ACTIONS = \[([\s\S]*?)\];/);
-    expect(listMatch).toBeTruthy();
-    expect(listMatch![1]).toContain("'getOzonSettingsJournal'");
+    expect(isGasRead('getOzonSettingsJournal')).toBe(true);
   });
 
   it('is never given a cache TTL — the journal must never be served stale', () => {
-    const ttlMatch = server.match(/function getCacheTtlMs[\s\S]*?\n  \}\n/);
-    expect(ttlMatch).toBeTruthy();
-    expect(ttlMatch![0]).not.toContain('getOzonSettingsJournal');
+    expect(gasCacheTtlMs('getOzonSettingsJournal')).toBe(0);
   });
 
   it("saveOzonSettings still invalidates its own cache entries", () => {
-    expect(server).toContain("saveOzonSettings: ['getOzonSettings', 'getOzonInitialData']");
+    expect(gasReadsInvalidatedBy('saveOzonSettings')).toEqual(['getOzonSettings', 'getOzonInitialData']);
   });
 });
 

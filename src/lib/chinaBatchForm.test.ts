@@ -15,6 +15,7 @@ import {
 import { parseChinaArrivalFile, parseChinaBatchFile, parseChinaReportFile } from './chinaFileParse';
 import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE } from './chinaFiles.fixture';
 import { ChinaBatch, ChinaBatchLine } from '../types';
+import { gasReadsInvalidatedBy, isGasRead } from './gasActions';
 
 /** A saved batch, filled in only where the test needs it — item 81e added 12 fields to the shape. */
 const makeBatch = (overrides: Partial<ChinaBatch>): ChinaBatch => ({
@@ -410,22 +411,23 @@ describe('подключение модуля «Заказы в Китае»', (
     });
   });
 
+  // Item 89: the proxy's action lists moved from server.ts into src/lib/gasActions.ts.
   it('the proxy treats the read as a read and drops it after every write', () => {
-    expect(server).toContain("'getChinaBatches'");
+    expect(isGasRead('getChinaBatches')).toBe(true);
     ['setupChinaSpreadsheet', 'saveChinaBatch', 'deleteChinaBatch', 'saveChinaBatchCost', 'deleteChinaBatchCost']
-      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches'`));
+      .forEach((action) => expect(gasReadsInvalidatedBy(action)?.[0]).toBe('getChinaBatches'));
     // Item 81g: a write can change the money of every order, so the batch writes drop the
     // money read as well. Item 82: tariffs/boxes/vs-fact derive from the same data, so every
     // batch write drops the forecast read too.
     ['saveChinaBatchCost', 'deleteChinaBatchCost']
-      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData']`));
+      .forEach((action) => expect(gasReadsInvalidatedBy(action)).toEqual(['getChinaBatches', 'getChinaMoney', 'getChinaForecastData']));
     // Item 83c: saveChinaBatch/deleteChinaBatch ALSO sync «Заказы на фабрике», so both drop
     // getFactoryOrders and the getOzonInitialData composite too.
     ['saveChinaBatch', 'deleteChinaBatch']
-      .forEach((action) => expect(server).toContain(`${action}: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData'`));
+      .forEach((action) => expect(gasReadsInvalidatedBy(action)?.slice(0, 5)).toEqual(['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData']));
     // Item 84 (stage 1): saveChinaBatch can also run the automatic cost correction, which
     // writes the MAIN spreadsheet's stock/transactions — its own cache entries must drop too.
-    expect(server).toContain("saveChinaBatch: ['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions']");
+    expect(gasReadsInvalidatedBy('saveChinaBatch')).toEqual(['getChinaBatches', 'getChinaMoney', 'getChinaForecastData', 'getFactoryOrders', 'getOzonInitialData', 'getInitialData', 'getStock', 'getTransactions']);
   });
 
   it('every write replaces the whole state with what the script answered', () => {
