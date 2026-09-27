@@ -65,8 +65,10 @@ describe('OzonStocksTab: coverageTone and the factory threshold both see deliver
     expect(tabModelSrc).toContain(
       "factoryThreshold: (Number(art.leadTimeDays) || 0) + (Number(deliveryToOzonDays) || 0) + minStockDays,"
     );
-    expect(tabSrc).toContain(
-      "const threshold = (Number(c.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays;"
+    // Item 88 ticket 04 follow-up: the component threshold moved into buildComponentRows too —
+    // the screen now reads it straight off the component row (`c.threshold`).
+    expect(tabModelSrc).toContain(
+      "threshold: (Number(c.leadTimeDays) || 0) + (Number(deliveryToOzonDays) || 0) + minStockDays,"
     );
   });
 });

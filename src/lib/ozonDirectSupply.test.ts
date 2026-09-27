@@ -216,8 +216,12 @@ describe('подключение правила к экранам', () => {
   });
 
   it('«Рекомендации»: выбор собирается по ВСЕМ артикулам, а не по строке товара', () => {
-    expect(stocks).toMatch(/selectedClusterIds\s*=\s*useMemo/);
-    expect(stocks).toContain("key.split('|||')[1]");
+    // Item 88 ticket 04 follow-up: the computation moved into buildSelectedClusterIds in the
+    // tab model, called from a `useMemo` in the hook — the screen only reads the result.
+    const hookSrc = fs.readFileSync(path.join(process.cwd(), 'src/components/useOzonStocksTabModel.ts'), 'utf8');
+    const tabModel = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');
+    expect(hookSrc).toMatch(/selectedClusterIds\s*=\s*useMemo/);
+    expect(tabModel).toContain("key.split('|||')[1]");
   });
 
   it('«Рекомендации»: правила читаются из настроек, а не зашиты', () => {

@@ -12,7 +12,6 @@ import {
   KitBottleneck,
   OzonCoverageResult,
   OzonCoverageSettings,
-  coverageTone,
   parseExcludedClusters,
   resolveOzonArticle,
 } from './ozonCoverage';
@@ -115,7 +114,7 @@ export const emptyManualCluster = (ref: { clusterId: string; clusterName: string
   shareWindowWeeks: 0,
 });
 
-// ===== Stage: coverage rows (was the `coverageRows` memo, ~lines 524-599) =====
+// ===== Stage: coverage rows (was the screen's `coverageRows` memo) =====
 
 const sumTotals = (list: OzonStockRow[]): CoverageRowTotals => ({
   available: list.reduce((s, w) => s + (w.available || 0), 0),
@@ -198,11 +197,31 @@ export function buildCoverageRows(
   return rows;
 }
 
-// ===== Stage: component rows and kit bottlenecks (~603-615) =====
+// ===== Stage: component rows and kit bottlenecks =====
 
-export function buildComponentRows(coverage: OzonCoverageResult | null): ComponentCoverage[] {
+/** The component table's own «Хватит на» column reads `threshold`/`daysLeftNoSignal` — the
+ *  same two values the screen used to compute per row during render. */
+export interface ComponentCoverageRow extends ComponentCoverage {
+  /** Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays). */
+  threshold: number;
+  /** Days the pipeline lasts without a factory signal — shown even when no order is needed, so
+   *  the column keeps telling something after the order is placed and the signal goes quiet. */
+  daysLeftNoSignal: number | null;
+}
+
+export function buildComponentRows(
+  coverage: OzonCoverageResult | null,
+  minStockDays: number,
+  deliveryToOzonDays: number
+): ComponentCoverageRow[] {
   if (!coverage || !Array.isArray(coverage.components)) return [];
-  return [...coverage.components].sort((a, b) => b.perDay - a.perDay);
+  return [...coverage.components]
+    .sort((a, b) => b.perDay - a.perDay)
+    .map((c) => ({
+      ...c,
+      threshold: (Number(c.leadTimeDays) || 0) + (Number(deliveryToOzonDays) || 0) + minStockDays,
+      daysLeftNoSignal: c.forecastPerDay > 0 ? Math.round(c.pipelineQty / c.forecastPerDay) : null,
+    }));
 }
 
 export function buildBottleneckByKit(coverage: OzonCoverageResult | null): Record<string, KitBottleneck> {
@@ -212,7 +231,7 @@ export function buildBottleneckByKit(coverage: OzonCoverageResult | null): Recor
   return map;
 }
 
-// ===== Stage: visible rows (~617) =====
+// ===== Stage: visible rows =====
 
 export function buildVisibleRows(
   coverageRows: CoverageTabRow[],
@@ -227,7 +246,7 @@ export function buildVisibleRows(
   });
 }
 
-// ===== Stage: cluster shares (~626) =====
+// ===== Stage: cluster shares =====
 
 export interface ClusterShareEntry {
   clusterName: string;
@@ -272,7 +291,7 @@ export function buildClusterShares(coverageRows: CoverageTabRow[]): ClusterShare
   return { list, total, byClusterId };
 }
 
-// ===== Stage: factory orders by article, active orders, hidden manual (~413-448, ~665-674) =====
+// ===== Stage: factory orders by article, active orders, hidden manual =====
 
 export function buildFactoryOrdersByArticle(factoryOrders: FactoryOrder[] | null | undefined): Record<string, FactoryOrder[]> {
   const map: Record<string, FactoryOrder[]> = {};
@@ -316,7 +335,7 @@ export function buildHiddenManualByArticle(openFactoryOrders: FactoryOnOrderResu
   return map;
 }
 
-// ===== Stage: the factory modal's row lookup (~676) =====
+// ===== Stage: the factory modal's row lookup =====
 
 export interface FactoryModalRow {
   article: string;
@@ -328,7 +347,7 @@ export interface FactoryModalRow {
 
 export function findFactoryModalRow(
   coverageRows: CoverageTabRow[],
-  componentRows: ComponentCoverage[],
+  componentRows: ComponentCoverageRow[],
   factoryModalArticle: string | null
 ): FactoryModalRow | null {
   if (!factoryModalArticle) return null;
@@ -348,7 +367,7 @@ export function findFactoryModalRow(
   };
 }
 
-// ===== Stage: «Фабрика» cell state, per article and per kit component (~1531-1552, ~1779-1935, ~2201) =====
+// ===== Stage: «Фабрика» cell state, per article and per kit component =====
 
 export type FactoryCellKind =
   | 'overdue'
@@ -373,6 +392,22 @@ export interface FactoryCellState {
   box: number;
 }
 
+/** The split/quantities/nearest-order part of a «Фабрика» cell — identical for the article and
+ *  the component builder, factored out so the two do not repeat it. */
+function splitFactoryCellOrders(
+  list: FactoryOrder[],
+  todayIso: string,
+  hiddenManualIds: Set<string>
+): { overdueList: FactoryOrder[]; overdueQty: number; waitingList: FactoryOrder[]; waitingQty: number; nearest: FactoryOrder | null } {
+  const split = splitFactoryOrders(list, todayIso, hiddenManualIds);
+  const overdueList = split.overdue;
+  const overdueQty = overdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
+  const waitingList = split.waiting;
+  const waitingQty = waitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
+  const nearest = waitingList[0] || null;
+  return { overdueList, overdueQty, waitingList, waitingQty, nearest };
+}
+
 /** The article row's «Фабрика» cell — one of eight states, same precedence as the JSX
  *  ternary chain it replaces: overdue orders win, then an open order, then the two
  *  cluster-only-deficit variants, then a waiting order, a kit bottleneck, a missing lead
@@ -388,12 +423,7 @@ export function buildArticleFactoryCellState(params: {
   isBottleneck: boolean;
 }): FactoryCellState {
   const box = params.pcsPerBox > 0 ? params.pcsPerBox : 1;
-  const split = splitFactoryOrders(params.factoryList, params.todayIso, params.hiddenManualIds);
-  const overdueList = split.overdue;
-  const overdueQty = overdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-  const waitingList = split.waiting;
-  const waitingQty = waitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-  const nearest = waitingList[0] || null;
+  const { overdueList, overdueQty, waitingList, waitingQty, nearest } = splitFactoryCellOrders(params.factoryList, params.todayIso, params.hiddenManualIds);
   const orderQty = params.factory ? params.factory.orderQty : 0;
   const clusterOnly = !!(params.factory && params.factory.reason === 'clusterDeficit' && params.factory.orderQty === 0);
 
@@ -420,12 +450,7 @@ export function buildComponentFactoryCellState(params: {
   pcsPerBox: number;
 }): FactoryCellState {
   const box = params.pcsPerBox > 0 ? params.pcsPerBox : 1;
-  const split = splitFactoryOrders(params.list, params.todayIso, params.hiddenManualIds);
-  const overdueList = split.overdue;
-  const overdueQty = overdueList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-  const waitingList = split.waiting;
-  const waitingQty = waitingList.reduce((s, o) => s + (Number(o.qty) || 0), 0);
-  const nearest = waitingList[0] || null;
+  const { overdueList, overdueQty, waitingList, waitingQty, nearest } = splitFactoryCellOrders(params.list, params.todayIso, params.hiddenManualIds);
   const orderQty = params.factory ? params.factory.orderQty : 0;
 
   let kind: FactoryCellKind;
@@ -466,7 +491,7 @@ export function buildFactoryCellByArticle(
 
 /** The «Требуемый заказ» cell state of every component row, by component. */
 export function buildFactoryCellByComponent(
-  componentRows: ComponentCoverage[],
+  componentRows: ComponentCoverageRow[],
   factoryOrdersByArticle: Record<string, FactoryOrder[]>,
   todayIso: string,
   hiddenManualIds: Set<string>
@@ -484,7 +509,33 @@ export function buildFactoryCellByComponent(
   return map;
 }
 
-// ===== Stage: cabinets by article, selected cabinet sets, supply stock options (~700-725) =====
+// ===== Stage: factory orders for articles not on Ozon yet =====
+
+export interface OffOzonFactoryOrders {
+  article: string;
+  orders: FactoryOrder[];
+}
+
+/** Owner, 2026-09-25: goods ordered in China that are not on Ozon yet (they go there after
+ *  arriving at the warehouse) have no coverage/component row above — list their orders
+ *  separately so an order never disappears from sight. */
+export function buildOffOzonFactoryOrders(
+  coverageRows: CoverageTabRow[],
+  componentRows: ComponentCoverageRow[],
+  factoryOrdersByArticle: Record<string, FactoryOrder[]>
+): OffOzonFactoryOrders[] {
+  const shown = new Set<string>([
+    ...coverageRows.map((r) => String(r.article)),
+    ...componentRows.map((c) => String(c.component)),
+  ]);
+  const liveOrders = (a: string) => factoryOrdersByArticle[a].filter((o) => String(o.status || '').trim() !== 'replaced');
+  return Object.keys(factoryOrdersByArticle)
+    .filter((a) => !shown.has(a) && liveOrders(a).length > 0)
+    .sort()
+    .map((article) => ({ article, orders: liveOrders(article) }));
+}
+
+// ===== Stage: cabinets by article, selected cabinet sets, supply stock options =====
 
 export function buildCabinetsByArticleMap(coverageRows: CoverageTabRow[]): Record<string, string[]> {
   const map: Record<string, string[]> = {};
@@ -506,6 +557,19 @@ export function buildSelectedCabinetSets(
   return sets;
 }
 
+/** Пункт 58. Кластер прямой поставки едет ОДИН: смешанного черновика в Ozon не существует.
+ *  Поэтому галочки взаимоисключающие, и правило смотрит на ВЕСЬ выбор по всем артикулам,
+ *  а не на строку товара — иначе запрет обходился бы отметкой в соседней карточке. */
+export function buildSelectedClusterIds(selectedSupply: Record<string, boolean>): string[] {
+  const ids: string[] = [];
+  Object.keys(selectedSupply).forEach((key) => {
+    if (!selectedSupply[key]) return;
+    const cid = key.split('|||')[1] || '';
+    if (cid && ids.indexOf(cid) < 0) ids.push(cid);
+  });
+  return ids;
+}
+
 export interface SupplyStockOption {
   article: string;
   name: string;
@@ -522,7 +586,7 @@ export function buildSupplyStockOptions(coverageRows: CoverageTabRow[]): SupplyS
   }));
 }
 
-// ===== Stage: supply cluster refs (~732) =====
+// ===== Stage: supply cluster refs =====
 
 export interface SupplyClusterRef {
   clusterId: string;
@@ -539,7 +603,7 @@ export function buildSupplyClusterRefs(
     .map((c) => ({ clusterId: String(c.clusterId), clusterName: String(c.clusterName || '') }));
 }
 
-// ===== Stage: manual infos and manual plan (~739-766) =====
+// ===== Stage: manual infos and manual plan =====
 
 export function buildManualInfos(
   coverageRows: CoverageTabRow[],
@@ -561,23 +625,7 @@ export function buildManualInfos(
   }));
 }
 
-export function buildManualPicks(manualQty: Record<string, string>): ManualPick[] {
-  return readManualPicks(manualQty);
-}
-
-export function buildManualClusterIds(manualPicks: ManualPick[]): string[] {
-  return pickedClusterIds(manualPicks);
-}
-
-export function buildManualCabinetSets(manualPicks: ManualPick[], cabinetsByArticleMap: Record<string, string[]>): string[][] {
-  return pickedCabinetSets(manualPicks, cabinetsByArticleMap);
-}
-
-export function buildManualPlanStage(manualPicks: ManualPick[], manualInfos: ManualArticleInfo[]): ManualPlan {
-  return buildManualPlan(manualPicks, manualInfos);
-}
-
-// ===== Stage: supply recommendations incl. the wide-window enrichment (~790-850) =====
+// ===== Stage: supply recommendations incl. the wide-window enrichment =====
 
 export interface SupplyRecommendationRow {
   article: string;
@@ -669,7 +717,7 @@ export function buildRecommendations(
   return { supplies, factories, orderedCount, clusterDeficitCount };
 }
 
-// ===== Stage: the supply plan from the ticked items (~856-909) =====
+// ===== Stage: the supply plan from the ticked items =====
 
 export interface SupplyPlanRow {
   article: string;
@@ -783,8 +831,12 @@ export interface OzonStocksTabModelInput {
 export interface OzonStocksTabModel {
   coverage: OzonCoverageResult | null;
   wideCoverage: OzonCoverageResult | null;
+  /** Whether any article is switched to «Распределить весь остаток». */
+  anyWide: boolean;
+  /** Окно тренда из настроек: сколько недель берём, когда распределяем весь остаток. */
+  wideWeeks: number;
   coverageRows: CoverageTabRow[];
-  componentRows: ComponentCoverage[];
+  componentRows: ComponentCoverageRow[];
   bottleneckByKit: Record<string, KitBottleneck>;
   visibleRows: CoverageTabRow[];
   clusterShares: ClusterShares;
@@ -795,8 +847,10 @@ export interface OzonStocksTabModel {
   factoryCellByArticle: Record<string, FactoryCellState>;
   factoryCellByComponent: Record<string, FactoryCellState>;
   factoryModalRow: FactoryModalRow | null;
+  offOzonFactoryOrders: OffOzonFactoryOrders[];
   cabinetsByArticleMap: Record<string, string[]>;
   selectedCabinetSets: string[][];
+  selectedClusterIds: string[];
   supplyStockOptions: SupplyStockOption[];
   supplyClusterRefs: SupplyClusterRef[];
   manualPicks: ManualPick[];
@@ -833,7 +887,7 @@ export function buildOzonStocksTabModel(input: OzonStocksTabModelInput): OzonSto
     factoryOnOrder,
     input.source.pending
   );
-  const componentRows = buildComponentRows(coverage);
+  const componentRows = buildComponentRows(coverage, input.settings.minStockDays, input.settings.deliveryToOzonDays || 0);
   const bottleneckByKit = buildBottleneckByKit(coverage);
   const visibleRows = buildVisibleRows(coverageRows, input.searchQuery, input.onlyWithRecommendations);
   const clusterShares = buildClusterShares(coverageRows);
@@ -847,17 +901,19 @@ export function buildOzonStocksTabModel(input: OzonStocksTabModelInput): OzonSto
   );
   const factoryCellByComponent = buildFactoryCellByComponent(componentRows, factoryOrdersByArticle, input.todayIso, hiddenManualIds);
   const factoryModalRow = findFactoryModalRow(coverageRows, componentRows, input.factoryModalArticle);
+  const offOzonFactoryOrders = buildOffOzonFactoryOrders(coverageRows, componentRows, factoryOrdersByArticle);
 
   const cabinetsByArticleMap = buildCabinetsByArticleMap(coverageRows);
   const selectedCabinetSets = buildSelectedCabinetSets(input.selectedSupply, cabinetsByArticleMap);
+  const selectedClusterIds = buildSelectedClusterIds(input.selectedSupply);
   const supplyStockOptions = buildSupplyStockOptions(coverageRows);
   const supplyClusterRefs = buildSupplyClusterRefs(input.settings.excludedClusters, input.source.clusters);
 
-  const manualPicks = buildManualPicks(input.manualQty);
-  const manualClusterIds = buildManualClusterIds(manualPicks);
-  const manualCabinetSets = buildManualCabinetSets(manualPicks, cabinetsByArticleMap);
+  const manualPicks = readManualPicks(input.manualQty);
+  const manualClusterIds = pickedClusterIds(manualPicks);
+  const manualCabinetSets = pickedCabinetSets(manualPicks, cabinetsByArticleMap);
   const manualInfos = buildManualInfos(coverageRows, supplyClusterRefs, clusterShares.byClusterId);
-  const manualPlan = buildManualPlanStage(manualPicks, manualInfos);
+  const manualPlan = buildManualPlan(manualPicks, manualInfos);
 
   const recommendations = buildRecommendations(coverageRows, input.wideArticles, wideCoverage, factoryOnOrder);
   const supplyPlan = buildSupplyPlan(recommendations, coverageRows, input.selectedSupply, input.maxBoxesPerCluster);
@@ -865,6 +921,8 @@ export function buildOzonStocksTabModel(input: OzonStocksTabModelInput): OzonSto
   return {
     coverage,
     wideCoverage,
+    anyWide,
+    wideWeeks,
     coverageRows,
     componentRows,
     bottleneckByKit,
@@ -877,8 +935,10 @@ export function buildOzonStocksTabModel(input: OzonStocksTabModelInput): OzonSto
     factoryCellByArticle,
     factoryCellByComponent,
     factoryModalRow,
+    offOzonFactoryOrders,
     cabinetsByArticleMap,
     selectedCabinetSets,
+    selectedClusterIds,
     supplyStockOptions,
     supplyClusterRefs,
     manualPicks,
@@ -890,6 +950,3 @@ export function buildOzonStocksTabModel(input: OzonStocksTabModelInput): OzonSto
     supplyPlan,
   };
 }
-
-// Re-exported for the screen: the colour of a cell by coverage tone, unchanged from ozonCoverage.
-export { coverageTone };

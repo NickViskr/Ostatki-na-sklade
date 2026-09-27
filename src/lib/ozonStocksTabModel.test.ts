@@ -626,20 +626,9 @@ describe('useOzonStocksTabModel: parity with buildOzonStocksTabModel for the sam
     let captured: OzonStocksTabModel | null = null;
     function Probe() {
       captured = useOzonStocksTabModel({
-        coverageSource: source,
-        ozonSettings: settings,
-        runCoverage: (s) => computeCoverage(source, s),
-        skus: source.skus,
-        clusterRefs: source.clusters,
-        factoryOrders: data.factoryOrders,
-        wideArticles: {},
-        selectedSupply,
-        manualQty: {},
-        searchQuery: '',
-        onlyWithRecommendations: false,
-        factoryModalArticle: null,
-        maxBoxesPerCluster: 30,
-        todayIso: TODAY_ISO
+        source, settings, maxBoxesPerCluster: 30, factoryOrders: data.factoryOrders, kits: data.kits,
+        wideArticles: {}, selectedSupply, manualQty: {}, searchQuery: '', onlyWithRecommendations: false,
+        factoryModalArticle: null, todayIso: TODAY_ISO
       });
       return null;
     }

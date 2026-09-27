@@ -120,11 +120,14 @@ describe('item 85, step 1.7: splitFactoryOrders — the screen follows the pipel
 
   it('both tables of «Остатки Озон» use it with the hidden ids, and keep no inline copy of the rule', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
-    // Item 88 ticket 04: the article- and component-level «Фабрика» cell state (with them, both
-    // splitFactoryOrders calls) moved into buildArticleFactoryCellState/buildComponentFactoryCellState
-    // in the tab model — the screen only reads the resulting FactoryCellState.
+    // Item 88 ticket 04: the article- and component-level «Фабрика» cell state (with them, the
+    // splitFactoryOrders call) moved into buildArticleFactoryCellState/buildComponentFactoryCellState
+    // in the tab model — the screen only reads the resulting FactoryCellState. Review follow-up:
+    // the ONE splitFactoryOrders call is now factored into a private helper both builders call —
+    // guarded here by the helper appearing once and both builders calling it once each.
     const tabModel = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');
-    expect(tabModel.match(/splitFactoryOrders\(params\.(factoryList|list), params\.todayIso, params\.hiddenManualIds\)/g) || []).toHaveLength(2);
+    expect(tabModel.match(/splitFactoryOrders\(list, todayIso, hiddenManualIds\)/g) || []).toHaveLength(1);
+    expect(tabModel.match(/splitFactoryCellOrders\(params\.(factoryList|list), params\.todayIso, params\.hiddenManualIds\)/g) || []).toHaveLength(2);
     expect(src).not.toMatch(/splitFactoryOrders\(/);
     expect(src).not.toMatch(/list\.filter\(\(o\) => o\.expectedAt && o\.expectedAt < todayIso\)/);
     expect(src).not.toMatch(/factoryList\.filter\(\(o\) => !isChinaFactoryOrder\(o\) && o\.expectedAt/);

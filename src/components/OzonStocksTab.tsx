@@ -19,7 +19,7 @@ import { buildCoverageSource, computeCoverage } from '../lib/ozonCoverageSource'
 import { getStatusDetails } from '../lib/ozonStatus';
 import { factoryOrderBadge, factoryLateLabel } from '../lib/factoryOrderDisplay';
 import { canEditOzonSettings } from '../lib/ozonSettingsFields';
-import { emptyManualCluster, resolveWideWeeks } from '../lib/ozonStocksTabModel';
+import { emptyManualCluster } from '../lib/ozonStocksTabModel';
 import { useOzonStocksTabModel } from './useOzonStocksTabModel';
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
@@ -110,15 +110,8 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   // а не на строку товара — иначе запрет обходился бы отметкой в соседней карточке.
   const directRules = useMemo(() => parseDirectClusters(supplySettings.directClusters), [supplySettings.directClusters]);
 
-  const selectedClusterIds = useMemo(() => {
-    const ids: string[] = [];
-    Object.keys(selectedSupply).forEach((key) => {
-      if (!selectedSupply[key]) return;
-      const cid = key.split('|||')[1] || '';
-      if (cid && ids.indexOf(cid) < 0) ids.push(cid);
-    });
-    return ids;
-  }, [selectedSupply]);
+  // Item 88 ticket 04 follow-up: `selectedClusterIds` now comes from the tab model hook below
+  // (buildSelectedClusterIds) — the same computation, moved out of the screen.
 
   const toggleSupplyRow = (article: string, clusterId: string) => {
     const key = supplyKey(article, clusterId);
@@ -438,9 +431,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return summarizeSettingsImpact(result, (article) => getOrderUnitCost(article).price);
   }, [runCoverage, getOrderUnitCost]);
 
-  /** Окно тренда из настроек: сколько недель берём, когда распределяем весь остаток. */
-  const wideWeeks = resolveWideWeeks(ozonSettings);
-
   const fmtDateShort = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}` : '');
   const fmtDateFull = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : '—');
 
@@ -454,26 +444,24 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   // recommendation supply plans — now comes from the tab model, one stage per `useMemo` inside
   // the hook, same dependency granularity as the memos it replaces.
   const {
-    coverage, wideCoverage, coverageRows, componentRows, bottleneckByKit, visibleRows,
+    coverage, wideCoverage, wideWeeks, coverageRows, componentRows, bottleneckByKit, visibleRows,
     clusterShares, factoryOrdersByArticle, activeFactoryOrders, hiddenManualIds,
     hiddenManualByArticle, factoryCellByArticle, factoryCellByComponent, factoryModalRow,
-    cabinetsByArticleMap, selectedCabinetSets, supplyStockOptions, supplyClusterRefs,
-    manualPicks, manualClusterIds, manualCabinetSets, manualInfos, manualPlan,
-    recommendations, supplyPlan,
+    offOzonFactoryOrders, cabinetsByArticleMap, selectedCabinetSets, selectedClusterIds,
+    supplyStockOptions, supplyClusterRefs, manualPicks, manualClusterIds, manualCabinetSets,
+    manualInfos, manualPlan, recommendations, supplyPlan,
   } = useOzonStocksTabModel({
-    coverageSource,
-    ozonSettings,
-    runCoverage,
-    skus,
-    clusterRefs,
+    source: coverageSource,
+    settings: ozonSettings,
+    maxBoxesPerCluster: supplySettings.maxBoxesPerCluster,
     factoryOrders,
+    kits,
     wideArticles,
     selectedSupply,
     manualQty,
     searchQuery,
     onlyWithRecommendations,
     factoryModalArticle,
-    maxBoxesPerCluster: supplySettings.maxBoxesPerCluster,
     todayIso,
   });
 
@@ -1729,38 +1717,29 @@ export const OzonStocksTab: React.FC = React.memo(() => {
               </div>
             )}
 
-            {(() => {
-              // Owner, 2026-09-25: goods ordered in China that are not on Ozon yet (they go there
-              // after arriving at the warehouse) have no row above — list their orders here so an
-              // order never disappears from sight. Components have their own table below.
-              const shown = new Set<string>([
-                ...(coverageRows as any[]).map((r) => String(r.article)),
-                ...(componentRows as any[]).map((c) => String(c.component)),
-              ]);
-              const liveOrders = (a: string) => factoryOrdersByArticle[a].filter((o) => String(o.status || '').trim() !== 'replaced');
-              const offOzon = Object.keys(factoryOrdersByArticle).filter((a) => !shown.has(a) && liveOrders(a).length > 0).sort();
-              if (offOzon.length === 0) return null;
-              return (
-                <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-offozon-factory">
-                  <div className="text-xs font-bold text-slate-700 mb-1">
-                    Заказано на фабрике — товары, которых пока нет на Ozon
-                    <span className="font-normal text-slate-400 ml-2">артикулов: {offOzon.length}</span>
-                  </div>
-                  <div className="flex flex-col gap-1 text-[11px]">
-                    {offOzon.map((a) => (
-                      <div key={a} className="flex flex-wrap items-baseline gap-x-3">
-                        <span className="font-mono font-bold text-slate-800">{a}</span>
-                        {liveOrders(a).map((o) => (
-                          <span key={o.id} className="text-sky-700">
-                            {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}
-                          </span>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
+            {/* Owner, 2026-09-25: goods ordered in China that are not on Ozon yet (they go there
+                after arriving at the warehouse) have no row above — list their orders here so an
+                order never disappears from sight. Components have their own table below. */}
+            {offOzonFactoryOrders.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-offozon-factory">
+                <div className="text-xs font-bold text-slate-700 mb-1">
+                  Заказано на фабрике — товары, которых пока нет на Ozon
+                  <span className="font-normal text-slate-400 ml-2">артикулов: {offOzonFactoryOrders.length}</span>
                 </div>
-              );
-            })()}
+                <div className="flex flex-col gap-1 text-[11px]">
+                  {offOzonFactoryOrders.map(({ article, orders }) => (
+                    <div key={article} className="flex flex-wrap items-baseline gap-x-3">
+                      <span className="font-mono font-bold text-slate-800">{article}</span>
+                      {orders.map((o) => (
+                        <span key={o.id} className="text-sky-700">
+                          {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {componentRows.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-components-factory">
@@ -1790,24 +1769,26 @@ export const OzonStocksTab: React.FC = React.memo(() => {
                     </thead>
                     <tbody>
                       {componentRows.map((c) => {
-                        const needOrder = !!(c.factory && c.factory.orderQty > 0);
-                        // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
-                        const threshold = (Number(c.leadTimeDays) || 0) + (Number(ozonSettings.deliveryToOzonDays) || 0) + ozonSettings.minStockDays;
                         // Разбор заказов на фабрике для компонента — по образцу основной таблицы,
                         // иначе после оформления заказа он пропадал бы из вида: сигнал гас, а сам заказ было не видно и не открыть.
                         // Item 85, step 1.7: the same rule as the main table and the pipeline — a late
                         // China order stays waiting («задерживается N дн»), never «просрочен».
                         const compFactoryCell = factoryCellByComponent[c.component];
+                        // Item 88 ticket 04 follow-up: the same predicate the cell's own `orderQty`
+                        // field already encodes (`c.factory && c.factory.orderQty > 0`), and
+                        // threshold/daysLeftNoSignal now come straight off the model's component row.
+                        const needOrder = compFactoryCell.orderQty > 0;
                         const overdueList = compFactoryCell.overdueList;
                         const overdueQty = compFactoryCell.overdueQty;
                         const waitingList = compFactoryCell.waitingList;
                         const waitingQty = compFactoryCell.waitingQty;
                         const nearest = compFactoryCell.nearest;
+                        const threshold = c.threshold;
                         // Сколько дней хватит запаса без сигнала — нужно показывать даже когда заказывать не надо,
                         // иначе после оформления заказа рост покрытия остаётся невидимым.
                         // Пункт 38: делить надо на ПРОГНОЗНУЮ скорость — по ней же считается и сам сигнал,
                         // иначе колонка показывала бы одни дни, а порог срабатывания считался бы по другим.
-                        const daysLeftNoSignal = c.forecastPerDay > 0 ? Math.round(c.pipelineQty / c.forecastPerDay) : null;
+                        const daysLeftNoSignal = c.daysLeftNoSignal;
                         return (
                           <tr
                             key={c.component}

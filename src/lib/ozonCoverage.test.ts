@@ -1429,6 +1429,10 @@ describe('дефицит компонента и честная подпись �
     expect(stocks).toMatch(
       /\) : compFactoryCell\.kind === 'clusterDeficit' && c\.factory \? \([\s\S]{0,1600}?держит сборку · \{fmtInt\(c\.factory\.unmetDeficitQty\)\} шт/
     );
+    // Review follow-up: pin the model's OWN line that decides 'clusterDeficit' for a component —
+    // the JSX guard above only pins the discriminant string, not the business rule behind it.
+    const tabModel = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');
+    expect(tabModel).toContain("else if (params.factory && params.factory.unmetDeficitQty > 0) kind = 'clusterDeficit';");
   });
 
   it('состояние кликабельно — по нему можно оформить заказ на фабрике', () => {
