@@ -168,15 +168,19 @@ describe('item 85, step 1.6: shared components are split between the kits', () =
   });
 });
 
-describe('item 85, step 1.6: the screens hand every kit component its stock', () => {
-  const loop = /for \(const k of kits\) for \(const c of k\.components \|\| \[\]\) \{\s*if \(!\(c\.componentSku in myStockAvailability\)\) myStockAvailability\[c\.componentSku\] = getEffectiveAvailability\(c\.componentSku\);/g;
-  it('the tab does it in both calculations (the usual window and the trend window)', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
-    expect((src.match(loop) || []).length).toBe(2);
+describe('item 85, step 1.6 / item 88 ticket 03: every kit component gets its own stock, in one shared place', () => {
+  const loop = /for \(const k of data\.kits\) for \(const c of k\.components \|\| \[\]\) \{\s*if \(!\(c\.componentSku in myStockAvailability\)\) myStockAvailability\[c\.componentSku\] = data\.availabilityOf\(c\.componentSku\);/g;
+  it('the loop lives ONCE in the shared coverage source, not duplicated on either screen', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonCoverageSource.ts'), 'utf8');
+    expect((source.match(loop) || []).length).toBe(1);
   });
-  it('the dashboard does it before its coverage', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
-    expect((src.match(loop) || []).length).toBe(1);
+  it('neither screen has its own copy of the loop — both call buildCoverageSource instead', () => {
+    const tab = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const dash = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
+    expect(tab).not.toContain('myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku)');
+    expect(dash).not.toContain('myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku)');
+    expect(tab).toMatch(/buildCoverageSource\(/);
+    expect(dash).toMatch(/buildCoverageSource\(/);
   });
   it('the recommendation card says when a kit got only its share of a shared component', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');

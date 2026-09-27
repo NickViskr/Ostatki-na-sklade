@@ -1696,8 +1696,11 @@ describe('пункт 48: фильтр по магазину на вкладке 
 
   it('фильтр объявлен ДО всего, что от него считается', () => {
     // Иначе const используется до объявления и экран падает на первом же рендере.
-    const filterAt = stocks.indexOf('const filteredOzonStocks = useMemo');
-    expect(filterAt).toBeGreaterThan(-1);
+    // Item 88 ticket 03: filteredOzonStocks is now an alias of the shared coverageSource.
+    const sourceAt = stocks.indexOf('const coverageSource = useMemo');
+    expect(sourceAt).toBeGreaterThan(-1);
+    const filterAt = stocks.indexOf('const filteredOzonStocks = coverageSource.stocks');
+    expect(filterAt).toBeGreaterThan(sourceAt);
     for (const dependent of ['const maxUpdatedAt = useMemo', 'const ozonTotals = useMemo', 'const uniqueCabinetsCount = useMemo']) {
       expect(stocks.indexOf(dependent)).toBeGreaterThan(filterAt);
     }
@@ -1827,12 +1830,16 @@ describe('factoryOnOrderByArticle', () => {
     expect(receivedResult.qty['ART-CHECKED']).toBe(50);
   });
 
-  it('оба места вызова (OzonStocksTab, Dashboard) импортируют общую функцию, не свою копию', () => {
+  // Item 88 ticket 03: both screens now build the pipeline through the shared coverageSource
+  // instead of calling factoryOnOrderByArticle themselves — the function has exactly one caller.
+  it('both screens go through the shared coverageSource; factoryOnOrderByArticle is called only in ozonCoverageSource.ts', () => {
     const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
     const dashboard = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
-    expect(stocks).toMatch(/factoryOnOrderByArticle/);
-    expect(dashboard).toMatch(/factoryOnOrderByArticle/);
-    expect(stocks).toMatch(/import \{[^}]*factoryOnOrderByArticle[^}]*\} from '..\/lib\/ozonCoverage'/);
-    expect(dashboard).toMatch(/import \{[^}]*factoryOnOrderByArticle[^}]*\} from '..\/lib\/ozonCoverage'/);
+    const source = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonCoverageSource.ts'), 'utf8');
+    expect(stocks).not.toMatch(/factoryOnOrderByArticle/);
+    expect(dashboard).not.toMatch(/factoryOnOrderByArticle/);
+    expect(stocks).toMatch(/import \{[^}]*buildCoverageSource[^}]*\} from '..\/lib\/ozonCoverageSource'/);
+    expect(dashboard).toMatch(/import \{[^}]*buildCoverageSource[^}]*\} from '..\/lib\/ozonCoverageSource'/);
+    expect((source.match(/factoryOnOrderByArticle/g) || []).length).toBeGreaterThan(0);
   });
 });

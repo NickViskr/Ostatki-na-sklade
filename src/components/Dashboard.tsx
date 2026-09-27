@@ -26,8 +26,8 @@ import { formatCurrency, calcCostDebt, hasCostDebt, formatDateRu } from '../lib/
 import { STATUS_FUNNEL_ORDER, getStatusDetails, isFunnelVisibleStatus } from '../lib/ozonStatus';
 import { buildOzonAlerts, buildCoverageAlerts, buildReserveShortageAlerts, OzonAlert } from '../lib/ozonAlerts';
 import { buildFreeStockCsv } from '../lib/freeStockCsv';
-import { buildOzonCoverage, resolveOzonArticle, OzonCoverageResult, factoryOnOrderByArticle } from '../lib/ozonCoverage';
-import { buildPendingSupplies } from '../lib/ozonPending';
+import { resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
+import { buildCoverageSource, computeCoverage } from '../lib/ozonCoverageSource';
 import { coverageDays, daysLying, lastReceiptByArticle, turnoverSortValue } from '../lib/turnoverDays';
 import { buildTurnover, shelfFromStock } from '../lib/turnover';
 
@@ -214,48 +214,27 @@ export const Dashboard: React.FC = React.memo(() => {
     return map;
   }, [turnoverData, stock, kits, transactions, skus, turnoverPeriodDays, ozonSettings.turnoverSlowDays, ozonSettings.turnoverFastDays]);
 
+  // Item 88 ticket 03: one shared coverage source, shared with OzonStocksTab.tsx. Cabinet 'all' —
+  // the dashboard never splits by shop — and `waitForClusterRefs: false`, so it keeps not
+  // waiting for the cluster reference (Q4 а), now expressed as a parameter, not a copy.
+  const coverageSource = useMemo(() => {
+    const d = new Date();
+    const todayIsoNow = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return buildCoverageSource(
+      { ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, availabilityOf: getEffectiveAvailability },
+      { cabinet: 'all', todayIso: todayIsoNow, waitForClusterRefs: false }
+    );
+  }, [ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, getEffectiveAvailability, stock]);
+
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
   // На главной кабинеты не разделяются — берутся все записи.
-  const pendingSupplies = useMemo(() => {
-    return buildPendingSupplies({
-      shipments: externalShipments || [],
-      requests: ozonSupplyRequests || [],
-      skus,
-    });
-  }, [externalShipments, ozonSupplyRequests, skus]);
+  const pendingSupplies = coverageSource.pending;
 
-  // Пункт 35/83. ТРУБА: сумма заказов на фабрике по артикулу — общее правило
-  // factoryOnOrderByArticle (src/lib/ozonCoverage.ts), общее с OzonStocksTab.tsx.
-  // Объявлено ДО расчёта покрытия: расчёт этими данными пользуется.
-  const factoryOnOrder = useMemo(() => {
-    const d = new Date();
-    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return factoryOnOrderByArticle(factoryOrders || [], today).qty;
-  }, [factoryOrders]);
+  // Item 35/83. The open-factory-orders pipeline — «ordered, not received» — shared with
+  // OzonStocksTab.tsx (not the ТРУБА itself, see CONTEXT.md).
+  const factoryOnOrder = coverageSource.factoryPipeline.qty;
 
-  const ozonCoverage = useMemo<OzonCoverageResult | null>(() => {
-    if (!ozonStocks || ozonStocks.length === 0) return null;
-    const myStockAvailability: Record<string, number> = {};
-    for (const s of skus) {
-      myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
-    }
-    // Item 85, step 1.6: the same availability as the «Остатки Озон» tab, components included.
-    for (const k of kits) for (const c of k.components || []) {
-      if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku);
-    }
-    return buildOzonCoverage({
-      stocks: ozonStocks,
-      sales: ozonSales || [],
-      skus,
-      clusters: clusterRefs,
-      settings: ozonSettings,
-      myStockAvailability,
-      pending: pendingSupplies,
-      factoryOnOrder,
-      kits,
-      stockHistory: ozonStockHistory,
-    });
-  }, [ozonStocks, ozonSales, ozonStockHistory, skus, kits, stock, clusterRefs, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
+  const ozonCoverage = useMemo<OzonCoverageResult | null>(() => computeCoverage(coverageSource, ozonSettings), [coverageSource, ozonSettings]);
 
   const coverageAlerts = useMemo(() => {
     if (!isAdmin || !ozonCoverage) return [];

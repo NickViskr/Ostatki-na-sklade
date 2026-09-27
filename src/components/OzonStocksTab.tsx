@@ -13,9 +13,9 @@ import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib
 import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
 import { canTickCluster } from '../lib/ozonSupplyLines';
 import { buildManualPlan, clampManualQty, manualClusterList, manualKey, pickedCabinetSets, pickedClusterIds, readManualPicks, remainingForArticle } from '../lib/ozonManualSupply';
-import { buildOzonCoverage, OzonCoverageResult, OzonCoverageSettings, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, factoryOnOrderByArticle, coverageTone, CoverageTone } from '../lib/ozonCoverage';
+import { OzonCoverageResult, OzonCoverageSettings, ComponentCoverage, KitBottleneck, parseExcludedClusters, resolveOzonArticle, coverageTone, CoverageTone } from '../lib/ozonCoverage';
 import { summarizeSettingsImpact, OzonSettingsImpact } from '../lib/ozonSettingsImpact';
-import { buildPendingSupplies } from '../lib/ozonPending';
+import { buildCoverageSource, computeCoverage } from '../lib/ozonCoverageSource';
 import { getStatusDetails } from '../lib/ozonStatus';
 import { factoryOrderBadge, factoryLateLabel, isChinaFactoryOrder, splitFactoryOrders } from '../lib/factoryOrderDisplay';
 import { canEditOzonSettings } from '../lib/ozonSettingsFields';
@@ -333,11 +333,21 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return Array.from(new Set(ozonStocks.map(s => s.cabinet).filter(Boolean)));
   }, [ozonStocks]);
 
-  const filteredOzonStocks = useMemo(() => {
-    if (!ozonStocks) return [];
-    if (cabinetFilter === 'all') return ozonStocks;
-    return ozonStocks.filter((s) => s.cabinet === cabinetFilter);
-  }, [ozonStocks, cabinetFilter]);
+  // Item 88, ticket 03: one shared coverage source assembles everything below (cabinet-filtered
+  // stocks/sales/stock history, the local pending reserve, the factory pipeline, availability
+  // incl. kit components). The dashboard builds the same source with cabinet 'all'. `rawStocks`
+  // stays a dep: `getEffectiveAvailability` reads the store's `stock` slice through a stable
+  // function reference, so a stock change would not otherwise invalidate this memo.
+  const coverageSource = useMemo(() => {
+    const d = new Date();
+    const todayIsoNow = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return buildCoverageSource(
+      { ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, availabilityOf: getEffectiveAvailability },
+      { cabinet: cabinetFilter, todayIso: todayIsoNow, waitForClusterRefs: true, clusterRefsLoaded }
+    );
+  }, [ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, getEffectiveAvailability, rawStocks, cabinetFilter, clusterRefsLoaded]);
+
+  const filteredOzonStocks = coverageSource.stocks;
 
   const maxUpdatedAt = useMemo(() => {
     if (filteredOzonStocks.length === 0) return '';
@@ -369,32 +379,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return cabs.size;
   }, [filteredOzonStocks]);
 
-  const filteredOzonSales = useMemo(() => {
-    if (!ozonSales) return [];
-    if (cabinetFilter === 'all') return ozonSales;
-    return ozonSales.filter((s) => s.cabinet === cabinetFilter);
-  }, [ozonSales, cabinetFilter]);
-
-  // Item 86, step D: same cabinet filter as sales and stocks — history of a foreign cabinet must
-  // not tell the speed of the selected one that it was in stock when it was not.
-  const filteredOzonStockHistory = useMemo(() => {
-    if (!ozonStockHistory) return [];
-    if (cabinetFilter === 'all') return ozonStockHistory;
-    return ozonStockHistory.filter((s) => s.cabinet === cabinetFilter);
-  }, [ozonStockHistory, cabinetFilter]);
+  // Item 86, step D: same cabinet filter as stocks — history of a foreign cabinet must not tell
+  // the speed of the selected one that it was in stock when it was not.
+  const filteredOzonSales = coverageSource.sales;
+  const filteredOzonStockHistory = coverageSource.stockHistory;
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
   // Фильтр по кабинету тот же, что у остатков и продаж, иначе заявки чужого кабинета
   // уменьшили бы потребность выбранного.
-  const pendingSupplies = useMemo(() => {
-    const shipments = cabinetFilter === 'all'
-      ? (externalShipments || [])
-      : (externalShipments || []).filter((s) => String(s.cabinet || '') === cabinetFilter);
-    const requests = cabinetFilter === 'all'
-      ? (ozonSupplyRequests || [])
-      : (ozonSupplyRequests || []).filter((r) => String(r.cabinet || '') === cabinetFilter);
-    return buildPendingSupplies({ shipments, requests, skus });
-  }, [externalShipments, ozonSupplyRequests, skus, cabinetFilter]);
+  const pendingSupplies = coverageSource.pending;
 
   // Названия кластеров по идентификатору — для расшифровки зачёта.
   const clusterNameById = useMemo(() => {
@@ -432,15 +425,11 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return map;
   }, [factoryOrders]);
 
-  // Пункт 35/83. ТРУБА: общее правило factoryOnOrderByArticle (src/lib/ozonCoverage.ts),
-  // общее с Dashboard.tsx. Сегодняшняя дата считается здесь же: переменная todayIso
-  // объявлена ниже по файлу. Item 83e/83d: the same call also gives the hidden-manual notice
-  // and the «задерживается N дн» label of a late China row — both used by the table below.
-  const factoryPipeline = useMemo(() => {
-    const d = new Date();
-    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return factoryOnOrderByArticle(factoryOrders || [], today);
-  }, [factoryOrders]);
+  // Item 35/83/88 ticket 03: the open-factory-orders pipeline — «ordered, not received» — now
+  // built once inside coverageSource, shared with Dashboard.tsx. Item 83e/83d: the same call
+  // also gives the hidden-manual notice and the «задерживается N дн» label of a late China row —
+  // both used by the table below.
+  const factoryPipeline = coverageSource.factoryPipeline;
   const factoryOnOrder = factoryPipeline.qty;
   // Item 85, step 1.7: the ids of manual orders the pipeline hides — kept out of «уже заказано».
   const hiddenManualIds = useMemo(() => new Set(factoryPipeline.hiddenManual.map((o) => o.id)), [factoryPipeline]);
@@ -487,36 +476,15 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const toggleWideArticle = useUIStore((state) => state.toggleOzonWideArticle);
   const anyWide = Object.keys(wideArticles).some((a) => wideArticles[a]);
 
-  // Item 87 step 4: the ONE place that builds an OzonCoverageResult from this screen's own
-  // filtered inputs — everything but `settings` is fixed. Used by the `coverage` memo below AND
+  // Item 87 step 4, item 88 ticket 03: the ONE place that runs coverage over this screen's own
+  // coverageSource — everything but `settings` is fixed. Used by the `coverage` memo below AND
   // handed to the settings modal as `computeImpact`, so its «было → станет» summary can never
-  // disagree with what this screen itself shows for the same settings.
+  // disagree with what this screen itself shows for the same settings. `coverageSource.ready`
+  // carries the old length/clusterRefsLoaded gate (Пункт 29, этап E: ждём ответ по справочнику
+  // кластеров).
   const runCoverage = React.useCallback((settings: OzonCoverageSettings): OzonCoverageResult | null => {
-    if (filteredOzonStocks.length === 0) return null;
-    // Пункт 29, этап E: ждём ответ по справочнику кластеров.
-    if (!clusterRefsLoaded) return null;
-    const myStockAvailability: Record<string, number> = {};
-    for (const s of skus) {
-      myStockAvailability[s.sku] = getEffectiveAvailability(s.sku);
-    }
-    // Item 85, step 1.6: shared kit components are split by their own stock — give every
-    // component its figure even when it has no SKU card.
-    for (const k of kits) for (const c of k.components || []) {
-      if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku);
-    }
-    return buildOzonCoverage({
-      stocks: filteredOzonStocks,
-      sales: filteredOzonSales,
-      skus,
-      clusters: clusterRefs,
-      settings,
-      myStockAvailability,
-      pending: pendingSupplies,
-      factoryOnOrder,
-      kits,
-      stockHistory: filteredOzonStockHistory,
-    });
-  }, [filteredOzonStocks, filteredOzonSales, filteredOzonStockHistory, skus, kits, clusterRefs, clusterRefsLoaded, getEffectiveAvailability, rawStocks, pendingSupplies, factoryOnOrder]);
+    return computeCoverage(coverageSource, settings);
+  }, [coverageSource]);
 
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     // Пункт 29, этап E: замер времени расчёта. Диагностика, логику не меняет.
@@ -546,30 +514,12 @@ export const OzonStocksTab: React.FC = React.memo(() => {
    */
   const wideCoverage = useMemo<OzonCoverageResult | null>(() => {
     if (!anyWide) return null;
-    if (filteredOzonStocks.length === 0 || !clusterRefsLoaded) return null;
-    const myStockAvailability: Record<string, number> = {};
-    for (const sku of skus) {
-      myStockAvailability[sku.sku] = getEffectiveAvailability(sku.sku);
-    }
-    for (const k of kits) for (const c of k.components || []) {
-      if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku);
-    }
+    if (!coverageSource.ready) return null;
     const perfStart = performance.now();
-    const result = buildOzonCoverage({
-      stocks: filteredOzonStocks,
-      sales: filteredOzonSales,
-      skus,
-      clusters: clusterRefs,
-      settings: { ...ozonSettings, speedWeeks: wideWeeks },
-      myStockAvailability,
-      pending: pendingSupplies,
-      factoryOnOrder,
-      kits,
-      stockHistory: filteredOzonStockHistory,
-    });
+    const result = computeCoverage(coverageSource, { ...ozonSettings, speedWeeks: wideWeeks });
     console.log(`OZONPERF wideCoverage total=${Math.round(performance.now() - perfStart)}ms weeks=${wideWeeks}`);
     return result;
-  }, [anyWide, wideWeeks, filteredOzonStocks, filteredOzonSales, filteredOzonStockHistory, skus, kits, clusterRefs, clusterRefsLoaded, ozonSettings, getEffectiveAvailability, pendingSupplies, factoryOnOrder]);
+  }, [anyWide, wideWeeks, coverageSource, ozonSettings]);
 
   const coverageRows = useMemo(() => {
     if (!coverage || !coverage.articles) return [];

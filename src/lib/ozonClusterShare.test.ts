@@ -293,8 +293,24 @@ describe('item 86 step B: display', () => {
   });
 
   it('the library exports no trace of item 72 (removed together with its badge and tests)', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonCoverage.ts'), 'utf8');
-    expect(src).not.toContain('applyClusterDeficitSpeedCorrection');
-    expect(src).not.toContain('ClusterSpeedCorrectionInfo');
+    // Item 88 ticket 03: the coverage library split across several files (ozonCoverage.ts is
+    // now near-empty of logic) — the guard must read every file the split produced, or a
+    // reintroduced `applyClusterDeficitSpeedCorrection` could hide in one of them unnoticed.
+    const libFiles = [
+      'src/lib/ozonCoverage.ts',
+      'src/lib/ozonSalesSpeed.ts',
+      'src/lib/ozonClusters.ts',
+      'src/lib/ozonSupplyRecommendation.ts',
+      'src/lib/ozonFactorySignal.ts',
+      'src/lib/ozonCoverageTypes.ts',
+      'src/lib/ozonStockHistory.ts',
+      'src/lib/ozonSalesTrend.ts',
+      'src/lib/ozonCoverageSource.ts'
+    ];
+    for (const file of libFiles) {
+      const src = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+      expect(src, `${file} must not contain applyClusterDeficitSpeedCorrection`).not.toContain('applyClusterDeficitSpeedCorrection');
+      expect(src, `${file} must not contain ClusterSpeedCorrectionInfo`).not.toContain('ClusterSpeedCorrectionInfo');
+    }
   });
 });

@@ -381,20 +381,24 @@ describe('OzonSettingsModal: «Что изменится после сохран
 
 // ---------------------------------------------------------------------------
 // Source check: OzonStocksTab's own coverage memo and the modal's impact both go through the
-// SAME buildOzonCoverage call — no second hand-written one with different inputs.
+// SAME shared coverage source and the SAME computeCoverage call — no screen assembles coverage
+// inputs itself or calls buildOzonCoverage directly (item 88, ticket 03).
 // ---------------------------------------------------------------------------
 
 describe('OzonStocksTab: coverage memo and settings-modal impact go through the same runCoverage', () => {
-  it('runCoverage is the ONLY buildOzonCoverage caller used by `coverage` and `computeImpact`; the pre-existing wideCoverage (item 85, unrelated to item 87) is the only other call site', () => {
+  it('the screen never calls buildOzonCoverage directly; runCoverage and wideCoverage both go through computeCoverage over the shared coverageSource', () => {
     const src = read('src/components/OzonStocksTab.tsx');
-    const calls = src.match(/buildOzonCoverage\(\{/g) || [];
+    // No hand-assembled buildOzonCoverage call is left on the screen — only the shared source does that.
+    expect(src).not.toMatch(/buildOzonCoverage\(\{/);
+    const calls = src.match(/computeCoverage\(coverageSource, /g) || [];
     // 1: inside runCoverage itself. 1: wideCoverage's own «Распределить весь остаток» memo,
     // pre-dating this item and out of scope — it recomputes with `speedWeeks: wideWeeks` for a
     // handful of manually-toggled articles and is untouched here.
     expect(calls.length).toBe(2);
+    expect(src).toContain("import { buildCoverageSource, computeCoverage } from '../lib/ozonCoverageSource';");
     expect(src).toContain('const runCoverage = React.useCallback((settings: OzonCoverageSettings)');
     // The main `coverage` memo and the modal's `computeSettingsImpact` both call runCoverage —
-    // neither has its own hand-written buildOzonCoverage call.
+    // neither has its own hand-written buildOzonCoverage or computeCoverage call.
     expect(src).toMatch(/const coverage = useMemo<OzonCoverageResult \| null>\(\(\) => \{[\s\S]*?runCoverage\(ozonSettings\)/);
     expect(src).toMatch(/const computeSettingsImpact = React\.useCallback\(\(settings: OzonCoverageSettings\)[\s\S]*?runCoverage\(settings\)/);
     expect(src).toContain('computeImpact={computeSettingsImpact}');
