@@ -5,7 +5,7 @@
 // stays byte-identical. `buildOzonStocksTabModel` chains every stage for tests with plain data;
 // the screen's own hook (`useOzonStocksTabModel.ts`) calls the same stage functions individually,
 // one per `useMemo`, so a search keystroke does not recompute coverage.
-import { FactoryOrder, KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { FactoryOrder, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
 import {
   ArticleCoverage,
   ComponentCoverage,
@@ -817,7 +817,6 @@ export interface OzonStocksTabModelInput {
   settings: OzonCoverageSettings;
   maxBoxesPerCluster: number;
   factoryOrders: FactoryOrder[] | null | undefined;
-  kits: KitItem[];
   wideArticles: Record<string, boolean>;
   selectedSupply: Record<string, boolean>;
   manualQty: Record<string, string>;

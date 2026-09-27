@@ -455,7 +455,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     settings: ozonSettings,
     maxBoxesPerCluster: supplySettings.maxBoxesPerCluster,
     factoryOrders,
-    kits,
     wideArticles,
     selectedSupply,
     manualQty,

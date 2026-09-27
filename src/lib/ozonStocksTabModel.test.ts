@@ -92,7 +92,6 @@ function makeInput(
     settings: makeSettings(),
     maxBoxesPerCluster: 30,
     factoryOrders: data.factoryOrders,
-    kits: data.kits,
     wideArticles: {},
     selectedSupply: {},
     manualQty: {},
@@ -592,56 +591,264 @@ describe('buildOzonStocksTabModel: todayIso is an input — same orders, differe
   });
 });
 
-// ===== Hook <-> model parity: the screen must compute exactly what the model computes =====
+// ===== Item 2: the owner's story («отметил восемь, в окне оказалось четыре») at cluster level =====
+// An article that IS already in the narrow recommendations (cluster C1) gets its cluster list
+// AND its per-cluster figures fully REPLACED by the wide result once switched — the wide result
+// adds a cluster (C2) that the narrow build could never reach on its own (its narrow-window need
+// is negative), and the supply plan, once ticked, carries the wide pieces/boxes for BOTH clusters,
+// not the narrow row.clusters figures.
 
-describe('useOzonStocksTabModel: parity with buildOzonStocksTabModel for the same inputs', () => {
+describe('buildOzonStocksTabModel: wide window replaces an existing row\'s clusters, not just adds one', () => {
+  // C1 sells every week, present in the narrow AND the wide window. C2 sells only in three
+  // OLDER weeks, outside the narrow 4-week speed window but inside the 13-week wide one — its
+  // small stock (5 pcs) covers its tiny narrow-window need, so narrow drops it silently; the
+  // wide window's higher share-window speed pushes its need well past that stock.
+  const data = makeData({
+    skus: [makeSku({ sku: 'SUP-WIDE2', pcsPerBox: 1, leadTimeDays: 5 })],
+    ozonStocks: [
+      stockRow('A', 'SUP-WIDE2', 'C1', 'Москва', 0),
+      stockRow('A', 'SUP-WIDE2', 'C2', 'Питер', 5)
+    ],
+    ozonSales: [
+      { week: '2024-01-01', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Москва', qty: 6, updatedAt: '', days: 7 },
+      { week: '2024-01-01', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Питер', qty: 1, updatedAt: '', days: 7 },
+      { week: '2023-11-20', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Москва', qty: 60, updatedAt: '', days: 7 },
+      { week: '2023-11-20', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Питер', qty: 10, updatedAt: '', days: 7 },
+      { week: '2023-11-13', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Москва', qty: 60, updatedAt: '', days: 7 },
+      { week: '2023-11-13', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Питер', qty: 10, updatedAt: '', days: 7 },
+      { week: '2023-11-06', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Москва', qty: 60, updatedAt: '', days: 7 },
+      { week: '2023-11-06', cabinet: 'A', offerId: 'SUP-WIDE2', clusterName: 'Питер', qty: 10, updatedAt: '', days: 7 }
+    ],
+    availability: { 'SUP-WIDE2': 1000 }
+  });
+
+  it('narrow: only C1, 18 pcs/18 boxes; wide: C1 grows to 133 pcs and C2 (18 pcs) appears; the plan carries the wide figures', () => {
+    const narrowModel = buildOzonStocksTabModel(makeInput(data));
+    const narrowRow = narrowModel.recommendations.supplies.find((s) => s.article === 'SUP-WIDE2')!;
+    expect(narrowRow.clusters.map((c) => c.clusterId)).toEqual(['C1']);
+    expect(narrowRow.clusters[0].recommendation!.qty).toBe(18);
+    expect(narrowRow.clusters[0].recommendation!.boxes).toBe(18);
+
+    const wideModel = buildOzonStocksTabModel(makeInput(data, {
+      wideArticles: { 'SUP-WIDE2': true },
+      selectedSupply: { 'SUP-WIDE2|||C1': true, 'SUP-WIDE2|||C2': true }
+    }));
+    const wideRow = wideModel.recommendations.supplies.find((s) => s.article === 'SUP-WIDE2')!;
+    expect(wideRow.wide).toBe(true);
+    expect(wideRow.clusters.map((c) => c.clusterId).sort()).toEqual(['C1', 'C2']);
+    const wideC1 = wideRow.clusters.find((c) => c.clusterId === 'C1')!;
+    const wideC2 = wideRow.clusters.find((c) => c.clusterId === 'C2')!;
+    // The narrow C1 figure (18) is NOT what the wide row carries — it is fully replaced.
+    expect(wideC1.recommendation!.qty).toBe(133);
+    expect(wideC1.recommendation!.boxes).toBe(133);
+    expect(wideC2.recommendation!.qty).toBe(18);
+    expect(wideC2.recommendation!.boxes).toBe(18);
+
+    // The plan, built from the ticks, carries the WIDE pieces/boxes for both clusters.
+    const planRows = wideModel.supplyPlan.rows.filter((r) => r.article === 'SUP-WIDE2');
+    expect(planRows.map((r) => r.clusterId).sort()).toEqual(['C1', 'C2']);
+    expect(planRows.find((r) => r.clusterId === 'C1')).toMatchObject({ boxes: 133, qty: 133 });
+    expect(planRows.find((r) => r.clusterId === 'C2')).toMatchObject({ boxes: 18, qty: 18 });
+  });
+});
+
+// ===== H: component «Фабрика» (Требуемый заказ) cell kinds, threshold, daysLeftNoSignal =====
+
+describe('buildOzonStocksTabModel: component factory cell — clusterDeficit «держит сборку» + threshold/daysLeftNoSignal', () => {
+  // The kit KIT-C sells in two clusters: C1 is stocked (1000 pcs), so the kit's own totalEstimated
+  // (which feeds the component's fromKitsQty) is healthy overall; C2 has none and the kit's own
+  // «Мой склад» is 0, so C2's need goes entirely unmet — that unmet passes to COMP-DEF, the only
+  // component and therefore the one «holding» assembly, even though the component pipeline itself
+  // (fromKitsQty 1000) is nowhere near its threshold.
+  const data = makeData({
+    skus: [
+      makeSku({ sku: 'KIT-C', pcsPerBox: 1, leadTimeDays: 5 }),
+      makeSku({ sku: 'COMP-DEF', pcsPerBox: 1, leadTimeDays: 5 })
+    ],
+    kits: [{ kitSku: 'KIT-C', type: 'virtual', components: [{ componentSku: 'COMP-DEF', quantity: 1 }] }],
+    ozonStocks: [
+      stockRow('A', 'KIT-C', 'C1', 'Москва', 1000),
+      stockRow('A', 'KIT-C', 'C2', 'Питер', 0)
+    ],
+    ozonSales: [...salesRows('A', 'KIT-C', 'Москва', 28), ...salesRows('A', 'KIT-C', 'Питер', 28)],
+    availability: { 'KIT-C': 0, 'COMP-DEF': 0 }
+  });
+
+  it('unmetDeficitQty > 0 on a healthy pipeline gives kind «clusterDeficit», not «order»', () => {
+    const model = buildOzonStocksTabModel(makeInput(data));
+    const comp = model.componentRows.find((c) => c.component === 'COMP-DEF')!;
+    expect(comp.factory).not.toBeNull();
+    expect(comp.factory!.orderQty).toBe(0);
+    expect(comp.factory!.unmetDeficitQty).toBeGreaterThan(0);
+    expect(model.factoryCellByComponent['COMP-DEF'].kind).toBe('clusterDeficit');
+    // threshold = leadTimeDays(5) + deliveryToOzonDays(0) + minStockDays(7)
+    expect(comp.threshold).toBe(12);
+    // daysLeftNoSignal = round(pipelineQty / forecastPerDay) = round(1000 / 2)
+    expect(comp.daysLeftNoSignal).toBe(500);
+  });
+});
+
+describe('buildOzonStocksTabModel: component factory cell — order / waiting / overdue / notNeeded', () => {
+  const kitData = (suffix: string, kitStock: number, compAvailability: number, orders: FactoryOrder[]) => makeData({
+    skus: [
+      makeSku({ sku: `KIT-${suffix}`, pcsPerBox: 1, leadTimeDays: 5 }),
+      makeSku({ sku: `COMP-${suffix}`, pcsPerBox: 10, leadTimeDays: 5 })
+    ],
+    kits: [{ kitSku: `KIT-${suffix}`, type: 'virtual', components: [{ componentSku: `COMP-${suffix}`, quantity: 1 }] }],
+    ozonStocks: [stockRow('A', `KIT-${suffix}`, 'C1', 'Москва', kitStock)],
+    ozonSales: salesRows('A', `KIT-${suffix}`, 'Москва', 280), // kit 10 pcs/day
+    availability: { [`KIT-${suffix}`]: 0, [`COMP-${suffix}`]: compAvailability },
+    factoryOrders: orders
+  });
+
+  it('empty pipeline, no orders — kind «order», in whole boxes of the COMPONENT box size', () => {
+    const model = buildOzonStocksTabModel(makeInput(kitData('ORDER', 0, 0, [])));
+    const cell = model.factoryCellByComponent['COMP-ORDER'];
+    expect(cell.kind).toBe('order');
+    expect(cell.orderQty).toBeGreaterThan(0);
+    expect(cell.orderQty % 10).toBe(0);
+  });
+
+  it('healthy component stock + a waiting order — kind «waiting»', () => {
+    const model = buildOzonStocksTabModel(makeInput(kitData('WAITING', 0, 1000, [
+      factoryOrder({ id: 'W1', article: 'COMP-WAITING', qty: 5, expectedAt: '2024-02-01', status: 'active' })
+    ])));
+    const cell = model.factoryCellByComponent['COMP-WAITING'];
+    expect(cell.kind).toBe('waiting');
+    expect(cell.waitingQty).toBe(5);
+  });
+
+  it('an overdue manual order on the component article — kind «overdue», wins over «order»', () => {
+    const model = buildOzonStocksTabModel(makeInput(kitData('OVERDUE', 0, 0, [
+      factoryOrder({ id: 'O1', article: 'COMP-OVERDUE', qty: 5, expectedAt: '2024-01-05', status: 'active' })
+    ])));
+    const cell = model.factoryCellByComponent['COMP-OVERDUE'];
+    expect(cell.kind).toBe('overdue');
+    expect(cell.overdueQty).toBe(5);
+  });
+
+  it('healthy component stock, no orders, no deficit — kind «notNeeded»', () => {
+    const model = buildOzonStocksTabModel(makeInput(kitData('NOTNEEDED', 0, 1000, [])));
+    const cell = model.factoryCellByComponent['COMP-NOTNEEDED'];
+    expect(cell.kind).toBe('notNeeded');
+  });
+});
+
+// ===== I: offOzonFactoryOrders — goods ordered but not yet on Ozon =====
+
+describe('buildOzonStocksTabModel: offOzonFactoryOrders — orders of articles with no coverage/component row', () => {
+  const data = makeData({
+    skus: [makeSku({ sku: 'SHOWN-ART', pcsPerBox: 1, leadTimeDays: 5 })],
+    ozonStocks: [stockRow('A', 'SHOWN-ART', 'C1', 'Москва', 1000)],
+    ozonSales: salesRows('A', 'SHOWN-ART', 'Москва', 28),
+    availability: { 'SHOWN-ART': 1000 },
+    factoryOrders: [
+      // OFF-ART is in neither coverageRows nor componentRows: no stock, no sales, no kit.
+      factoryOrder({ id: 'OFF1', article: 'OFF-ART', qty: 40, expectedAt: '2024-02-01', status: 'active' }),
+      // SHOWN-ART DOES have a coverage row — its order must stay out of offOzonFactoryOrders.
+      factoryOrder({ id: 'SHOWN1', article: 'SHOWN-ART', qty: 10, expectedAt: '2024-02-01', status: 'active' }),
+      // RECEIVED-ONLY-ART has only a received order — must not appear either.
+      factoryOrder({ id: 'REC1', article: 'RECEIVED-ONLY-ART', qty: 5, expectedAt: '2024-01-01', status: 'received' })
+    ]
+  });
+
+  it('lists exactly OFF-ART, with its live order, sorted; excludes shown articles and received-only articles', () => {
+    const model = buildOzonStocksTabModel(makeInput(data));
+    expect(model.offOzonFactoryOrders.map((o) => o.article)).toEqual(['OFF-ART']);
+    expect(model.offOzonFactoryOrders[0].orders.map((o) => o.id)).toEqual(['OFF1']);
+  });
+});
+
+// ===== J: selectedClusterIds — the direct-supply single-cluster rule's input =====
+
+describe('buildOzonStocksTabModel: selectedClusterIds — deduplicated cluster ids of every ticked box', () => {
+  it('collects distinct cluster ids across articles, ignores unticked keys', () => {
+    const data = makeData({
+      skus: [makeSku({ sku: 'SUP-A', pcsPerBox: 1 }), makeSku({ sku: 'SUP-B', pcsPerBox: 1 })],
+      ozonStocks: [stockRow('A', 'SUP-A', 'C1', 'Москва', 0), stockRow('A', 'SUP-B', 'C1', 'Москва', 0)],
+      ozonSales: [...salesRows('A', 'SUP-A', 'Москва', 28), ...salesRows('A', 'SUP-B', 'Москва', 28)],
+      availability: { 'SUP-A': 1000, 'SUP-B': 1000 }
+    });
+    const model = buildOzonStocksTabModel(makeInput(data, {
+      selectedSupply: { 'SUP-A|||C1': true, 'SUP-B|||C1': true, 'SUP-A|||C2': false }
+    }));
+    expect(model.selectedClusterIds).toEqual(['C1']);
+  });
+});
+
+// ===== Hook <-> model parity: the screen must compute exactly what the model computes =====
+// The hook now takes exactly `OzonStocksTabModelInput` (item 88 ticket 04 follow-up), so the SAME
+// input object can drive both the pure model and the hook, and the whole output object can be
+// compared field by field in one `toEqual` — no hand-picked subset of fields.
+
+describe('useOzonStocksTabModel: parity with buildOzonStocksTabModel, full object, rich input', () => {
   const data = makeData({
     skus: [
       makeSku({ sku: 'SUP-A', pcsPerBox: 10, leadTimeDays: 5 }),
-      makeSku({ sku: 'FAC-1', pcsPerBox: 1, leadTimeDays: 5 })
+      makeSku({ sku: 'FAC-1', pcsPerBox: 1, leadTimeDays: 5 }),
+      makeSku({ sku: 'KIT-1', pcsPerBox: 1, leadTimeDays: 5 }),
+      makeSku({ sku: 'COMP-1', pcsPerBox: 1, leadTimeDays: 5 })
     ],
+    kits: [{ kitSku: 'KIT-1', type: 'virtual', components: [{ componentSku: 'COMP-1', quantity: 1 }] }],
     ozonStocks: [
       stockRow('A', 'SUP-A', 'C1', 'Москва', 0),
-      stockRow('A', 'FAC-1', 'C1', 'Москва', 0)
+      stockRow('A', 'FAC-1', 'C1', 'Москва', 0),
+      stockRow('A', 'KIT-1', 'C1', 'Москва', 1000)
     ],
     ozonSales: [
       ...salesRows('A', 'SUP-A', 'Москва', 140),
-      ...salesRows('A', 'FAC-1', 'Москва', 28)
+      // An older week, outside the narrow 4-week speed window but inside the 13-week wide one —
+      // makes wideCoverage numerically differ from a coverage build over the narrow speedWeeks,
+      // so a hook that used settings.speedWeeks instead of wideWeeks for the wide stage would be
+      // caught by the parity check below.
+      { week: '2023-11-06', cabinet: 'A', offerId: 'SUP-A', clusterName: 'Москва', qty: 700, updatedAt: '', days: 7 },
+      ...salesRows('A', 'FAC-1', 'Москва', 28),
+      ...salesRows('A', 'KIT-1', 'Москва', 28)
     ],
-    availability: { 'SUP-A': 1000, 'FAC-1': 0 },
-    factoryOrders: [factoryOrder({ id: 'O1', article: 'FAC-1', qty: 10, expectedAt: '2024-01-05', status: 'active' })]
+    availability: { 'SUP-A': 1000, 'FAC-1': 0, 'KIT-1': 0, 'COMP-1': 0 },
+    factoryOrders: [
+      factoryOrder({ id: 'O1', article: 'FAC-1', qty: 10, expectedAt: '2024-01-05', status: 'active' }),
+      // Off-Ozon: neither a coverage row nor a component row — exercises offOzonFactoryOrders too.
+      factoryOrder({ id: 'OFF1', article: 'OFF-ART', qty: 20, expectedAt: '2024-02-01', status: 'active' })
+    ]
   });
 
-  it('coverage rows, recommendations, supply plan, factory cells, visible rows and shares are deep-equal', () => {
+  it('every field of OzonStocksTabModel is deep-equal between the hook and the pure model, same input object', () => {
     const source = buildCoverageSource(data, { cabinet: 'all', todayIso: TODAY_ISO, waitForClusterRefs: false });
-    const settings = makeSettings();
-    const selectedSupply = { 'SUP-A|||C1': true };
+    const input: OzonStocksTabModelInput = {
+      source,
+      settings: makeSettings(),
+      maxBoxesPerCluster: 30,
+      factoryOrders: data.factoryOrders,
+      wideArticles: { 'SUP-A': true }, // exercises anyWide/wideWeeks/wideCoverage in both
+      selectedSupply: { 'SUP-A|||C1': true },
+      manualQty: { 'FAC-1|||C1': '3' },
+      searchQuery: '',
+      onlyWithRecommendations: false,
+      factoryModalArticle: 'COMP-1', // exercises the component branch of findFactoryModalRow
+      todayIso: TODAY_ISO
+    };
 
-    const model = buildOzonStocksTabModel({
-      source, settings, maxBoxesPerCluster: 30, factoryOrders: data.factoryOrders, kits: data.kits,
-      wideArticles: {}, selectedSupply, manualQty: {}, searchQuery: '', onlyWithRecommendations: false,
-      factoryModalArticle: null, todayIso: TODAY_ISO
-    });
+    const model = buildOzonStocksTabModel(input);
 
     let captured: OzonStocksTabModel | null = null;
-    function Probe() {
-      captured = useOzonStocksTabModel({
-        source, settings, maxBoxesPerCluster: 30, factoryOrders: data.factoryOrders, kits: data.kits,
-        wideArticles: {}, selectedSupply, manualQty: {}, searchQuery: '', onlyWithRecommendations: false,
-        factoryModalArticle: null, todayIso: TODAY_ISO
-      });
+    function Probe(props: OzonStocksTabModelInput) {
+      captured = useOzonStocksTabModel(props);
       return null;
     }
-    renderToStaticMarkup(createElement(Probe));
+    renderToStaticMarkup(createElement(Probe, input));
     expect(captured).not.toBeNull();
-    const hookModel = captured as unknown as OzonStocksTabModel;
 
-    expect(hookModel.coverageRows).toEqual(model.coverageRows);
-    expect(hookModel.recommendations).toEqual(model.recommendations);
-    expect(hookModel.supplyPlan).toEqual(model.supplyPlan);
-    expect(hookModel.factoryCellByArticle).toEqual(model.factoryCellByArticle);
-    expect(hookModel.factoryCellByComponent).toEqual(model.factoryCellByComponent);
-    expect(hookModel.visibleRows).toEqual(model.visibleRows);
-    expect(hookModel.clusterShares).toEqual(model.clusterShares);
+    // Sanity: the rich input actually exercises what it claims to, so the parity check is not
+    // vacuously true over empty structures.
+    expect(model.anyWide).toBe(true);
+    expect(model.wideCoverage).not.toBeNull();
+    expect(model.componentRows.length).toBeGreaterThan(0);
+    expect(Object.keys(model.factoryCellByComponent).length).toBeGreaterThan(0);
+    expect(model.offOzonFactoryOrders.length).toBeGreaterThan(0);
+    expect(model.manualPicks.length).toBeGreaterThan(0);
+    expect(model.factoryModalRow).not.toBeNull();
+
+    expect(captured).toEqual(model);
   });
 });
