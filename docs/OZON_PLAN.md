@@ -286,6 +286,8 @@
 - Настройки Ozon и справочник кластеров грузятся двумя независимыми местами — Dashboard.tsx и OzonStocksTab.tsx, каждое со своими значениями по умолчанию (4/7/30/60/80). При изменении состава настроек их нужно править в обоих файлах, иначе цифры алертов на главной разойдутся с блоком рекомендаций.
 
 - HTTP 500 на вкладках Ozon во время планового опроса. ПЕРЕНЕСЕНО ИЗ БРИФА 27.08.2026, чтобы хвост жил в одном месте. Диагностировано как редирект POST→GET в `server.ts`; с кодом пункта 42 НЕ связано — ошибки появились за 6 часов до его выката. Расследование не завершено и с 18.08.2026 к нему не возвращались.
+- RECORDED FOR ITEM 88 (2026-09-27), not built, check separately: the dashboard (`Dashboard.tsx`) computes Ozon coverage without waiting for the cluster reference to load — unlike the «Остатки Озон» tab, which waits for `ozonRefsLoaded`. Possible visible effect: a brief flash of coverage alerts without cluster names or clusters, then a redraw. Item 88 keeps this behaviour as is (spec Q4 option а); whether the flash really happens is to be checked on the live screen.
+- RECORDED FOR ITEM 88 (2026-09-27), not built: the notice «Труба изменилась по артикулам» of «Заказы в Китае» (`ChinaOrdersTab.tsx`) is about open factory orders only, while «Труба» (glossary `CONTEXT.md`) means Ozon stock + «Мой склад» + open factory orders. The label is left as is in item 88; its wording is the owner's decision.
 
 ## Правило границ промта
 

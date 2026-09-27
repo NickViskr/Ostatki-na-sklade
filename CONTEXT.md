@@ -37,10 +37,34 @@ Extra money of one shipment written into its «Объект» text and spread ov
 quantity into «ДопРасходы». Labels are read regardless of letter case.
 _Avoid_: доп. затраты, overhead
 
+### Coverage
+
+**Coverage** («Покрытие, дн.»):
+How many days an article's stock in an Ozon cluster lasts at its current sales speed, counting
+goods already on their way there. Its colour follows the recommendation threshold.
+_Avoid_: запас, остаток в днях
+
+**Supply recommendation** («Рекомендация к поставке»):
+How many pieces of an article to send to a cluster so its coverage reaches the target stock days
+plus the days on the road to Ozon, in whole boxes, never above the cluster day ceiling and never
+above the availability on «Мой склад».
+_Avoid_: потребность (that is the need before boxes and limits)
+
+**Factory signal** (the «Фабрика» cell):
+How many pieces of an article to order at the factory so that everything we hold and have ordered
+lasts the lead time, the road to Ozon, the minimum stock and the order horizon.
+_Avoid_: заказ (that is an order already placed)
+
 ### Factory
 
-**Pipeline** («Труба», «Заказы на фабрике»):
-Pieces ordered at the factory and not yet received, per article. A China order stays in it while
+**Pipeline** («Труба»):
+Everything we hold or have ordered of an article: its stock on Ozon in all clusters (excluded
+ones and rows without a cluster included), plus «Мой склад», plus its open factory orders. The
+factory signal compares it with the pieces needed.
+_Avoid_: using «Труба» for the factory orders alone
+
+**Open factory orders** («Заказы на фабрике», not received):
+Pieces ordered at the factory and not yet received, per article. A China order stays open while
 late; a manual order drops out when its expected date passes, and is hidden when a China order of
 the same article covers it.
 _Avoid_: on order, в пути (that is Ozon's in-transit stock)
