@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
 import { buildPendingSupplies, type OzonSupplyRequestRow } from './ozonPending';
 import { buildOzonCoverage, type OzonCoverageSettings } from './ozonCoverage';
 import type { ExternalShipment, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 /**
  * Item 70. The owner's case of 14.09.2026, replayed from the sheets.
@@ -167,7 +166,7 @@ describe('Item 70. Списанная, но не принятая Ozon пост�
   });
 
   it('окно «В заявках» помечает обе разновидности строк и итожит только резерв склада', () => {
-    const tab = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const tab = readOzonStocksScreen();
     expect(tab).toContain("{!d.reservesMyStock && <span className=\"ml-1 text-amber-600 font-semibold\">списана, едет</span>}");
     expect(tab).toContain("{!d.countsForCluster && <span className=\"ml-1 text-sky-600 font-semibold\">принята Ozon</span>}");
     expect(tab).toContain('pendingModalRows.reduce((s, d) => s + (d.reservesMyStock ? d.qty : 0), 0)');

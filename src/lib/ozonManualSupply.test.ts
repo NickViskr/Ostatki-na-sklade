@@ -14,6 +14,7 @@ import {
   remainingForArticle
 } from './ozonManualSupply';
 import type { ManualArticleInfo } from './ozonManualSupply';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 // Пункт 63. Владелец собирает поставку сам, глядя на остатки по кластерам, а не по
 // рекомендациям. Главное правило: сколько бы кластеров он ни отметил, суммарно нельзя
@@ -287,7 +288,7 @@ describe('в ручном режиме видны все кластеры пос
 
 describe('ручной выбор на экране остатков', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
-  const stocks = read('src/components/OzonStocksTab.tsx');
+  const stocks = readOzonStocksScreen();
   // Item 88 ticket 04: manualInfos (with it, this same manualClusterList call and the excluded-
   // clusters filter) moved into buildManualInfos/buildSupplyClusterRefs in the tab model.
   const tabModel = read('src/lib/ozonStocksTabModel.ts');

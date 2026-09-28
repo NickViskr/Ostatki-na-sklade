@@ -1,60 +1,33 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { Calculator, ChevronDown, ChevronRight, Columns3, FileDown, HelpCircle, Maximize2, Minimize2, PackagePlus, RefreshCw, Search, Settings, TrendingUp } from 'lucide-react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { useChinaStore } from '../store/useChinaStore';
-import { OzonStockRow, FactoryOrder } from '../types';
+import { FactoryOrder, KitItem } from '../types';
 import { chinaFactoryOrdersToForecastLines } from '../lib/chinaForecastView';
-import { OzonSettingsModal } from './OzonSettingsModal';
-import { FactoryOrderModal } from './FactoryOrderModal';
-import { OzonSupplyModal } from './OzonSupplyModal';
-import { disabledReason, isClusterSelectable, parseDirectClusters } from '../lib/ozonDirectSupply';
-import { cabinetDisabledReason, isCabinetCompatible, resolveSupplyCabinet } from '../lib/ozonSupplyCabinet';
-import { canTickCluster } from '../lib/ozonSupplyLines';
-import { clampManualQty, manualClusterList, manualKey, remainingForArticle } from '../lib/ozonManualSupply';
-import { OzonCoverageResult, OzonCoverageSettings, coverageTone, CoverageTone } from '../lib/ozonCoverage';
+import { parseDirectClusters } from '../lib/ozonDirectSupply';
+import { clampManualQty, manualKey } from '../lib/ozonManualSupply';
+import { OzonCoverageResult, OzonCoverageSettings } from '../lib/ozonCoverage';
 import { summarizeSettingsImpact, OzonSettingsImpact } from '../lib/ozonSettingsImpact';
 import { buildCoverageSource, computeCoverage } from '../lib/ozonCoverageSource';
-import { getStatusDetails } from '../lib/ozonStatus';
-import { factoryOrderBadge, factoryLateLabel } from '../lib/factoryOrderDisplay';
-import { canEditOzonSettings } from '../lib/ozonSettingsFields';
-import { emptyManualCluster } from '../lib/ozonStocksTabModel';
 import { useOzonStocksTabModel } from './useOzonStocksTabModel';
+import { OzonStocksHeader } from './OzonStocksHeader';
+import { OzonStocksNotices } from './OzonStocksNotices';
+import { OzonRecommendationsPanel } from './OzonRecommendationsPanel';
+import { OzonCoverageTable } from './OzonCoverageTable';
+import { OzonComponentsTable } from './OzonComponentsTable';
+import { OzonStocksModals } from './OzonStocksModals';
 
 const OZON_COLS_STORAGE_KEY = 'ozon_stocks_hidden_cols';
-
-const OZON_TOGGLEABLE_COLS: { key: string; label: string }[] = [
-  { key: 'sold', label: 'Продано' },
-  { key: 'speed', label: 'Скорость' },
-  { key: 'trend', label: 'Тренд' },
-  { key: 'share', label: 'Доля' },
-  { key: 'available', label: 'Доступно' },
-  { key: 'preparing', label: 'Готовим' },
-  { key: 'requested', label: 'В заявках' },
-  { key: 'transit', label: 'В пути' },
-  { key: 'excess', label: 'Излишки' },
-  { key: 'returns', label: 'Возвраты' },
-  { key: 'other', label: 'Прочее' },
-  { key: 'estimated', label: 'Расчётный' },
-  { key: 'coverage', label: 'Покрытие' },
-  { key: 'pending', label: 'Едет' },
-  { key: 'myStock', label: 'Мой склад' },
-  { key: 'recommendation', label: 'Рекомендация' },
-  { key: 'factory', label: 'Заказ на фабрике' },
-  { key: 'orderCost', label: 'Стоимость заказа, ₽' },
-];
-
 const OZON_DEFAULT_HIDDEN_COLS = ['preparing', 'requested', 'excess', 'other'];
 
-const ColHint: React.FC<{ text: string }> = ({ text }) => (
-  <span className="relative inline-flex group align-middle ml-1">
-    <HelpCircle size={12} className="text-slate-300 hover:text-indigo-500 cursor-help" />
-    <span className="pointer-events-none absolute right-0 top-full mt-2 z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal normal-case text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-normal">
-      {text}
-    </span>
-  </span>
-);
+/** The bit of `ozonClustersRaw` the «new clusters» notice reads — the store keeps the
+ *  whole array untyped (`any[]`), this is only the shape used here. */
+interface OzonClusterRawItem {
+  notified: boolean;
+  clusterId: string;
+  clusterName: string;
+}
 
 export const OzonStocksTab: React.FC = React.memo(() => {
   const currentUser = useWarehouseStore((state) => state.currentUser);
@@ -190,10 +163,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     if (!isAdmin) return;
     if (!clusterRefsLoaded || notifyCheckDone.current) return;
     notifyCheckDone.current = true;
-    const unnotified = clustersRaw.filter((item: any) => item.notified === false);
+    const unnotified = (clustersRaw as OzonClusterRawItem[]).filter((item) => item.notified === false);
     if (unnotified.length === 0) return;
     const names = unnotified
-      .map((item: any) => {
+      .map((item) => {
         const cid = String(item.clusterId || '').trim();
         const cname = String(item.clusterName || '').trim();
         return cname || `Кластер ${cid}`;
@@ -232,15 +205,13 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     setExpandedClusters((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const fmtInt = (v: number | null | undefined) => Math.round(Number(v) || 0).toLocaleString('ru-RU');
-
   // Пункт 35. Цена единицы для колонки «Стоимость заказа, ₽».
   // Берётся цена последнего поступления на склад, а НЕ средняя себестоимость:
   // средняя искажена накопленной капитализацией и даёт цифры в сотни раз больше.
   // У виртуального комплекта цена складывается из цен компонентов по нормам.
   // Если поступлений не было, откатываемся на средняя себестоимость.
   const getOrderUnitCost = React.useCallback((article: string): { price: number; source: string } => {
-    const virtualKit = kits.find((k: any) => k.kitSku === article && k.type === 'virtual');
+    const virtualKit = kits.find((k: KitItem) => k.kitSku === article && k.type === 'virtual');
     if (virtualKit && Array.isArray(virtualKit.components) && virtualKit.components.length > 0) {
       let sum = 0;
       const parts: string[] = [];
@@ -258,39 +229,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     if (rec && rec.price > 0) return { price: rec.price, source: `по последнему поступлению ${rec.date}` };
     return { price: getEffectiveAvgCost(article), source: 'поступлений не было, взята средняя себестоимость' };
   }, [kits, lastPurchasePrices, getEffectiveAvgCost]);
-  const fmtSpeed = (v: number | null | undefined) => (Number(v) || 0).toFixed(2);
-  // Пункт 38. Множитель тренда — как остальные дробные величины в интерфейсе, с запятой вместо точки.
-  const fmtTrend = (v: number | null | undefined) => (Number(v) || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const TREND_REASON_SHORT: Record<string, string> = {
-    shortWindow: 'мало данных',
-    correction: 'скорость скорректирована',
-    zeroWeek: 'нулевые недели',
-    fewSales: 'мелкая выборка',
-    deficit: 'распродан',
-    clamped: 'упёрся в предел',
-    lookback: 'товара долго не было',
-  };
-  const TREND_REASON_LONG: Record<string, (t: any) => string> = {
-    shortWindow: () => 'В окне меньше шести недель с данными — тренд считать не на чем.',
-    correction: () => 'Скорость уже поднята коррекцией из-за распродажи товара. Тренд поверх неё не применяется: оба механизма поднимают скорость одним и тем же способом.',
-    zeroWeek: (t) => `В окне ${t.zeroWeeks} нед. с нулевыми продажами. Это чаще старт продаж или отсутствие товара, а не спрос.`,
-    fewSales: (t) => `За окно продано ${fmtInt(t.windowQty)} шт — меньше порога в 50 шт. На такой выборке наклон это шум.`,
-    deficit: () => 'Товар распродан. Понижающий тренд не применяется: падение продаж неотличимо от отсутствия товара.',
-    clamped: () => 'Множитель ограничен диапазоном 0,7…1,5.',
-    // Item 86, step D: a long-absent article has too few in-stock days to trust a trend line.
-    lookback: () => 'Товара долго не было — тренд не применяется.',
-  };
-  const fmtDays = (v: number | null | undefined, estimated: number) => {
-    if (v === null || v === undefined) return estimated > 0 ? '∞' : '—';
-    return `${Math.round(v)}`;
-  };
-  // Item 85, step 1.8: the colour comes from coverageTone — the thresholds of the recommendation.
-  const TONE_CLASS: Record<CoverageTone, string> = {
-    none: 'text-slate-400',
-    red: 'text-red-600 font-bold',
-    amber: 'text-amber-600 font-semibold',
-    green: 'text-emerald-600 font-semibold',
-  };
 
   // Item 48. The list of shops for the drop-down is the ONLY thing here that must stay
   // unfiltered — a filter that hides its own options cannot be undone. Everything else on
@@ -431,9 +369,6 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     return summarizeSettingsImpact(result, (article) => getOrderUnitCost(article).price);
   }, [runCoverage, getOrderUnitCost]);
 
-  const fmtDateShort = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}` : '');
-  const fmtDateFull = (iso: string) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : '—');
-
   const todayIso = useMemo(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -501,1577 +436,139 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     <div className="space-y-6 tab-enter">
       {/* Ozon Stocks Mirror Section */}
       <div className="space-y-4 bg-slate-50/50 p-6 rounded-3xl border border-slate-200/60 shadow-sm" id="ozon-stocks-mirror-section">
-        <div
-          className="flex justify-between items-center"
-          id="ozon-stocks-header"
-        >
-          <div className="flex items-center gap-3">
-            <h3 className="text-xl font-bold text-slate-800">Остатки на складах Ozon</h3>
-            {maxUpdatedAt && (
-              <span className="text-xs text-slate-400 font-medium">
-                Обновлено: {maxUpdatedAt}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {/* Пункт 63. Вход в режим ручного выбора. Пока он выключен, таблица работает как раньше. */}
-            <button
-              type="button"
-              id="btn-ozon-manual-supply"
-              onClick={() => (manualMode ? exitManualMode() : setManualMode(true))}
-              className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl transition-all shadow-xs border ${
-                manualMode
-                  ? 'text-white bg-indigo-600 border-indigo-600 hover:bg-indigo-700'
-                  : 'text-indigo-600 bg-white border-slate-200 hover:border-slate-300 hover:text-indigo-700'
-              }`}
-            >
-              <PackagePlus size={14} />
-              {manualMode ? 'Отменить выбор' : 'Оформить поставку'}
-            </button>
-            <button
-              type="button"
-              id="btn-ozon-fullscreen"
-              onClick={() => setIsFullscreen(true)}
-              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
-            >
-              <Maximize2 size={14} />
-              Развернуть
-            </button>
-            <div className="relative">
-              <button
-                type="button"
-                id="btn-ozon-columns"
-                onClick={() => setShowColsMenu((prev) => !prev)}
-                className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
-              >
-                <Columns3 size={14} />
-                Колонки
-              </button>
-              {showColsMenu && (
-                <div className="absolute right-0 mt-2 z-20 bg-white border border-slate-200 rounded-2xl shadow-lg p-3 w-56 max-h-80 overflow-y-auto" id="ozon-columns-menu">
-                  <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400 mb-2">Показывать колонки</div>
-                  {OZON_TOGGLEABLE_COLS.map((col) => (
-                    <label key={col.key} className="flex items-center gap-2 py-1 cursor-pointer text-xs text-slate-700 hover:text-slate-900">
-                      <input
-                        type="checkbox"
-                        checked={isColVisible(col.key)}
-                        onChange={() => toggleCol(col.key)}
-                        className="rounded border-slate-300"
-                      />
-                      {col.label}
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-            {canEditOzonSettings(currentUser) && (
-              <button
-                type="button"
-                id="btn-ozon-settings"
-                onClick={() => setShowSettings(true)}
-                className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs"
-              >
-                <Settings size={14} />
-                Настройки
-              </button>
-            )}
-            <button
-              type="button"
-              id="btn-kan-cost-export"
-              title="Собрать файл себестоимости для загрузки в КАН"
-              disabled={isProcessing}
-              onClick={exportKanCost}
-              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs disabled:opacity-50"
-            >
-              <FileDown size={14} />
-              Себестоимость КАН
-            </button>
-            <button
-              type="button"
-              id="btn-refresh-ozon-stocks"
-              disabled={isProcessing}
-              onClick={runOzonStocksSync}
-              className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all shadow-xs disabled:opacity-50"
-            >
-              <RefreshCw size={14} className={`transition-transform ${isProcessing ? 'animate-spin' : ''}`} />
-              Обновить
-            </button>
-          </div>
-        </div>
+        <OzonStocksHeader
+          maxUpdatedAt={maxUpdatedAt}
+          manualMode={manualMode}
+          setManualMode={setManualMode}
+          exitManualMode={exitManualMode}
+          onFullscreen={() => setIsFullscreen(true)}
+          showColsMenu={showColsMenu}
+          onToggleColsMenu={() => setShowColsMenu((prev) => !prev)}
+          isColVisible={isColVisible}
+          onToggleCol={toggleCol}
+          currentUser={currentUser}
+          onOpenSettings={() => setShowSettings(true)}
+          isProcessing={isProcessing}
+          onExportKanCost={exportKanCost}
+          onRefresh={runOzonStocksSync}
+        />
 
         <div className="space-y-4" id="ozon-stocks-content">
-            {ozonStocksSyncIssues.length > 0 && (
-              <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl p-4 text-sm font-semibold" id="ozon-stocks-partial-warning">
-                Данные неполные: не удалось обновить {ozonStocksSyncIssues.map(i => i.name).join(', ')}. Показаны последние успешно полученные данные по остальным магазинам.
-              </div>
-            )}
-            {ozonStocksCabinets.length > 0 && (
-              <div className="text-xs text-slate-500 font-medium" id="ozon-stocks-cabinets-info">
-                Данные по магазинам: {ozonStocksCabinets.join(', ')}
-                {cabinetFilter !== 'all' && (
-                  <span className="text-indigo-600 font-semibold">
-                    {' '}· показан только «{cabinetFilter}»: и числа наверху, и таблица считаются по нему
-                  </span>
-                )}
-              </div>
-            )}
-            {/* Summary Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3" id="ozon-stocks-summary-cards">
-              <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-col gap-1">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
-                  Доступно к продаже
-                </span>
-                <div className="text-2xl font-extrabold text-slate-900 leading-none">
-                  {ozonTotals.available.toLocaleString('ru-RU')}
-                </div>
-              </div>
-              <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-col gap-1">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
-                  В заявках
-                </span>
-                <div className="text-2xl font-extrabold text-slate-900 leading-none">
-                  {ozonTotals.requested.toLocaleString('ru-RU')}
-                </div>
-              </div>
-              <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-col gap-1">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
-                  В пути
-                </span>
-                <div className="text-2xl font-extrabold text-slate-900 leading-none">
-                  {ozonTotals.transit.toLocaleString('ru-RU')}
-                </div>
-              </div>
-              <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-col gap-1">
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
-                  Возвраты
-                </span>
-                <div className="text-2xl font-extrabold text-slate-900 leading-none">
-                  {ozonTotals.returns.toLocaleString('ru-RU')}
-                </div>
-              </div>
-            </div>
+            <OzonStocksNotices
+              ozonStocksSyncIssues={ozonStocksSyncIssues}
+              ozonStocksCabinets={ozonStocksCabinets}
+              cabinetFilter={cabinetFilter}
+              ozonTotals={ozonTotals}
+            />
 
-            {(recommendations.supplies.length > 0 || recommendations.factories.length > 0 || recommendations.orderedCount > 0) && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-4" id="ozon-recommendations">
-                <button
-                  type="button"
-                  onClick={() => setShowRecommendations((v) => !v)}
-                  className="w-full flex items-center justify-between text-left"
-                >
-                  <span className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                    {showRecommendations ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronRight size={16} className="text-slate-400" />}
-                    Рекомендации
-                  </span>
-                  <span className="text-[11px] text-slate-400">
-                    поставок: {recommendations.supplies.length} · заказов на фабрике: {recommendations.factories.length}
-                  </span>
-                </button>
-                {showRecommendations && (
-                  <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <div>
-                      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-2">Отвезти на Ozon</div>
+            <OzonRecommendationsPanel
+              recommendations={recommendations}
+              showRecommendations={showRecommendations}
+              onToggleShowRecommendations={() => setShowRecommendations((v) => !v)}
+              supplyPlan={supplyPlan}
+              supplySettings={supplySettings}
+              onClearSupplySelection={() => setSelectedSupply({})}
+              onOpenSupplySummary={() => setSupplySummaryOpen(true)}
+              selectedSupply={selectedSupply}
+              onToggleSupplyRow={toggleSupplyRow}
+              directRules={directRules}
+              selectedClusterIds={selectedClusterIds}
+              selectedCabinetSets={selectedCabinetSets}
+              cabinetsByArticleMap={cabinetsByArticleMap}
+              wideWeeks={wideWeeks}
+              speedWeeks={ozonSettings.speedWeeks}
+              onToggleWideArticle={toggleWideArticle}
+              isAdmin={isAdmin}
+              onGoToChinaForecast={goToChinaForecast}
+              setFactoryModalArticle={setFactoryModalArticle}
+            />
 
-                      {supplyPlan.rows.length > 0 && (
-                        <div className="mb-3 p-3 rounded-xl bg-indigo-50 border border-indigo-200">
-                          <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <div className="text-[11px] font-semibold text-indigo-900">
-                              Выбрано: {supplyPlan.rows.length} строк · {fmtInt(supplyPlan.totalBoxes)} кор ({fmtInt(supplyPlan.totalQty)} шт) · кластеров: {supplyPlan.clusters.length}
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => setSelectedSupply({})}
-                                className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-slate-600 hover:bg-slate-200 transition-colors"
-                              >
-                                Снять всё
-                              </button>
-                              <button
-                                type="button"
-                                id="btn-ozon-create-supply"
-                                onClick={() => setSupplySummaryOpen(true)}
-                                disabled={supplyPlan.cabinets.length > 1 || !supplySettings.dropOffWarehouseId}
-                                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-[11px] font-bold transition-colors"
-                              >
-                                Оформить поставку
-                              </button>
-                            </div>
-                          </div>
+            <OzonCoverageTable
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              ozonStocksCabinets={ozonStocksCabinets}
+              cabinetFilter={cabinetFilter}
+              onCabinetChange={setCabinetFilter}
+              onlyWithRecommendations={onlyWithRecommendations}
+              onOnlyWithRecommendationsChange={setOnlyWithRecommendations}
+              visibleRows={visibleRows}
+              coverageRowsCount={coverageRows.length}
+              manualMode={manualMode}
+              manualPlan={manualPlan}
+              supplySettings={supplySettings}
+              onOpenManualSummary={() => setManualSummaryOpen(true)}
+              isFullscreen={isFullscreen}
+              onExitFullscreen={() => setIsFullscreen(false)}
+              isColVisible={isColVisible}
+              expandedArticles={expandedArticles}
+              onToggleArticle={toggleArticle}
+              expandedClusters={expandedClusters}
+              onToggleCluster={toggleCluster}
+              uniqueCabinetsCount={uniqueCabinetsCount}
+              manualPicks={manualPicks}
+              manualQty={manualQty}
+              toggleManualPick={toggleManualPick}
+              changeManualQty={changeManualQty}
+              directRules={directRules}
+              manualClusterIds={manualClusterIds}
+              manualCabinetSets={manualCabinetSets}
+              supplyClusterRefs={supplyClusterRefs}
+              clusterShares={clusterShares}
+              factoryOrdersByArticle={factoryOrdersByArticle}
+              hiddenManualByArticle={hiddenManualByArticle}
+              factoryCellByArticle={factoryCellByArticle}
+              factoryLateById={openFactoryOrders.late}
+              bottleneckByKit={bottleneckByKit}
+              ozonSettings={ozonSettings}
+              unboundInFlightByArticle={pendingSupplies.unboundInFlightByArticle}
+              getOrderUnitCost={getOrderUnitCost}
+              setFactoryModalArticle={setFactoryModalArticle}
+              setPendingModalArticle={setPendingModalArticle}
+              onResolveFactoryConflict={askResolveFactoryConflict}
+            />
 
-                          {supplyPlan.cabinets.length > 1 && (
-                            <div className="mt-2 text-[11px] font-semibold text-red-700">
-                              Выбраны товары из разных магазинов ({supplyPlan.cabinets.join(', ')}). Заявка создаётся в одном магазине — отфильтруйте магазин выше.
-                            </div>
-                          )}
-
-                          {supplyPlan.overLimit.length > 0 && (
-                            <div className="mt-2 text-[11px] font-semibold text-amber-700">
-                              Превышен лимит {supplyPlan.limit} кор на кластер: {supplyPlan.overLimit.map((c) => `${c.clusterName} — ${c.boxes} кор`).join('; ')}. Остаток лучше оформить отдельной заявкой.
-                            </div>
-                          )}
-
-                          {!supplySettings.dropOffWarehouseId && (
-                            <div className="mt-2 text-[11px] font-semibold text-red-700">
-                              Не выбрана точка отгрузки — укажите её в настройках Ozon.
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-
-                      {recommendations.supplies.length === 0 ? (
-                        <div className="text-[11px] text-slate-400">Запасы кластеров в норме.</div>
-                      ) : (
-                        <div className="flex flex-col gap-3">
-                          {recommendations.supplies.map((s: any) => (
-                            <div key={s.article} className="border border-slate-100 rounded-xl p-3 bg-slate-50/60">
-                              <div className="flex items-baseline justify-between gap-2">
-                                <span className="font-mono font-bold text-slate-800 text-[12px]">{s.article}</span>
-                                <span
-                                  className="text-[11px] text-slate-400 shrink-0"
-                                  title={s.pendingTotal > 0 ? `На складе всего ${fmtInt(s.myStockAvailable)} шт, из них ${fmtInt(s.pendingTotal)} шт зарезервировано под уже созданные заявки. Свободно для новых поставок ${fmtInt(s.freeMyStock)} шт.` : undefined}
-                                >
-                                  свободно {fmtInt(s.freeMyStock)} шт
-                                  {s.pendingTotal > 0 && <span className="text-amber-500"> (из {fmtInt(s.myStockAvailable)})</span>}
-                                  {/* Item 85, step 1.6: a shared component is split between the kits. */}
-                                  {s.sharedLimitedBy.length > 0 && s.shippableMyStock < s.freeMyStock && (
-                                    <span
-                                      className="block text-orange-600"
-                                      title={`Компоненты ${s.sharedLimitedBy.join(', ')} общие с другими комплектами, и на все их потребности не хватает. Они поделены между комплектами пропорционально потребности кластеров; этому товару досталось на ${fmtInt(s.shippableMyStock)} шт.`}
-                                    >
-                                      доля общих компонентов: {fmtInt(s.shippableMyStock)} шт
-                                    </span>
-                                  )}
-                                </span>
-                              </div>
-                              {s.name && <div className="text-[11px] text-slate-500 truncate" title={s.name}>{s.name}</div>}
-
-                              <div className="mt-1.5 flex items-center justify-between gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleWideArticle(s.article)}
-                                  title={s.wide
-                                    ? `Вернуться к обычному расчёту: окно скорости ${ozonSettings.speedWeeks} нед.`
-                                    : `Пересчитать распределение по окну тренда — ${wideWeeks} нед. Кластеры, продававшие до того, как товар кончился, вернутся в распределение.`}
-                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors ${
-                                    s.wide
-                                      ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
-                                      : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'
-                                  }`}
-                                >
-                                  {s.wide ? `по окну тренда, ${wideWeeks} нед.` : 'Распределить весь остаток'}
-                                </button>
-                                {s.wide && s.leftover > 0 && (
-                                  <span className="text-[10px] text-slate-400 shrink-0" title="Расчёт разложил не весь свободный остаток: потребности кластеров за окно тренда на него не хватило">
-                                    не разложено {fmtInt(s.leftover)} шт
-                                  </span>
-                                )}
-                              </div>
-
-                              <div className="mt-2 flex flex-col gap-1">
-                                {s.clusters.map((c: any) => (
-                                  <div key={c.clusterId} className="flex items-center justify-between gap-2 text-[11px]">
-                                    <span className="text-slate-600 truncate flex items-center gap-1.5" title={c.clusterName}>
-                                      {canTickCluster(c.recommendation.boxes, c.needBoxes) && (
-                                        <input
-                                          type="checkbox"
-                                          checked={Boolean(selectedSupply[supplyKey(s.article, c.clusterId)])}
-                                          onChange={() => toggleSupplyRow(s.article, c.clusterId)}
-                                          disabled={
-                                            !isClusterSelectable(directRules, selectedClusterIds, String(c.clusterId)) ||
-                                            !isCabinetCompatible(selectedCabinetSets, cabinetsByArticleMap[s.article] || [])
-                                          }
-                                          className="shrink-0 w-3.5 h-3.5 accent-indigo-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
-                                          title={
-                                            disabledReason(directRules, selectedClusterIds, String(c.clusterId)) ||
-                                            cabinetDisabledReason(selectedCabinetSets, cabinetsByArticleMap[s.article] || []) ||
-                                            (c.recommendation.boxes > 0
-                                              ? 'Включить в заявку на поставку'
-                                              : 'Добавить кластер в заявку с нулём: количество распределите сами в окне оформления')
-                                          }
-                                        />
-                                      )}
-                                      {c.clusterName}
-                                      {c.priority && <span className="ml-1 text-amber-600 font-bold">×{c.priorityK}</span>}
-                                    </span>
-                                    {c.recommendation.boxes > 0 ? (
-                                      <span className={`shrink-0 text-right font-semibold ${c.recommendation.limitedByMyStock ? 'text-amber-600' : 'text-indigo-600'}`}>
-                                        {fmtInt(c.recommendation.boxes)} кор ({fmtInt(c.recommendation.qty)} шт)
-                                        {c.recommendation.partialByMaxDays && (
-                                          <span
-                                            className="block text-[10px] font-normal text-slate-500"
-                                            title={`Полная коробка дала бы кластеру запас на ${fmtInt(c.recommendation.fullBoxDays)} дн — дольше настройки «Максимальный срок продаж кластера, дней». Везём ровно столько, сколько нужно до целевого запаса.`}
-                                          >
-                                            неполная: полная коробка = запас на {fmtInt(c.recommendation.fullBoxDays)} дн
-                                          </span>
-                                        )}
-                                      </span>
-                                    ) : (
-                                      <span className="shrink-0 font-semibold text-red-600">
-                                        нужно {fmtInt(c.needBoxes)} кор — нет на складе
-                                      </span>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Заказать на фабрике</div>
-                        {isAdmin && recommendations.factories.length > 0 && (
-                          <button
-                            type="button"
-                            data-testid="btn-china-forecast-prefill"
-                            onClick={goToChinaForecast}
-                            className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100"
-                            title="Открыть прогноз поставки в модуле «Заказы в Китае» с этими артикулами и количествами"
-                          >
-                            <Calculator size={12} /> Прогноз Китай
-                          </button>
-                        )}
-                      </div>
-                      {recommendations.factories.length === 0 ? (
-                        <div className="text-[11px] text-slate-400">
-                          Заказывать пока нечего.
-                          {recommendations.orderedCount > 0 && <span className="block text-sky-700">Размещённых заказов на фабрике: {recommendations.orderedCount}.</span>}
-                          {recommendations.clusterDeficitCount > 0 && <span className="block text-slate-500">Дефицит в кластерах: {recommendations.clusterDeficitCount} товаров — товар есть, лежит не там.</span>}
-                        </div>
-                      ) : (
-                        <div className="flex flex-col gap-2">
-                          {recommendations.factories.map((f) => (
-                            <button
-                              key={f.article}
-                              type="button"
-                              onClick={() => setFactoryModalArticle(f.article)}
-                              className="text-left border border-rose-100 bg-rose-50/60 rounded-xl p-3 hover:bg-rose-50 transition-colors"
-                            >
-                              <div className="flex items-baseline justify-between gap-2">
-                                <span className="font-mono font-bold text-slate-800 text-[12px]">{f.article}</span>
-                                <span className="text-rose-600 font-bold text-[12px] shrink-0">
-                                  {fmtInt(f.factory.orderQty)} шт ({fmtInt(f.factory.orderBoxes)} кор)
-                                </span>
-                              </div>
-                              {f.name && <div className="text-[11px] text-slate-500 truncate" title={f.name}>{f.name}</div>}
-                              <div className="text-[11px] text-slate-500 mt-1">
-                                Хватит на {Math.round(f.factory.daysLeft)} дн. · срок поставки {f.leadTimeDays || 0} дн. · {f.factory.reason === 'clusterDeficit' ? 'нечем пополнить кластеры' : 'кончается везде'}
-                              </div>
-                            </button>
-                          ))}
-                          {recommendations.orderedCount > 0 && (
-                            <div className="text-[11px] text-sky-700">Размещённых заказов на фабрике: {recommendations.orderedCount} товаров, они уже учтены в расчёте.</div>
-                          )}
-                          {recommendations.clusterDeficitCount > 0 && (
-                            <div className="text-[11px] text-slate-500">Дефицит в кластерах: {recommendations.clusterDeficitCount} товаров — товар есть, лежит не там, заказывать не нужно.</div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Table / List */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-3 mb-3 flex flex-wrap items-center gap-3" id="ozon-stocks-filters">
-              <div className="relative flex-1 min-w-[200px]">
-                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  id="ozon-search-input"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Поиск по артикулу или названию"
-                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300"
-                />
-              </div>
-              {ozonStocksCabinets.length > 1 && (
-                <select
-                  id="ozon-cabinet-filter"
-                  value={cabinetFilter}
-                  onChange={(e) => setCabinetFilter(e.target.value)}
-                  className="text-xs border border-slate-200 rounded-xl px-3 py-1.5 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                >
-                  <option value="all">Все магазины</option>
-                  {ozonStocksCabinets.map((cab: string) => (
-                    <option key={cab} value={cab}>{cab}</option>
-                  ))}
-                </select>
-              )}
-              <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none" id="ozon-only-rec-toggle">
-                <input
-                  type="checkbox"
-                  checked={onlyWithRecommendations}
-                  onChange={(e) => setOnlyWithRecommendations(e.target.checked)}
-                  className="rounded border-slate-300"
-                />
-                Только с рекомендациями
-              </label>
-              <span className="text-[11px] text-slate-400 ml-auto">
-                Показано товаров: {visibleRows.length} из {coverageRows.length}
-              </span>
-            </div>
-
-            {/* Пункт 63. Итог ручного выбора и вход в мастер. Заявка идёт тем же путём,
-                что и из рекомендаций, — это тот же мастер оформления. */}
-            {manualMode && (
-              <div className="p-3 rounded-2xl border border-indigo-200 bg-indigo-50 flex flex-col gap-2" id="ozon-manual-supply-bar">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <span className="text-xs font-semibold text-indigo-900">
-                    {manualPlan.rows.length === 0
-                      ? 'Отметьте кластеры у нужных товаров и задайте количество'
-                      : `Выбрано: ${manualPlan.rows.length} строк · ${fmtInt(manualPlan.totalQty)} шт (${fmtInt(manualPlan.totalBoxes)} кор) · кластеров: ${manualPlan.clusters.length}`}
-                  </span>
-                  <button
-                    type="button"
-                    id="btn-ozon-manual-supply-create"
-                    disabled={
-                      manualPlan.rows.length === 0
-                      || manualPlan.cabinets.length > 1
-                      || manualPlan.over.length > 0
-                      || !supplySettings.dropOffWarehouseId
-                    }
-                    onClick={() => setManualSummaryOpen(true)}
-                    className="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-1.5 rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Оформить поставку
-                  </button>
-                </div>
-                {manualPlan.cabinets.length > 1 && (
-                  <div className="text-[11px] text-amber-700">
-                    Выбраны товары из разных магазинов ({manualPlan.cabinets.join(', ')}). Заявка создаётся в одном магазине — снимите лишние галочки.
-                  </div>
-                )}
-                {manualPlan.over.map((o) => (
-                  <div key={o.article} className="text-[11px] text-red-600">
-                    {o.article}: назначено {fmtInt(o.asked)} шт, а свободно {fmtInt(o.free)} шт. Остаток изменился — уменьшите количество.
-                  </div>
-                ))}
-                {!supplySettings.dropOffWarehouseId && (
-                  <div className="text-[11px] text-amber-700">Не выбрана точка отгрузки — укажите её в настройках Ozon.</div>
-                )}
-              </div>
-            )}
-
-            {visibleRows.length === 0 ? (
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 text-center text-sm text-slate-500" id="ozon-stocks-empty">
-                Данных пока нет. Нажмите „Обновить", чтобы загрузить остатки со складов Ozon.
-              </div>
-            ) : (
-              <div
-                className={`bg-white border border-slate-200 shadow-sm ${isFullscreen ? 'fixed inset-0 z-50 rounded-none overflow-hidden flex flex-col' : 'rounded-2xl overflow-hidden'}`}
-                id="ozon-stocks-table-container"
-              >
-                {isFullscreen && (
-                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200 bg-slate-50 shrink-0">
-                    <span className="text-sm font-bold text-slate-800">Остатки на складах Ozon</span>
-                    <button
-                      type="button"
-                      id="btn-ozon-fullscreen-exit"
-                      onClick={() => setIsFullscreen(false)}
-                      className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-xl transition-all"
-                    >
-                      <Minimize2 size={14} />
-                      Свернуть (Esc)
-                    </button>
-                  </div>
-                )}
-                <div className={`overflow-auto ${isFullscreen ? 'flex-1 min-h-0' : 'max-h-[70vh]'}`}>
-                  <style>{`
-                    #ozon-stocks-table thead th {
-                      position: sticky;
-                      top: 0;
-                      z-index: 20;
-                      background-color: #f1f5f9;
-                      box-shadow: inset 0 -1px 0 #e2e8f0;
-                    }
-                  `}</style>
-                  <table className="w-full text-left border-collapse text-xs" id="ozon-stocks-table">
-                    <thead>
-                      <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-semibold">
-                        <th className="p-3 min-w-[220px]">
-                          Товар / Кластер / Склад
-                          <ColHint text="Три уровня: строка товара — итог по всем складам Ozon; строка кластера — регион доставки; строка склада — конкретный склад Ozon внутри кластера. Нажми на строку, чтобы раскрыть уровень ниже." />
-                        </th>
-                        {isColVisible('sold') && (
-                          <th className="p-3 text-right">
-                            Продано
-                            <ColHint text="Сколько штук продано за расчётное окно: полные недели из настройки «Недель для расчёта скорости» плюс текущая неделя с понедельника по момент последнего опроса Ozon. Продажи берутся из отчёта Ozon, не из твоих отгрузок." />
-                          </th>
-                        )}
-                        {isColVisible('speed') && (
-                          <th className="p-3 text-right">
-                            Скорость
-                            <ColHint text="Средние продажи в штуках за день: продано за окно ÷ число дней окна (полные недели × 7 + прошедшие дни текущей недели). На этой скорости строятся покрытие и рекомендации." />
-                          </th>
-                        )}
-                        {isColVisible('trend') && (
-                          <th className="p-3 text-right">
-                            Тренд
-                            <ColHint text="Тренд — направление спроса за окно тренда, посчитанное линейной регрессией по недельному ряду и переведённое в месячный множитель. Применяется ТОЛЬКО к заказу на фабрике: прогнозная скорость = фактическая × тренд × (1 + прирост объёма продаж). Рекомендации на поставку в кластеры Ozon считаются по фактической скорости и от тренда не зависят. Множитель ограничен диапазоном 0,7…1,5 и гасится до 1,00 пятью фильтрами — наведи курсор на значение, там написана причина." />
-                          </th>
-                        )}
-                        {isColVisible('share') && (
-                          <th className="p-3 text-right">
-                            Доля
-                            <ColHint text="Какую часть продаж товара даёт этот кластер за окно тренда (настройка «Окно тренда», недель). Скорость кластера = скорость товара × эта доля, поэтому кластер, который недавно стоял пустым, не теряет свою долю." />
-                          </th>
-                        )}
-                        {isColVisible('available') && (
-                          <th className="p-3 text-right">
-                            Доступно
-                            <ColHint text="Товар лежит на складе Ozon и продаётся прямо сейчас." />
-                          </th>
-                        )}
-                        {isColVisible('preparing') && (
-                          <th className="p-3 text-right">
-                            Готовим
-                            <ColHint text="Ozon готовит товар к отгрузке покупателю: он уже зарезервирован и в продаже не участвует." />
-                          </th>
-                        )}
-                        {isColVisible('requested') && (
-                          <th className="p-3 text-right">
-                            В заявках
-                            <ColHint text="Товар заявлен к вывозу или перемещению по заявке в личном кабинете Ozon." />
-                          </th>
-                        )}
-                        {isColVisible('transit') && (
-                          <th className="p-3 text-right">
-                            В пути
-                            <ColHint text="Товар едет на склад Ozon и скоро встанет в продажу. Учитывается в расчётном остатке." />
-                          </th>
-                        )}
-                        {isColVisible('excess') && (
-                          <th className="p-3 text-right">
-                            Излишки
-                            <ColHint text="Товар, найденный складом Ozon сверх принятого количества. В расчётный остаток не входит." />
-                          </th>
-                        )}
-                        {isColVisible('returns') && (
-                          <th className="p-3 text-right">
-                            Возвраты
-                            <ColHint text="Возвраты от покупателей на складе Ozon. В расчётный остаток попадает не весь объём, а доля, заданная в настройках полем «% возвратов, возвращающихся в продажу». Товар, который Ozon готовит к вывозу вам по вашей заявке, сюда не входит — он в «Прочем»." />
-                          </th>
-                        )}
-                        {isColVisible('other') && (
-                          <th className="p-3 text-right">
-                            Прочее
-                            <ColHint text="Остальные состояния товара на складе Ozon: вывоз к вам по вашей заявке, брак, утилизация, разбирательства. В расчётный остаток не входит." />
-                          </th>
-                        )}
-                        {isColVisible('estimated') && (
-                          <th className="p-3 text-right">
-                            Расчётный
-                            <ColHint text="На сколько штук реально можно рассчитывать: доступно + доля возвратов + то, что уже едет в кластер (колонка «Едет»). Именно эта величина сравнивается с целевым запасом." />
-                          </th>
-                        )}
-                        {isColVisible('coverage') && (
-                          <th className="p-3 text-right">
-                            Покрытие
-                            <ColHint text="На сколько дней хватит расчётного остатка сверх неснижаемого запаса. В расчётный остаток входит и то, что уже едет в кластер по заявкам. Красный — поставка, отправленная сегодня, всё равно приедет уже после того, как запас упадёт ниже неснижаемого (учитывает «Срок доставки до Ozon»); жёлтый — ниже целевого, и по кластеру есть рекомендация поставки; зелёный — норма. У приоритетного кластера оба порога умножены на его коэффициент (срок доставки — нет, он не зависит от приоритета). «∞» означает, что продаж нет, а остаток есть." />
-                          </th>
-                        )}
-                        {isColVisible('pending') && (
-                          <th className="p-3 text-right">
-                            Едет
-                            <ColHint text="Сколько штук уже едет в кластер. Считается двумя способами: по нашим созданным заявкам (от создания до начала приёмки на складе Ozon) и по колонкам Ozon «В пути» + «В заявках». Берётся большее из двух, а не сумма — это одни и те же поставки: наши статусы свежее, а данные остатков Ozon обновляет с опозданием до полусуток. Эти штуки входят в «Расчётный» и уменьшают потребность сразу после создания заявки. Нажми на число у товара — откроется список заявок." />
-                          </th>
-                        )}
-                        {isColVisible('myStock') && (
-                          <th className="p-3 text-right">
-                            Мой склад
-                            <ColHint text="Сколько штук этого артикула свободно на твоём складе для НОВЫХ поставок. Это потолок рекомендации. Если часть остатка уже зарезервирована под созданные заявки, крупная цифра — свободный остаток, а под ней мелким шрифтом общий остаток и размер резерва. Резерв нужен, чтобы одну и ту же партию не порекомендовало отвезти второй раз в другой кластер. Для виртуальных комплектов остаток считается по компонентам." />
-                          </th>
-                        )}
-                        {isColVisible('recommendation') && (
-                          <th className="p-3 text-right">
-                            Рекомендация
-                            <ColHint text="Сколько отвезти в кластер, чтобы вернуть запас к целевому, с учётом времени на дорогу до Ozon. Неснижаемый остаток входит внутрь целевого запаса, а не прибавляется к нему; срок доставки — прибавляется поверх целевого запаса (настройка «Срок доставки до Ozon, дней»): пока коробка едет, кластер продолжает продавать. Кратно коробке, кроме двух случаев: медленному кластеру, которому целая коробка дала бы запас дольше настройки «Максимальный срок продаж кластера, дней» (считается уже ПОСЛЕ приезда поставки), предлагается неполная коробка ровно на потребность, и неполная коробка предлагается тогда, когда на складе не набирается целой. Синий — везём полностью, оранжевый — поставка урезана нехваткой на твоём складе, красный — потребность есть, но везти нечего: на складе пусто. У товара показана сумма по всем его кластерам." />
-                          </th>
-                        )}
-                        {isColVisible('factory') && (
-                          <th className="p-3 text-right">
-                            Заказ на фабрике
-                            <ColHint text="Сигнал «пора заказывать новую партию». Загорается по одной из двух причин: «кончается везде» — товара на Ozon и на твоём складе вместе хватит меньше, чем на срок поставки с фабрики плюс срок доставки до Ozon плюс неснижаемый запас; «нечем пополнить» — кластерам нужна поставка, а на твоём складе пусто, и перебросить остаток между кластерами Ozon нельзя. Объём заказа — больший из расчёта по настройке «Объём заказа на фабрике, дней» и непокрытой потребности кластеров. Наведи курсор на ячейку: там видно, на сколько дней хватит запаса и какой порог срабатывания." />
-                          </th>
-                        )}
-                        {isColVisible('orderCost') && (
-                          <th className="p-3 text-right">
-                            Стоимость заказа, ₽
-                            <ColHint text="Сколько денег нужно на заказ: объём заказа умножен на цену последнего поступления товара на склад. Средняя себестоимость здесь не используется — она искажена накопленной капитализацией. У виртуального комплекта цена складывается из цен компонентов по нормам. Наведи курсор на цифру: там видно цену за штуку и дату поступления, из которого она взята." />
-                          </th>
-                        )}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleRows.map((art: any, rowIdx: number) => {
-                        const isArtExpanded = !!expandedArticles[art.article];
-                        // Подсказки раскрываются вверх, а у первых строк сверху нет места: таблица лежит
-                        // в контейнере с прокруткой и обрезает всё, что вышло за его край. У них раскрываем вниз.
-                        const tipUp = rowIdx > 1 ? 'bottom-full mb-1.5' : 'top-full mt-1.5';
-                        // Пункт 35, item 88 ticket 04: разбор заказов на фабрике для восьми состояний
-                        // ячейки — теперь читается из модели, посчитанный один раз для всех строк.
-                        // Item 83d: a China row NEVER drops into the «просрочен» state — it stays in the
-                        // ТРУБА even late, only «задерживается N дн» tells the owner about it.
-                        const factoryList = factoryOrdersByArticle[art.article] || [];
-                        // Item 83e: manual orders hidden from the ТРУБА for this article, shown as a
-                        // separate notice next to the article, with the two owner buttons.
-                        const factoryHiddenManual = hiddenManualByArticle[art.article] || [];
-                        const factoryCell = factoryCellByArticle[art.article];
-                        const factoryOverdueList = factoryCell.overdueList;
-                        const factoryOverdueQty = factoryCell.overdueQty;
-                        const factoryWaitingList = factoryCell.waitingList;
-                        const factoryWaitingQty = factoryCell.waitingQty;
-                        const factoryNearest = factoryCell.nearest;
-                        // Item 83g: one line per active order — badge and «задерживается N дн» when a
-                        // China row is late — appended to the cell's tooltips below.
-                        const factoryOrdersDetail = factoryList
-                          .map((o) => {
-                            const badge = factoryOrderBadge(o);
-                            const late = factoryLateLabel(openFactoryOrders.late[o.id]);
-                            return `${fmtInt(o.qty)} шт${badge ? ` · ${badge}` : ''}${o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}${late ? ` · ${late}` : ''}`;
-                          })
-                          .join('\n');
-                        const factoryOrderQty = factoryCell.orderQty;
-                        const factoryClusterOnly = factoryCell.clusterOnly;
-                        const factoryBox = factoryCell.box;
-                        // Item 86, step D. N — the pieces sold over the speed period, from the result
-                        // (not perDay × days: «Спрос вырос» may have replaced perDay since).
-                        const speedSoldQty = art.speedSoldQty;
-                        const speedTitle = art.speedSource === 'daysInStock'
-                          ? `Скорость по дням наличия: продано ${fmtInt(speedSoldQty)} шт за ${Math.round(art.speedDaysInStock)} дн. в наличии (из ${Math.round(art.speedWindowDays)} дн. окна)`
-                          : art.speedSource === 'lookback' && art.speedPeriod
-                            ? `Товара долго не было: скорость по периоду ${fmtDateShort(art.speedPeriod.from)}–${fmtDateShort(art.speedPeriod.to)} — ${fmtInt(speedSoldQty)} шт за ${Math.round(art.speedDaysInStock)} дн. в наличии${art.speedApproximate ? '\nПриблизительно: до 18.08 история наличия не велась, недели с продажами считаются днями в наличии' : ''}`
-                            : 'История наличия ещё не покрывает окно — скорость по календарным дням';
-                        return (
-                          <React.Fragment key={art.article}>
-                            {/* LEVEL 1: ARTICLE */}
-                            <tr
-                              className="border-b border-slate-200 bg-slate-100/80 hover:bg-slate-200/60 cursor-pointer transition-colors"
-                              onClick={() => toggleArticle(art.article)}
-                              id={`ozon-art-row-${art.article}`}
-                            >
-                              <td className="p-3 max-w-[350px]">
-                                <div className="flex flex-col gap-1">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    {isArtExpanded ? <ChevronDown size={14} className="text-slate-500" /> : <ChevronRight size={14} className="text-slate-500" />}
-                                    {uniqueCabinetsCount > 1 && art.cabinets.map((cab: string) => (
-                                      <span key={cab} className="text-[10px] px-1.5 py-0.5 rounded-md font-bold tracking-wide bg-indigo-50 text-indigo-600 border border-indigo-100">{cab}</span>
-                                    ))}
-                                    <span className="font-mono font-bold text-slate-800">{art.article}</span>
-                                    {/* Пункт 63. Остаток тает по мере того, как владелец раскладывает его по кластерам. */}
-                                    {manualMode && (
-                                      <span
-                                        className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-indigo-50 text-indigo-700 border border-indigo-100"
-                                        title="Свободно на «Моём складе» с учётом того, что уже разложено по кластерам в этом выборе"
-                                      >
-                                        свободно {fmtInt(remainingForArticle(art.freeMyStock, manualPicks, art.article, ''))} шт
-                                      </span>
-                                    )}
-                                  </div>
-                                  <span className="text-slate-500 truncate block text-[11px]" title={art.name}>{art.name}</span>
-                                  {/* Item 83e: the manual order is real, it just double-counts an article that
-                                      already has a China shipment — the owner decides which. */}
-                                  {factoryHiddenManual.map((hidden) => (
-                                    <div
-                                      key={hidden.id}
-                                      className="text-[10px] bg-amber-50 border border-amber-200 text-amber-700 rounded-lg px-2 py-1 flex items-center gap-2 flex-wrap"
-                                      onClick={(e) => e.stopPropagation()}
-                                    >
-                                      <span>ручной заказ {fmtInt(hidden.qty)} шт скрыт из трубы: по артикулу есть заказ из Китая</span>
-                                      <button
-                                        type="button"
-                                        className="font-bold underline hover:text-amber-900"
-                                        onClick={() => askResolveFactoryConflict(hidden, true)}
-                                      >
-                                        это тот же заказ
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="font-bold underline hover:text-amber-900"
-                                        onClick={() => askResolveFactoryConflict(hidden, false)}
-                                      >
-                                        это разные заказы
-                                      </button>
-                                    </div>
-                                  ))}
-                                </div>
-                              </td>
-                              {isColVisible('sold') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.qtySold)}</td>}
-                              {isColVisible('speed') && (
-                                <td className="p-3 text-right font-semibold text-slate-800">
-                                  {art.noSales26 && (
-                                    <span className="block text-[10px] font-bold text-red-600">Товар не продавался более 26 недель</span>
-                                  )}
-                                  {art.speedCorrection ? (
-                                    <span className="relative inline-flex group cursor-help">
-                                      {/* Значок читается как «тренд», хотя это другой механизм — коррекция при
-                                          распродаже. Подпись снизу убирает путаницу с колонкой «Тренд». */}
-                                      <span className="flex flex-col items-end">
-                                        <span className="inline-flex items-center gap-1">
-                                          <TrendingUp size={13} className="text-amber-500" />
-                                          <span className="text-amber-600">{fmtSpeed(art.perDay)}</span>
-                                        </span>
-                                        <span className="block text-[10px] font-normal text-slate-400">коррекция</span>
-                                      </span>
-                                      <span className={`absolute right-0 ${tipUp} hidden group-hover:block z-30 w-72 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl`}>
-                                        <span className="block font-bold mb-1">Скорость скорректирована: товар был распродан</span>
-                                        <span className="block">Было {fmtSpeed(art.speedCorrection.base)} шт/д, стало {fmtSpeed(art.speedCorrection.corrected)} шт/д{art.speedCorrection.base > 0 ? ` (рост в ${art.speedCorrection.factor.toFixed(2)} раза)` : ''}.</span>
-                                        <span className="block mt-1">Остатка Ozon хватало на {art.speedCorrection.daysLeft.toFixed(1)} дн — меньше порога дефицита, поэтому скорость взята по лучшим неделям, а не по последним.</span>
-                                        <span className="block mt-1">Лучшие недели окна: {art.speedCorrection.bestWeeks.map((b: any) => `${b.week} — ${fmtInt(b.qty)} шт`).join('; ')}.</span>
-                                        <span className="block mt-1 text-slate-300">В окне {art.speedCorrection.windowWeeks} нед: продано {fmtInt(art.speedCorrection.windowQty)} шт, недель с продажами {art.speedCorrection.weeksWithSales}.</span>
-                                        {art.speedCorrection.capped && (
-                                          <span className="block mt-1 text-amber-300">Рост упёрся в предел: по лучшим неделям вышло бы {fmtSpeed(art.speedCorrection.raw)} шт/д.</span>
-                                        )}
-                                      </span>
-                                    </span>
-                                  ) : (
-                                    <span className="cursor-help" title={speedTitle}>{fmtSpeed(art.perDay)}</span>
-                                  )}
-                                  {/* Item 86, step D: a lookback article gets a small visible mark next to the speed. */}
-                                  {art.speedSource === 'lookback' && (
-                                    <span className="block text-[10px] font-semibold text-amber-600 cursor-help" title={speedTitle}>товара долго не было</span>
-                                  )}
-                                  {art.demandGrowth && art.demandGrowth.applied && (
-                                    /* Item 73. The last 7 days beat the window: the speed shown IS the recent one. */
-                                    <span
-                                      className="block text-[10px] font-semibold text-orange-600 cursor-help"
-                                      title={`Спрос вырос: за 7 дней продано ${Math.round(art.demandGrowth.recentQty)} шт (${fmtSpeed(art.demandGrowth.recentPerDay)} шт/д) против ${fmtSpeed(art.demandGrowth.basePerDay)} шт/д по окну. Скорость и рекомендации взяты по последним 7 дням.`}
-                                    >
-                                      спрос +{Math.round(art.demandGrowth.growthPct)} %
-                                    </span>
-                                  )}
-                                </td>
-                              )}
-                              {isColVisible('trend') && (
-                                <td className="p-3 text-right">
-                                  {!art.trend ? (
-                                    <span className="text-slate-300" title="Продаж за окно тренда нет — тренд не считается.">—</span>
-                                  ) : (
-                                    <span className="relative inline-flex group cursor-help">
-                                      <span className="flex flex-col items-end">
-                                        <span className={`font-semibold ${art.trend.applied > 1 ? 'text-emerald-600' : art.trend.applied < 1 ? 'text-rose-600' : 'text-slate-400'}`}>
-                                          {fmtTrend(art.trend.applied)}
-                                        </span>
-                                        {art.trend.reason && (
-                                          <span className="block text-[10px] text-slate-400">{TREND_REASON_SHORT[art.trend.reason]}</span>
-                                        )}
-                                      </span>
-                                      <span className={`absolute right-0 ${tipUp} hidden group-hover:block z-30 w-96 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl whitespace-normal`}>
-                                        <span className="block font-bold mb-1">Тренд продаж</span>
-                                        {art.demandGrowth && art.demandGrowth.applied ? (
-                                          /* Item 85, step 1.4: the larger of the two, never their product. */
-                                          <span className="block">
-                                            Прогноз для заказа на фабрике — большее из двух: по окну с трендом {fmtSpeed(art.demandGrowth.basePerDay)}{' × '}{fmtTrend(art.trend.applied)}{' = '}{fmtSpeed(art.demandGrowth.basePerDay * art.trend.applied)} шт/д и за последние 7 дней {fmtSpeed(art.demandGrowth.recentPerDay)} шт/д
-                                            {ozonSettings.salesGrowthPct ? `, затем × ${fmtTrend(1 + ozonSettings.salesGrowthPct / 100)}` : ''}
-                                            {' → '}{fmtSpeed(art.forecastPerDay)} шт/д
-                                          </span>
-                                        ) : (
-                                          <span className="block">
-                                            Прогноз для заказа на фабрике: {fmtSpeed(art.perDay)}{' × '}{fmtTrend(art.trend.applied)}
-                                            {ozonSettings.salesGrowthPct ? ` × ${fmtTrend(1 + ozonSettings.salesGrowthPct / 100)}` : ''}
-                                            {' = '}{fmtSpeed(art.forecastPerDay)} шт/д
-                                          </span>
-                                        )}
-                                        <span className="block mt-1">Расчётный множитель: {fmtTrend(art.trend.raw)}</span>
-                                        {art.trend.reason && (art.trend.applied !== art.trend.raw || art.trend.reason === 'lookback') && (
-                                          <span className="block mt-1 text-amber-300">{TREND_REASON_LONG[art.trend.reason](art.trend)}</span>
-                                        )}
-                                        {/* Item 86, step D: the trend is rate-adjusted by days in stock, not raw calendar weeks. */}
-                                        {art.trend.historyBased && (
-                                          <span className="block mt-1 text-sky-300">Тренд считается по дням наличия, а не по календарным неделям.</span>
-                                        )}
-                                        <span className="block mt-1 text-slate-300">
-                                          Окно: {art.trend.weeks.length} нед, {fmtDateShort(art.trend.weeks[0])}…{fmtDateShort(art.trend.weeks[art.trend.weeks.length - 1])}, продано {fmtInt(art.trend.windowQty)} шт
-                                        </span>
-                                        <span className="block mt-1 text-slate-300">
-                                          {art.trend.weeks.map((w: string, i: number) => `${fmtDateShort(w)} — ${fmtInt(art.trend.weekQty[i])}`).join('; ')}
-                                        </span>
-                                      </span>
-                                    </span>
-                                  )}
-                                </td>
-                              )}
-                              {isColVisible('share') && <td className="p-3 text-right text-slate-300">—</td>}
-                              {isColVisible('available') && <td className={`p-3 text-right font-semibold ${art.totals.available === 0 ? 'text-slate-300' : 'text-slate-900'}`}>{fmtInt(art.totals.available)}</td>}
-                              {isColVisible('preparing') && <td className={`p-3 text-right ${art.totals.preparing === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.preparing)}</td>}
-                              {isColVisible('requested') && <td className={`p-3 text-right ${art.totals.requested === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.requested)}</td>}
-                              {isColVisible('transit') && <td className={`p-3 text-right ${art.totals.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.transit)}</td>}
-                              {isColVisible('excess') && <td className={`p-3 text-right ${art.totals.excess === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.excess)}</td>}
-                              {isColVisible('returns') && <td className={`p-3 text-right ${art.totals.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.returns)}</td>}
-                              {isColVisible('other') && <td className={`p-3 text-right ${art.totals.other === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(art.totals.other)}</td>}
-                              {isColVisible('estimated') && <td className="p-3 text-right font-semibold text-slate-800">{fmtInt(art.totalEstimated)}</td>}
-                              {isColVisible('coverage') && <td className={`p-3 text-right ${TONE_CLASS[coverageTone(art.totalEstimated, art.perDay, ozonSettings)]}`}>{fmtDays(art.coverageDays, art.totalEstimated)}</td>}
-                              {isColVisible('pending') && (
-                                <td className="p-3 text-right">
-                                  {art.inFlightTotal > 0 || art.pendingTotal > 0 ? (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => { e.stopPropagation(); setPendingModalArticle(art.article); }}
-                                      className="font-semibold text-sky-600 hover:underline"
-                                      title={`В кластеры этого товара едет ${fmtInt(art.inFlightTotal)} шт — они уже учтены в «Расчётном», и потребность на них уменьшена. На Моём складе под созданные заявки зарезервировано ${fmtInt(art.pendingTotal)} шт. Нажми, чтобы посмотреть список заявок.`}
-                                    >
-                                      {fmtInt(art.inFlightTotal)}
-                                    </button>
-                                  ) : (
-                                    <span className="text-slate-300">—</span>
-                                  )}
-                                </td>
-                              )}
-                              {isColVisible('myStock') && (
-                                <td className="p-3 text-right">
-                                  {art.pendingTotal > 0 ? (
-                                    <span
-                                      className="inline-flex flex-col items-end"
-                                      title={`На складе всего ${fmtInt(art.myStockAvailable)} шт. Из них ${fmtInt(art.pendingTotal)} шт зарезервировано под уже созданные заявки на поставку. Для новых поставок свободно ${fmtInt(art.freeMyStock)} шт — это и есть потолок рекомендации.`}
-                                    >
-                                      <span className="font-semibold text-amber-600">{fmtInt(art.freeMyStock)}</span>
-                                      <span className="text-[10px] text-slate-400 font-normal">из {fmtInt(art.myStockAvailable)} · резерв {fmtInt(art.pendingTotal)}</span>
-                                    </span>
-                                  ) : (
-                                    <span className="text-slate-600">{fmtInt(art.myStockAvailable)}</span>
-                                  )}
-                                </td>
-                              )}
-                              {isColVisible('recommendation') && (
-                                <td className="p-3 text-right">
-                                  {art.recommendedQty > 0 ? (
-                                    <span
-                                      className={art.recLimited ? 'text-amber-600 font-bold' : 'text-indigo-600 font-bold'}
-                                      title={art.recLimited ? 'Рекомендация урезана: на Моём складе не хватает товара на полную потребность' : undefined}
-                                    >
-                                      {fmtInt(art.recommendedQty)} шт
-                                    </span>
-                                  ) : art.deficitQty > 0 ? (
-                                    <span className="text-red-600 font-bold" title="Кластерам нужна поставка, но на Моём складе нет товара">
-                                      дефицит {fmtInt(art.deficitQty)} шт
-                                    </span>
-                                  ) : (
-                                    <span className="text-slate-300">—</span>
-                                  )}
-                                  {art.recommendedQty > 0 && art.deficitQty > 0 && (
-                                    <span className="block text-[10px] font-bold text-red-500" title="Часть кластеров осталась без поставки: на Моём складе не хватило товара">
-                                      + дефицит {fmtInt(art.deficitQty)} шт
-                                    </span>
-                                  )}
-                                </td>
-                              )}
-                              {/* Item 50. Every state of this cell opens the order window, including the
-                                  states where the calculation asks for nothing: the owner sometimes orders
-                                  anyway and the order must still land in «Заказы на фабрике» and in the ТРУБА.
-                                  The only exception is a virtual kit — its components are ordered instead,
-                                  and their own cells live in the components table below. */}
-                              {isColVisible('factory') && (
-                                <td className="p-3 text-right">
-                                  {factoryCell.kind === 'overdue' ? (
-                                    <span className="relative inline-flex group justify-end">
-                                      <button
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                        className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
-                                      >
-                                        просрочен · {fmtDateShort(factoryOverdueList[0].expectedAt)}
-                                        <span className="block text-[10px] font-semibold text-amber-600">{fmtInt(factoryOverdueQty)} шт · нажми, чтобы решить</span>
-                                      </button>
-                                      <span className="pointer-events-none absolute right-0 top-full mt-1 z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal normal-case text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-normal">
-                                        Заказано {fmtInt(factoryOverdueList[0].qty)} шт ({fmtInt(Math.ceil(factoryOverdueList[0].qty / factoryBox))} кор)<br />
-                                        Размещён: {fmtDateFull(factoryOverdueList[0].orderedAt)}<br />
-                                        Ожидается: {fmtDateFull(factoryOverdueList[0].expectedAt)} — срок прошёл<br />
-                                        {factoryOverdueList[0].comment ? <>Комментарий: {factoryOverdueList[0].comment}<br /></> : null}
-                                        {factoryOverdueList[0].user ? <>Отметил: {factoryOverdueList[0].user}<br /></> : null}
-                                        {/* Item 83g: every OTHER active order of the article (e.g. a China row that
-                                            keeps counting while this manual one is overdue) — the owner needs to
-                                            see it here too, not just the one this branch is about. */}
-                                        {factoryList.filter((o) => o.id !== factoryOverdueList[0].id).map((o) => (
-                                          <React.Fragment key={o.id}>
-                                            {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}
-                                            {factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}<br />
-                                          </React.Fragment>
-                                        ))}
-                                        Нажми, чтобы изменить заказ или отметить приход партии.
-                                      </span>
-                                    </span>
-                                  ) : factoryCell.kind === 'order' ? (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                      className="text-rose-600 font-bold text-right hover:underline"
-                                      title={`Запаса хватит на ${Math.round(art.factory.daysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн. (срок поставки ${art.leadTimeDays || 0} дн. + срок доставки до Ozon ${Number(ozonSettings.deliveryToOzonDays) || 0} дн. + неснижаемый запас). В запас входят остаток на Ozon, Мой склад и заказанное на фабрике ${fmtInt(factoryWaitingQty)} шт. Нажми, чтобы отметить размещённый заказ.\n${factoryOrdersDetail}`}
-                                    >
-                                      {factoryWaitingQty > 0 ? 'дозаказать ' : ''}{fmtInt(factoryOrderQty)} шт
-                                      <span className="block text-[10px] font-semibold text-rose-400">
-                                        {fmtInt(art.factory.orderBoxes)} кор · {factoryWaitingQty > 0 ? `уже заказано ${fmtInt(factoryWaitingQty)} шт` : `хватит на ${Math.round(art.factory.daysLeft)} дн.`}
-                                      </span>
-                                      {/* Owner, 2026-09-25: an order that does not cover the whole need was invisible
-                                          here — show every waiting order with its China batch and arrival. */}
-                                      {factoryWaitingList.map((o) => (
-                                        <span key={o.id} className="block text-[10px] font-semibold text-sky-600">
-                                          заказ {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}
-                                        </span>
-                                      ))}
-                                    </button>
-                                  ) : (factoryCell.kind === 'clusterDeficitWaiting' || factoryCell.kind === 'clusterDeficit') ? (
-                                    factoryCell.kind === 'clusterDeficitWaiting' ? (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                        className="text-[10px] font-semibold text-slate-500 text-right hover:underline"
-                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. с учётом заказанных на фабрике ${fmtInt(factoryWaitingQty)} шт. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно. Нажми, чтобы изменить заказ.\n${factoryOrdersDetail}`}
-                                      >
-                                        дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
-                                        <span className="block text-[10px] font-normal text-sky-600">заказано {fmtInt(factoryWaitingQty)} шт · ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}</span>
-                                      </button>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                        className="text-[10px] font-semibold text-slate-500 text-right hover:underline"
-                                        title={`Кластерам нужна поставка на ${fmtInt(art.factory.unmetDeficitQty)} шт, но общего запаса хватает на ${Math.round(art.factory.daysLeft)} дн. Товар есть, он лежит в других кластерах, а между кластерами Ozon остаток не перебросить. Заказывать на фабрике не нужно. Нажми, чтобы всё равно отметить заказ на фабрике.`}
-                                      >
-                                        дефицит в кластерах {fmtInt(art.factory.unmetDeficitQty)} шт
-                                        <span className="block text-[10px] font-normal text-slate-400">товар есть, лежит не там</span>
-                                      </button>
-                                    )
-                                  ) : factoryCell.kind === 'waiting' ? (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                      className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100"
-                                      title={`Заказано на фабрике ${fmtInt(factoryWaitingQty)} шт. Заказ входит в запас, дозаказывать не нужно. Нажми, чтобы изменить заказ или отметить приход партии.\n${factoryOrdersDetail}`}
-                                    >
-                                      заказано {fmtInt(factoryWaitingQty)} шт
-                                      <span className="block text-[10px] font-semibold text-sky-600">
-                                        ждём {factoryNearest && factoryNearest.expectedAt ? fmtDateShort(factoryNearest.expectedAt) : '—'}
-                                        {factoryNearest && factoryOrderBadge(factoryNearest) ? ` · ${factoryOrderBadge(factoryNearest)}` : ''}
-                                      </span>
-                                    </button>
-                                  ) : factoryCell.kind === 'bottleneck' ? (
-                                    <span
-                                      className="text-[10px] font-semibold text-slate-500"
-                                      title={`Комплект на фабрике не заказывают — заказывают его компоненты. Самый дефицитный компонент комплекта: ${bottleneckByKit[art.article].componentSku}. Заказ по нему — в блоке «Заказ на фабрике — компоненты» под таблицей. «Собрать» — сколько комплектов можно собрать из остатков компонентов на Моём складе прямо сейчас.`}
-                                    >
-                                      узкое место: {bottleneckByKit[art.article].componentSku}
-                                      <span className="block text-[10px] font-normal text-slate-400">
-                                        хватит на {bottleneckByKit[art.article].daysLeft === null ? '∞' : `${Math.round(bottleneckByKit[art.article].daysLeft as number)} дн`} · собрать: {fmtInt(bottleneckByKit[art.article].canAssembleQty)} шт
-                                      </span>
-                                    </span>
-                                  ) : factoryCell.kind === 'noLeadTime' ? (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                      className="text-[10px] font-semibold text-slate-400 text-right hover:underline"
-                                      title="Не заполнена колонка «Срок поставки, дн» в SKU Базе. Пока она пуста, сигнал по общему остатку сработает только при падении ниже неснижаемого запаса. Нажми, чтобы всё равно отметить заказ на фабрике."
-                                    >
-                                      срок не задан
-                                    </button>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => { e.stopPropagation(); setFactoryModalArticle(art.article); }}
-                                      className="text-slate-300 hover:text-slate-500 hover:underline"
-                                      title={
-                                        (art.factoryDaysLeft === null
-                                          ? 'Продаж за расчётное окно нет — сигнал не считается.'
-                                          : `Заказ не нужен: запаса хватит на ${Math.round(art.factoryDaysLeft)} дн. при пороге ${Math.round(art.factoryThreshold)} дн., непокрытой потребности у кластеров нет.`) +
-                                        ' Нажми, чтобы всё равно отметить заказ на фабрике.'
-                                      }
-                                    >
-                                      не нужно
-                                    </button>
-                                  )}
-                                </td>
-                              )}
-                              {isColVisible('orderCost') && (
-                                <td className="p-3 text-right">
-                                  {factoryOrderQty > 0 && getOrderUnitCost(art.article).price > 0 ? (
-                                    <span
-                                      className="font-semibold text-slate-700"
-                                      title={`${fmtInt(factoryOrderQty)} шт по ${getOrderUnitCost(art.article).price.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽ за штуку — ${getOrderUnitCost(art.article).source}.`}
-                                    >
-                                      {Math.round(factoryOrderQty * getOrderUnitCost(art.article).price).toLocaleString('ru-RU')}
-                                    </span>
-                                  ) : (
-                                    <span className="text-slate-300" title={factoryOrderQty > 0 ? 'Цена неизвестна: товар ещё ни разу не приходил на склад.' : 'Заказывать нечего.'}>—</span>
-                                  )}
-                                </td>
-                              )}
-                            </tr>
-
-                            {/* LEVEL 2: CLUSTERS */}
-                            {isArtExpanded && (manualMode
-                              ? manualClusterList(art.clusters || [], supplyClusterRefs, clusterShares.byClusterId, emptyManualCluster)
-                              : art.clusters
-                            ).map((cls: any) => {
-                              const clusterKey = `${art.article}:::${cls.clusterId}`;
-                              const isClsExpanded = !!expandedClusters[clusterKey];
-                              return (
-                                <React.Fragment key={clusterKey}>
-                                  <tr
-                                    className="border-b border-slate-100 bg-slate-50/70 hover:bg-slate-100/60 cursor-pointer transition-colors"
-                                    onClick={() => toggleCluster(clusterKey)}
-                                    id={`ozon-cls-row-${art.article}-${cls.clusterId}`}
-                                  >
-                                    <td className="p-2.5 pl-8">
-                                      <div className="flex items-center gap-1.5">
-                                        {/* Пункт 63. Галочка и количество. Клик по ним не должен раскрывать строку,
-                                            иначе каждая отметка ещё и разворачивала бы список складов. */}
-                                        {manualMode && (() => {
-                                          const mKey = manualKey(art.article, String(cls.clusterId));
-                                          const picked = manualQty[mKey] !== undefined;
-                                          const blockedDirect = !isClusterSelectable(directRules, manualClusterIds, String(cls.clusterId));
-                                          const blockedCabinet = !isCabinetCompatible(manualCabinetSets, art.cabinets || []);
-                                          const why =
-                                            disabledReason(directRules, manualClusterIds, String(cls.clusterId))
-                                            || cabinetDisabledReason(manualCabinetSets, art.cabinets || [])
-                                            || undefined;
-                                          return (
-                                            <span className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-                                              <input
-                                                type="checkbox"
-                                                id={`ozon-manual-pick-${art.article}-${cls.clusterId}`}
-                                                checked={picked}
-                                                disabled={blockedDirect || blockedCabinet}
-                                                title={why}
-                                                onChange={() => toggleManualPick(art.article, String(cls.clusterId))}
-                                                className="rounded border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed"
-                                              />
-                                              {picked && (
-                                                <input
-                                                  type="number"
-                                                  min={0}
-                                                  placeholder="0"
-                                                  value={manualQty[mKey]}
-                                                  onChange={(e) => changeManualQty(art.article, String(cls.clusterId), e.target.value, art.freeMyStock)}
-                                                  className="w-16 px-1.5 py-0.5 text-[11px] text-right rounded-lg border border-indigo-200 bg-white focus:outline-none focus:border-indigo-400"
-                                                />
-                                              )}
-                                            </span>
-                                          );
-                                        })()}
-                                        {isClsExpanded ? <ChevronDown size={12} className="text-slate-400" /> : <ChevronRight size={12} className="text-slate-400" />}
-                                        <span className="font-semibold text-slate-700 text-[11px]">{cls.clusterName}</span>
-                                        {cls.excluded && (
-                                          <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-slate-200 text-slate-600">без поставок</span>
-                                        )}
-                                        {cls.priority && (
-                                          <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-amber-100 text-amber-700" title="Приоритетный кластер: целевой и неснижаемый запас умножены на коэффициент">
-                                            приоритет ×{cls.priorityK}
-                                          </span>
-                                        )}
-                                      </div>
-                                    </td>
-                                    {isColVisible('sold') && <td className="p-2.5 text-right text-slate-700">{fmtInt(cls.qtySold)}</td>}
-                                    {isColVisible('speed') && (
-                                      <td className="p-2.5 text-right text-slate-700">
-                                        {/* Item 86, step B. Cluster speed = article speed × its share of the article's
-                                            sales over the long share window (replaces item 72's own best-weeks lift). */}
-                                        <span className="relative inline-flex group cursor-help">
-                                          <span>{fmtSpeed(cls.perDay)}</span>
-                                          <span className={`absolute right-0 ${tipUp} hidden group-hover:block z-30 w-72 p-2.5 rounded-lg bg-slate-800 text-white text-[11px] font-normal leading-snug text-left shadow-xl`}>
-                                            Скорость кластера = скорость товара × доля кластера в продажах за {cls.shareWindowWeeks} нед. ({cls.speedSharePct.toFixed(1)} %).
-                                          </span>
-                                        </span>
-                                      </td>
-                                    )}
-                                    {isColVisible('trend') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                    {isColVisible('share') && <td className="p-2.5 text-right text-slate-600">{cls.speedSharePct > 0 ? `${cls.speedSharePct.toFixed(1)}%` : '—'}</td>}
-                                    {isColVisible('available') && <td className={`p-2.5 text-right ${cls.available === 0 ? 'text-slate-300' : 'text-slate-800 font-medium'}`}>{fmtInt(cls.available)}</td>}
-                                    {isColVisible('preparing') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                    {isColVisible('requested') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                    {isColVisible('transit') && <td className={`p-2.5 text-right ${cls.transit === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.transit)}</td>}
-                                    {isColVisible('excess') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                    {isColVisible('returns') && <td className={`p-2.5 text-right ${cls.returns === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(cls.returns)}</td>}
-                                    {isColVisible('other') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                    {isColVisible('estimated') && <td className="p-2.5 text-right font-medium text-slate-800">{fmtInt(cls.estimated)}</td>}
-                                    {isColVisible('coverage') && <td className={`p-2.5 text-right ${TONE_CLASS[coverageTone(cls.estimated, cls.perDay, ozonSettings, cls.priorityK, cls.excluded)]}`}>{fmtDays(cls.coverageDays, cls.estimated)}</td>}
-                                    {isColVisible('pending') && (
-                                      <td className="p-2.5 text-right">
-                                        {cls.inFlightQty > 0 ? (
-                                          <span className="font-medium text-sky-600" title={`Едет в кластер ${fmtInt(cls.inFlightQty)} шт — учтены в «Расчётном». По нашим заявкам: ${fmtInt(cls.pendingQty)} шт. По данным Ozon: «В пути» ${fmtInt(cls.transit)} + «В заявках» ${fmtInt(cls.requestedQty)} = ${fmtInt(cls.ozonInFlightQty)} шт. Берём большее из двух, а не сумму — это одни и те же поставки.`}>
-                                            {fmtInt(cls.inFlightQty)}
-                                          </span>
-                                        ) : (
-                                          <span className="text-slate-300">—</span>
-                                        )}
-                                      </td>
-                                    )}
-                                    {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                    {isColVisible('recommendation') && (
-                                      <td className="p-2.5 text-right">
-                                        {cls.recommendation && cls.recommendation.boxes > 0 ? (
-                                          <span
-                                            className={cls.recommendation.limitedByMyStock ? 'text-amber-600 font-semibold' : 'text-indigo-600 font-semibold'}
-                                            title={cls.recommendation.limitedByMyStock ? `Урезано остатком Моего склада: полная потребность ${fmtInt(cls.needQty)} шт` : undefined}
-                                          >
-                                            {fmtInt(cls.recommendation.boxes)} кор ({fmtInt(cls.recommendation.qty)} шт)
-                                            {cls.recommendation.partialByMaxDays && (
-                                              <span
-                                                className="block text-[10px] font-normal text-slate-500"
-                                                title={`Полная коробка дала бы кластеру запас на ${fmtInt(cls.recommendation.fullBoxDays)} дн — дольше настройки «Максимальный срок продаж кластера, дней». Везём ровно столько, сколько нужно до целевого запаса.`}
-                                              >
-                                                неполная коробка: полная = запас на {fmtInt(cls.recommendation.fullBoxDays)} дн
-                                              </span>
-                                            )}
-                                          </span>
-                                        ) : cls.recommendation && cls.needQty > 0 ? (
-                                          <span className="text-red-600 font-semibold" title="Кластеру нужна поставка, но на Моём складе нет товара">
-                                            нужно {fmtInt(cls.needBoxes)} кор ({fmtInt(cls.needQty)} шт)
-                                            <span className="block text-[10px] font-bold text-red-400">нет на складе</span>
-                                          </span>
-                                        ) : (
-                                          <span className="text-slate-300">—</span>
-                                        )}
-                                      </td>
-                                    )}
-                                    {isColVisible('factory') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                    {isColVisible('orderCost') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                  </tr>
-
-                                  {/* LEVEL 3: WAREHOUSES */}
-                                  {isClsExpanded && cls.warehouses.map((wh: OzonStockRow, idx: number) => (
-                                    <tr
-                                      key={`${clusterKey}-wh-${idx}`}
-                                      className="border-b border-slate-100/50 bg-white hover:bg-slate-50 transition-colors"
-                                      id={`ozon-wh-row-${art.article}-${cls.clusterId}-${idx}`}
-                                    >
-                                      <td className="p-2 pl-14">
-                                        <div className="flex items-center gap-1.5">
-                                          {uniqueCabinetsCount > 1 && (
-                                            <span className="text-[10px] px-1 py-0.5 rounded font-bold bg-slate-100 text-slate-500">{wh.cabinet}</span>
-                                          )}
-                                          <span className="text-slate-600 text-[11px]">{wh.warehouseName}</span>
-                                        </div>
-                                      </td>
-                                      {isColVisible('sold') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('speed') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('trend') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('share') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('available') && <td className={`p-2 text-right ${(wh.available || 0) === 0 ? 'text-slate-300' : 'text-slate-700'}`}>{fmtInt(wh.available)}</td>}
-                                      {isColVisible('preparing') && <td className={`p-2 text-right ${(wh.preparing || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.preparing)}</td>}
-                                      {isColVisible('requested') && <td className={`p-2 text-right ${(wh.requested || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.requested)}</td>}
-                                      {isColVisible('transit') && <td className={`p-2 text-right ${(wh.transit || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.transit)}</td>}
-                                      {isColVisible('excess') && <td className={`p-2 text-right ${(wh.excess || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.excess)}</td>}
-                                      {isColVisible('returns') && <td className={`p-2 text-right ${(wh.returns || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.returns)}</td>}
-                                      {isColVisible('other') && <td className={`p-2 text-right ${(wh.other || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>{fmtInt(wh.other)}</td>}
-                                      {isColVisible('estimated') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('coverage') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('pending') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('myStock') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('recommendation') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('factory') && <td className="p-2 text-right text-slate-300">—</td>}
-                                      {isColVisible('orderCost') && <td className="p-2 text-right text-slate-300">—</td>}
-                                    </tr>
-                                  ))}
-                                </React.Fragment>
-                              );
-                            })}
-
-                            {/* LEVEL 2: UNBOUND (без кластера) */}
-                            {isArtExpanded && art.unboundRows.length > 0 && (
-                              <tr className="border-b border-slate-100 bg-slate-50/70" id={`ozon-unbound-row-${art.article}`}>
-                                <td className="p-2.5 pl-8">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="font-semibold text-slate-500 text-[11px]">Без кластера (агрегат)</span>
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-slate-200 text-slate-600">не в рекомендациях</span>
-                                  </div>
-                                </td>
-                                {isColVisible('sold') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundQtySold)}</td>}
-                                {isColVisible('speed') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                {isColVisible('trend') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                {isColVisible('share') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                {isColVisible('available') && <td className="p-2.5 text-right text-slate-700">{fmtInt(art.unboundTotals.available)}</td>}
-                                {isColVisible('preparing') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.preparing)}</td>}
-                                {isColVisible('requested') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.requested)}</td>}
-                                {isColVisible('transit') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.transit)}</td>}
-                                {isColVisible('excess') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.excess)}</td>}
-                                {isColVisible('returns') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.returns)}</td>}
-                                {isColVisible('other') && <td className="p-2.5 text-right text-slate-600">{fmtInt(art.unboundTotals.other)}</td>}
-                                {isColVisible('estimated') && <td className="p-2.5 text-right font-medium text-slate-700">{fmtInt(art.unboundEstimated)}</td>}
-                                {isColVisible('coverage') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                {isColVisible('pending') && (
-                                  <td className="p-2.5 text-right">
-                                    {(pendingSupplies.unboundInFlightByArticle[art.article] || 0) > 0 ? (
-                                      <span className="text-slate-600" title="Заявки, у которых Ozon не вернул кластер. В кластерные рекомендации они не идут, но в общий итог товара и в трубу фабрики входят.">
-                                        {fmtInt(pendingSupplies.unboundInFlightByArticle[art.article] || 0)}
-                                      </span>
-                                    ) : (
-                                      <span className="text-slate-300">—</span>
-                                    )}
-                                  </td>
-                                )}
-                                {isColVisible('myStock') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                {isColVisible('recommendation') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                {isColVisible('factory') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                                {isColVisible('orderCost') && <td className="p-2.5 text-right text-slate-300">—</td>}
-                              </tr>
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {/* Owner, 2026-09-25: goods ordered in China that are not on Ozon yet (they go there
-                after arriving at the warehouse) have no row above — list their orders here so an
-                order never disappears from sight. Components have their own table below. */}
-            {offOzonFactoryOrders.length > 0 && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-offozon-factory">
-                <div className="text-xs font-bold text-slate-700 mb-1">
-                  Заказано на фабрике — товары, которых пока нет на Ozon
-                  <span className="font-normal text-slate-400 ml-2">артикулов: {offOzonFactoryOrders.length}</span>
-                </div>
-                <div className="flex flex-col gap-1 text-[11px]">
-                  {offOzonFactoryOrders.map(({ article, orders }) => (
-                    <div key={article} className="flex flex-wrap items-baseline gap-x-3">
-                      <span className="font-mono font-bold text-slate-800">{article}</span>
-                      {orders.map((o) => (
-                        <span key={o.id} className="text-sky-700">
-                          {fmtInt(o.qty)} шт{factoryOrderBadge(o) ? ` · ${factoryOrderBadge(o)}` : ''}{o.expectedAt ? ` · ждём ${fmtDateShort(o.expectedAt)}` : ''}{factoryLateLabel(openFactoryOrders.late[o.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[o.id])}` : ''}
-                        </span>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {componentRows.length > 0 && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-components-factory">
-                <div className="text-xs font-bold text-slate-700 mb-1">
-                  Заказ на фабрике — компоненты
-                  <span className="font-normal text-slate-400 ml-2">компонентов в расчёте: {componentRows.length}</span>
-                </div>
-                <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
-                  Виртуальный комплект на фабрике не заказывают — заказывают его компоненты, у них свои сроки поставки и свои коробки. Скорость компонента — сумма скоростей комплектов, куда он входит, умноженная на норму расхода: у компонента с нормой 1 она в точности равна скорости комплекта из таблицы выше. Заказ считается не по ней, а по прогнозной скорости (факт × тренд продаж комплекта) — она показана второй строкой, когда отличается от факта. «В обороте» — это НЕ складской остаток: сюда входит и тот же компонент внутри готовых комплектов, уже уехавших на Ozon. Он будет продан, но собрать из него новые комплекты нельзя — для сборки есть только складская часть, и она показана в разбивке под числом.
-                </div>
-                <div className="overflow-auto">
-                  <table className="w-full text-left text-[11px] border-collapse" id="ozon-components-table">
-                    <thead>
-                      <tr className="text-slate-500 font-semibold border-b border-slate-200">
-                        <th className="py-2 pr-2 min-w-[200px]">Компонент</th>
-                        <th className="py-2 pr-2 text-right">Скорость, шт/д</th>
-                        <th
-                          className="py-2 pr-2 text-right"
-                          title="НЕ остаток на Моём складе. Это весь компонент, который сейчас есть в обороте: собственный остаток на складе, плюс тот же компонент внутри готовых комплектов, уже лежащих на Ozon, плюс заказанное на фабрике. Разбивка — строкой ниже под числом. Собрать новые комплекты можно только из складской части."
-                        >
-                          В обороте
-                        </th>
-                        <th className="py-2 pr-2 text-right">Срок поставки, дней</th>
-                        <th className="py-2 pr-2 text-right">Хватит на</th>
-                        <th className="py-2 pr-2 text-right">Требуемый заказ</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {componentRows.map((c) => {
-                        // Разбор заказов на фабрике для компонента — по образцу основной таблицы,
-                        // иначе после оформления заказа он пропадал бы из вида: сигнал гас, а сам заказ было не видно и не открыть.
-                        // Item 85, step 1.7: the same rule as the main table and the pipeline — a late
-                        // China order stays waiting («задерживается N дн»), never «просрочен».
-                        const compFactoryCell = factoryCellByComponent[c.component];
-                        // Item 88 ticket 04 follow-up: the same predicate the cell's own `orderQty`
-                        // field already encodes (`c.factory && c.factory.orderQty > 0`), and
-                        // threshold/daysLeftNoSignal now come straight off the model's component row.
-                        const needOrder = compFactoryCell.orderQty > 0;
-                        const overdueList = compFactoryCell.overdueList;
-                        const overdueQty = compFactoryCell.overdueQty;
-                        const waitingList = compFactoryCell.waitingList;
-                        const waitingQty = compFactoryCell.waitingQty;
-                        const nearest = compFactoryCell.nearest;
-                        const threshold = c.threshold;
-                        // Сколько дней хватит запаса без сигнала — нужно показывать даже когда заказывать не надо,
-                        // иначе после оформления заказа рост покрытия остаётся невидимым.
-                        // Пункт 38: делить надо на ПРОГНОЗНУЮ скорость — по ней же считается и сам сигнал,
-                        // иначе колонка показывала бы одни дни, а порог срабатывания считался бы по другим.
-                        const daysLeftNoSignal = c.daysLeftNoSignal;
-                        return (
-                          <tr
-                            key={c.component}
-                            id={`ozon-comp-row-${c.component}`}
-                            className={`border-b border-slate-100 ${needOrder ? 'bg-rose-50/60' : overdueList.length > 0 || (c.factory && c.factory.unmetDeficitQty > 0) ? 'bg-amber-50/60' : ''}`}
-                          >
-                            <td className="py-2 pr-2">
-                              <span className="font-mono font-bold text-slate-800">{c.component}</span>
-                              <span className="block text-[10px] text-slate-400" title="Комплекты, в которые входит компонент">
-                                ({c.usedInKits.join(', ')})
-                              </span>
-                            </td>
-                            {/* Крупно — ФАКТИЧЕСКИЙ расход: это та же величина, что скорость комплекта в
-                                таблице выше (норма расхода на комплект), и расходиться с ней она не может.
-                                Прогноз — производная от неё, поэтому идёт второй строкой. */}
-                            <td className="py-2 pr-2 text-right font-semibold text-slate-800">
-                              {fmtSpeed(c.perDay)}
-                              {Math.abs(c.forecastPerDay - c.perDay) > 0.005 && (
-                                <span
-                                  className="block text-[10px] font-normal text-slate-400"
-                                  title="Заказ на фабрике считается по прогнозной скорости: фактическая скорость комплектов умножена на их тренд продаж. Рекомендации на поставку в кластеры считаются по фактической."
-                                >
-                                  прогноз {fmtSpeed(c.forecastPerDay)}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2 pr-2 text-right">
-                              <span className="font-semibold text-slate-800">{fmtInt(c.pipelineQty)}</span>
-                              <span
-                                className="block text-[10px] font-normal text-slate-400"
-                                title="«Склад» — свободный остаток компонента. Резерв — часть склада, уже расписанная по созданным заявкам: эти штуки считаются внутри комплектов, которые едут на Ozon, поэтому второй раз в трубу не входят. Собрать из резерва новые комплекты нельзя."
-                              >
-                                из комплектов {fmtInt(c.fromKitsQty)} / склад {fmtInt(c.freeMyStockQty)} / заказано {fmtInt(c.onOrderQty)}
-                                {c.reservedQty > 0 && <> · в резерве ещё {fmtInt(c.reservedQty)} (учтены в комплектах, которые едут)</>}
-                              </span>
-                            </td>
-                            <td className={`py-2 pr-2 text-right ${(Number(c.leadTimeDays) || 0) === 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                              {(Number(c.leadTimeDays) || 0) === 0 ? '—' : fmtInt(c.leadTimeDays)}
-                            </td>
-                            <td className="py-2 pr-2 text-right">
-                              {c.perDay === 0 ? (
-                                <span
-                                  className="text-slate-300"
-                                  title="Комплекты с этим компонентом за расчётное окно не продавались — сигнал не считается."
-                                >
-                                  —
-                                </span>
-                              ) : c.factory ? (
-                                <span
-                                  className="font-semibold text-slate-700"
-                                  title={`Запаса хватит на ${Math.round(c.factory.daysLeft)} дн. при пороге ${Math.round(threshold)} дн. (срок поставки компонента ${fmtInt(c.leadTimeDays)} дн. + срок доставки до Ozon ${Number(ozonSettings.deliveryToOzonDays) || 0} дн. + неснижаемый запас).`}
-                                >
-                                  {Math.round(c.factory.daysLeft)} дн
-                                </span>
-                              ) : (
-                                <span
-                                  className="text-slate-500"
-                                  title={`Заказ не нужен: запаса хватит на ${daysLeftNoSignal} дн. при пороге ${Math.round(threshold)} дн.`}
-                                >
-                                  {daysLeftNoSignal} дн
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2 pr-2 text-right">
-                              {compFactoryCell.kind === 'overdue' ? (
-                                <button
-                                  type="button"
-                                  onClick={() => setFactoryModalArticle(c.component)}
-                                  className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
-                                  title="Фабрика сорвала срок. Просроченный заказ в запас НЕ входит. Нажми, чтобы изменить дату или отметить приход партии."
-                                >
-                                  просрочен · {fmtDateShort(overdueList[0].expectedAt)}
-                                  <span className="block text-[10px] font-semibold text-amber-600">{fmtInt(overdueQty)} шт · нажми, чтобы решить</span>
-                                </button>
-                              ) : compFactoryCell.kind === 'order' && c.factory ? (
-                                <button
-                                  type="button"
-                                  onClick={() => setFactoryModalArticle(c.component)}
-                                  className="text-rose-600 font-bold text-right hover:underline"
-                                >
-                                  {waitingQty > 0 ? 'дозаказать ' : ''}{fmtInt(c.factory.orderQty)} шт
-                                  <span className="block text-[10px] font-semibold text-rose-400">
-                                    {fmtInt(c.factory.orderBoxes)} кор · {waitingQty > 0 ? `уже заказано ${fmtInt(waitingQty)} шт` : `хватит на ${Math.round(c.factory.daysLeft)} дн.`}
-                                  </span>
-                                </button>
-                              ) : compFactoryCell.kind === 'clusterDeficit' && c.factory ? (
-                                /* 29.08.2026. Дефицит кластеров комплекта теперь доходит до компонента,
-                                   который держит сборку. Заказа на фабрике при этом может и не быть:
-                                   общего запаса хватает надолго, не хватает именно свободного склада
-                                   прямо сейчас — и это два разных утверждения, которые нельзя смешивать. */
-                                <button
-                                  type="button"
-                                  onClick={() => setFactoryModalArticle(c.component)}
-                                  className="text-[10px] font-semibold text-amber-700 text-right hover:underline"
-                                  title={`Кластерам не досталось ${fmtInt(c.factory.unmetDeficitQty)} шт из-за этого компонента: собрать больше комплектов не из чего. Свободно на складе ${fmtInt(c.freeMyStockQty)} шт из ${fmtInt(c.myStockQty)} — остальное обещано созданным заявкам. Общего запаса при этом хватает на ${Math.round(c.factory.daysLeft)} дн. при пороге ${Math.round(threshold)} дн., поэтому расчёт заказа на фабрике не требует.${waitingQty > 0 ? ` Уже заказано ${fmtInt(waitingQty)} шт.` : ''} Нажми, чтобы оформить заказ на фабрике.`}
-                                >
-                                  держит сборку · {fmtInt(c.factory.unmetDeficitQty)} шт
-                                  <span className="block text-[10px] font-normal text-amber-600">
-                                    свободно {fmtInt(c.freeMyStockQty)} шт{waitingQty > 0 ? ` · заказано ${fmtInt(waitingQty)} шт` : ''}
-                                  </span>
-                                </button>
-                              ) : compFactoryCell.kind === 'waiting' ? (
-                                <button
-                                  type="button"
-                                  onClick={() => setFactoryModalArticle(c.component)}
-                                  className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100"
-                                  title={`Заказано на фабрике ${waitingQty} шт. Заказ входит в запас, дозаказывать не нужно. Нажми, чтобы изменить заказ или отметить приход партии.`}
-                                >
-                                  заказано {fmtInt(waitingQty)} шт
-                                  <span className="block text-[10px] font-semibold text-sky-600">
-                                    ждём {nearest && nearest.expectedAt ? fmtDateShort(nearest.expectedAt) : '—'}
-                                    {nearest && factoryOrderBadge(nearest) ? ` · ${factoryOrderBadge(nearest)}` : ''}
-                                    {nearest && factoryLateLabel(openFactoryOrders.late[nearest.id]) ? ` · ${factoryLateLabel(openFactoryOrders.late[nearest.id])}` : ''}
-                                  </span>
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => setFactoryModalArticle(c.component)}
-                                  className="text-slate-300 hover:text-slate-500 hover:underline"
-                                  title="Заказ по расчёту не нужен. Нажми, чтобы всё равно отметить заказ на фабрике по этому компоненту."
-                                >
-                                  не нужно
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {clusterShares.list.length > 0 && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 mt-3" id="ozon-cluster-shares">
-                <div className="text-xs font-bold text-slate-700 mb-3">
-                  Доли кластеров в продажах
-                  <span className="font-normal text-slate-400 ml-2">всего продано: {fmtInt(clusterShares.total)} шт</span>
-                </div>
-                <div className="flex flex-col gap-2">
-                  {clusterShares.list.map((c) => (
-                    <div key={c.clusterName} className="flex items-center gap-3">
-                      <span className="w-40 shrink-0 flex items-center gap-1.5 overflow-hidden">
-                        <span className="text-[11px] text-slate-600 truncate" title={c.clusterName}>{c.clusterName}</span>
-                        {c.priority && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-md font-bold bg-amber-100 text-amber-700 shrink-0" title="Приоритетный кластер: целевой и неснижаемый запас умножены на коэффициент">
-                            ×{c.priorityK}
-                          </span>
-                        )}
-                      </span>
-                      <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(100, c.pct)}%` }} />
-                      </div>
-                      <span className="text-[11px] font-semibold text-slate-700 w-14 text-right">{c.pct.toFixed(1)}%</span>
-                      <span className="text-[11px] text-slate-400 w-16 text-right">{fmtInt(c.qty)} шт</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <OzonComponentsTable
+              offOzonFactoryOrders={offOzonFactoryOrders}
+              componentRows={componentRows}
+              factoryCellByComponent={factoryCellByComponent}
+              factoryLateById={openFactoryOrders.late}
+              ozonSettings={ozonSettings}
+              clusterShares={clusterShares}
+              setFactoryModalArticle={setFactoryModalArticle}
+            />
           </div>
       </div>
-      <OzonSettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} openBlocks={['supply', 'factory']} computeImpact={computeSettingsImpact} />
-      <OzonSupplyModal
-        isOpen={supplySummaryOpen && supplyPlan.rows.length > 0}
-        onClose={() => setSupplySummaryOpen(false)}
-        rows={supplyPlan.rows}
-        stockOptions={supplyStockOptions}
-        cabinet={resolveSupplyCabinet(selectedCabinetSets) || (cabinetFilter !== 'all' ? cabinetFilter : '')}
-        clusterSalesShare={clusterShares.byClusterId}
-        dropOffWarehouseId={supplySettings.dropOffWarehouseId}
-        dropOffWarehouseName={supplySettings.dropOffWarehouseName}
-        dropOffWarehouseType={supplySettings.dropOffWarehouseType}
-        onCreated={() => {
-          setSelectedSupply({});
-          // Пункт 66. Созданная заявка гасит режим ручного выбора, из какого бы списка
-          // она ни ушла. Иначе полный список кластеров оставался на экране после
-          // оформления — режим выключен только у своей кнопки, а рисуют его обе.
-          exitManualMode();
-        }}
+      <OzonStocksModals
+        showSettings={showSettings}
+        onCloseSettings={() => setShowSettings(false)}
+        computeSettingsImpact={computeSettingsImpact}
+        supplySummaryOpen={supplySummaryOpen}
+        onCloseSupplySummary={() => setSupplySummaryOpen(false)}
+        supplyPlan={supplyPlan}
+        supplyStockOptions={supplyStockOptions}
+        selectedCabinetSets={selectedCabinetSets}
+        cabinetFilter={cabinetFilter}
+        clusterShares={clusterShares}
+        supplySettings={supplySettings}
+        setSelectedSupply={setSelectedSupply}
+        exitManualMode={exitManualMode}
+        manualSummaryOpen={manualSummaryOpen}
+        onCloseManualSummary={() => setManualSummaryOpen(false)}
+        manualPlan={manualPlan}
+        manualCabinetSets={manualCabinetSets}
+        setManualSummaryOpen={setManualSummaryOpen}
+        factoryModalArticle={factoryModalArticle}
+        onCloseFactoryModal={() => setFactoryModalArticle(null)}
+        factoryModalRow={factoryModalRow}
+        activeFactoryOrders={activeFactoryOrders}
+        factoryOrdersByArticle={factoryOrdersByArticle}
+        hiddenManualByArticle={hiddenManualByArticle}
+        onResolveFactoryConflict={askResolveFactoryConflict}
+        pendingModalArticle={pendingModalArticle}
+        onClosePendingModal={() => setPendingModalArticle(null)}
+        pendingModalRows={pendingModalRows}
+        clusterNameById={clusterNameById}
       />
-      {/* Пункт 63. Тот же мастер, что и у рекомендаций: ручной выбор идёт стандартным путём
-          создания заявки. Выборы независимы, поэтому и окна разные. */}
-      <OzonSupplyModal
-        isOpen={manualSummaryOpen && manualPlan.rows.length > 0}
-        onClose={() => setManualSummaryOpen(false)}
-        rows={manualPlan.rows}
-        stockOptions={supplyStockOptions}
-        cabinet={resolveSupplyCabinet(manualCabinetSets) || (cabinetFilter !== 'all' ? cabinetFilter : '')}
-        clusterSalesShare={clusterShares.byClusterId}
-        dropOffWarehouseId={supplySettings.dropOffWarehouseId}
-        dropOffWarehouseName={supplySettings.dropOffWarehouseName}
-        dropOffWarehouseType={supplySettings.dropOffWarehouseType}
-        onCreated={() => { exitManualMode(); setManualSummaryOpen(false); }}
-      />
-      {factoryModalArticle && (
-        <FactoryOrderModal
-          isOpen={true}
-          onClose={() => setFactoryModalArticle(null)}
-          article={factoryModalArticle}
-          productName={factoryModalRow ? factoryModalRow.name : ''}
-          suggestedQty={factoryModalRow && factoryModalRow.factory ? factoryModalRow.factory.orderQty : 0}
-          pcsPerBox={factoryModalRow ? factoryModalRow.pcsPerBox : 1}
-          leadTimeDays={factoryModalRow ? factoryModalRow.leadTimeDays : 0}
-          order={activeFactoryOrders[factoryModalArticle] || null}
-          orders={factoryOrdersByArticle[factoryModalArticle] || []}
-          hiddenManual={hiddenManualByArticle[factoryModalArticle] || []}
-          onResolveConflict={askResolveFactoryConflict}
-        />
-      )}
-      {pendingModalArticle && (
-        <div
-          className="fixed inset-0 z-50 bg-slate-900/40 flex items-start justify-center p-4 overflow-y-auto"
-          onClick={() => setPendingModalArticle(null)}
-        >
-          <div
-            className="bg-white rounded-2xl shadow-xl w-full max-w-3xl mt-16 p-5"
-            onClick={(e) => e.stopPropagation()}
-            id="ozon-pending-modal"
-          >
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div>
-                <div className="text-sm font-bold text-slate-800">Расшифровка зачёта</div>
-                <div className="text-[11px] text-slate-500 font-mono">{pendingModalArticle}</div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPendingModalArticle(null)}
-                className="text-slate-400 hover:text-slate-700 text-lg leading-none px-2"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="text-[11px] text-slate-500 bg-slate-50 rounded-xl p-3 mb-3 leading-snug">
-              Эти заявки уже созданы, поэтому их количества вычтены из потребности, а пока товар не списан — зарезервированы на Моём складе. Заявка считается «едущей» до начала приёмки на складе Ozon; дальше товар учитывается по колонкам Ozon. Заявка выпадает сама, когда отменена, отклонена или просрочена. Если статус получить не удалось, она истечёт через 7 дней от даты в колонке «С какого числа». Строка «списана, едет» уже списана со склада: остаток она не резервирует, но в кластер ещё едет и из потребности вычтена. Строка «принята Ozon» уже на приёмке у Ozon и учтена его колонками: резерв держится до списания, в потребности не повторяется.
-            </div>
-            {pendingModalRows.length === 0 ? (
-              <div className="text-[11px] text-slate-400">По этому товару активных заявок нет.</div>
-            ) : (
-              <table className="w-full text-left text-[11px] border-collapse">
-                <thead>
-                  <tr className="text-slate-500 font-semibold border-b border-slate-200">
-                    <th className="py-2 pr-2">Кластер</th>
-                    <th className="py-2 pr-2 text-right">Штук</th>
-                    <th className="py-2 pr-2">Статус</th>
-                    <th className="py-2 pr-2">С какого числа</th>
-                    <th className="py-2 pr-2">Заявка</th>
-                    <th className="py-2">Откуда</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pendingModalRows.map((d, idx) => (
-                    <tr key={`${d.orderId}-${d.clusterId}-${idx}`} className="border-b border-slate-100">
-                      <td className="py-2 pr-2 text-slate-700">{d.clusterId ? (clusterNameById[d.clusterId] || d.clusterId) : 'Без кластера'}</td>
-                      <td className="py-2 pr-2 text-right font-semibold text-slate-800">{fmtInt(d.qty)}</td>
-                      <td className="py-2 pr-2">
-                        <span className={`px-1.5 py-0.5 rounded-md font-semibold ${getStatusDetails(d.ozonStatus).badgeClass}`}>
-                          {getStatusDetails(d.ozonStatus).label}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-2 text-slate-500">{fmtDateFull(d.since)}</td>
-                      <td className="py-2 pr-2 text-slate-500 font-mono">{d.orderId || '—'}</td>
-                      <td className="py-2 text-slate-400">
-                        {d.source === 'shipment' ? 'данные Ozon' : 'журнал заявок'}
-                        {!d.reservesMyStock && <span className="ml-1 text-amber-600 font-semibold">списана, едет</span>}
-                        {!d.countsForCluster && <span className="ml-1 text-sky-600 font-semibold">принята Ozon</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="font-bold text-slate-800">
-                    <td className="py-2 pr-2">Итого резерв склада</td>
-                    <td className="py-2 pr-2 text-right">{fmtInt(pendingModalRows.reduce((s, d) => s + (d.reservesMyStock ? d.qty : 0), 0))}</td>
-                    <td colSpan={4}></td>
-                  </tr>
-                </tfoot>
-              </table>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 });

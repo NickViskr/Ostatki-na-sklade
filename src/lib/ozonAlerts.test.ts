@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildCoverageAlerts } from './ozonAlerts';
 import { isFunnelVisibleStatus } from './ozonStatus';
 import type { ArticleCoverage, ClusterCoverageRow, ComponentCoverage, FactorySignal, OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 const settings: OzonCoverageSettings = {
   speedWeeks: 4,
@@ -215,7 +216,7 @@ describe('Item 73. Алерт «Спрос вырос»', () => {
     const path = require('path');
     const dashboard = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
     expect(dashboard).toMatch(/alert\.type === 'demand_growth' \? 'ozonStocks'/);
-    const tab = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const tab = readOzonStocksScreen();
     expect(tab).toContain('art.demandGrowth && art.demandGrowth.applied');
     expect(tab).toContain('спрос +{Math.round(art.demandGrowth.growthPct)} %');
   });

@@ -12,6 +12,7 @@ import {
   validateSelection,
   type DirectClusterRule
 } from './ozonDirectSupply';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 // Plan item 58, stage 1. Ekaterinburg (cluster 4066) ships by direct supply and therefore
 // travels alone: Ozon has no draft that mixes a direct cluster with anything else.
@@ -203,7 +204,7 @@ describe('склад для заявки', () => {
 // Компонентных тестов в проекте нет, поэтому подключение стережётся по исходному коду.
 describe('подключение правила к экранам', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
-  const stocks = read('src/components/OzonStocksTab.tsx');
+  const stocks = readOzonStocksScreen();
   const modal = read('src/components/OzonSupplyModal.tsx');
 
   it('«Рекомендации»: галочка гаснет по правилу', () => {

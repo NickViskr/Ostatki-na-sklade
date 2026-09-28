@@ -7,6 +7,7 @@ import {
   type SalesSpeedResult, type OzonCoverageInput, type OzonCoverageSettings
 } from './ozonCoverage';
 import type { OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 /**
  * Item 86, step B (owner, 26.09.2026): «Остатки Озон» rework. Replaces item 72's per-cluster
@@ -277,7 +278,7 @@ describe('item 86 step B: generated invariants (500 sets, 1–3 clusters)', () =
 
 describe('item 86 step B: display', () => {
   it('the cluster speed tooltip shows the share formula and its fields; the item-72 correction badge is gone', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const src = readOzonStocksScreen();
     expect(src).toContain('Скорость кластера = скорость товара × доля кластера в продажах за');
     expect(src).toContain('cls.shareWindowWeeks');
     expect(src).toContain('cls.speedSharePct.toFixed(1)');
@@ -286,7 +287,7 @@ describe('item 86 step B: display', () => {
   });
 
   it('the «Доля» column shows the share the speed is computed from, not a second short-window share', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const src = readOzonStocksScreen();
     expect(src).toContain("{isColVisible('share') && <td className=\"p-2.5 text-right text-slate-600\">{cls.speedSharePct > 0 ? `${cls.speedSharePct.toFixed(1)}%` : '—'}</td>}");
     expect(src).toContain('Скорость кластера = скорость товара × эта доля');
     expect(src).not.toMatch(/cls\.sharePct\b/);

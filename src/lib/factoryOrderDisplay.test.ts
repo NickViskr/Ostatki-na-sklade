@@ -7,6 +7,7 @@ import {
   forecastPipelineStatus, forecastPipelineStatusLabel, splitFactoryOrders
 } from './factoryOrderDisplay';
 import { factoryOnOrderByArticle } from './ozonCoverage';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 const order = (patch: Partial<FactoryOrder>): FactoryOrder => ({
   id: 'o1', article: 'ART-1', orderedAt: '2026-09-01', qty: 10, expectedAt: '2026-10-01',
@@ -119,7 +120,7 @@ describe('item 85, step 1.7: splitFactoryOrders — the screen follows the pipel
   });
 
   it('both tables of «Остатки Озон» use it with the hidden ids, and keep no inline copy of the rule', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const src = readOzonStocksScreen();
     // Item 88 ticket 04: the article- and component-level «Фабрика» cell state (with them, the
     // splitFactoryOrders call) moved into buildArticleFactoryCellState/buildComponentFactoryCellState
     // in the tab model — the screen only reads the resulting FactoryCellState. Review follow-up:

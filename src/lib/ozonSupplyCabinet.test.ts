@@ -7,6 +7,7 @@ import {
   possibleCabinets,
   resolveSupplyCabinet
 } from './ozonSupplyCabinet';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 // Пункт 59. На боевых данных 27.08.2026: 13 артикулов, 10 у Mercurius и 3 у MaxiStore,
 // ни один не продаётся в двух кабинетах сразу. Фикстуры повторяют это, но обязательно
@@ -88,7 +89,7 @@ describe('пункт 59: товар другого магазина не доб�
 // Подключение стережётся по исходному коду: компонентных тестов в проекте нет.
 describe('подключение правила магазина к экранам', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
-  const stocks = read('src/components/OzonStocksTab.tsx');
+  const stocks = readOzonStocksScreen();
   const modal = read('src/components/OzonSupplyModal.tsx');
   const server = read('server.ts');
 

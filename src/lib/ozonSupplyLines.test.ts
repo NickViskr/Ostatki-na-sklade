@@ -65,6 +65,7 @@ describe('Item 45. Потолок строки заявки = свободный
 });
 
 import { acceptedForLine, applyOzonCorrection, foldOzonVerdict } from './ozonSupplyLines';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 // Ozon отвечает по кластерам и опознаёт товар по offerId и своему SKU.
 // В тестах артикул совпадает с offerId — так же, как это делает resolveOzonArticle на боевых данных.
@@ -311,7 +312,7 @@ describe('пункт 60: порядок кластеров по доле про�
 
 describe('подключение пункта 60 к экранам', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
-  const stocks = read('src/components/OzonStocksTab.tsx');
+  const stocks = readOzonStocksScreen();
   const modal = read('src/components/OzonSupplyModal.tsx');
   // Item 88 ticket 04: the supply-plan and cluster-shares stages moved into
   // buildSupplyPlan/buildClusterShares in the tab model.

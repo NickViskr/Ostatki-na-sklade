@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildOzonCoverage, type OzonCoverageInput, type OzonPendingLike } from './ozonCoverage';
 import type { KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 /**
  * Item 85, step 1.6 (audit 2026-09-26). BowlGrayMini_01 and BowlBlueMini_01 share «Бутылки» and
@@ -175,7 +176,7 @@ describe('item 85, step 1.6 / item 88 ticket 03: every kit component gets its ow
     expect((source.match(loop) || []).length).toBe(1);
   });
   it('neither screen has its own copy of the loop — both call buildCoverageSource instead', () => {
-    const tab = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const tab = readOzonStocksScreen();
     const dash = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
     expect(tab).not.toContain('myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku)');
     expect(dash).not.toContain('myStockAvailability[c.componentSku] = getEffectiveAvailability(c.componentSku)');
@@ -183,7 +184,7 @@ describe('item 85, step 1.6 / item 88 ticket 03: every kit component gets its ow
     expect(dash).toMatch(/buildCoverageSource\(/);
   });
   it('the recommendation card says when a kit got only its share of a shared component', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const src = readOzonStocksScreen();
     expect(src).toContain('доля общих компонентов: {fmtInt(s.shippableMyStock)} шт');
     // Item 88 ticket 04: the recommendations stage (with it, this field) moved into
     // buildRecommendations in the tab model.

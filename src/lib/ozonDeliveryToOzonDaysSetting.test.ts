@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 /**
  * Item 86, step C (owner, 26.09.2026): «Срок доставки до Ozon, дней» — new setting
@@ -14,7 +15,7 @@ import path from 'node:path';
 
 const storeSrc = fs.readFileSync(path.join(process.cwd(), 'src/store/useWarehouseStore.ts'), 'utf8');
 const modalSrc = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonSettingsModal.tsx'), 'utf8');
-const tabSrc = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+const tabSrc = readOzonStocksScreen();
 // Item 88 ticket 04: coverageRows (with it, the article-level factoryThreshold) moved into
 // buildCoverageRows in the tab model — the anchor below now reads that file instead.
 const tabModelSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonStocksTabModel.ts'), 'utf8');

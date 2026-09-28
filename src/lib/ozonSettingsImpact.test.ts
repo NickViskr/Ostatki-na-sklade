@@ -13,6 +13,7 @@ import {
 import { KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonSettingsModal } from '../components/OzonSettingsModal';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 /**
  * Item 87 step 4: «было → станет» summary at the bottom of the «Настройки Ozon» window.
@@ -387,7 +388,7 @@ describe('OzonSettingsModal: «Что изменится после сохран
 
 describe('OzonStocksTab: coverage memo and settings-modal impact go through the same runCoverage', () => {
   it('the screen never calls buildOzonCoverage directly; the hook and computeSettingsImpact both go through computeCoverage over the shared coverage source', () => {
-    const src = read('src/components/OzonStocksTab.tsx');
+    const src = readOzonStocksScreen();
     // Item 88 ticket 04 review follow-up: the hook now takes exactly the model's own input
     // (`OzonStocksTabModelInput`, i.e. `source`/`settings`) instead of the screen's own
     // `runCoverage`/`skus`/`clusterRefs` — so `buildOzonStocksTabModel` and `useOzonStocksTabModel`

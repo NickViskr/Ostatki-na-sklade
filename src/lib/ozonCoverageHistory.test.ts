@@ -1,6 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   applyDeficitSpeedCorrection,
   buildArticleSpeedByHistory,
@@ -27,6 +25,7 @@ import {
   OzonCoverageSettings
 } from './ozonCoverage';
 import { OzonSalesRow, OzonStockHistoryRow, OzonStockRow, SKUItem } from '../types';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 // ===== Item 86, step D: speed by days in stock, not calendar days =====
 //
@@ -743,7 +742,7 @@ describe('buildOzonCoverage with history: 500 сгенерированных н�
 // ===== Display: tooltip texts and the noSales26 label =====
 
 describe('OzonStocksTab: display of the speed source (item 86 step D) — text guards', () => {
-  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+  const src = readOzonStocksScreen();
 
   it('daysInStock tooltip text is exactly as specified', () => {
     expect(src).toContain('Скорость по дням наличия: продано');

@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
 import { buildOzonCoverage, coverageTone } from './ozonCoverage';
 import type { OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 /**
  * Item 85, step 1.8 (owner 2026-09-26): «Покрытие» is one number including the goods on their
@@ -137,7 +136,7 @@ describe('item 85, step 1.8: the colour agrees with the recommendation on the wh
   });
 
   it('the tab colours both levels by coverageTone and has no other colour rule left', () => {
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const src = readOzonStocksScreen();
     expect(src).toContain('TONE_CLASS[coverageTone(art.totalEstimated, art.perDay, ozonSettings)]');
     expect(src).toContain('TONE_CLASS[coverageTone(cls.estimated, cls.perDay, ozonSettings, cls.priorityK, cls.excluded)]');
     expect(src).not.toContain('coverageColor');

@@ -19,6 +19,7 @@ import {
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { OzonSettingsModal } from '../components/OzonSettingsModal';
 import { gasCacheTtlMs, gasReadsInvalidatedBy, isGasRead } from './gasActions';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 /**
  * Item 87 step 2: reworked «Настройки Ozon» window — collapsible blocks, plain names, one
@@ -64,7 +65,7 @@ describe('canEditOzonSettings: role only, username is ignored', () => {
 
 describe('OzonStocksTab and TurnoverTab: the settings button is role-gated', () => {
   it('OzonStocksTab shows the button only to canEditOzonSettings and opens supply+factory', () => {
-    const src = read('src/components/OzonStocksTab.tsx');
+    const src = readOzonStocksScreen();
     expect(src).toContain("import { canEditOzonSettings } from '../lib/ozonSettingsFields';");
     expect(src).toMatch(/\{canEditOzonSettings\(currentUser\) && \([\s\S]*id="btn-ozon-settings"/);
     expect(src).toContain("openBlocks={['supply', 'factory']}");

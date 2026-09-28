@@ -18,6 +18,7 @@ import {
   resolveOzonArticle
 } from './ozonCoverage';
 import { FactoryOrder, KitItem, OzonSalesRow, OzonStockRow, SKUItem } from '../types';
+import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
 
 // Фабрика SKU для тестов resolveOzonArticle: заполняет только обязательные поля.
 function makeSku(overrides: Partial<SKUItem> & { sku: string }): SKUItem {
@@ -1412,7 +1413,7 @@ describe('buildOzonCoverage: кластер с созданной заявкой
  *  её крупное число читалось как складской остаток, а это вся труба целиком. */
 describe('дефицит компонента и честная подпись колонки', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
-  const stocks = read('src/components/OzonStocksTab.tsx');
+  const stocks = readOzonStocksScreen();
 
   it('колонка больше не называется «Запас»', () => {
     expect(stocks).toContain('>\n                          В обороте\n                        </th>');
@@ -1461,7 +1462,7 @@ describe('дефицит компонента и честная подпись �
  *  screen. These are source guards over the cell states that used to be dead text. */
 describe('заказ на фабрике вне рекомендаций', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
-  const stocks = read('src/components/OzonStocksTab.tsx');
+  const stocks = readOzonStocksScreen();
   const modal = read('src/components/FactoryOrderModal.tsx');
 
   it('состояние «заказ не нужен» открывает окно заказа', () => {
@@ -1658,7 +1659,7 @@ describe('пункт 51: неполная коробка вместо молча
 // ---- Пункт 51 в интерфейсе. Расчёт может быть верным, а экран продолжать округлять
 // потребность до целой коробки и называть медленный кластер исключённым. ----
 describe('пункт 51: экран показывает неполную коробку', () => {
-  const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+  const stocks = readOzonStocksScreen();
 
   it('полная потребность берётся из wantQty в ОБОИХ местах, а не пересчитывается из neededQty', () => {
     // Item 88 ticket 04: both places (coverageRows and the recommendations' wide-window
@@ -1688,7 +1689,7 @@ describe('пункт 51: экран показывает неполную кор
 // Дефект был в том, что четыре числа наверху, бейджи магазина и отметка свежести данных
 // считались по ВСЕМ магазинам сразу: таблица под ними сжималась, а числа стояли на месте.
 describe('пункт 48: фильтр по магазину на вкладке «Остатки Озон»', () => {
-  const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+  const stocks = readOzonStocksScreen();
 
   it('от нефильтрованных остатков зависит РОВНО один расчёт — список магазинов для выбора', () => {
     // Фильтр, прячущий собственные варианты, назад уже не переключить.
@@ -1847,7 +1848,7 @@ describe('factoryOnOrderByArticle', () => {
   // Item 88 ticket 03: both screens now build the pipeline through the shared coverageSource
   // instead of calling factoryOnOrderByArticle themselves — the function has exactly one caller.
   it('both screens go through the shared coverageSource; factoryOnOrderByArticle is called only in ozonCoverageSource.ts', () => {
-    const stocks = fs.readFileSync(path.join(process.cwd(), 'src/components/OzonStocksTab.tsx'), 'utf8');
+    const stocks = readOzonStocksScreen();
     const dashboard = fs.readFileSync(path.join(process.cwd(), 'src/components/Dashboard.tsx'), 'utf8');
     const source = fs.readFileSync(path.join(process.cwd(), 'src/lib/ozonCoverageSource.ts'), 'utf8');
     expect(stocks).not.toMatch(/factoryOnOrderByArticle/);
