@@ -11,6 +11,11 @@ import {
   amountTotal, buildDestination, extrasTotal, parseShipmentExtras, rowMoneyAfterExtras,
   type ShipmentExtras
 } from './shipmentExtras';
+import { splitByQuantity } from './ozonBatchWriteOff';
+import {
+  AmbiguousOrderError, isOldCombinedShipment, orderLabels, orderSharesPreview, wholeShipmentNewExtras,
+  wholeShipmentOrders, wholeShipmentRows
+} from './wholeShipment';
 import { factoryOnOrderByArticle, resolveOzonArticle } from './ozonCoverage';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import type { FactoryOrder, SKUItem } from '../types';
@@ -321,7 +326,134 @@ const editTwin: Twin<EditInput> = {
   }
 };
 
-const TWINS: Twin<any>[] = [...destinationTwins, rebuildTwin, pipelineTwin, articleTwin, availabilityTwin, editTwin];
+// ── Item 90: the whole shipment — per-order pieces and shares of a new extras total ──
+
+interface CombinedInput {
+  orders: { article: string; quantity: number }[][];
+  oldTotal: number;
+  /** After the write-off: an order deleted, a quantity edited (the row keeps its OpID), or a row without OpID added, or an old combined
+   *  shipment written without a shipment number (both sides refuse the last two). */
+  after: { kind: 'none' } | { kind: 'delete'; order: number } | { kind: 'edit'; order: number; quantity: number } | { kind: 'loose' } | { kind: 'old' };
+  packaging: { mode: 'unit' | 'batch'; value: number };
+  other: { mode: 'unit' | 'batch'; value: number };
+  services: { name: string; quantity: number; unitCost: number }[];
+}
+const SHIPMENT_ID = 'op-comb';
+// The write-off exactly as ConfirmModal makes it: one commit per order, its share from
+// splitByQuantity, the note of the batch, OpID «<shipment>-N», the shared shipment number.
+function combinedOnStand(input: CombinedInput) {
+  const h = freshStand();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setStockSheet(['A', 'B', 'C'].map((a, i) => ({ article: a, quantity: 2000, avgCost: 600 + i * 17.35, capitalization: 2000 * (600 + i * 17.35) })));
+  h.setOzonCostSheet([]);
+  const pieces = input.orders.map((lines) => lines.reduce((s, l) => s + l.quantity, 0));
+  const totalPieces = pieces.reduce((s, q) => s + q, 0);
+  const shares = splitByQuantity(input.oldTotal, pieces);
+  const labels = input.orders.map((_, i) => `13000${i}-1`);
+  const base = `Яндекс [Услуги: Паллета x1 (${input.oldTotal}₽)]`;
+  input.orders.forEach((lines, i) => {
+    const note = `[Общая поставка: заявки ${labels.map((l) => '№ ' + l).join(', ')}; доля этой заявки ${pieces[i]} из ${totalPieces} шт., `
+      + `${shares[i].toFixed(2)} руб. из ${input.oldTotal.toFixed(2)} руб.]`;
+    h.commitTransaction(lines.map((l) => ({ ...l, price: 600 })), 'Расход', `${base} ${note}`, '2026-09-22', 'tester',
+      '2026-09-22T11:05:47.756Z', `${SHIPMENT_ID}-${i + 1}`, shares[i], undefined, '',
+      input.after.kind === 'old' ? '' : SHIPMENT_ID);
+  });
+  const orderRows = (n: number) => plain(h.getTransactions().rows)
+    .filter((t: any) => t.type === 'Расход' && t.opId === `${SHIPMENT_ID}-${n + 1}`);
+  if (input.after.kind === 'delete') {
+    orderRows(input.after.order).forEach((t: any) => h.deleteTransaction(t.id, 'tester'));
+  } else if (input.after.kind === 'loose') {
+    // A row of the shipment without an OpID: the correction must refuse it on both sides.
+    h.commitTransaction([{ article: 'A', quantity: 3, price: 600 }], 'Расход', base, '2026-09-22', 'tester',
+      '2026-09-22T11:05:47.756Z', '', 0, undefined, '', SHIPMENT_ID);
+  } else if (input.after.kind === 'edit') {
+    const t = orderRows(input.after.order)[0];
+    h.updateTransaction(t.id, {
+      article: t.article, quantity: input.after.quantity, price: t.price, writeOffCost: t.writeOffCost,
+      type: 'Расход', destination: t.destination, deliveryDate: '2026-09-22', date: t.date
+    }, 'tester');
+  }
+  return { h, rows: plain(h.getTransactions().rows).filter((t: any) => t.type === 'Расход') };
+}
+const combinedTwin: Twin<CombinedInput> = {
+  name: 'whole shipment: per-order pieces and shares of a new extras total',
+  cases: [{
+    // Hand case: 3 orders of 10 / 10 / 30 pieces (equal first two: the ties go to the earlier order).
+    orders: [[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 10 }], [{ article: 'A', quantity: 20 }, { article: 'C', quantity: 10 }]],
+    oldTotal: 2419, after: { kind: 'none' },
+    packaging: { mode: 'unit', value: 6 }, other: { mode: 'batch', value: 100 },
+    services: [{ name: 'Доставка 1 пал', quantity: 1, unitCost: 2333.33 }]
+  }, {
+    // Hand case: a row without OpID inside a shipment — both sides refuse.
+    orders: [[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 20 }]],
+    oldTotal: 1200, after: { kind: 'loose' },
+    packaging: { mode: 'batch', value: 100 }, other: { mode: 'batch', value: 0 }, services: []
+  }, {
+    // Hand case: an old combined shipment (note, no shipment number) — both sides refuse.
+    orders: [[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 20 }]],
+    oldTotal: 1200, after: { kind: 'old' },
+    packaging: { mode: 'batch', value: 100 }, other: { mode: 'batch', value: 0 }, services: []
+  }],
+  generated: 30,
+  generate: (r) => {
+    const orders = Array.from({ length: r.int(2, 3) }, () =>
+      ['A', 'B', 'C'].filter(() => r.chance(0.6)).concat('A').filter((a, i, xs) => xs.indexOf(a) === i)
+        .map((article) => ({ article, quantity: r.int(1, 40) })));
+    const order = r.int(0, orders.length - 1);
+    const kind = r.pick(['none', 'delete', 'edit', 'loose', 'old'] as const);
+    return {
+      orders,
+      oldTotal: r.int(500, 9000),
+      after: (kind === 'none' || kind === 'loose' || kind === 'old') ? { kind } : kind === 'delete' ? { kind, order } : { kind, order, quantity: r.int(1, 60) },
+      packaging: { mode: r.pick(['unit', 'batch'] as const), value: r.chance(0.3) ? 0 : r.int(1, 30) },
+      other: { mode: r.pick(['unit', 'batch'] as const), value: r.chance(0.5) ? 0 : r.int(1, 900) },
+      services: Array.from({ length: r.int(0, 2) }, () => ({ name: r.pick(['Маркировка', 'Паллета']), quantity: r.int(1, 5), unitCost: r.chance(0.5) ? r.int(5, 300) : r.int(500, 30000) / 100 }))
+    };
+  },
+  // The screen: the browser twin over the rows the server reports; the new total from the window's own function.
+  ts: (input) => {
+    const { rows } = combinedOnStand(input);
+    const set = wholeShipmentRows(rows, rows[0]);
+    if (isOldCombinedShipment(set)) return { refused: 'old' };
+    const { total } = wholeShipmentNewExtras(rows, rows[0], {
+      packaging: input.packaging, other: input.other, services: input.services
+    });
+    try {
+      const orders = wholeShipmentOrders(set);
+      const labels = orderLabels(orders, (rows[0].shipmentId ?? '').trim());
+      return {
+        newTotal: total,
+        orders: orderSharesPreview(orders, total).map((o, i) => ({ label: labels[i], pieces: o.pieces, oldShare: o.oldShare, newShare: o.newShare }))
+      };
+    } catch (e) {
+      if (e instanceof AmbiguousOrderError) return { refused: 'ambiguous' };
+      throw e;
+    }
+  },
+  gs: (input) => {
+    const { h, rows } = combinedOnStand(input);
+    try {
+      const res = h.updateShipmentExtras({
+        id: rows[0].id,
+        packagingMode: input.packaging.mode, packagingValue: input.packaging.value,
+        otherMode: input.other.mode, otherValue: input.other.value,
+        services: input.services
+      }, 'tester');
+      return {
+        newTotal: res.newTotal,
+        orders: res.orders.map((o: any) => ({ label: o.label, pieces: o.pieces, oldShare: o.oldShare, newShare: o.newShare }))
+      };
+    } catch (e: any) {
+      const msg = String(e && e.message);
+      if (msg.includes('Не удаётся понять')) return { refused: 'ambiguous' };
+      if (msg.includes('общей поставки')) return { refused: 'old' };
+      throw e;
+    }
+  }
+};
+
+const TWINS: Twin<any>[] = [...destinationTwins, rebuildTwin, pipelineTwin, articleTwin, availabilityTwin, editTwin, combinedTwin];
 
 describe('item 89 B: every twin rule gives the same answer in TS and in Code.gs', () => {
   for (const twin of TWINS) {

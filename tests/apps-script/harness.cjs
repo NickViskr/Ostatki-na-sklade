@@ -633,6 +633,7 @@ module.exports = {
   shipmentRowsOfTransaction: (...args) => context.shipmentRowsOfTransaction(...args),
   parseShipmentExtrasGs: (...args) => context.parseShipmentExtrasGs(...args),
   buildDestinationGs: (...args) => context.buildDestinationGs(...args),
+  parseBatchNoteGs: (...args) => context.parseBatchNoteGs(...args),
   extrasTotalGs: (...args) => context.extrasTotalGs(...args),
   reissueOzonCostRows: (...args) => context.reissueOzonCostRows(...args),
   replayArticle: (...args) => context.replayArticle(...args),

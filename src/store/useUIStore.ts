@@ -70,6 +70,11 @@ interface UIState {
   setShowEditTransModal: (show: boolean) => void;
   editingTrans: any;
   setEditingTrans: (trans: any) => void;
+  /** Item 90: the «Вся отгрузка» window and the row it was opened for. */
+  showWholeShipmentModal: boolean;
+  setShowWholeShipmentModal: (show: boolean) => void;
+  wholeShipmentAnchor: any;
+  setWholeShipmentAnchor: (anchor: any) => void;
   showSkuModal: boolean;
   setShowSkuModal: (show: boolean) => void;
   editingSku: SKUItem | null;
@@ -242,6 +247,10 @@ export const useUIStore = create<UIState>((set) => ({
   setShowEditTransModal: (showEditTransModal) => set({ showEditTransModal }),
   editingTrans: null,
   setEditingTrans: (editingTrans) => set({ editingTrans }),
+  showWholeShipmentModal: false,
+  setShowWholeShipmentModal: (showWholeShipmentModal) => set({ showWholeShipmentModal }),
+  wholeShipmentAnchor: null,
+  setWholeShipmentAnchor: (wholeShipmentAnchor) => set({ wholeShipmentAnchor }),
   showSkuModal: false,
   setShowSkuModal: (showSkuModal) => set({ showSkuModal }),
   editingSku: null,

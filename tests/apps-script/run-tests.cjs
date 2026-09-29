@@ -3842,6 +3842,342 @@ function withShipment() {
   check('80b: сборка текста возвращает исходную строку', h.buildDestinationGs(e, e) === d, h.buildDestinationGs(e, e));
 })();
 
+// ================= Item 90, ticket 03: the whole shipment =================
+//
+// Combined shipment as ConfirmModal writes it: one commit per order, the order's share of the batch
+// total from splitByQuantity, the note «[Общая поставка: …]», OpID «<shipment>-N», the shared
+// shipment number. Three Ozon orders of 10 / 20 / 30 pieces (the third holds two articles), batch
+// total 1 200 ₽ → shares 200 / 400 / 600; new extras 6 ₽ x 60 pieces + 2 459 ₽ = 2 819 ₽.
+// Expected figures were computed with a node snippet using the same roundToTwo and the kopeck
+// largest-remainder split:
+//   shares  = split(2819, [10, 20, 30]) = 469.83 / 939.67 / 1409.50  (281900 kop: 46983.33 / 93966.67 / 140950;
+//             one leftover kopeck goes to the largest remainder — order 2)
+//   row     = old row total - round2(oldShare * qty / orderPieces) + round2(newShare * qty / orderPieces)
+//   order 1 A x10: 6200 - 200 + 469.83 = 6469.83 (price 646.98); order 2 B x20: 12400 - 400 + 939.67 = 12939.67;
+//   order 3 A x20: 12400 - 400 + 939.67 = 12939.67, B x10: 6200 - 200 + 469.83 = 6469.83.
+
+const T90_SHIP = 'op-comb';
+const T90_LABELS = ['1300-1', '1301-1', '1302-1'];
+const t90Note = (labels, q, Q, share, total) =>
+  `[Общая поставка: заявки ${labels.map(l => '№ ' + l).join(', ')}; доля этой заявки ${q} из ${Q} шт., ${share.toFixed(2)} руб. из ${total.toFixed(2)} руб.]`;
+
+function t90Combined(orders, oldShares, base) {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setStockSheet([
+    { article: 'A', quantity: 500, avgCost: 600, capitalization: 300000 },
+    { article: 'B', quantity: 500, avgCost: 600, capitalization: 300000 }
+  ]);
+  h.setOzonCostSheet([]);
+  h.setOzonStocksSheet([
+    { cabinet: 'MaxiStore', article: 'A', available: 900, sku: '111' },
+    { cabinet: 'MaxiStore', article: 'B', available: 900, sku: '222' }
+  ]);
+  const pieces = orders.map(o => o.reduce((s, l) => s + l.quantity, 0));
+  const Q = pieces.reduce((s, q) => s + q, 0);
+  const total = oldShares.reduce((s, v) => s + v, 0);
+  orders.forEach((lines, i) => {
+    h.commitTransaction(lines.map(l => ({ ...l, price: 600 })), 'Расход',
+      `${base} ${t90Note(T90_LABELS.slice(0, orders.length), pieces[i], Q, oldShares[i], total)}`,
+      '2026-09-22', 'tester', '2026-09-22T11:05:47.756Z', `${T90_SHIP}-${i + 1}`, oldShares[i], undefined, '', T90_SHIP);
+  });
+  return h;
+}
+const t90Rows = h => h.getTransactions().rows.filter(t => t.type === 'Расход');
+const t90Extras = { packagingMode: 'unit', packagingValue: 6, otherMode: 'unit', otherValue: 0,
+  services: [{ name: 'Доставка', quantity: 1, unitCost: 2459 }] };
+const T90_BASE = 'Ozon (MaxiStore) [Услуги: Паллета x1 (1200₽)]';
+const t90ThreeOrders = () => t90Combined(
+  [[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 20 }], [{ article: 'A', quantity: 20 }, { article: 'B', quantity: 10 }]],
+  [200, 400, 600], T90_BASE);
+
+(function test90t03a() {
+  const h = t90ThreeOrders();
+  const rowsBefore = t90Rows(h);
+  const stockBefore = JSON.stringify(h.dumpStockSheet());
+  const journalBefore = h.dumpOzonCost().length;
+  const res = h.updateShipmentExtras({ id: rowsBefore[0].id, ...t90Extras, comment: 'Паллета 12' }, 'tester');
+  const rows = t90Rows(h);
+  const byOrder = n => rows.filter(t => t.opId === `${T90_SHIP}-${n}`);
+
+  check('90t03: three orders get shares 469.83 / 939.67 / 1409.50 summing to the new total to the kopeck',
+    JSON.stringify(res.orders.map(o => o.newShare)) === '[469.83,939.67,1409.5]'
+      && Math.round(res.orders.reduce((s, o) => s + o.newShare, 0) * 100) === 281900 && res.newTotal === 2819,
+    JSON.stringify(res.orders));
+  check('90t03: the answer carries pieces, old shares and labels per order; oldTotal is the sum of old shares',
+    JSON.stringify(res.orders.map(o => [o.opId, o.label, o.pieces, o.oldShare]))
+      === JSON.stringify([[`${T90_SHIP}-1`, '1300-1', 10, 200], [`${T90_SHIP}-2`, '1301-1', 20, 400], [`${T90_SHIP}-3`, '1302-1', 30, 600]])
+      && res.oldTotal === 1200,
+    JSON.stringify(res.orders) + ' ' + res.oldTotal);
+  check('90t03: extras per piece are equal across orders within a kopeck',
+    res.orders.every(o => Math.abs(o.newShare - 2819 * o.pieces / 60) <= 0.01),
+    res.orders.map(o => (o.newShare / o.pieces).toFixed(4)).join(' / '));
+  check('90t03: every order row is re-spread by the pieces of its order (money and «ДопРасходы»)',
+    byOrder(1)[0].total === 6469.83 && byOrder(1)[0].price === 646.98 && byOrder(1)[0].additionalCosts === 469.83
+      && byOrder(2)[0].total === 12939.67 && byOrder(2)[0].additionalCosts === 939.67
+      && byOrder(3).find(t => t.article === 'A').total === 12939.67
+      && byOrder(3).find(t => t.article === 'B').total === 6469.83
+      && byOrder(3).every(t => t.additionalCosts === 1409.5),
+    JSON.stringify(rows.map(t => [t.opId, t.article, t.total, t.price, t.additionalCosts])));
+  check('90t03: every order gets the new extras text and its own rewritten note, no «₽» in the note',
+    [1, 2, 3].every((n, i) => byOrder(n)[0].destination
+      === `Ozon (MaxiStore) [Упаковка: 60 шт. x 6₽ = 360₽ | Услуги: Доставка x1 (2459₽)] `
+        + t90Note(T90_LABELS, [10, 20, 30][i], 60, [469.83, 939.67, 1409.5][i], 2819))
+      && res.destination === rows.find(t => t.id === rowsBefore[0].id).destination,
+    byOrder(2)[0].destination);
+  check('90t03: quantities, write-off cost and the stock sheet did not move',
+    JSON.stringify(rows.map(t => [t.quantity, t.writeOffCost])) === JSON.stringify(rowsBefore.map(t => [t.quantity, t.writeOffCost]))
+      && JSON.stringify(h.dumpStockSheet()) === stockBefore,
+    JSON.stringify(rows.map(t => [t.quantity, t.writeOffCost])));
+  const journal = h.dumpOzonCost();
+  check('90t03: the cost journal gains one corrected entry per changed Ozon row (4 rows in 3 orders)',
+    res.costRowsAppended === 4 && journal.length === journalBefore + 4,
+    `appended ${res.costRowsAppended}, journal ${journalBefore} -> ${journal.length}`);
+  check('90t03: the comment is written to every row of every order',
+    rows.every(t => t.comment === 'Паллета 12'), JSON.stringify(rows.map(t => t.comment)));
+
+  // A repeat with the same input changes no money and appends nothing.
+  const again = h.updateShipmentExtras({ id: rows[0].id, ...t90Extras }, 'tester');
+  check('90t03: the same correction twice changes no money and, without a comment field, keeps the comments',
+    again.changedRows === 0 && again.costRowsAppended === 0
+      && JSON.stringify(t90Rows(h).map(t => [t.total, t.comment])) === JSON.stringify(rows.map(t => [t.total, t.comment])),
+    JSON.stringify(again.orders));
+  h.updateShipmentExtras({ id: rows[0].id, ...t90Extras, comment: '   ' }, 'tester');
+  check('90t03: an empty comment clears the comments of every row',
+    t90Rows(h).every(t => t.comment === ''), JSON.stringify(t90Rows(h).map(t => t.comment)));
+})();
+
+(function test90t03b() {
+  // An order deleted after the write-off: the total goes over the remaining orders (10 and 30
+  // pieces). Per-piece packaging is now 6 x 40 = 240, so the total is 240 + 2 459 = 2 699 ₽ and
+  // split(2699, [10, 30]) = 674.75 / 2024.25; the shares of the rest come off as stored
+  // (200 / 600) and the label of the deleted order drops out of the notes.
+  const h = t90ThreeOrders();
+  t90Rows(h).filter(t => t.opId === `${T90_SHIP}-2`).forEach(t => h.deleteTransaction(t.id, 'tester'));
+  const res = h.updateShipmentExtras({ id: t90Rows(h)[0].id, ...t90Extras }, 'tester');
+  const rows = t90Rows(h);
+  check('90t03: after an order was deleted the new total is spread over the remaining orders',
+    JSON.stringify(res.orders.map(o => [o.pieces, o.oldShare, o.newShare])) === '[[10,200,674.75],[30,600,2024.25]]'
+      && res.oldTotal === 800,
+    JSON.stringify(res.orders));
+  check('90t03: the remaining rows carry the new shares (6674.75 / 13349.50 / 6674.75)',
+    JSON.stringify(rows.map(t => [t.article, t.total])) === JSON.stringify([['B', 6674.75], ['A', 13349.5], ['A', 6674.75]]),
+    JSON.stringify(rows.map(t => [t.article, t.total])));
+  check('90t03: the deleted order drops out of the notes, and the batch is now 40 pieces',
+    rows.every(t => t.destination.includes('заявки № 1300-1, № 1302-1;') && !t.destination.includes('1301-1'))
+      && rows[1].destination.endsWith('доля этой заявки 30 из 40 шт., 2024.25 руб. из 2699.00 руб.]')
+      && res.orders.map(o => o.label).join() === '1300-1,1302-1',
+    rows[0].destination);
+})();
+
+(function test90t03c() {
+  // A quantity edited after the write-off (row edit: the row keeps its OpID, shipment number,
+  // «ДопРасходы» and «Объект»): order 3 now holds 25 + 10 = 35 pieces, 65 in all, so the
+  // total is 6 x 65 + 2 459 = 2 849 and split(2849, [10, 20, 35]) = 438.31 / 876.61 / 1534.08.
+  // The edited row A x25 was re-spread by the edit as 15 000 + round2(600 * 25 / 35) = 15 428.57;
+  // the correction takes 428.57 off and puts round2(1534.08 * 25 / 35) = 1095.77 on: 16 095.77.
+  // (Its sibling B x10 was NOT re-spread by the edit: 6 200 - 171.43 + 438.31 = 6 466.88.)
+  const h = t90ThreeOrders();
+  const edited = t90Rows(h).find(t => t.opId === `${T90_SHIP}-3` && t.article === 'A');
+  h.updateTransaction(edited.id, {
+    article: 'A', quantity: 25, price: edited.price, writeOffCost: edited.writeOffCost,
+    type: 'Расход', destination: edited.destination, deliveryDate: '2026-09-22', date: edited.date
+  }, 'tester');
+  const after = t90Rows(h).find(t => t.article === 'A' && t.quantity === 25);
+  check('90t03: the row edit keeps the OpID and the shipment number',
+    after.opId === `${T90_SHIP}-3` && after.shipmentId === T90_SHIP && after.total === 15428.57, JSON.stringify(after));
+  const res = h.updateShipmentExtras({ id: t90Rows(h)[0].id, ...t90Extras }, 'tester');
+  const rows = t90Rows(h);
+  check('90t03: shares follow the current pieces and the edited row still resolves to its own order',
+    JSON.stringify(res.orders.map(o => [o.pieces, o.newShare])) === '[[10,438.31],[20,876.61],[35,1534.08]]'
+      && res.orders.length === 3,
+    JSON.stringify(res.orders));
+  check('90t03: the edited row and the untouched orders carry the recomputed money',
+    rows.find(t => t.quantity === 25).total === 16095.77
+      && rows.find(t => t.article === 'B' && t.quantity === 10).total === 6466.88
+      && rows.find(t => t.article === 'B' && t.quantity === 20).total === 12876.61
+      && rows.find(t => t.article === 'A' && t.quantity === 10).total === 6438.31
+      && rows.find(t => t.quantity === 25).additionalCosts === 1534.08,
+    JSON.stringify(rows.map(t => [t.article, t.quantity, t.total, t.additionalCosts])));
+})();
+
+(function test90t03d() {
+  // Combined shipment written before shipment numbers existed: refused, nothing written.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setStockSheet([{ article: 'A', quantity: 500, avgCost: 600, capitalization: 300000 }]);
+  h.setOzonCostSheet([]);
+  h.commitTransaction([{ article: 'A', quantity: 10, price: 600 }], 'Расход',
+    `Яндекс [Услуги: Паллета x1 (1200₽)] ${t90Note(['1', '2'], 10, 30, 400, 1200)}`,
+    '2026-09-22', 'tester', '2026-09-22T11:05:47.756Z', 'op-old-1', 400);
+  const dumpBefore = JSON.stringify(h.dumpTransSheet()) + JSON.stringify(h.dumpOzonCost());
+  let msg = '';
+  try { h.updateShipmentExtras({ id: t90Rows(h)[0].id, ...t90Extras, comment: 'x' }, 'tester'); } catch (e) { msg = e.message; }
+  check('90t03: an old combined shipment (no shipment number) is refused with a clear reason, nothing written',
+    msg.includes('общей поставки') && msg.includes('номеров отгрузки')
+      && JSON.stringify(h.dumpTransSheet()) + JSON.stringify(h.dumpOzonCost()) === dumpBefore,
+    msg);
+})();
+
+(function test90t03e() {
+  // A row of the shipment without an OpID (written with a shipment number but no operation id)
+  // cannot be placed in any order: the correction is refused and nothing is written.
+  const h = t90Combined([[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 20 }]], [400, 800], T90_BASE);
+  h.commitTransaction([{ article: 'A', quantity: 3, price: 600 }], 'Расход', T90_BASE, '2026-09-22', 'tester',
+    '2026-09-22T11:05:47.756Z', '', 0, undefined, '', T90_SHIP);
+  const dumpBefore = JSON.stringify(h.dumpTransSheet()) + JSON.stringify(h.dumpOzonCost());
+  let msg = '';
+  try { h.updateShipmentExtras({ id: t90Rows(h)[0].id, ...t90Extras, comment: 'x' }, 'tester'); } catch (e) { msg = e.message; }
+  check('90t03: an OpID-less row inside a shipment is refused naming its article, nothing written',
+    msg.includes('«A»') && msg.includes('Ничего не записано') && JSON.stringify(h.dumpTransSheet()) + JSON.stringify(h.dumpOzonCost()) === dumpBefore,
+    msg);
+})();
+
+(function test90t03f() {
+  // A shipment number with one order left is a whole shipment of one order: the whole total is its share
+  // (6 x 10 + 2 459 = 2 519).
+  const h = t90Combined([[{ article: 'A', quantity: 10 }]], [300], T90_BASE);
+  const res = h.updateShipmentExtras({ id: t90Rows(h)[0].id, ...t90Extras }, 'tester');
+  check('90t03: one order with a shipment number carries the whole new total',
+    JSON.stringify(res.orders.map(o => [o.pieces, o.oldShare, o.newShare])) === '[[10,300,2519]]'
+      && t90Rows(h)[0].additionalCosts === 2519 && t90Rows(h)[0].total === 6000 + 2519,
+    JSON.stringify(res.orders));
+})();
+
+(function test90t03g() {
+  // The row edit keeps the OpID of the row it replaces: a plain single operation (item 80 fixture)
+  // and a kit (main row + component row, both re-written by the edit).
+  const { h, rowA } = withShipment();
+  h.updateTransaction(rowA.id, {
+    article: 'A', quantity: 24, price: rowA.price, writeOffCost: rowA.writeOffCost,
+    type: 'Расход', destination: rowA.destination, deliveryDate: '2026-09-22', date: rowA.date
+  }, 'tester');
+  check('90t03: a plain single-operation row edit keeps the OpID of the row',
+    t90Rows(h).filter(t => t.opId === 'op-ship').length === 2, JSON.stringify(t90Rows(h).map(t => t.opId)));
+
+  const k = freshHarness();
+  k.ensureTransSheet();
+  k.ensureArchiveSheet();
+  k.setStockSheet([{ article: 'COMPK', quantity: 500, avgCost: 100, capitalization: 50000 }]);
+  k.setKitSheet([{ kitSku: 'KITK', componentSku: 'COMPK', quantity: 2, kitType: 'virtual' }]);
+  k.setOzonCostSheet([]);
+  k.commitTransaction([{ article: 'KITK', quantity: 3, price: 300 }], 'Расход', 'Яндекс', '2026-09-22', 'tester',
+    '2026-09-22T11:05:47.756Z', 'op-kit');
+  const main = t90Rows(k).find(t => t.article === 'KITK');
+  k.updateTransaction(main.id, {
+    article: 'KITK', quantity: 4, price: main.price, writeOffCost: main.writeOffCost,
+    type: 'Расход', destination: 'Яндекс', deliveryDate: '2026-09-22', date: main.date
+  }, 'tester');
+  const kitRows = t90Rows(k);
+  check('90t03: a kit row edit keeps the OpID on the main row and on its component row',
+    kitRows.length === 2 && kitRows.some(t => t.isComponent === true) && kitRows.every(t => t.opId === 'op-kit'),
+    JSON.stringify(kitRows.map(t => [t.article, t.isComponent, t.opId])));
+})();
+
+(function test90t03h() {
+  // Mutation-testing additions (item 90, ticket 03).
+  // (1) Rounding ties: 1.00 over three equal orders is 100 kop / 3 = 33.33 each, one leftover kopeck
+  //     goes to the EARLIEST order on equal remainders: 0.34 / 0.33 / 0.33.
+  const tie = t90Combined([[{ article: 'A', quantity: 10 }], [{ article: 'A', quantity: 10 }], [{ article: 'A', quantity: 10 }]],
+    [0, 0, 0], 'Ozon (MaxiStore)');
+  const tieRes = tie.updateShipmentExtras({ id: t90Rows(tie)[0].id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0,
+    services: [{ name: 'Доставка', quantity: 1, unitCost: 1 }] }, 'tester');
+  check('90t03: a leftover kopeck on equal remainders goes to the earliest order (0.34 / 0.33 / 0.33)',
+    JSON.stringify(tieRes.orders.map(o => o.newShare)) === '[0.34,0.33,0.33]', JSON.stringify(tieRes.orders));
+
+  // (2) A batch note whose order number is outside the list of labels: the list stays as written
+  //     (no «undefined» label), and the order is still corrected.
+  const odd = t90Combined([[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 20 }]], [200, 400], T90_BASE);
+  odd.commitTransaction([{ article: 'A', quantity: 5, price: 600 }], 'Расход',
+    `${T90_BASE} ${t90Note(T90_LABELS.slice(0, 2), 5, 35, 100, 700)}`,
+    '2026-09-22', 'tester', '2026-09-22T11:05:47.756Z', `${T90_SHIP}-7`, 100, undefined, '', T90_SHIP);
+  const oddRes = odd.updateShipmentExtras({ id: t90Rows(odd)[0].id, ...t90Extras }, 'tester');
+  check('90t03: an order number beyond the label list keeps the note labels as written, no «undefined»',
+    oddRes.orders.length === 3 && oddRes.orders.every(o => o.label === '')
+      && t90Rows(odd).every(t => t.destination.includes('заявки № 1300-1, № 1301-1;') && !t.destination.includes('undefined')),
+    t90Rows(odd)[0].destination);
+
+  // (3) The parsed note: empty labels dropped, decimal piece count read with a comma.
+  const parsed = tie.parseBatchNoteGs('Общая поставка: заявки № A, ,№ B; доля этой заявки 5 из 12,5 шт., 1.00 руб. из 2.00 руб.');
+  check('90t03: parseBatchNoteGs drops empty labels and reads a decimal piece count',
+    JSON.stringify(parsed.labels) === '["A","B"]' && parsed.totalQty === 12.5, JSON.stringify(parsed));
+
+  // (4) The comment is written trimmed into the sheet cell itself, kit component rows included.
+  const k = freshHarness();
+  k.ensureTransSheet();
+  k.ensureArchiveSheet();
+  k.setStockSheet([{ article: 'COMPK', quantity: 500, avgCost: 100, capitalization: 50000 }]);
+  k.setKitSheet([{ kitSku: 'KITK', componentSku: 'COMPK', quantity: 2, kitType: 'virtual' }]);
+  k.setOzonCostSheet([]);
+  k.commitTransaction([{ article: 'KITK', quantity: 3, price: 300 }], 'Расход', 'Яндекс', '2026-09-22', 'tester',
+    '2026-09-22T11:05:47.756Z', 'op-kit');
+  k.updateShipmentExtras({ id: t90Rows(k)[0].id, packagingMode: 'batch', packagingValue: 30, otherMode: 'batch', otherValue: 0,
+    services: [], comment: '  Паллета 12  ' }, 'tester');
+  const raw = k.dumpTransSheet().filter(r => String(r['Тип']) === 'Расход');
+  check('90t03: the comment lands trimmed in the cell of every row of the set, the kit component row too',
+    raw.length === 2 && raw.some(r => String(r['isComponent']) === 'true' || r['isComponent'] === true)
+      && raw.every(r => r['Комментарий'] === 'Паллета 12'),
+    JSON.stringify(raw.map(r => [r['isComponent'], r['Комментарий']])));
+  // The extras belong to the main kit row only: 30 ₽ on it, nothing on the component row.
+  const kitRows = t90Rows(k);
+  check('90t03: a kit shipment carries the extras on the main row only (component row keeps no «ДопРасходы»)',
+    kitRows.find(t => t.isComponent !== true).additionalCosts === 30
+      && kitRows.filter(t => t.isComponent === true).every(t => t.additionalCosts === null),
+    JSON.stringify(kitRows.map(t => [t.article, t.isComponent, t.additionalCosts])));
+
+  // (5) A combined shipment with a kit order: the old share is read off the MAIN row of the order
+  //     (the component row holds no «ДопРасходы»), and the kit order stays correctable.
+  const kc = freshHarness();
+  kc.ensureTransSheet();
+  kc.ensureArchiveSheet();
+  kc.setStockSheet([{ article: 'COMPK', quantity: 500, avgCost: 100, capitalization: 50000 },
+    { article: 'A', quantity: 500, avgCost: 600, capitalization: 300000 }]);
+  kc.setKitSheet([{ kitSku: 'KITK', componentSku: 'COMPK', quantity: 2, kitType: 'virtual' }]);
+  kc.setOzonCostSheet([]);
+  kc.commitTransaction([{ article: 'KITK', quantity: 3, price: 300 }], 'Расход', 'Яндекс', '2026-09-22', 'tester',
+    '2026-09-22T11:05:47.756Z', 'op-kc-1', 90, undefined, '', 'op-kc');
+  kc.commitTransaction([{ article: 'A', quantity: 3, price: 600 }], 'Расход', 'Яндекс', '2026-09-22', 'tester',
+    '2026-09-22T11:05:47.756Z', 'op-kc-2', 90, undefined, '', 'op-kc');
+  const kcRes = kc.updateShipmentExtras({ id: t90Rows(kc)[0].id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0,
+    services: [{ name: 'Доставка', quantity: 1, unitCost: 60 }] }, 'tester');
+  check('90t03: in a combined shipment with a kit order the old share is the main row stored figure (90), new shares 30 / 30',
+    JSON.stringify(kcRes.orders.map(o => [o.pieces, o.oldShare, o.newShare])) === '[[3,90,30],[3,90,30]]' && kcRes.oldTotal === 180,
+    JSON.stringify(kcRes.orders));
+})();
+
+(function test90t03h() {
+  // Two orders of one combined Ozon shipment, the same article on the same day: each order's journal
+  // row is corrected with ITS OWN unit cost. 9 and 14 pieces of A, old batch 1000 (shares 391.30 /
+  // 608.70), new total 1002 (packaging «на партию»). Node, same roundToTwo and kopeck split:
+  //   split(1002, [9, 14]) = 392.09 / 609.91; unit = round2((600 * qty + share) / qty) = 643.57 and 643.56.
+  const h = t90Combined([[{ article: 'A', quantity: 9 }], [{ article: 'A', quantity: 14 }]], [391.3, 608.7], T90_BASE);
+  const before = h.dumpOzonCost().length;
+  const res = h.updateShipmentExtras({ id: t90Rows(h)[0].id, packagingMode: 'batch', packagingValue: 1002,
+    otherMode: 'unit', otherValue: 0, services: [] }, 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  const costOf = op => added.filter(r => r['OpID'] === op).map(r => r['Себестоимость отгрузки']);
+  check('90t03: two orders with the same article and day get their own corrected journal unit cost',
+    JSON.stringify(res.orders.map(o => o.newShare)) === '[392.09,609.91]'
+      && JSON.stringify(costOf(`${T90_SHIP}-1`)) === '[643.57]' && JSON.stringify(costOf(`${T90_SHIP}-2`)) === '[643.56]',
+    JSON.stringify(added));
+})();
+
+(function test90t03i() {
+  // The journal write fails: the rows of «История» are still corrected and the result says so.
+  const h = t90ThreeOrders();
+  h.context.reissueOzonCostRows = function() { throw new Error('журнал недоступен'); };
+  const res = h.updateShipmentExtras({ id: t90Rows(h)[0].id, ...t90Extras }, 'tester');
+  check('90t03: a failing cost journal does not undo the correction and is reported in the result',
+    res.newTotal === 2819 && t90Rows(h).every(t => t.destination.includes('Доставка x1 (2459₽)'))
+      && res.costRowsAppended === 0 && res.costJournalError.includes('НЕ записана') && res.costJournalError.includes('журнал недоступен'),
+    JSON.stringify(res.costJournalError));
+  const h2 = t90ThreeOrders();
+  const fine = h2.updateShipmentExtras({ id: t90Rows(h2)[0].id, ...t90Extras }, 'tester');
+  check('90t03: a working journal gives an empty costJournalError', fine.costJournalError === '', JSON.stringify(fine.costJournalError));
+})();
+
 // ================= Item 81: module «Заказы в Китае» =================
 //
 // The fixtures are the two real batches the factory shipped: NV-0825-2 (order 28) and

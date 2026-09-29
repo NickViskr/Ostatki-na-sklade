@@ -30,6 +30,7 @@ const ChinaOrdersTab = React.lazy(() => import('./components/ChinaOrdersTab').th
 // Modals
 import { ConfirmModal } from './components/ConfirmModal';
 import { EditTransModal } from './components/EditTransModal';
+import { WholeShipmentModal } from './components/WholeShipmentModal';
 import { SkuModal } from './components/SkuModal';
 import { KitModal } from './components/KitModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -55,6 +56,7 @@ export default function App() {
 
   const showConfirmModal = useUIStore((state) => state.showConfirmModal);
   const showEditTransModal = useUIStore((state) => state.showEditTransModal);
+  const showWholeShipmentModal = useUIStore((state) => state.showWholeShipmentModal);
   const showSkuModal = useUIStore((state) => state.showSkuModal);
   const showKitModal = useUIStore((state) => state.showKitModal);
   const setShowKitModal = useUIStore((state) => state.setShowKitModal);
@@ -137,6 +139,7 @@ export default function App() {
         <MarketplaceMismatchModal key="mismatchModal" />
         {showConfirmModal && <ConfirmModal key="confirmModal" />}
         {showEditTransModal && <EditTransModal key="editTransModal" />}
+        {showWholeShipmentModal && <WholeShipmentModal key="wholeShipmentModal" />}
         {showSkuModal && <SkuModal key="skuModal" />}
         {showKitModal && kitModalSku && (
           <KitModal

@@ -32,6 +32,10 @@ export interface Transaction {
   comment?: string;
   /** Item 90: number shared by the orders of one combined Ozon shipment; '' otherwise. */
   shipmentId?: string;
+  /** Item 90: OpID of the operation the row was written with (kept by a row edit); '' on rows older than OpID. */
+  opId?: string;
+  /** Column «ДопРасходы»: the additional costs the row's order carries; null/absent on old rows. */
+  additionalCosts?: number | null;
   user?: string;
   groupId?: string;
   isComponent?: boolean;

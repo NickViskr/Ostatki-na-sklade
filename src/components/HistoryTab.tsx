@@ -15,7 +15,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
-  Layers
+  Layers,
+  PackageOpen
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
@@ -113,6 +114,8 @@ export const HistoryTab: React.FC = React.memo(() => {
   const setHistDestFilter = useUIStore((state) => state.setHistDestFilter);
   const setEditingTrans = useUIStore((state) => state.setEditingTrans);
   const setShowEditTransModal = useUIStore((state) => state.setShowEditTransModal);
+  const setWholeShipmentAnchor = useUIStore((state) => state.setWholeShipmentAnchor);
+  const setShowWholeShipmentModal = useUIStore((state) => state.setShowWholeShipmentModal);
 
   const [expandedKitGroups, setExpandedKitGroups] = useState<Set<string>>(new Set());
   const toggleKit = (groupId: string) => {
@@ -720,6 +723,20 @@ export const HistoryTab: React.FC = React.memo(() => {
                           >
                             <Edit3 size={16} />
                           </button>
+                          {t.type === 'Расход' && (
+                            <button
+                              onClick={() => {
+                                setWholeShipmentAnchor(t);
+                                setShowWholeShipmentModal(true);
+                              }}
+                              title="Вся отгрузка"
+                              aria-label="Вся отгрузка"
+                              data-testid="history-whole-shipment"
+                              className="p-1.5 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all"
+                            >
+                              <PackageOpen size={16} />
+                            </button>
+                          )}
                           <button 
                             onClick={() => {
                               const componentIds = t.groupId

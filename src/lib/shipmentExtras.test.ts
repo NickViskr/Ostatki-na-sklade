@@ -171,16 +171,26 @@ describe('rowMoneyAfterExtras', () => {
 // Item 80. Wiring guards: the window, the store and the server speak about the same thing.
 describe('подключение правки доп. расходов поставки', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
-  const modal = read('src/components/EditTransModal.tsx');
+  const pencil = read('src/components/EditTransModal.tsx');
+  const modal = read('src/components/WholeShipmentModal.tsx');
+  const shipmentLib = read('src/lib/wholeShipment.ts');
   const store = read('src/store/useWarehouseStore.ts');
   const code = read('Code.gs');
 
   it('окно собирает расходы из полей и шлёт их одним действием на всю поставку', () => {
     expect(modal).toContain("from '../lib/shipmentExtras'");
     expect(modal).toContain('updateShipmentExtras({');
-    expect(modal).toContain('id: editingTrans!.id');
-    expect(modal).toContain('Доп. расходы поставки');
-    expect(modal).toContain('btn-save-extras');
+    expect(modal).toContain('id: anchor.id');
+    expect(modal).toContain('Доп. расходы отгрузки');
+    expect(modal).toMatch(/comment\s*\}\);/);
+  });
+
+  // Item 90: the extras block moved from the row pencil to the «Вся отгрузка» window.
+  it('the row pencil no longer edits the extras: the block moved to the «Вся отгрузка» window', () => {
+    expect(pencil).not.toContain('updateShipmentExtras');
+    expect(pencil).not.toContain('Доп. расходы поставки');
+    expect(pencil).not.toContain('btn-save-extras');
+    expect(pencil).toContain('input-edit-comment');
   });
 
   // Правка 22.09.2026 по замечаниям владельца: окно не прокручивалось, а упаковка считалась
@@ -188,18 +198,21 @@ describe('подключение правки доп. расходов пост�
   it('окно не выходит за экран: шапка и кнопки закреплены, середина прокручивается', () => {
     expect(modal).toContain('max-h-[90vh]');
     expect(modal).toContain('overflow-y-auto grow');
+    expect(pencil).toContain('max-h-[90vh]');
   });
 
   it('упаковка и «Прочее» вводятся за единицу товара или на партию, как при оформлении поставки', () => {
     expect(modal).toContain('<option value="unit">На единицу</option>');
     expect(modal).toContain('<option value="batch">На партию</option>');
     expect(modal).toContain('packagingMode: packaging.mode');
+    expect(modal).toContain('wholeShipmentNewExtras(');
     expect(modal).toContain('otherValue: Number(other.value) || 0');
     expect(code).toContain("return String(mode) === 'unit' ? roundToTwo(v * totalQty) : v;");
   });
 
   it('заявка из общей поставки к правке не допускается ни на экране, ни на сервере', () => {
-    expect(modal).toContain('общей поставки');
+    expect(shipmentLib).toContain('до появления номера отгрузки');
+    expect(modal).toContain('whole-shipment-refusal');
     expect(code).toMatch(/общая поставка[\s\S]{0,400}?править услуги по одной заявке нельзя/);
   });
 

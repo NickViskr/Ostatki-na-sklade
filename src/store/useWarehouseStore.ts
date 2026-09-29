@@ -134,6 +134,8 @@ interface WarehouseState {
     otherMode: 'unit' | 'batch';
     otherValue: number;
     services: { name: string; quantity: number; unitCost: number }[];
+    /** Item 90: written to every order of the shipment when defined; omitted = comments untouched. */
+    comment?: string;
   }) => Promise<boolean>;
   handleProcessInvoice: (feedback?: any) => Promise<void>;
   
@@ -896,8 +898,18 @@ export const useWarehouseStore = create<WarehouseState>()(
       if (Array.isArray(d.newTransactions)) set({ transactions: d.newTransactions });
       if (Array.isArray(d.stock)) set({ stock: normalizeStock(d.stock) });
       const money = `${formatCurrency(Number(d.oldTotal) || 0)} → ${formatCurrency(Number(d.newTotal) || 0)} ₽`;
-      toast.success(`Доп. расходы поставки изменены: ${money}, пересчитано строк: ${d.changedRows || 0}`);
-      if (Number(d.costRowsAppended) > 0) {
+      const orders: { label?: string; oldShare?: number; newShare?: number }[] = Array.isArray(d.orders) ? d.orders : [];
+      if (orders.length > 1) {
+        // What the server actually wrote, order by order.
+        const lines = orders.map((o, i) =>
+          `№ ${o.label || i + 1}: ${formatCurrency(Number(o.oldShare) || 0)} → ${formatCurrency(Number(o.newShare) || 0)} ₽`);
+        toast.success(`Доп. расходы отгрузки изменены: ${money}`, { description: lines.join('\n'), style: { whiteSpace: 'pre-line' } });
+      } else {
+        toast.success(`Доп. расходы поставки изменены: ${money}, пересчитано строк: ${d.changedRows || 0}`);
+      }
+      if (typeof d.costJournalError === 'string' && d.costJournalError) {
+        toast.warning(d.costJournalError);
+      } else if (Number(d.costRowsAppended) > 0) {
         toast.success('Исправленная себестоимость дописана в журнал для КАН');
       }
       return true;

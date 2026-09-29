@@ -1121,6 +1121,8 @@ function parseTransactionRow(row, headers) {
                      : null,
     groupId:      String(headers && headers.indexOf('groupId') !== -1 ? row[headers.indexOf('groupId')] : ''),
     isComponent:  headers && headers.indexOf('isComponent') !== -1 ? Boolean(row[headers.indexOf('isComponent')]) : false,
+    // Item 90: OpID of the operation ('' on old rows / sheets without the column)
+    opId:         headers && headers.indexOf('OpID') !== -1 ? String(row[headers.indexOf('OpID')] || '').trim() : '',
     // Item 90: free-text operation note in its own column; '' for old sheets/rows
     comment:      headers && headers.indexOf('Комментарий') !== -1 ? String(row[headers.indexOf('Комментарий')] || '').trim() : '',
     // Item 90: number shared by the orders of one combined shipment; '' for single orders and old rows
@@ -1879,6 +1881,30 @@ function setTransactionComment(data, username) {
   return { transactions: getTransactions().rows };
 }
 
+/**
+ * Item 90. Writes `opId` into the «OpID» cell of the rows a commit has just appended (main and kit
+ * component rows, found by the ids the commit returned). No-op for an empty OpID or a sheet without
+ * the column. Used by the row edit and the peresort, which delete and re-commit rows.
+ */
+function stampOpIdOnTransactions(newTransactions, opId) {
+  const key = String(opId || '').trim();
+  if (!key || !newTransactions || newTransactions.length === 0) return;
+  const sheet = getTransactionSheet(getSpreadsheet());
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const headers = readHeaderRow(sheet);
+  const iId = headers.indexOf('ID');
+  const iOp = headers.indexOf('OpID');
+  if (iId === -1 || iOp === -1) return;
+  const wanted = {};
+  newTransactions.forEach(function(t) { wanted[String(t.id).trim()] = true; });
+  const ids = sheet.getRange(2, iId + 1, lastRow - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (wanted[String(ids[i][0]).trim()]) sheet.getRange(i + 2, iOp + 1).setValue(key);
+  }
+  SpreadsheetApp.flush();
+}
+
 function updateTransaction(id, data, username) {
   // Item 56, stage 2. The additional costs of an operation now live in their own column.
   // An edit deletes the row and writes it again, so the number has to be read BEFORE the
@@ -1956,9 +1982,14 @@ function updateTransaction(id, data, username) {
     : (storedRow ? storedRow.comment : '');
   // Item 90: the shipment number is not editable; the rewritten row keeps it.
   const keptShipmentId = storedRow ? storedRow.shipmentId : '';
+  // Item 90: nor is the OpID — it is what ties the row to its order inside a combined shipment.
+  const keptOpId = storedRow ? String(storedRow.opId || '') : '';
 
   deleteTransaction(id, username, true, replacementQty);
   const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty, editedComment, keptShipmentId);
+  // Not passed to the commit as its opId: the order's sibling rows still carry it and the
+  // idempotency guard would skip the write. Stamped on the rows the commit has just written.
+  stampOpIdOnTransactions(commitResult.newTransactions, keptOpId);
 
   // Подэтап 4. ПЕРЕСЧЁТ. Приход изменился — значит изменилась средняя, по которой уезжали
   // все последующие отгрузки. Проигрываем историю артикула заново и дописываем в журнал
@@ -2267,6 +2298,10 @@ function reissueOzonCostRows(changedShipments, username) {
   if (relevant.length === 0) return { appended: 0 };
 
   const newCostByKey = {};
+  // Item 90: orders of one combined shipment share the article and the day; a journal row that
+  // carries an OpID is matched by it first, so each order gets its OWN corrected unit cost.
+  // Entries without opId (receipt recompute) leave this map empty and behave as before.
+  const newCostByOp = {};
   relevant.forEach(function(c) {
     const cabinet = ozonCabinetFromDestination(c.destination);
     // Both days point at the same replacement: rows written since 03.09.2026 are dated by the
@@ -2275,6 +2310,7 @@ function reissueOzonCostRows(changedShipments, username) {
     days.forEach(function(day) {
       if (!day) return;
       newCostByKey[cabinet + '|' + c.article + '|' + day] = c.newUnitCost;
+      if (c.opId) newCostByOp[cabinet + '|' + c.article + '|' + day + '|' + c.opId] = c.newUnitCost;
     });
   });
 
@@ -2296,7 +2332,10 @@ function reissueOzonCostRows(changedShipments, username) {
     rows.forEach(function(r) {
       // «НАЧАЛЬНАЯ ТОЧКА» и любая строка без отгрузки задают точку отсчёта и не пересчитываются.
       if (!r.shipped) { prior = r.costAfter; return; }
-      const replacement = newCostByKey.hasOwnProperty(stampOf(r)) ? newCostByKey[stampOf(r)] : null;
+      const opKey = r.opId ? stampOf(r) + '|' + r.opId : '';
+      const replacement = (opKey && newCostByOp.hasOwnProperty(opKey))
+        ? newCostByOp[opKey]
+        : (newCostByKey.hasOwnProperty(stampOf(r)) ? newCostByKey[stampOf(r)] : null);
       // ГЛАВНОЕ ПРАВИЛО ЭТОЙ ФУНКЦИИ. Пока не встретилась сдвинувшаяся отгрузка, цепочку не
       // пересчитываем вовсе: там всё как было, и любое расхождение — чужое, не наше дело.
       // Оно же оставляет в покое ЦЕЛИКОМ те пары «магазин + товар», которых правка не
@@ -8149,6 +8188,8 @@ function commitShipmentPeresort(postingId, username) {
   // Item 56, stage 2: the additional costs come from the stored column of the original
   // expense, so a batch write-off is not re-charged the cost of the whole batch.
   var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts, undefined, firstTx.comment, firstTx.shipmentId);
+  // Item 90: the re-written rows keep the OpID of the rows they replace (see updateTransaction).
+  stampOpIdOnTransactions(commitResult.newTransactions, firstTx.opId);
 
   // Шаг 10. Собери newTxIds: из commitResult.newTransactions возьми элементы с isComponent !== true, их String(id). const linkInfo = JSON.stringify(newTxIds).
   var newTxIds = commitResult.newTransactions
@@ -9536,8 +9577,12 @@ function getTurnoverData(data) {
  * by the same production example in both test suites.
  */
 
-/** Rows of ONE operation: the same OpID, or — for rows written before OpID — the same moment. */
-function shipmentRowsOfTransaction(id) {
+/**
+ * Rows of ONE operation: the same OpID, or — for rows written before OpID — the same moment.
+ * Item 90: with `wholeShipment` and an anchor that carries a shipment number («Отгрузка»), the rows
+ * of EVERY order sharing that number instead.
+ */
+function shipmentRowsOfTransaction(id, wholeShipment) {
   const ss = getSpreadsheet();
   const sheet = getTransactionSheet(ss);
   const lastRow = sheet.getLastRow();
@@ -9546,6 +9591,7 @@ function shipmentRowsOfTransaction(id) {
   const headers = data[0].map(function(h) { return String(h).trim(); });
   const iId = headers.indexOf('ID');
   const iOp = headers.indexOf('OpID');
+  const iShip = headers.indexOf('Отгрузка');
   if (iId === -1) return [];
 
   let anchor = null;
@@ -9555,12 +9601,15 @@ function shipmentRowsOfTransaction(id) {
   if (!anchor) return [];
 
   const anchorOp = iOp === -1 ? '' : String(anchor.values[iOp] || '').trim();
+  const anchorShip = iShip === -1 ? '' : String(anchor.values[iShip] || '').trim();
   const out = [];
   for (let r = 1; r < data.length; r++) {
     const row = data[r];
     if (String(row[iId]).trim() === '') continue;
     let mine;
-    if (anchorOp) {
+    if (wholeShipment && anchorShip) {
+      mine = String(row[iShip] || '').trim() === anchorShip;
+    } else if (anchorOp) {
       mine = iOp !== -1 && String(row[iOp] || '').trim() === anchorOp;
     } else {
       // No OpID: the rows of one operation share the moment, the type and the object.
@@ -9581,6 +9630,10 @@ function shipmentRowsOfTransaction(id) {
       date: sheetCellText(row, headers, 'Дата'),
       deliveryDate: sheetCellText(row, headers, 'Дата поставки'),
       additionalCosts: parseNumber(sheetCellText(row, headers, 'ДопРасходы')),
+      // Item 90: null when the cell is empty (an old row) — a stored 0 and «nothing stored» differ
+      storedAdditional: String(sheetCellText(row, headers, 'ДопРасходы')).trim() === '' ? null : parseNumber(sheetCellText(row, headers, 'ДопРасходы')),
+      opId: iOp === -1 ? '' : String(row[iOp] || '').trim(),
+      shipmentId: iShip === -1 ? '' : String(row[iShip] || '').trim(),
       isComponent: sheetCellText(row, headers, 'isComponent') === true
         || String(sheetCellText(row, headers, 'isComponent')).toLowerCase() === 'true'
     });
@@ -9721,32 +9774,124 @@ function buildDestinationGs(extras, original, totalQty) {
 }
 
 /**
- * Item 80. Rewrites the additional costs of the shipment the row `id` belongs to.
+ * Item 90 (ADR 0001). Twin of `splitByQuantity` in `src/lib/ozonBatchWriteOff.ts`: cuts a sum of
+ * money into shares proportional to piece counts, in kopecks, the rounding leftovers going to
+ * the largest remainders (ties to the earlier order) — the shares add up to the sum EXACTLY.
+ * The twin-rules parity test feeds both the same inputs; keep the arithmetic identical.
+ */
+function splitByQuantityGs(total, quantities) {
+  const totalKop = Math.round((Number(total) || 0) * 100);
+  const qtys = quantities.map(function(q) { return Math.max(0, Number(q) || 0); });
+  const totalQty = qtys.reduce(function(sum, q) { return sum + q; }, 0);
+  if (totalQty === 0 || totalKop === 0) return qtys.map(function() { return 0; });
+
+  const exact = qtys.map(function(q) { return (totalKop * q) / totalQty; });
+  const base = exact.map(function(v) { return Math.floor(v); });
+  let leftover = totalKop - base.reduce(function(sum, v) { return sum + v; }, 0);
+
+  const order = exact
+    .map(function(v, index) { return { index: index, remainder: v - Math.floor(v) }; })
+    .sort(function(a, b) { return (b.remainder - a.remainder) || (a.index - b.index); });
+
+  const result = base.slice();
+  for (let i = 0; leftover > 0 && i < order.length; i += 1) {
+    result[order[i].index] += 1;
+    leftover -= 1;
+  }
+  return result.map(function(kop) { return Math.round(kop) / 100; });
+}
+
+/** Twin of `batchDestinationNote` in `src/lib/ozonBatchWriteOff.ts`. Never a «₽» in it. */
+function batchDestinationNoteGs(labels, groupQuantity, totalQuantity, share, total) {
+  const orders = labels.map(function(l) { return '№ ' + l; }).join(', ');
+  return '[Общая поставка: заявки ' + orders + '; доля этой заявки ' + groupQuantity + ' из ' + totalQuantity
+    + ' шт., ' + (Number(share) || 0).toFixed(2) + ' руб. из ' + (Number(total) || 0).toFixed(2) + ' руб.]';
+}
+
+function isBatchNoteTag(tag) {
+  return String(tag).replace(/^\s+/, '').toLowerCase().indexOf('общая поставка') === 0;
+}
+
+/** Labels and the pieces of the whole batch out of a «Общая поставка: заявки № A, № B; … из Q шт., …» tag. */
+function parseBatchNoteGs(tag) {
+  const labelsMatch = String(tag).match(/заявки\s+([^;]*);/);
+  const qtyMatch = String(tag).match(/из\s+(\d+(?:[.,]\d+)?)\s*шт\./);
+  return {
+    labels: labelsMatch
+      ? labelsMatch[1].split(',').map(function(l) { return l.trim().replace(/^№\s*/, ''); }).filter(function(l) { return l !== ''; })
+      : [],
+    totalQty: qtyMatch ? parseNumber(qtyMatch[1]) : null
+  };
+}
+
+/**
+ * Item 90. Twin of `wholeShipmentOrders` in `src/lib/wholeShipment.ts` (ADR 0001).
+ * Splits the rows of a whole shipment into orders. Without a shipment number the set is ONE
+ * operation and one order (the item-80 behaviour). With one: the key is OpID, and a row without
+ * an OpID cannot be placed in an order — the correction is refused and nothing is written (a row
+ * edit and the peresort keep the OpID since item 90; only hand-broken rows lack it). Sequence:
+ * numeric suffix of the OpID («…-2» → 2), then first appearance.
+ */
+function resolveShipmentOrdersGs(rows, hasShipmentId) {
+  if (!hasShipmentId) return [{ opId: rows[0].opId || '', rows: rows.slice() }];
+
+  const groups = [];
+  const byOp = {};
+  rows.forEach(function(r) {
+    if (!r.opId) {
+      throw new Error('Не удаётся понять, к какой заявке отгрузки относится строка «' + r.article
+        + '»: у неё нет номера операции. Ничего не записано.');
+    }
+    if (!byOp[r.opId]) { byOp[r.opId] = { opId: r.opId, rows: [] }; groups.push(byOp[r.opId]); }
+    byOp[r.opId].rows.push(r);
+  });
+  const suffixOf = function(opId) {
+    const m = String(opId).match(/-(\d+)$/);
+    return m ? Number(m[1]) : Infinity;
+  };
+  return groups.map(function(g, i) { return { g: g, i: i }; })
+    .sort(function(a, b) { return (suffixOf(a.g.opId) - suffixOf(b.g.opId)) || (a.i - b.i); })
+    .map(function(x) { return x.g; });
+}
+
+/**
+ * Item 80, extended by item 90. Rewrites the additional costs (and optionally the comment) of the
+ * WHOLE shipment the row `id` belongs to: all rows sharing its «Отгрузка» number, or — without one —
+ * the rows of its operation. A combined shipment (several orders) gets the new total spread over
+ * its orders by pieces, then over each order's rows by pieces.
  *
  * @param {Object} data { id, packagingMode, packagingValue, otherMode, otherValue,
- *                          services: [{ name, quantity, unitCost }] }
+ *                          services: [{ name, quantity, unitCost }], comment? }
  *   packagingMode / otherMode: 'unit' — рубли за единицу товара, как при оформлении поставки,
- *   'batch' — сумма на всю партию. Итог считается ЗДЕСЬ, по количеству штук самой операции.
- * @returns {Object} { changedRows, oldTotal, newTotal, destination, stock, newTransactions }
+ *   'batch' — сумма на всю партию. Итог считается ЗДЕСЬ, по количеству штук всей отгрузки.
+ *   comment: written trimmed to «Комментарий» of every row of the set when present (even '');
+ *   undefined — comments untouched.
+ * @returns {Object} { changedRows, oldTotal, newTotal, destination, orders, costRowsAppended,
+ *                     stock, newTransactions }
  */
 function updateShipmentExtras(data, username) {
   const id = String((data && data.id) || '').trim();
   if (!id) throw new Error('Не передан номер строки истории');
 
-  const rows = shipmentRowsOfTransaction(id);
+  const rows = shipmentRowsOfTransaction(id, true);
   if (rows.length === 0) throw new Error('Строка истории не найдена: ' + id);
 
   const anchor = rows.filter(function(r) { return r.id === id; })[0] || rows[0];
-  if (String(anchor.type) !== 'Расход') {
-    throw new Error('Дополнительные расходы есть только у отгрузки: эта операция — «' + anchor.type + '»');
-  }
+  rows.forEach(function(r) {
+    if (String(r.type) !== 'Расход') {
+      throw new Error('Дополнительные расходы есть только у отгрузки: эта операция — «' + r.type + '»');
+    }
+  });
 
+  const shipmentId = String(anchor.shipmentId || '');
   const original = parseShipmentExtrasGs(anchor.destination);
-  if (original.keptGroups.some(function(group) {
-    return group.some(function(tag) { return String(tag).toLowerCase().indexOf('общая поставка') === 0; });
-  })) {
-    throw new Error('Это заявка из общей поставки: её доля расходов посчитана от всей партии, '
-      + 'и править услуги по одной заявке нельзя. Исправьте операцию целиком вручную.');
+  const hasBatchNote = function(extras) {
+    return extras.keptGroups.some(function(group) { return group.some(isBatchNoteTag); });
+  };
+  // An old combined shipment: the note («общая поставка») but no shipment number to find its orders by.
+  if (!shipmentId && rows.some(function(r) { return hasBatchNote(parseShipmentExtrasGs(r.destination)); })) {
+    throw new Error('Это заявка из общей поставки, списанной до появления номеров отгрузки, и целиком она не исправляется: её доля расходов '
+      + 'посчитана от всей партии, и править услуги по одной заявке нельзя. Исправьте операцию вручную.');
   }
 
   const totalQty = shipmentPieces(rows);
@@ -9763,6 +9908,33 @@ function updateShipmentExtras(data, username) {
   const unitOf = function(mode, value) {
     return String(mode) === 'unit' ? roundToTwo(Number(value) || 0) : 0;
   };
+
+  const orders = resolveShipmentOrdersGs(rows, shipmentId !== '');
+
+  // The note of a combined shipment: labels of its orders and the pieces of the batch it was
+  // written with. Labels are kept per order only when every OpID is «<shipment>-N» with N inside
+  // the list (a deleted order then drops out); otherwise the list stays as written.
+  let noteSource = null;
+  orders.forEach(function(o) {
+    if (noteSource) return;
+    parseShipmentExtrasGs(o.rows[0].destination).keptGroups.forEach(function(group) {
+      group.forEach(function(tag) { if (!noteSource && isBatchNoteTag(tag)) noteSource = parseBatchNoteGs(tag); });
+    });
+  });
+  const oldLabels = noteSource ? noteSource.labels : [];
+  const labelIndexOf = function(opId) {
+    if (String(opId).indexOf(shipmentId + '-') !== 0) return -1;
+    const rest = String(opId).slice(shipmentId.length + 1);
+    const n = /^\d+$/.test(rest) ? Number(rest) : 0;
+    return (n >= 1 && n <= oldLabels.length) ? n - 1 : -1;
+  };
+  const labelsKnown = shipmentId !== '' && oldLabels.length > 0
+    && orders.every(function(o) { return labelIndexOf(o.opId) !== -1; });
+  const noteLabels = labelsKnown ? orders.map(function(o) { return oldLabels[labelIndexOf(o.opId)]; }) : oldLabels;
+
+  // A per-piece wording written for another piece count would be stale: rebuild it.
+  const wordingStale = noteSource && noteSource.totalQty !== null && noteSource.totalQty !== totalQty;
+  const wording = wordingStale ? Object.assign({}, original, { packagingText: '', otherText: '' }) : original;
 
   const edited = {
     main: original.main,
@@ -9781,13 +9953,20 @@ function updateShipmentExtras(data, username) {
     }).filter(function(s) { return s.name !== '' && s.quantity > 0; }),
     keptGroups: original.keptGroups
   };
-
-  // What comes off the rows is what the text says they were charged. For every shipment but a
-  // batch one — refused above — the column «ДопРасходы» holds exactly this number, so there is
-  // nothing else to consult, and a row written before that column existed is served as well.
-  const oldTotal = extrasTotalGs(original);
   const newTotal = extrasTotalGs(edited);
-  const newDestination = buildDestinationGs(edited, original, totalQty);
+
+  // What comes off the rows is what they were charged. A single operation: the text says it
+  // (the column «ДопРасходы» holds the same number, and a row older than the column is served
+  // too). A combined shipment: the share of that order stored in «ДопРасходы» — the note in
+  // «Объект» names the whole batch and would charge it in full to every order.
+  const orderPieces = orders.map(function(o) { return shipmentPieces(o.rows); });
+  const oldShares = orders.map(function(o) {
+    if (shipmentId === '') return extrasTotalGs(original);
+    const carrier = o.rows.filter(function(r) { return r.isComponent !== true; })[0];
+    return carrier && carrier.storedAdditional !== null ? roundToTwo(carrier.storedAdditional) : 0;
+  });
+  const newShares = shipmentId === '' ? [newTotal] : splitByQuantityGs(newTotal, orderPieces);
+  const oldTotal = roundToTwo(oldShares.reduce(function(s, v) { return s + v; }, 0));
 
   const ss = getSpreadsheet();
   const sheet = getTransactionSheet(ss);
@@ -9796,39 +9975,80 @@ function updateShipmentExtras(data, username) {
   const cPrice = headers.indexOf('Цена');
   const cTotal = headers.indexOf('Сумма');
   const cAdd = headers.indexOf('ДопРасходы');
+  const cComment = headers.indexOf('Комментарий');
   if (cDest === -1 || cPrice === -1 || cTotal === -1) {
     throw new Error('В листе «История» не хватает колонок Объект, Цена или Сумма');
   }
+  const writeComment = data && data.comment !== undefined && data.comment !== null;
+  const commentText = writeComment ? String(data.comment).trim() : '';
+  if (writeComment && cComment === -1) throw new Error('В листе «История» нет колонки «Комментарий»');
 
+  // Everything is worked out here, BEFORE the first write: a throw above leaves the sheet as it was.
+  const plan = [];
   const changed = [];
-  rows.forEach(function(r) {
-    sheet.getRange(r.sheetRow, cDest + 1).setValue(newDestination);
-    if (r.isComponent === true) return;
-
-    const qty = Number(r.quantity) || 0;
-    if (qty <= 0) return;
-    const oldShare = oldTotal > 0 ? roundToTwo(oldTotal * qty / totalQty) : 0;
-    const newShare = newTotal > 0 ? roundToTwo(newTotal * qty / totalQty) : 0;
-    const rowTotal = roundToTwo((Number(r.total) || 0) - oldShare + newShare);
-    const rowPrice = roundToTwo(rowTotal / qty);
-
-    sheet.getRange(r.sheetRow, cPrice + 1).setValue(rowPrice);
-    sheet.getRange(r.sheetRow, cTotal + 1).setValue(rowTotal);
-    if (cAdd !== -1) sheet.getRange(r.sheetRow, cAdd + 1).setValue(newTotal > 0 ? newTotal : '');
-
-    if (Math.abs(rowPrice - (Number(r.price) || 0)) >= 0.005) {
-      changed.push({
-        id: r.id,
-        date: r.date,
-        kanDay: ozonCostDayFor(r.deliveryDate, r.date),
-        operationDay: String(r.date || '').slice(0, 10),
-        destination: newDestination,
-        article: r.article,
-        quantity: qty,
-        oldUnitCost: roundToTwo(Number(r.price) || 0),
-        newUnitCost: rowPrice
+  const orderReport = [];
+  let anchorDestination = '';
+  orders.forEach(function(o, oi) {
+    const ownOriginal = shipmentId === '' ? original : parseShipmentExtrasGs(o.rows[0].destination);
+    const keptGroups = ownOriginal.keptGroups.map(function(group) {
+      return group.map(function(tag) {
+        return isBatchNoteTag(tag)
+          ? batchDestinationNoteGs(noteLabels, orderPieces[oi], totalQty, newShares[oi], newTotal).slice(1, -1)
+          : tag;
       });
-    }
+    });
+    const orderEdited = Object.assign({}, edited, { main: ownOriginal.main, keptGroups: keptGroups });
+    const destination = buildDestinationGs(orderEdited, wording, totalQty);
+    if (oi === 0) anchorDestination = destination;
+    if (o.rows.some(function(r) { return r.id === anchor.id; })) anchorDestination = destination;
+
+    o.rows.forEach(function(r) {
+      const step = { sheetRow: r.sheetRow, destination: destination };
+      plan.push(step);
+      if (r.isComponent === true) return;
+
+      const qty = Number(r.quantity) || 0;
+      if (qty <= 0) return;
+      const oldRowShare = oldShares[oi] > 0 ? roundToTwo(oldShares[oi] * qty / orderPieces[oi]) : 0;
+      const newRowShare = newShares[oi] > 0 ? roundToTwo(newShares[oi] * qty / orderPieces[oi]) : 0;
+      const rowTotal = roundToTwo((Number(r.total) || 0) - oldRowShare + newRowShare);
+      const rowPrice = roundToTwo(rowTotal / qty);
+      step.price = rowPrice;
+      step.total = rowTotal;
+      step.additional = newShares[oi] > 0 ? newShares[oi] : '';
+
+      if (Math.abs(rowPrice - (Number(r.price) || 0)) >= 0.005) {
+        changed.push({
+          id: r.id,
+          // Item 90: the journal row of this order carries the same OpID as its History rows
+          opId: r.opId,
+          date: r.date,
+          kanDay: ozonCostDayFor(r.deliveryDate, r.date),
+          operationDay: String(r.date || '').slice(0, 10),
+          destination: destination,
+          article: r.article,
+          quantity: qty,
+          oldUnitCost: roundToTwo(Number(r.price) || 0),
+          newUnitCost: rowPrice
+        });
+      }
+    });
+    orderReport.push({
+      opId: o.opId,
+      label: labelsKnown ? oldLabels[labelIndexOf(o.opId)] : '',
+      pieces: orderPieces[oi],
+      oldShare: oldShares[oi],
+      newShare: newShares[oi]
+    });
+  });
+
+  plan.forEach(function(step) {
+    sheet.getRange(step.sheetRow, cDest + 1).setValue(step.destination);
+    if (writeComment) sheet.getRange(step.sheetRow, cComment + 1).setValue(commentText);
+    if (step.price === undefined) return;
+    sheet.getRange(step.sheetRow, cPrice + 1).setValue(step.price);
+    sheet.getRange(step.sheetRow, cTotal + 1).setValue(step.total);
+    if (cAdd !== -1) sheet.getRange(step.sheetRow, cAdd + 1).setValue(step.additional);
   });
   SpreadsheetApp.flush();
 
@@ -9836,18 +10056,24 @@ function updateShipmentExtras(data, username) {
   // what went to KAN. The corrected cost is appended to the journal with the day of the very
   // same supply — the machinery of item 47 stage 4, reused as it is.
   let appended = 0;
+  let costJournalError = '';
   try {
     appended = reissueOzonCostRows(changed, username).appended;
   } catch (e) {
     Logger.log('Себестоимость Озон не переписана после правки расходов: ' + e);
+    // The rows of «История» are already corrected; the owner is told the journal is not.
+    costJournalError = 'Строки истории исправлены, но исправленная себестоимость НЕ записана в журнал '
+      + '«Себестоимость Озон» для КАН: ' + errorMessage(e);
   }
 
   return {
     changedRows: changed.length,
     oldTotal: oldTotal,
     newTotal: newTotal,
-    destination: newDestination,
+    destination: anchorDestination,
+    orders: orderReport,
     costRowsAppended: appended,
+    costJournalError: costJournalError,
     stock: getStock(),
     newTransactions: getTransactions().rows
   };
