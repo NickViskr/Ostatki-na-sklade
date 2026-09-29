@@ -9001,6 +9001,153 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
     /case 'getOzonSettingsJournal': assertAdmin\(currentUser\); result = getOzonSettingsJournal\(data && data\.limit\); break;/.test(routerSrc));
 })();
 
+// ================= Item 90, ticket 01: operation comment =================
+// The comment lives in its own «Комментарий» column of «История», never in «Объект», never as money.
+(function testItem90Comment() {
+  const D = '2026-01-05T09:00:00Z';
+  const commentsOf = (h) => h.dumpTransSheet().map(r => String(r['Комментарий'] === undefined ? '' : r['Комментарий']));
+  const lastHeader = (h) => { const d = h.ensureTransSheet().__dump()[0]; return String(d[d.length - 1]).trim(); };
+
+  // --- commit: every row incl. kit components; without comment the cell is empty; column appended last ---
+  const h1 = freshHarness();
+  h1.ensureTransSheet();
+  h1.setKitSheet([{ kitSku: 'KIT90', componentSku: 'COMP90', quantity: 2, kitType: 'virtual' }]);
+  h1.setStockSheet([{ article: 'COMP90', quantity: 20, avgCost: 5, capitalization: 100 },
+                    { article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  h1.commitTransaction([{ article: 'KIT90', quantity: 3, price: 0 }, { article: 'ART90', quantity: 2, price: 10 }],
+    'Расход', 'Склад', '', 'tester', D, '', undefined, undefined, '  для Иванова  ');
+  const rows1 = h1.dumpTransSheet();
+  check('Item 90: every row of the operation (incl. kit component rows) carries the comment, trimmed',
+    rows1.length >= 3 && rows1.every(r => r['Комментарий'] === 'для Иванова'), JSON.stringify(rows1.map(r => r['Комментарий'])));
+  check('Item 90: the comment column is appended as the LAST header of a sheet that lacked it',
+    lastHeader(h1) === 'Комментарий', lastHeader(h1));
+  check('Item 90: the kit component row no longer shows the old auto text',
+    rows1.every(r => String(r['Комментарий']).indexOf('Авто') === -1));
+
+  const h2 = freshHarness();
+  h2.ensureTransSheet();
+  h2.setStockSheet([{ article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  h2.commitTransaction([{ article: 'ART90', quantity: 2, price: 10 }], 'Расход', 'Склад', '', 'tester', D, '');
+  check('Item 90: commit without a comment leaves the cell empty',
+    commentsOf(h2).length === 1 && commentsOf(h2)[0] === '', JSON.stringify(commentsOf(h2)));
+
+  // --- money-adjacent: «500₽» in the comment changes nothing ---
+  const mk = (comment) => {
+    const h = freshHarness();
+    h.ensureTransSheet();
+    h.setStockSheet([{ article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+    h.commitTransaction([{ article: 'ART90', quantity: 5, price: 10 }], 'Расход', 'Ozon (Shop)', '', 'tester', D, '', undefined, undefined, comment);
+    return h.dumpTransSheet()[0];
+  };
+  const plain = mk(undefined), noted = mk('доплатил 500₽');
+  check('Item 90: comment «доплатил 500₽» changes no «ДопРасходы», «Цена» or «Сумма»',
+    String(noted['ДопРасходы']) === String(plain['ДопРасходы']) && noted['Цена'] === plain['Цена'] && noted['Сумма'] === plain['Сумма'],
+    JSON.stringify({ noted, plain }));
+  check('Item 90: the comment text never lands in «Объект»',
+    noted['Объект'] === plain['Объект'] && String(noted['Объект']).indexOf('500') === -1 && noted['Комментарий'] === 'доплатил 500₽');
+
+  // --- China posting ---
+  const hc = withChina();
+  const batch = china84PostableFixture(hc);
+  hc.postChinaBatch({ id: batch.id, opId: 'op-90-1', comment: ' приход с накладной ', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const chinaRows = hc.dumpTransSheet().filter(r => String(r['Объект'] || '').indexOf('NV-POST-1') !== -1);
+  check('Item 90: postChinaBatch writes the comment to its receipt row',
+    chinaRows.length === 1 && chinaRows[0]['Комментарий'] === 'приход с накладной', JSON.stringify(chinaRows));
+
+  // --- edit: keep / replace / comment-only edit leaves money alone ---
+  const h3 = freshHarness();
+  h3.ensureTransSheet();
+  h3.ensureArchiveSheet();
+  h3.setStockSheet([{ article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  h3.commitTransaction([{ article: 'ART90', quantity: 5, price: 10 }], 'Расход', 'Склад', '', 'tester', D, '', undefined, undefined, 'первый');
+  const id3 = h3.getTransactions().rows[0].id;
+  const edit = (id, extra) => h3.updateTransaction(id, Object.assign({ article: 'ART90', quantity: 5, price: 10, type: 'Расход', destination: 'Склад', date: D }, extra), 'tester');
+  edit(id3, {});
+  let row3 = h3.dumpTransSheet()[0];
+  check('Item 90: an edit without a comment field keeps the stored comment', row3['Комментарий'] === 'первый', row3['Комментарий']);
+  const before = { q: row3['Количество'], p: row3['Цена'], t: row3['Сумма'] };
+  edit(h3.getTransactions().rows[0].id, { comment: 'второй' });
+  row3 = h3.dumpTransSheet()[0];
+  check('Item 90: an edit with a new comment replaces it; quantity/price/total unchanged',
+    row3['Комментарий'] === 'второй' && row3['Количество'] === before.q && row3['Цена'] === before.p && row3['Сумма'] === before.t, JSON.stringify(row3));
+  edit(h3.getTransactions().rows[0].id, { comment: '' });
+  check('Item 90: an edit with an empty comment clears it', String(h3.dumpTransSheet()[0]['Комментарий']) === '');
+
+  // --- delete -> «Удаленное» -> restore keeps the comment ---
+  edit(h3.getTransactions().rows[0].id, { comment: 'сохрани' });
+  h3.deleteTransaction(h3.getTransactions().rows[0].id, 'tester');
+  const arch = h3.dumpArchive();
+  check('Item 90: the archive payload carries the comment', arch.length > 0 && arch[arch.length - 1].data.comment === 'сохрани', JSON.stringify(arch.map(a => a.data.comment)));
+  h3.restoreArchivedItem(arch[arch.length - 1].archiveId, 'tester');
+  check('Item 90: restoreArchivedItem puts the comment back in «Комментарий»',
+    h3.dumpTransSheet().length === 1 && h3.dumpTransSheet()[0]['Комментарий'] === 'сохрани', JSON.stringify(h3.dumpTransSheet()));
+
+  // --- bulk delete -> bulk restore ---
+  const idBulk = h3.getTransactions().rows[0].id;
+  h3.deleteMultipleTransactions([idBulk], 'tester');
+  const archBulk = h3.dumpArchive();
+  check('Item 90: the bulk-delete archive payload carries the comment',
+    archBulk[archBulk.length - 1].data.comment === 'сохрани', JSON.stringify(archBulk.map(a => a.data.comment)));
+  h3.restoreMultipleArchivedItems([archBulk[archBulk.length - 1].archiveId], 'tester');
+  check('Item 90: restoreMultipleArchivedItems puts the comment back by header',
+    h3.dumpTransSheet().length === 1 && h3.dumpTransSheet()[0]['Комментарий'] === 'сохрани'
+    && h3.dumpTransSheet()[0]['Артикул'] === 'ART90', JSON.stringify(h3.dumpTransSheet()));
+
+  // --- old rows: no column / empty cell read as '' ---
+  const hOld = freshHarness();
+  hOld.ensureTransSheet();
+  hOld.setStockSheet([{ article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  hOld.commitTransaction([{ article: 'ART90', quantity: 1, price: 10 }], 'Расход', 'Склад', '', 'tester', D, '');
+  check('Item 90: a row without a comment parses with comment \'\'',
+    hOld.getTransactions().rows.length === 1 && hOld.getTransactions().rows[0].comment === '', JSON.stringify(hOld.getTransactions().rows));
+  const hOld2 = freshHarness();
+  hOld2.ensureTransSheet().__setData([hOld2.TRANS_HEADERS.slice(), ['ID-OLD', D, 'Приход', 'ART90', 5, 10, 0, 50, 'Склад', '', 'tester']]);
+  check('Item 90: a legacy sheet with no «Комментарий» column parses old rows with comment \'\'',
+    hOld2.getTransactions().rows.length === 1 && hOld2.getTransactions().rows[0].comment === '', JSON.stringify(hOld2.getTransactions().rows));
+
+  // --- setTransactionComment: a note on ANY operation, nothing else touched ---
+  const cellsOf = (h) => JSON.stringify(h.dumpTransSheet().map(r => Object.assign({}, r, { 'Комментарий': '' })));
+  const { h: hOldR, id: idOldR } = withReceipt(300, 100);
+  hOldR.setNow('2026-09-10T09:00:00Z'); // the receipt is 40 days old: outside the edit window
+  const beforeOld = cellsOf(hOldR);
+  const stockBeforeOld = JSON.stringify(hOldR.dumpStockSheet());
+  hOldR.setTransactionComment({ id: idOldR, comment: '  поставщик X  ' }, 'tester');
+  check('Item 90: setTransactionComment writes the trimmed cell',
+    hOldR.dumpTransSheet()[0]['Комментарий'] === 'поставщик X', JSON.stringify(hOldR.dumpTransSheet()));
+  check('Item 90: on a 40-day-old receipt every other cell (ID, OpID, qty, price, total) and the stock are byte-identical',
+    cellsOf(hOldR) === beforeOld && JSON.stringify(hOldR.dumpStockSheet()) === stockBeforeOld && hOldR.getTransactions().rows[0].id === idOldR);
+
+  const hCn = freshHarness();
+  hCn.ensureTransSheet();
+  hCn.setStockSheet([{ article: 'ART90', quantity: 0, avgCost: 0, capitalization: 0 }]);
+  hCn.commitTransaction([{ article: 'ART90', quantity: 10, price: 5 }], 'Приход', 'Склад [Китай: партия NV-90]', '', 'tester', D, 'op-cn');
+  const idCn = hCn.getTransactions().rows[0].id;
+  let cnRefused = '';
+  try { hCn.deleteTransaction(idCn, 'tester'); } catch (e) { cnRefused = String(e.message || e); }
+  const beforeCn = cellsOf(hCn);
+  hCn.setTransactionComment({ id: idCn, comment: 'китайская партия' }, 'tester');
+  check('Item 90: a China-owned row (guarded against delete) still takes a note, nothing else changes',
+    cnRefused.indexOf('NV-90') !== -1 && hCn.dumpTransSheet()[0]['Комментарий'] === 'китайская партия' && cellsOf(hCn) === beforeCn,
+    cnRefused + ' | ' + JSON.stringify(hCn.dumpTransSheet()));
+
+  const hKit = freshHarness();
+  hKit.ensureTransSheet();
+  hKit.setKitSheet([{ kitSku: 'KIT90', componentSku: 'COMP90', quantity: 2, kitType: 'virtual' }]);
+  hKit.setStockSheet([{ article: 'COMP90', quantity: 20, avgCost: 5, capitalization: 100 }]);
+  hKit.commitTransaction([{ article: 'KIT90', quantity: 3, price: 0 }], 'Расход', 'Склад', '', 'tester', D, '', undefined, undefined, 'старый');
+  const mainKit = hKit.getTransactions().rows.find(r => r.groupId && !r.isComponent);
+  hKit.setTransactionComment({ id: mainKit.id, comment: 'новый' }, 'tester');
+  const kitRows = hKit.dumpTransSheet();
+  check('Item 90: a note on a kit main row reaches the component rows too',
+    kitRows.length >= 2 && kitRows.every(r => r['Комментарий'] === 'новый'), JSON.stringify(kitRows.map(r => r['Комментарий'])));
+
+  const beforeUnknown = JSON.stringify(hKit.dumpTransSheet());
+  let unknownMsg = '';
+  try { hKit.setTransactionComment({ id: 'NO-SUCH-ID', comment: 'x' }, 'tester'); } catch (e) { unknownMsg = String(e.message || e); }
+  check('Item 90: an unknown id throws «Операция не найдена» and writes nothing',
+    unknownMsg === 'Операция не найдена' && JSON.stringify(hKit.dumpTransSheet()) === beforeUnknown, unknownMsg);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

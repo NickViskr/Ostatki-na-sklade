@@ -10,6 +10,7 @@ import { useUIStore } from '../store/useUIStore';
 import { toast } from 'sonner';
 import { daysSinceReceipt, formatCurrency, RECEIPT_EDIT_WINDOW_DAYS } from '../lib/utils';
 import { resolveServiceCostAt } from '../lib/serviceRates';
+import { isCommentOnlyEdit } from '../lib/operationComment';
 import {
   amountTotal,
   buildDestination,
@@ -23,6 +24,7 @@ import {
 export const EditTransModal: React.FC = () => {
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const handleUpdateTransaction = useWarehouseStore((state) => state.handleUpdateTransaction);
+  const setTransactionComment = useWarehouseStore((state) => state.setTransactionComment);
   
   const editingTrans = useUIStore((state) => state.editingTrans);
   const setEditingTrans = useUIStore((state) => state.setEditingTrans);
@@ -149,7 +151,16 @@ export const EditTransModal: React.FC = () => {
   const receiptAgeDays = editingTrans.type === 'Приход' ? daysSinceReceipt(editingTrans.date) : 0;
   const isReceiptLocked = receiptAgeDays > RECEIPT_EDIT_WINDOW_DAYS;
 
+  // Item 90: a note-only edit never goes through delete + re-commit, so it is allowed on ANY row.
+  const storedTrans = transactions.find((t) => t.id === editingTrans.id);
+  const commentOnly = isCommentOnlyEdit(storedTrans as any, editingTrans as any);
+
   const handleSave = async () => {
+    if (commentOnly) {
+      const done = await setTransactionComment(editingTrans.id, editingTrans.comment ?? '');
+      if (done) setShowEditTransModal(false);
+      return;
+    }
     if (isReceiptLocked) {
       toast.error(`Приход старше ${RECEIPT_EDIT_WINDOW_DAYS} дней править нельзя: этому приходу ${receiptAgeDays} дн.`);
       return;
@@ -167,7 +178,7 @@ export const EditTransModal: React.FC = () => {
       return;
     }
 
-    const success = await handleUpdateTransaction(editingTrans.id, editingTrans);
+    const success = await handleUpdateTransaction(editingTrans.id, { ...editingTrans, comment: editingTrans.comment ?? '' });
     if (success) {
       setShowEditTransModal(false);
     }
@@ -198,7 +209,7 @@ export const EditTransModal: React.FC = () => {
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-6 py-4 text-sm text-amber-800">
               <span className="font-bold">Править этот приход уже нельзя.</span> Ему {receiptAgeDays} дн.,
               а себестоимость поступившего товара меняется не позднее {RECEIPT_EDIT_WINDOW_DAYS} дней
-              с даты поступления на склад.
+              с даты поступления на склад. Комментарий изменить можно.
             </div>
           )}
 
@@ -248,6 +259,18 @@ export const EditTransModal: React.FC = () => {
               value={editingTrans.destination}
               onChange={(e) => setEditingTrans({...editingTrans, destination: e.target.value})}
               className="w-full h-32 p-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none resize-none"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-bold text-slate-500 uppercase">Комментарий</label>
+            <input
+              type="text"
+              data-testid="input-edit-comment"
+              value={editingTrans.comment ?? ''}
+              onChange={(e) => setEditingTrans({...editingTrans, comment: e.target.value})}
+              placeholder="Необязательно — заметка для себя"
+              className="w-full px-6 py-4 rounded-2xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
 
@@ -424,7 +447,7 @@ export const EditTransModal: React.FC = () => {
           </button>
           <button 
             onClick={handleSave}
-            disabled={isProcessing || isReceiptLocked}
+            disabled={isProcessing || (isReceiptLocked && !commentOnly)}
             className="flex-1 bg-slate-900 text-white py-4 rounded-2xl font-bold hover:bg-slate-800 disabled:opacity-50 transition-all shadow-xl flex items-center justify-center gap-2"
           >
             {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <Save size={20} />}

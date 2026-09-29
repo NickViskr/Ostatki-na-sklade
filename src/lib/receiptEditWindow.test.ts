@@ -60,8 +60,8 @@ describe('окно правки в интерфейсе', () => {
     'utf8'
   );
 
-  it('кнопка «Сохранить» гаснет за пределами окна', () => {
-    expect(modal).toContain('disabled={isProcessing || isReceiptLocked}');
+  it('кнопка «Сохранить» гаснет за пределами окна, кроме правки одного комментария', () => {
+    expect(modal).toContain('disabled={isProcessing || (isReceiptLocked && !commentOnly)}');
   });
 
   it('окно правки считает возраст только для прихода', () => {

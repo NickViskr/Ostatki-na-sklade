@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { batchOrderOptions } from "../lib/operationComment";
 import {
   CheckCircle2,
   X,
@@ -73,6 +74,7 @@ export const ConfirmModal: React.FC = () => {
   const [otherDist, setOtherDist] = useState<"batch" | "unit">("batch");
 
   const [deliveryDate, setDeliveryDate] = useState<string>("");
+  const [comment, setComment] = useState<string>("");
   const [selectedCabinet, setSelectedCabinet] = useState<string>("");
   const ozonCabinetNames = useSettingsStore((state) => state.ozonCabinetNames);
   const needCabinetChoice = opType === "Расход" && uploadDestination === "Ozon" && ozonCabinetNames.length >= 2;
@@ -541,12 +543,7 @@ export const ConfirmModal: React.FC = () => {
           groupDestination,
           deliveryDate,
           `${opIdRef.current}-${i + 1}`,
-          {
-            postingIds: group.postingIds,
-            additionalCosts: group.extrasShare,
-            silent: true,
-            skipShipmentsRefresh: true,
-          },
+          batchOrderOptions(group, comment),
         );
 
         if (!ok) {
@@ -576,6 +573,7 @@ export const ConfirmModal: React.FC = () => {
       finalDestination,
       deliveryDate,
       opIdRef.current,
+      { comment },
     );
     if (success) {
       setShowConfirmModal(false);
@@ -1046,6 +1044,20 @@ export const ConfirmModal: React.FC = () => {
                 }`}
               />
             </div>
+          </div>
+
+          <div className="bg-white p-6 rounded-3xl border border-indigo-100 shadow-sm">
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2">
+              Комментарий
+            </label>
+            <input
+              type="text"
+              data-testid="input-confirm-comment"
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              placeholder="Необязательно — заметка для себя"
+              className="w-full px-4 py-3 rounded-xl bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500 font-medium border border-indigo-100"
+            />
           </div>
 
           {/* AI Feedback Section */}

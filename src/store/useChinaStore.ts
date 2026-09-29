@@ -78,7 +78,7 @@ interface ChinaState {
   syncChinaFactoryOrders: () => Promise<{ added: number; updated: number; removed: number; before: Record<string, number>; after: Record<string, number> } | null>;
   /** Item 84 (stage 2): posts an arrived batch onto «Мой склад» at a provisional cost. `opId` is
    * generated ONCE per confirmation window, by the caller, so a double click cannot post twice. */
-  postChinaBatch: (payload: { id: string; opId: string; lines: { article: string; qty: number }[] }) => Promise<boolean>;
+  postChinaBatch: (payload: { id: string; opId: string; lines: { article: string; qty: number }[]; comment?: string }) => Promise<boolean>;
   /** Item 84 (stage 2): admin-only rollback of a posting — removes its receipts/corrections. */
   cancelChinaBatchPosting: (id: string) => Promise<boolean>;
 }

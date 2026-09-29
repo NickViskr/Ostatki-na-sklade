@@ -1,3 +1,4 @@
+import { commentPayload } from '../lib/operationComment';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder } from '../types';
@@ -36,6 +37,8 @@ export interface CommitOptions {
   silent?: boolean;
   /** The supplies are reloaded once after the loop, not after every order. */
   skipShipmentsRefresh?: boolean;
+  /** Optional operation comment (item 90); sent only when non-empty after trimming. */
+  comment?: string;
 }
 
 // Роль администратора определяется одинаково в нескольких местах приложения.
@@ -118,6 +121,8 @@ interface WarehouseState {
   handleDeleteTransaction: (id: string) => Promise<boolean>;
   handleDeleteMultipleTransactions: (ids: string[]) => Promise<boolean>;
   handleUpdateTransaction: (id: string, data: Transaction) => Promise<boolean>;
+  /** Item 90: rewrites only the comment of a History row (any age); no money, no stock. */
+  setTransactionComment: (id: string, comment: string) => Promise<boolean>;
   /** Item 80. Additional costs (packaging, «Прочее», services) of the whole shipment of a row. */
   updateShipmentExtras: (payload: {
     id: string;
@@ -730,7 +735,8 @@ export const useWarehouseStore = create<WarehouseState>()(
         notificationEmail,
         // Item 56, stage 3: stated as a number so the server does not read the batch total
         // out of the destination text and charge it to this order in full.
-        ...(options?.additionalCosts === undefined ? {} : { additionalCosts: options.additionalCosts })
+        ...(options?.additionalCosts === undefined ? {} : { additionalCosts: options.additionalCosts }),
+        ...commentPayload(options?.comment)
       });
       
       if (result.status === 'success') {
@@ -892,6 +898,27 @@ export const useWarehouseStore = create<WarehouseState>()(
         toast.success('Исправленная себестоимость дописана в журнал для КАН');
       }
       return true;
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети: ' + (e?.message || ''));
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  setTransactionComment: async (id, comment) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('setTransactionComment', { data: { id, comment } });
+      if (result.status === 'success') {
+        const rows = result.data?.transactions;
+        if (Array.isArray(rows)) set({ transactions: rows });
+        toast.success('Комментарий сохранён');
+        return true;
+      }
+      toast.error(result.message || 'Не удалось сохранить комментарий');
+      return false;
     } catch (e: any) {
       console.error(e);
       toast.error('Ошибка сети: ' + (e?.message || ''));

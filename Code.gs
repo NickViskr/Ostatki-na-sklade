@@ -332,6 +332,10 @@ function doPost(e) {
       case 'updateTransaction':
         result = updateTransaction(payload.id, data, currentUser.username);
         break;
+      // Item 90: a note is not money — it is rewritten in place, on any operation.
+      case 'setTransactionComment':
+        result = setTransactionComment(data, currentUser.username);
+        break;
       // Item 80: the additional costs of a shipment, edited from «История».
       case 'updateShipmentExtras':
         result = updateShipmentExtras(data, currentUser.username);
@@ -371,7 +375,7 @@ function doPost(e) {
         result = deleteSku(payload.sku, currentUser.username);
         break;
       case 'commit':
-        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId, payload.additionalCosts);
+        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId, payload.additionalCosts, undefined, payload.comment);
         // Пункт 28, этап C: привязка поставок Ozon выполняется здесь же, внутри замка.
         // Ошибка привязки не отменяет уже записанный расход — она возвращается клиенту как предупреждение.
         if (result && payload.postingIds && payload.postingIds.length > 0) {
@@ -1116,7 +1120,9 @@ function parseTransactionRow(row, headers) {
                      ? parseNumber(row[headers.indexOf('ДопРасходы')])
                      : null,
     groupId:      String(headers && headers.indexOf('groupId') !== -1 ? row[headers.indexOf('groupId')] : ''),
-    isComponent:  headers && headers.indexOf('isComponent') !== -1 ? Boolean(row[headers.indexOf('isComponent')]) : false
+    isComponent:  headers && headers.indexOf('isComponent') !== -1 ? Boolean(row[headers.indexOf('isComponent')]) : false,
+    // Item 90: free-text operation note in its own column; '' for old sheets/rows
+    comment:      headers && headers.indexOf('Комментарий') !== -1 ? String(row[headers.indexOf('Комментарий')] || '').trim() : ''
   };
 }
 
@@ -1156,7 +1162,8 @@ function buildTransactionRow(obj) {
     'Пользователь': obj.user,
     'groupId': obj.groupId || '',
     'isComponent': obj.isComponent || false,
-    'ДопРасходы': obj.additionalCosts
+    'ДопРасходы': obj.additionalCosts,
+    'Комментарий': String(obj.comment || '').trim()
   };
   
   for (let i = 0; i < _transHeadersCache.length; i++) {
@@ -1178,7 +1185,7 @@ function getTransactionSheet(ss) {
     finalSheet = sheet1 || sheet2;
   }
   if (finalSheet) {
-    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID', 'ДопРасходы']);
+    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID', 'ДопРасходы', 'Комментарий']);
   }
   return finalSheet;
 }
@@ -1712,7 +1719,8 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
       total: total,
       destination: dest,
       deliveryDate: deliveryDateStr,
-      user: String(transData[10] || '')
+      user: String(transData[10] || ''),
+      comment: headers.indexOf('Комментарий') !== -1 ? String(transData[headers.indexOf('Комментарий')] || '').trim() : ''
     }, deletedBy);
   }
   
@@ -1827,6 +1835,46 @@ function assertReceiptWithinEditWindow(type, dateStr, verb) {
   }
 }
 
+/**
+ * Item 90. Rewrites ONLY the «Комментарий» cell of an «История» row (and of the component rows
+ * when the row is a kit main row). No money, no stock, no id/OpID change, no archive, and no
+ * edit-window / China-owned guards: a note may be added to any operation, old ones included.
+ */
+function setTransactionComment(data, username) {
+  const id = String((data && data.id) || '').trim();
+  const text = String((data && data.comment) || '').trim();
+  const sheet = getTransactionSheet(getSpreadsheet());
+  if (!sheet || sheet.getLastRow() <= 1) throw new Error('Операция не найдена');
+
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(h => String(h).trim());
+  const commentIdx = headers.indexOf('Комментарий');
+  const gIdx = headers.indexOf('groupId');
+  const cIdx = headers.indexOf('isComponent');
+  if (!id || commentIdx === -1) throw new Error('Операция не найдена');
+
+  let target = -1;
+  for (let i = 1; i < values.length; i++) {
+    if (String(values[i][0]) === id) { target = i; break; }
+  }
+  if (target === -1) throw new Error('Операция не найдена');
+
+  const rowsToWrite = [target];
+  const groupId = gIdx !== -1 ? String(values[target][gIdx] || '').trim() : '';
+  const isComponent = cIdx !== -1 && (values[target][cIdx] === true || String(values[target][cIdx]).toLowerCase() === 'true');
+  if (groupId && !isComponent) {
+    for (let i = 1; i < values.length; i++) {
+      if (i === target || String(values[i][gIdx] || '').trim() !== groupId) continue;
+      rowsToWrite.push(i);
+    }
+  }
+  rowsToWrite.forEach(function(i) {
+    sheet.getRange(i + 1, commentIdx + 1).setValue(text);
+  });
+  SpreadsheetApp.flush();
+  return { transactions: getTransactions().rows };
+}
+
 function updateTransaction(id, data, username) {
   // Item 56, stage 2. The additional costs of an operation now live in their own column.
   // An edit deletes the row and writes it again, so the number has to be read BEFORE the
@@ -1898,8 +1946,13 @@ function updateTransaction(id, data, username) {
     }
   }
 
+  // Item 90: an edit without a comment field keeps the stored note; an empty string clears it.
+  const editedComment = (data.comment !== undefined && data.comment !== null)
+    ? String(data.comment).trim()
+    : (storedRow ? storedRow.comment : '');
+
   deleteTransaction(id, username, true, replacementQty);
-  const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty);
+  const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty, editedComment);
 
   // Подэтап 4. ПЕРЕСЧЁТ. Приход изменился — значит изменилась средняя, по которой уезжали
   // все последующие отгрузки. Проигрываем историю артикула заново и дописываем в журнал
@@ -2372,8 +2425,10 @@ function findTransactionsByOpId(transSheet, opIdStr) {
   return found;
 }
 
-function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride) {
+function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride, comment) {
   const items = Array.isArray(data) ? data : [data];
+  // Item 90: optional operation note, written to «Комментарий» on every row of the operation
+  const operationComment = String(comment || '').trim();
 
   // Item 56, stage 2. Additional costs of the operation, stated as a number by the caller.
   // Until now they were dug out of the destination text by regex, which cannot serve a batch
@@ -2619,7 +2674,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
             total:       compTotal,
             destination: destination,
             deliveryDate: '',
-            comment:     'Авто: комплект ' + article,
+            comment:     operationComment,
             user:        username,
             groupId:     kitGroupId,
             isComponent: true
@@ -2640,7 +2695,8 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
             deliveryDate: '',
             user: username,
             groupId: kitGroupId,
-            isComponent: true
+            isComponent: true,
+            comment: operationComment
           });
         }
       }
@@ -2728,6 +2784,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       user: username,
       groupId: kitGroupId || '',
       isComponent: false,
+      comment: operationComment,
       additionalCosts: (type === 'Расход' && shipmentAdditional > 0) ? shipmentAdditional : undefined
     });
     
@@ -2746,7 +2803,8 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       deliveryDate,
       user: username,
       groupId: kitGroupId || '',
-      isComponent: false
+      isComponent: false,
+      comment: operationComment
     });
   });
 
@@ -3273,6 +3331,22 @@ function restoreTransaction(payload) {
     payload.groupId || '',
     payload.isComponent || false
   ]);
+  writeRestoredComment(transSheet, transSheet.getLastRow(), payload.comment);
+}
+
+/**
+ * Item 90. Restore paths append rows positionally (first 13 columns); the note lives in the
+ * «Комментарий» column found BY HEADER at the end of the sheet, so it is written separately.
+ * No-op for an archive payload without a comment (old payloads restore with an empty cell).
+ */
+function writeRestoredComment(transSheet, rowNumber, comment) {
+  const text = String(comment || '').trim();
+  if (!text) return;
+  const lastCol = transSheet.getLastColumn();
+  const headers = transSheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+  const idx = headers.indexOf('Комментарий');
+  if (idx === -1) return;
+  transSheet.getRange(rowNumber, idx + 1).setValue(text);
 }
 
 function deleteMultipleTransactions(ids, deletedBy) {
@@ -3306,6 +3380,7 @@ function deleteMultipleTransactions(ids, deletedBy) {
   const headers = transDataAll[0] || [];
   const groupIdIdx = headers.indexOf('groupId');
   const isComponentIdx = headers.indexOf('isComponent');
+  const commentIdxBulk = headers.map(h => String(h).trim()).indexOf('Комментарий');
 
   // Словари для быстрого поиска и работы
   const idsSet = new Set(ids);
@@ -3371,7 +3446,8 @@ function deleteMultipleTransactions(ids, deletedBy) {
         deliveryDate: deliveryDateStr, 
         user: userStr,
         groupId: groupIdVal !== null && groupIdVal !== undefined ? groupIdVal : '',
-        isComponent: isComponentVal !== null && isComponentVal !== undefined ? isComponentVal : ''
+        isComponent: isComponentVal !== null && isComponentVal !== undefined ? isComponentVal : '',
+        comment: commentIdxBulk !== -1 ? String(transDataAll[i][commentIdxBulk] || '').trim() : ''
       };
       rowsToArchive.push([Utilities.getUuid(), 'Transaction', deletedAt, JSON.stringify(archiveObj), deletedBy]);
 
@@ -3516,6 +3592,7 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
   }
 
   // 1. Ищем строки в архиве
+  const restoredCommentById = {};
   for (let i = 1; i < archiveDataAll.length; i++) {
     const archiveId = String(archiveDataAll[i][0]);
     if (idsSet.has(archiveId)) {
@@ -3532,6 +3609,8 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
           payload.quantity, payload.price, payload.writeOffCost, payload.total,
           payload.destination || '', deliveryStr
         ]);
+        // Item 90: the note is written by header at write time (column sits at the sheet's end)
+        if (payload.comment) restoredCommentById[String(payload.id)] = String(payload.comment).trim();
         
       } catch (e) {
         // Ошибка парсинга
@@ -3579,7 +3658,20 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
     }
     
     if (filteredToRestore.length > 0) {
-      transSheet.getRange(transSheet.getLastRow() + 1, 1, filteredToRestore.length, filteredToRestore[0].length).setValues(filteredToRestore);
+      // Item 90: pad each row to the header length and put the note under «Комментарий» by header.
+      const restoreHeaders = activeTransData[0].map(h => String(h).trim());
+      const restoreCommentIdx = restoreHeaders.indexOf('Комментарий');
+      const restoreWidth = restoreCommentIdx !== -1
+        ? Math.max(restoreHeaders.length, filteredToRestore[0].length)
+        : filteredToRestore[0].length;
+      const rowsToWrite = filteredToRestore.map(function(r) {
+        const out = r.slice();
+        if (restoreCommentIdx === -1) return out;
+        while (out.length < restoreWidth) out.push('');
+        out[restoreCommentIdx] = restoredCommentById[String(r[0])] || '';
+        return out;
+      });
+      transSheet.getRange(transSheet.getLastRow() + 1, 1, rowsToWrite.length, restoreWidth).setValues(rowsToWrite);
     }
     
     transactionsToRestore = filteredToRestore; // for logs or info later
@@ -8037,7 +8129,7 @@ function commitShipmentPeresort(postingId, username) {
   }
   // Item 56, stage 2: the additional costs come from the stored column of the original
   // expense, so a batch write-off is not re-charged the cost of the whole batch.
-  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts);
+  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts, undefined, firstTx.comment);
 
   // Шаг 10. Собери newTxIds: из commitResult.newTransactions возьми элементы с isComponent !== true, их String(id). const linkInfo = JSON.stringify(newTxIds).
   var newTxIds = commitResult.newTransactions

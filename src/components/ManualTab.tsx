@@ -65,6 +65,7 @@ export const ManualTab: React.FC = React.memo(() => {
 
   const [isAddingDest, setIsAddingDest] = useState(false);
   const [newDest, setNewDest] = useState('');
+  const [comment, setComment] = useState('');
   
   // Пункт 40, этап A. Что делать с себестоимостью списанного товара:
   // 'debt' — оставить долгом на артикуле (поведение по умолчанию), 'zero' — обнулить.
@@ -207,10 +208,10 @@ export const ManualTab: React.FC = React.memo(() => {
 
       let ok = true;
       if (incomingItems.length > 0) {
-        ok = await commitTransaction(incomingItems, 'Приход', labeledDestination, deliveryDate, takeOpId() + ':in');
+        ok = await commitTransaction(incomingItems, 'Приход', labeledDestination, deliveryDate, takeOpId() + ':in', { comment });
       }
       if (ok && outgoingItems.length > 0) {
-        ok = await commitTransaction(outgoingItems, 'Расход', labeledDestination, deliveryDate, takeOpId() + ':out');
+        ok = await commitTransaction(outgoingItems, 'Расход', labeledDestination, deliveryDate, takeOpId() + ':out', { comment });
       }
 
       if (ok === true) {
@@ -223,6 +224,7 @@ export const ManualTab: React.FC = React.memo(() => {
           price: ''
         });
         setArticleSearch('');
+        setComment('');
         setWriteOffCapMode('debt');
       }
       return;
@@ -257,7 +259,8 @@ export const ManualTab: React.FC = React.memo(() => {
       standardType,
       labeledDestination,
       deliveryDate,
-      takeOpId()
+      takeOpId(),
+      { comment }
     );
     
     if (success) {
@@ -270,11 +273,12 @@ export const ManualTab: React.FC = React.memo(() => {
         price: ''
       });
       setArticleSearch('');
+      setComment('');
       // Пункт 40, этап A: возвращаем безопасный выбор по умолчанию,
       // чтобы обнуление не «прилипло» к следующему списанию незаметно для владельца.
       setWriteOffCapMode('debt');
     }
-  }, [manualForm, commitTransaction, setManualForm, pendingItems, kits, stock, writeOffCapMode]);
+  }, [manualForm, commitTransaction, setManualForm, pendingItems, kits, stock, writeOffCapMode, comment]);
 
   const removePendingItem = (index: number) => {
     setPendingItems(prev => prev.filter((_, i) => i !== index));
@@ -351,6 +355,18 @@ export const ManualTab: React.FC = React.memo(() => {
               </div>
             )}
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm font-bold text-slate-500 uppercase">Комментарий</label>
+          <input
+            type="text"
+            data-testid="input-manual-comment"
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            placeholder="Необязательно — заметка для себя"
+            className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
+          />
         </div>
 
         {/* Пункт 40, этап A. Судьба себестоимости списанного товара. Выбор виден только у

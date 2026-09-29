@@ -3,6 +3,7 @@ import { X, Loader2, PackageCheck } from 'lucide-react';
 import { useChinaStore } from '../store/useChinaStore';
 import { ChinaBatch } from '../types';
 import { chinaPostPricePerUnit, chinaPostQtyError, chinaRubText } from '../lib/chinaBatchForm';
+import { commentPayload } from '../lib/operationComment';
 import { newOperationId } from '../lib/utils';
 
 interface ChinaPostModalProps {
@@ -28,6 +29,8 @@ export const ChinaPostModal: React.FC<ChinaPostModalProps> = ({ batch, onClose }
     return initial;
   });
 
+  const [comment, setComment] = useState('');
+
   const errors: Record<string, string | null> = {};
   preview.forEach((p) => { errors[p.article] = chinaPostQtyError(qty[p.article] ?? ''); });
   const hasErrors = Object.values(errors).some((e) => e !== null);
@@ -35,7 +38,7 @@ export const ChinaPostModal: React.FC<ChinaPostModalProps> = ({ batch, onClose }
   const handleConfirm = async () => {
     if (hasErrors) return;
     const lines = preview.map((p) => ({ article: p.article, qty: Number(qty[p.article]) }));
-    const ok = await postChinaBatch({ id: batch.id, opId: opIdRef.current, lines });
+    const ok = await postChinaBatch({ id: batch.id, opId: opIdRef.current, lines, ...commentPayload(comment) });
     if (ok) onClose();
   };
 
@@ -83,6 +86,16 @@ export const ChinaPostModal: React.FC<ChinaPostModalProps> = ({ batch, onClose }
               })}
             </tbody>
           </table>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1">Комментарий</label>
+            <input
+              data-testid="input-post-comment"
+              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"
+              placeholder="Необязательно — заметка для себя"
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+            />
+          </div>
           <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
             Товар встанет на «Мой склад» по предварительной цене; когда заказ будет закрыт в отчёте
             китайцев, цена доведётся автоматически.

@@ -612,6 +612,7 @@ module.exports = {
       .map(r => { const o = {}; headers.forEach((h, i) => o[h] = r[i]); return o; });
   },
   updateTransaction: (...args) => context.updateTransaction(...args),
+  setTransactionComment: (...args) => context.setTransactionComment(...args),
   deleteTransaction: (...args) => context.deleteTransaction(...args),
   getStock: (...args) => context.getStock(...args),
   stockOf(article) {

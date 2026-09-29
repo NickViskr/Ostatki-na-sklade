@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
+import { commentMatches, hasComment } from '../lib/operationComment';
 import { buildDestinationOptions, destinationMain, formatCurrency, historyTypeLabel, parseAppDate, parseDestination } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -157,6 +158,9 @@ export const HistoryTab: React.FC = React.memo(() => {
     return dateStr;
   };
 
+  // Item 90: History had no text search; this one matches the operation comment only.
+  const [commentQuery, setCommentQuery] = useState('');
+
   const filteredHistory = useMemo(() => {
     return transactions.filter(t => {
       const matchesSku = histSelectedSkus.length === 0 || histSelectedSkus.includes(t.article);
@@ -185,9 +189,12 @@ export const HistoryTab: React.FC = React.memo(() => {
       
       const matchesDest = histDestFilter === 'all' || destinationMain(t.destination) === histDestFilter;
 
-      return matchesSku && matchesType && dateMatched && matchesDest && !t.isComponent;
+      const query = commentQuery.trim().toLowerCase();
+      const matchesComment = !query || commentMatches(t, query);
+
+      return matchesSku && matchesType && dateMatched && matchesDest && matchesComment && !t.isComponent;
     });
-  }, [transactions, histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter]);
+  }, [transactions, histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter, commentQuery]);
 
   // 29.08.2026. Список объектов собирается из САМИХ операций, а не только из настройки в
   // браузере. Настройка пополняется единственным способом — когда объект впервые вручную
@@ -285,7 +292,7 @@ export const HistoryTab: React.FC = React.memo(() => {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter]);
+  }, [histSelectedSkus, histTypeFilter, histStartDate, histEndDate, histDestFilter, commentQuery]);
 
   const totalPages = Math.ceil(sortedHistory.length / pageSize) || 1;
 
@@ -416,7 +423,7 @@ export const HistoryTab: React.FC = React.memo(() => {
       </div>
 
       {/* Filters */}
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+      <div className="grid grid-cols-1 md:grid-cols-6 gap-4 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
         <div className="relative" ref={dropdownRef}>
           <button 
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -522,6 +529,18 @@ export const HistoryTab: React.FC = React.memo(() => {
             title="Конечная дата"
           />
           <Calendar className="absolute left-3 top-2.5 text-slate-400" size={18} />
+        </div>
+
+        <div className="relative">
+          <input
+            type="text"
+            data-testid="input-history-comment-search"
+            value={commentQuery}
+            onChange={(e) => setCommentQuery(e.target.value)}
+            placeholder="Поиск по комментарию"
+            className="w-full pl-10 pr-4 py-2 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
         </div>
       </div>
 
@@ -674,7 +693,12 @@ export const HistoryTab: React.FC = React.memo(() => {
                       )} ₽
                     </td>
                     <td className="px-3 py-3 text-[11px] text-slate-500 max-w-[240px] whitespace-normal">
-                      <DestinationCell destination={t.destination} />
+                      <div className="flex items-start gap-1.5">
+                        <DestinationCell destination={t.destination} />
+                        {hasComment(t) && (
+                          <span className="shrink-0 cursor-help" title={t.comment} data-testid="history-comment-marker">💬</span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
                       {t.deliveryDate ? formatDate(t.deliveryDate) : '-'}

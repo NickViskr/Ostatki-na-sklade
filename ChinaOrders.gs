@@ -2673,7 +2673,9 @@ function postChinaBatch(data, username) {
     return { article: a, quantity: qty, price: price };
   });
 
-  const commit = commitTransaction(items, 'Приход', destination, '', username, undefined, opId);
+  // Item 90: optional operation note, written to «Комментарий» of every receipt row.
+  const operationComment = String((data || {}).comment || '').trim();
+  const commit = commitTransaction(items, 'Приход', destination, '', username, undefined, opId, undefined, undefined, operationComment);
   const created = commit.newTransactions || [];
 
   const records = articles.map(function (a) {
