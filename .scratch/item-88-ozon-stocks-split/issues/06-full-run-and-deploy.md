@@ -4,12 +4,12 @@
 
 **Blocked by:** 02, 03, 04, 05.
 
-**Status:** ready-for-human
+**Status:** done
 
 - [x] Full set green (counts recorded in TEST_LOG)
 - [x] Owner deployed; served chunks equal the local build modulo hashes and the build label; revision recorded
 - [x] Owner's live check done
-- [ ] Item 88 closed in the plan on the owner's word
+- [x] Item 88 closed in the plan on the owner's word
 
 ## Result (2026-09-29)
 
@@ -27,4 +27,4 @@ index, follow chunk references by full hyphenated names, replace 8-char hashes, 
 
 Owner's live check 2026-09-29: cabinets, article and cluster expansion, «Рекомендации» with ticks,
 manual pick, «Фабрика» and «В заявках» cells, dashboard alert block — «всё как раньше».
-`/code-review` not run for this ticket: no code diff. Item 88 stays open until the owner's word.
+`/code-review` not run for this ticket: no code diff. Item 88 CLOSED 2026-09-29 on the owner's word.
