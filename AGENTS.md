@@ -82,7 +82,7 @@ not translated back; files drift to English as they are edited.
   reports three files with the manifest. The stand loads both into one context. Verify BOTH
   files after a push. TWO owner-run commands, ALWAYS from `repo/` — the classifier blocks them
   for the assistant:
-  `cd "/Users/nikolajvyskrebencev/Ostatki na sklade/repo" && clasp push`
+  `cd "/Users/nikolajvyskrebencev/AI Project/Projects/Ostatki na sklade/repo" && clasp push`
   then `clasp deploy -i AKfycbxRb4HXyqUsqqk1x5ScRgL44O1YUOlmpemCn0AAcIB50Rh5kXKeaNxAWMU2NDZTU4F3 -d "<what>"`.
   Push alone moves HEAD only; the /exec deployment is pinned to a version. Verify with
   `clasp clone-script <id>` into the scratchpad + `cmp`, and `clasp list-deployments`.

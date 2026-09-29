@@ -2,7 +2,7 @@
 
 Rewritten 2026-09-18 (the previous version dated from the first weeks and still mentioned a
 Gemini-only proxy and no Ozon integration). Current state and open items are in the
-«Очередь дальше» block at the end of `docs/OZON_PLAN.md`; rules in `CLAUDE.md`.
+«Очередь дальше» block at the end of `docs/OZON_PLAN.md`; rules in `AGENTS.md`.
 
 ## Three parts, one repository
 
@@ -101,4 +101,4 @@ which is public.
 `npx vitest run` (frontend logic), `npm run test:gas` (Apps Script stand in
 `tests/apps-script/`, fakes the spreadsheet), `npx tsc --noEmit`, `npx vite build`. Deployment of
 the proxy: `gcloud run deploy` from a clean `git archive` export; of `Code.gs`: `clasp push` +
-`clasp deploy -i` by the owner. Details and the exact commands: `CLAUDE.md`.
+`clasp deploy -i` by the owner. Details and the exact commands: `AGENTS.md`.
