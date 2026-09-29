@@ -32,10 +32,33 @@ Pieces already promised to created supplies that Ozon has not yet taken off our 
 not available for a new supply.
 _Avoid_: pending, зачёт
 
+**Ozon order** («Заявка», e.g. 130238688-1):
+One order number of Ozon. It is written off our books as one expense operation, one row per article.
+_Avoid_: поставка (that is one cluster's part of it)
+
+**Cluster posting** («Поставка по кластеру»):
+The part of an Ozon order bound for one Ozon cluster. An order can hold many of them.
+_Avoid_: заявка
+
+**Combined shipment** («Общая отгрузка», tagged «Общая поставка» in «История»):
+Several Ozon orders written off together and served by one set of shipment extras; each order keeps
+its own expense operation and carries a share of the extras by pieces.
+_Avoid_: batch (that word belongs to China batches), общая заявка
+
 **Shipment extras** («Упаковка», «Прочее», «Услуги»):
 Extra money of one shipment written into its «Объект» text and spread over the shipment's rows by
-quantity into «ДопРасходы». Labels are read regardless of letter case.
+quantity into «ДопРасходы». Labels are read regardless of letter case. Correcting them after the
+fact changes only the extras and their spread over the orders and rows — never quantities, stock or
+the write-off cost.
 _Avoid_: доп. затраты, overhead
+
+### Operations
+
+**Operation comment** («Комментарий»):
+The owner's own free note on a receipt or a shipment, written when it is recorded and editable later;
+one text for the whole operation (and for every order of a combined shipment). It is never part of
+«Объект» and never carries money.
+_Avoid_: примечание, note inside «Объект»
 
 ### Coverage
 
