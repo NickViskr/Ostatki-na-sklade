@@ -375,7 +375,7 @@ function doPost(e) {
         result = deleteSku(payload.sku, currentUser.username);
         break;
       case 'commit':
-        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId, payload.additionalCosts, undefined, payload.comment);
+        result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId, payload.additionalCosts, undefined, payload.comment, payload.shipmentId);
         // Пункт 28, этап C: привязка поставок Ozon выполняется здесь же, внутри замка.
         // Ошибка привязки не отменяет уже записанный расход — она возвращается клиенту как предупреждение.
         if (result && payload.postingIds && payload.postingIds.length > 0) {
@@ -1122,7 +1122,9 @@ function parseTransactionRow(row, headers) {
     groupId:      String(headers && headers.indexOf('groupId') !== -1 ? row[headers.indexOf('groupId')] : ''),
     isComponent:  headers && headers.indexOf('isComponent') !== -1 ? Boolean(row[headers.indexOf('isComponent')]) : false,
     // Item 90: free-text operation note in its own column; '' for old sheets/rows
-    comment:      headers && headers.indexOf('Комментарий') !== -1 ? String(row[headers.indexOf('Комментарий')] || '').trim() : ''
+    comment:      headers && headers.indexOf('Комментарий') !== -1 ? String(row[headers.indexOf('Комментарий')] || '').trim() : '',
+    // Item 90: number shared by the orders of one combined shipment; '' for single orders and old rows
+    shipmentId:   headers && headers.indexOf('Отгрузка') !== -1 ? String(row[headers.indexOf('Отгрузка')] || '').trim() : ''
   };
 }
 
@@ -1163,7 +1165,8 @@ function buildTransactionRow(obj) {
     'groupId': obj.groupId || '',
     'isComponent': obj.isComponent || false,
     'ДопРасходы': obj.additionalCosts,
-    'Комментарий': String(obj.comment || '').trim()
+    'Комментарий': String(obj.comment || '').trim(),
+    'Отгрузка': String(obj.shipmentId || '').trim()
   };
   
   for (let i = 0; i < _transHeadersCache.length; i++) {
@@ -1185,7 +1188,7 @@ function getTransactionSheet(ss) {
     finalSheet = sheet1 || sheet2;
   }
   if (finalSheet) {
-    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID', 'ДопРасходы', 'Комментарий']);
+    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID', 'ДопРасходы', 'Комментарий', 'Отгрузка']);
   }
   return finalSheet;
 }
@@ -1720,7 +1723,8 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
       destination: dest,
       deliveryDate: deliveryDateStr,
       user: String(transData[10] || ''),
-      comment: headers.indexOf('Комментарий') !== -1 ? String(transData[headers.indexOf('Комментарий')] || '').trim() : ''
+      comment: headers.indexOf('Комментарий') !== -1 ? String(transData[headers.indexOf('Комментарий')] || '').trim() : '',
+      shipmentId: headers.indexOf('Отгрузка') !== -1 ? String(transData[headers.indexOf('Отгрузка')] || '').trim() : ''
     }, deletedBy);
   }
   
@@ -1950,9 +1954,11 @@ function updateTransaction(id, data, username) {
   const editedComment = (data.comment !== undefined && data.comment !== null)
     ? String(data.comment).trim()
     : (storedRow ? storedRow.comment : '');
+  // Item 90: the shipment number is not editable; the rewritten row keeps it.
+  const keptShipmentId = storedRow ? storedRow.shipmentId : '';
 
   deleteTransaction(id, username, true, replacementQty);
-  const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty, editedComment);
+  const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty, editedComment, keptShipmentId);
 
   // Подэтап 4. ПЕРЕСЧЁТ. Приход изменился — значит изменилась средняя, по которой уезжали
   // все последующие отгрузки. Проигрываем историю артикула заново и дописываем в журнал
@@ -2425,10 +2431,12 @@ function findTransactionsByOpId(transSheet, opIdStr) {
   return found;
 }
 
-function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride, comment) {
+function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride, comment, shipmentId) {
   const items = Array.isArray(data) ? data : [data];
   // Item 90: optional operation note, written to «Комментарий» on every row of the operation
   const operationComment = String(comment || '').trim();
+  // Item 90: combined-shipment number (browser-generated), written to «Отгрузка» on every row
+  const operationShipmentId = String(shipmentId || '').trim();
 
   // Item 56, stage 2. Additional costs of the operation, stated as a number by the caller.
   // Until now they were dug out of the destination text by regex, which cannot serve a batch
@@ -2675,6 +2683,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
             destination: destination,
             deliveryDate: '',
             comment:     operationComment,
+            shipmentId:  operationShipmentId,
             user:        username,
             groupId:     kitGroupId,
             isComponent: true
@@ -2696,7 +2705,8 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
             user: username,
             groupId: kitGroupId,
             isComponent: true,
-            comment: operationComment
+            comment: operationComment,
+            shipmentId: operationShipmentId
           });
         }
       }
@@ -2785,6 +2795,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       groupId: kitGroupId || '',
       isComponent: false,
       comment: operationComment,
+      shipmentId: operationShipmentId,
       additionalCosts: (type === 'Расход' && shipmentAdditional > 0) ? shipmentAdditional : undefined
     });
     
@@ -2804,7 +2815,8 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       user: username,
       groupId: kitGroupId || '',
       isComponent: false,
-      comment: operationComment
+      comment: operationComment,
+      shipmentId: operationShipmentId
     });
   });
 
@@ -3331,22 +3343,23 @@ function restoreTransaction(payload) {
     payload.groupId || '',
     payload.isComponent || false
   ]);
-  writeRestoredComment(transSheet, transSheet.getLastRow(), payload.comment);
+  writeRestoredLateCells(transSheet, transSheet.getLastRow(), payload);
 }
 
 /**
- * Item 90. Restore paths append rows positionally (first 13 columns); the note lives in the
- * «Комментарий» column found BY HEADER at the end of the sheet, so it is written separately.
- * No-op for an archive payload without a comment (old payloads restore with an empty cell).
+ * Item 90. Restore paths append rows positionally (first 13 columns); the note and the shipment
+ * number live in «Комментарий» / «Отгрузка» found BY HEADER at the end of the sheet, so they are
+ * written separately. Empty values are skipped (old payloads restore with empty cells).
  */
-function writeRestoredComment(transSheet, rowNumber, comment) {
-  const text = String(comment || '').trim();
-  if (!text) return;
+const RESTORED_LATE_CELLS = [['Комментарий', 'comment'], ['Отгрузка', 'shipmentId']];
+function writeRestoredLateCells(transSheet, rowNumber, payload) {
   const lastCol = transSheet.getLastColumn();
   const headers = transSheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
-  const idx = headers.indexOf('Комментарий');
-  if (idx === -1) return;
-  transSheet.getRange(rowNumber, idx + 1).setValue(text);
+  RESTORED_LATE_CELLS.forEach(function(pair) {
+    const text = String((payload && payload[pair[1]]) || '').trim();
+    const idx = headers.indexOf(pair[0]);
+    if (text && idx !== -1) transSheet.getRange(rowNumber, idx + 1).setValue(text);
+  });
 }
 
 function deleteMultipleTransactions(ids, deletedBy) {
@@ -3381,6 +3394,7 @@ function deleteMultipleTransactions(ids, deletedBy) {
   const groupIdIdx = headers.indexOf('groupId');
   const isComponentIdx = headers.indexOf('isComponent');
   const commentIdxBulk = headers.map(h => String(h).trim()).indexOf('Комментарий');
+  const shipmentIdxBulk = headers.map(h => String(h).trim()).indexOf('Отгрузка');
 
   // Словари для быстрого поиска и работы
   const idsSet = new Set(ids);
@@ -3447,7 +3461,8 @@ function deleteMultipleTransactions(ids, deletedBy) {
         user: userStr,
         groupId: groupIdVal !== null && groupIdVal !== undefined ? groupIdVal : '',
         isComponent: isComponentVal !== null && isComponentVal !== undefined ? isComponentVal : '',
-        comment: commentIdxBulk !== -1 ? String(transDataAll[i][commentIdxBulk] || '').trim() : ''
+        comment: commentIdxBulk !== -1 ? String(transDataAll[i][commentIdxBulk] || '').trim() : '',
+        shipmentId: shipmentIdxBulk !== -1 ? String(transDataAll[i][shipmentIdxBulk] || '').trim() : ''
       };
       rowsToArchive.push([Utilities.getUuid(), 'Transaction', deletedAt, JSON.stringify(archiveObj), deletedBy]);
 
@@ -3592,7 +3607,7 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
   }
 
   // 1. Ищем строки в архиве
-  const restoredCommentById = {};
+  const restoredLateById = {};
   for (let i = 1; i < archiveDataAll.length; i++) {
     const archiveId = String(archiveDataAll[i][0]);
     if (idsSet.has(archiveId)) {
@@ -3609,8 +3624,8 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
           payload.quantity, payload.price, payload.writeOffCost, payload.total,
           payload.destination || '', deliveryStr
         ]);
-        // Item 90: the note is written by header at write time (column sits at the sheet's end)
-        if (payload.comment) restoredCommentById[String(payload.id)] = String(payload.comment).trim();
+        // Item 90: note and shipment number are written by header at write time (columns sit at the sheet's end)
+        restoredLateById[String(payload.id)] = payload;
         
       } catch (e) {
         // Ошибка парсинга
@@ -3658,17 +3673,21 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
     }
     
     if (filteredToRestore.length > 0) {
-      // Item 90: pad each row to the header length and put the note under «Комментарий» by header.
+      // Item 90: pad each row to the header length and put the note and the shipment number
+      // under «Комментарий» / «Отгрузка» by header.
       const restoreHeaders = activeTransData[0].map(h => String(h).trim());
-      const restoreCommentIdx = restoreHeaders.indexOf('Комментарий');
-      const restoreWidth = restoreCommentIdx !== -1
+      const lateCols = RESTORED_LATE_CELLS
+        .map(function(pair) { return { idx: restoreHeaders.indexOf(pair[0]), key: pair[1] }; })
+        .filter(function(c) { return c.idx !== -1; });
+      const restoreWidth = lateCols.length > 0
         ? Math.max(restoreHeaders.length, filteredToRestore[0].length)
         : filteredToRestore[0].length;
       const rowsToWrite = filteredToRestore.map(function(r) {
         const out = r.slice();
-        if (restoreCommentIdx === -1) return out;
+        if (lateCols.length === 0) return out;
         while (out.length < restoreWidth) out.push('');
-        out[restoreCommentIdx] = restoredCommentById[String(r[0])] || '';
+        const src = restoredLateById[String(r[0])] || {};
+        lateCols.forEach(function(c) { out[c.idx] = String(src[c.key] || '').trim(); });
         return out;
       });
       transSheet.getRange(transSheet.getLastRow() + 1, 1, rowsToWrite.length, restoreWidth).setValues(rowsToWrite);
@@ -8129,7 +8148,7 @@ function commitShipmentPeresort(postingId, username) {
   }
   // Item 56, stage 2: the additional costs come from the stored column of the original
   // expense, so a batch write-off is not re-charged the cost of the whole batch.
-  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts, undefined, firstTx.comment);
+  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts, undefined, firstTx.comment, firstTx.shipmentId);
 
   // Шаг 10. Собери newTxIds: из commitResult.newTransactions возьми элементы с isComponent !== true, их String(id). const linkInfo = JSON.stringify(newTxIds).
   var newTxIds = commitResult.newTransactions

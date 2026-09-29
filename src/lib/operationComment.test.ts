@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { batchOrderOptions, commentMatches, commentPayload, hasComment, isCommentOnlyEdit } from './operationComment';
 import { useWarehouseStore } from '../store/useWarehouseStore';
@@ -14,9 +15,35 @@ describe('operation comment (item 90, browser half)', () => {
       { postingIds: ['a'], extrasShare: 10 },
       { postingIds: ['b'], extrasShare: 20 },
     ];
-    const options = groups.map((g) => batchOrderOptions(g, 'общая'));
+    const options = groups.map((g) => batchOrderOptions(g, 'общая', 'OP-1'));
     expect(options.map((o) => o.comment)).toEqual(['общая', 'общая']);
     expect(options.map((o) => o.postingIds)).toEqual([['a'], ['b']]);
+  });
+
+  it('every order of a combined write-off gets the same shipment number', () => {
+    const groups = [
+      { postingIds: ['a'], extrasShare: 10 },
+      { postingIds: ['b'], extrasShare: 20 },
+      { postingIds: ['c'], extrasShare: 30 },
+    ];
+    const options = groups.map((g) => batchOrderOptions(g, '', 'OP-7'));
+    expect(options.map((o) => o.shipmentId)).toEqual(['OP-7', 'OP-7', 'OP-7']);
+  });
+
+  it('commit sends shipmentId only when one is given', async () => {
+    const fetchGas = vi.fn().mockResolvedValue({ status: 'error', message: 'stop' });
+    useWarehouseStore.setState({ fetchGas, kits: [] } as never);
+    const item = [{ article: 'A', quantity: 1, price: 1 }] as never;
+    await useWarehouseStore.getState().commitTransaction(item, 'Приход', 'Склад', '', 'op-1', { shipmentId: 'OP-7' });
+    await useWarehouseStore.getState().commitTransaction(item, 'Приход', 'Склад', '', 'op-2', { comment: 'x' });
+    expect(fetchGas.mock.calls[0][1].shipmentId).toBe('OP-7');
+    expect('shipmentId' in fetchGas.mock.calls[1][1]).toBe(false);
+  });
+
+  it('ConfirmModal: the combined path passes the window-wide id as shipment number; the single path passes none', () => {
+    const src = readFileSync(new URL('../components/ConfirmModal.tsx', import.meta.url), 'utf8');
+    expect(src).toMatch(/batchOrderOptions\(group, comment, opIdRef\.current\)/);
+    expect(src).toMatch(/opIdRef\.current,\n\s*\{ comment \},\n\s*\);/);
   });
 
   it('updateTransaction sends data.comment, also an empty one to clear it', async () => {

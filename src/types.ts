@@ -30,6 +30,8 @@ export interface Transaction {
   destination: string;
   deliveryDate?: string;
   comment?: string;
+  /** Item 90: number shared by the orders of one combined Ozon shipment; '' otherwise. */
+  shipmentId?: string;
   user?: string;
   groupId?: string;
   isComponent?: boolean;

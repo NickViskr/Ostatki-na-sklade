@@ -6,16 +6,21 @@ export const commentPayload = (comment?: string): { comment?: string } => {
   return trimmed ? { comment: trimmed } : {};
 };
 
-/** Commit options of ONE order of a combined Ozon write-off; every order gets the same comment. */
+/**
+ * Commit options of ONE order of a combined Ozon write-off; every order gets the same comment
+ * and the same shipment number (item 90), which later finds all orders of the shipment.
+ */
 export const batchOrderOptions = (
   group: { postingIds: string[]; extrasShare: number },
   comment: string,
+  shipmentId: string,
 ): CommitOptions => ({
   postingIds: group.postingIds,
   additionalCosts: group.extrasShare,
   silent: true,
   skipShipmentsRefresh: true,
   comment,
+  shipmentId,
 });
 
 /** True when a History row carries a non-blank comment (drives the 💬 marker). */

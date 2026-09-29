@@ -543,7 +543,8 @@ export const ConfirmModal: React.FC = () => {
           groupDestination,
           deliveryDate,
           `${opIdRef.current}-${i + 1}`,
-          batchOrderOptions(group, comment),
+          // The batch's operation id doubles as the shipment number: generated once per window.
+          batchOrderOptions(group, comment, opIdRef.current),
         );
 
         if (!ok) {

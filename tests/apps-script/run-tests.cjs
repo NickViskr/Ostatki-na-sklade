@@ -9006,7 +9006,6 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
 (function testItem90Comment() {
   const D = '2026-01-05T09:00:00Z';
   const commentsOf = (h) => h.dumpTransSheet().map(r => String(r['Комментарий'] === undefined ? '' : r['Комментарий']));
-  const lastHeader = (h) => { const d = h.ensureTransSheet().__dump()[0]; return String(d[d.length - 1]).trim(); };
 
   // --- commit: every row incl. kit components; without comment the cell is empty; column appended last ---
   const h1 = freshHarness();
@@ -9019,8 +9018,10 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
   const rows1 = h1.dumpTransSheet();
   check('Item 90: every row of the operation (incl. kit component rows) carries the comment, trimmed',
     rows1.length >= 3 && rows1.every(r => r['Комментарий'] === 'для Иванова'), JSON.stringify(rows1.map(r => r['Комментарий'])));
-  check('Item 90: the comment column is appended as the LAST header of a sheet that lacked it',
-    lastHeader(h1) === 'Комментарий', lastHeader(h1));
+  // Ticket 02 appends «Отгрузка» after it, so «Комментарий» is the second-to-last header.
+  const hdr1 = h1.ensureTransSheet().__dump()[0].map(x => String(x).trim());
+  check('Item 90: the comment column is appended at the end of a sheet that lacked it (before «Отгрузка»)',
+    hdr1[hdr1.length - 2] === 'Комментарий' && hdr1[hdr1.length - 1] === 'Отгрузка', JSON.stringify(hdr1.slice(-2)));
   check('Item 90: the kit component row no longer shows the old auto text',
     rows1.every(r => String(r['Комментарий']).indexOf('Авто') === -1));
 
@@ -9146,6 +9147,96 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
   try { hKit.setTransactionComment({ id: 'NO-SUCH-ID', comment: 'x' }, 'tester'); } catch (e) { unknownMsg = String(e.message || e); }
   check('Item 90: an unknown id throws «Операция не найдена» and writes nothing',
     unknownMsg === 'Операция не найдена' && JSON.stringify(hKit.dumpTransSheet()) === beforeUnknown, unknownMsg);
+})();
+
+// ================= Item 90, ticket 02: combined-shipment number =================
+// «Отгрузка» holds one browser-generated number shared by every order of a combined write-off.
+(function testItem90ShipmentNumber() {
+  const D = '2026-01-05T09:00:00Z';
+  const shipOf = (h) => h.dumpTransSheet().map(r => String(r['Отгрузка'] === undefined ? '' : r['Отгрузка']));
+  const lastHeader = (h) => { const d = h.ensureTransSheet().__dump()[0]; return String(d[d.length - 1]).trim(); };
+
+  // --- two orders of one combined shipment, one with a kit: every row carries the number ---
+  const h1 = freshHarness();
+  h1.ensureTransSheet();
+  h1.setKitSheet([{ kitSku: 'KIT90', componentSku: 'COMP90', quantity: 2, kitType: 'virtual' }]);
+  h1.setStockSheet([{ article: 'COMP90', quantity: 20, avgCost: 5, capitalization: 100 },
+                    { article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  h1.commitTransaction([{ article: 'KIT90', quantity: 3, price: 0 }], 'Расход', 'Ozon (Shop) [Общая поставка: заявки № 1, № 2]', '', 'tester', D, 'OP-S-1', 100, undefined, '', ' OP-S ');
+  h1.commitTransaction([{ article: 'ART90', quantity: 2, price: 10 }], 'Расход', 'Ozon (Shop) [Общая поставка: заявки № 1, № 2]', '', 'tester', D, 'OP-S-2', 50, undefined, '', 'OP-S');
+  const s1 = shipOf(h1);
+  check('Item 90/02: every row of every order of a combined shipment (incl. kit component rows) carries the trimmed number',
+    s1.length === 3 && s1.every(v => v === 'OP-S'), JSON.stringify(s1));
+  check('Item 90/02: «Отгрузка» is appended as the LAST header, after «Комментарий»',
+    lastHeader(h1) === 'Отгрузка', lastHeader(h1));
+  check('Item 90/02: the read model exposes shipmentId',
+    h1.getTransactions().rows.every(r => r.shipmentId === 'OP-S'), JSON.stringify(h1.getTransactions().rows.map(r => r.shipmentId)));
+
+  // --- single order / receipt: empty ---
+  const h2 = freshHarness();
+  h2.ensureTransSheet();
+  h2.setStockSheet([{ article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  h2.commitTransaction([{ article: 'ART90', quantity: 2, price: 10 }], 'Расход', 'Ozon (Shop)', '', 'tester', D, 'OP-1');
+  h2.commitTransaction([{ article: 'ART90', quantity: 4, price: 10 }], 'Приход', 'Склад', '', 'tester', D, 'OP-2', undefined, undefined, 'заметка');
+  check('Item 90/02: a commit without a number leaves «Отгрузка» empty and shipmentId \'\'',
+    shipOf(h2).length === 2 && shipOf(h2).every(v => v === '') && h2.getTransactions().rows.every(r => r.shipmentId === ''),
+    JSON.stringify(shipOf(h2)));
+
+  // --- money: the number changes no cell but «Отгрузка» ---
+  const mk = (sid) => {
+    const h = freshHarness();
+    h.ensureTransSheet();
+    h.setStockSheet([{ article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+    h.commitTransaction([{ article: 'ART90', quantity: 5, price: 10 }], 'Расход', 'Ozon (Shop)', '', 'tester', D, 'OP-M', 30, undefined, '', sid);
+    const r = Object.assign({}, h.dumpTransSheet()[0]);
+    delete r['ID']; delete r['Отгрузка'];
+    return JSON.stringify(r) + JSON.stringify(h.dumpStockSheet());
+  };
+  check('Item 90/02: with or without a number every other cell and the stock are identical', mk('OP-M') === mk(undefined));
+
+  // --- row edit keeps the number (and cannot set a different one) ---
+  const h3 = freshHarness();
+  h3.ensureTransSheet();
+  h3.ensureArchiveSheet();
+  h3.setStockSheet([{ article: 'ART90', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  h3.commitTransaction([{ article: 'ART90', quantity: 5, price: 10 }], 'Расход', 'Склад', '', 'tester', D, 'OP-E', undefined, undefined, '', 'OP-E');
+  h3.updateTransaction(h3.getTransactions().rows[0].id,
+    { article: 'ART90', quantity: 4, price: 10, type: 'Расход', destination: 'Склад', date: D, comment: 'правка', shipmentId: 'CHANGED' }, 'tester');
+  const e3 = h3.dumpTransSheet();
+  check('Item 90/02: a row edit (delete + rewrite) keeps the stored number',
+    e3.length === 1 && e3[0]['Отгрузка'] === 'OP-E' && e3[0]['Количество'] === 4 && e3[0]['Комментарий'] === 'правка', JSON.stringify(e3));
+
+  // --- delete -> restore, single and bulk ---
+  h3.deleteTransaction(h3.getTransactions().rows[0].id, 'tester');
+  const arch = h3.dumpArchive();
+  check('Item 90/02: the archive payload carries the number', arch[arch.length - 1].data.shipmentId === 'OP-E', JSON.stringify(arch.map(a => a.data.shipmentId)));
+  h3.restoreArchivedItem(arch[arch.length - 1].archiveId, 'tester');
+  check('Item 90/02: restoreArchivedItem puts the number back in «Отгрузка» (comment too)',
+    h3.dumpTransSheet().length === 1 && h3.dumpTransSheet()[0]['Отгрузка'] === 'OP-E' && h3.dumpTransSheet()[0]['Комментарий'] === 'правка',
+    JSON.stringify(h3.dumpTransSheet()));
+  h3.deleteMultipleTransactions([h3.getTransactions().rows[0].id], 'tester');
+  const archBulk = h3.dumpArchive();
+  check('Item 90/02: the bulk-delete archive payload carries the number',
+    archBulk[archBulk.length - 1].data.shipmentId === 'OP-E', JSON.stringify(archBulk.map(a => a.data.shipmentId)));
+  h3.restoreMultipleArchivedItems([archBulk[archBulk.length - 1].archiveId], 'tester');
+  const r3 = h3.dumpTransSheet();
+  check('Item 90/02: restoreMultipleArchivedItems puts number and comment back by header',
+    r3.length === 1 && r3[0]['Отгрузка'] === 'OP-E' && r3[0]['Комментарий'] === 'правка' && r3[0]['Артикул'] === 'ART90', JSON.stringify(r3));
+
+  // --- old rows: a sheet of 21.09/24.09 style combined rows without the column reads as before ---
+  const hOld = freshHarness();
+  hOld.ensureTransSheet().__setData([hOld.TRANS_HEADERS.slice(),
+    ['ID-OLD-1', D, 'Расход', 'ART90', 5, 10, 50, 60, 'Ozon (Shop) [Общая поставка: заявки № 129272007-1, № 129270949-1]', '', 'tester'],
+    ['ID-OLD-2', D, 'Расход', 'ART90', 3, 10, 30, 36, 'Ozon (Shop) [Общая поставка: заявки № 129272007-1, № 129270949-1]', '', 'tester']]);
+  const oldRows = hOld.getTransactions().rows;
+  check('Item 90/02: old combined rows without «Отгрузка» parse with shipmentId \'\' and unchanged money',
+    oldRows.length === 2 && oldRows.every(r => r.shipmentId === '')
+    && oldRows.find(r => r.id === 'ID-OLD-1').total === 60 && oldRows.find(r => r.id === 'ID-OLD-2').total === 36, JSON.stringify(oldRows));
+
+  // --- doPost routes the number ---
+  const codeSrc = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+  check('Item 90/02: doPost commit passes payload.shipmentId as the 11th argument',
+    /commitTransaction\(data, payload\.type, payload\.destination, payload\.deliveryDate, currentUser\.username, null, payload\.opId, payload\.additionalCosts, undefined, payload\.comment, payload\.shipmentId\)/.test(codeSrc));
 })();
 
 // ================= Итог =================

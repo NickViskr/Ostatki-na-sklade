@@ -39,6 +39,8 @@ export interface CommitOptions {
   skipShipmentsRefresh?: boolean;
   /** Optional operation comment (item 90); sent only when non-empty after trimming. */
   comment?: string;
+  /** Item 90: combined-shipment number, the same for every order of one combined write-off. */
+  shipmentId?: string;
 }
 
 // Роль администратора определяется одинаково в нескольких местах приложения.
@@ -736,7 +738,8 @@ export const useWarehouseStore = create<WarehouseState>()(
         // Item 56, stage 3: stated as a number so the server does not read the batch total
         // out of the destination text and charge it to this order in full.
         ...(options?.additionalCosts === undefined ? {} : { additionalCosts: options.additionalCosts }),
-        ...commentPayload(options?.comment)
+        ...commentPayload(options?.comment),
+        ...(options?.shipmentId ? { shipmentId: options.shipmentId } : {})
       });
       
       if (result.status === 'success') {
