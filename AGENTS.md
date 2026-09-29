@@ -25,8 +25,8 @@ not translated back; files drift to English as they are edited.
 ## Git
 - Branch `work/cloud-run-and-tests`. Commit when work is done; `git push` only on the owner's
   explicit word for that task («отправляй в гитхаб»); never amend.
-- Session cwd drifts to the parent folder `~/Ostatki na sklade` — always use absolute paths
-  into `repo/`.
+- Session cwd drifts to the parent folder `~/AI Project/Projects/Ostatki na sklade` — always use
+  absolute paths into `repo/`.
 
 ## Build and tests (npm, never pnpm — the pnpm hook breaks this repo; use `npx`)
 - `npx vitest run`, `npx tsc --noEmit`, `npx vite build`, `npm run test:gas` (Apps Script stand).

@@ -6,7 +6,25 @@
 
 **Status:** ready-for-human
 
-- [ ] Full set green (counts recorded in TEST_LOG)
-- [ ] Owner deployed; served chunks equal the local build modulo hashes and the build label; revision recorded
-- [ ] Owner's live check done
+- [x] Full set green (counts recorded in TEST_LOG)
+- [x] Owner deployed; served chunks equal the local build modulo hashes and the build label; revision recorded
+- [x] Owner's live check done
 - [ ] Item 88 closed in the plan on the owner's word
+
+## Result (2026-09-29)
+
+Full set on `d807280` (no code changed after `9edc66e`; `d807280` only renamed CLAUDE.md to
+AGENTS.md): vitest 2470 + 1 expected fail in 61 files, stand 1126, tsc clean; no Yekaterinburg run
+(dates untouched). Clean `git archive HEAD` export built with `npm ci` + `vite build`.
+
+Owner deployed Cloud Run `sklad-00104-hr5` (100 % traffic, `/api/version` agrees). Served files vs
+the local build of the same export: index equal modulo hashes; 30 of 34 chunks equal modulo hashes
+(OzonStocksTab, Dashboard, OzonSettingsModal, ChinaOrdersTab, OzonSuppliesTab, ozonCoverageSource);
+main chunk equal modulo hashes and the build label (11:21 vs 11:16 МСК); CSS short of the same 5
+docs-only rules as `sklad-00103-tlw` (`w-auto`, `blur`, `invert`, `justify-start`, `opacity-60` —
+`.dockerignore` keeps `docs/` out, no `src` use). Comparison script: scratchpad `norm.py` (fetch
+index, follow chunk references by full hyphenated names, replace 8-char hashes, compare).
+
+Owner's live check 2026-09-29: cabinets, article and cluster expansion, «Рекомендации» with ticks,
+manual pick, «Фабрика» and «В заявках» cells, dashboard alert block — «всё как раньше».
+`/code-review` not run for this ticket: no code diff. Item 88 stays open until the owner's word.
