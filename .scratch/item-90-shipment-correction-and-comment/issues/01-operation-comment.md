@@ -32,7 +32,7 @@ Built, reviewed (/code-review, two axes), not deployed (Code.gs/ChinaOrders.gs g
   existed). doPost `commit` passes `payload.comment`; `updateTransaction` keeps the stored note when
   `data.comment` is absent, '' clears it. Archive payloads (single and bulk delete) carry `comment`;
   both restore paths write it by header. `commitShipmentPeresort` carries the replaced shipment's
-  comment over (owner to confirm — spec said service ops stay as today, but otherwise the note is lost).
+  comment over (owner confirmed 2026-09-29: keep it).
   New action `setTransactionComment({id, comment})`: writes only the «Комментарий» cell (plus the
   component rows of a kit main row), no money/stock/id/OpID/archive, no 30-day or China guards.
   Not in `GAS_ACTIONS` (default: write that wipes the cache). Ticket 03's whole-shipment comment
@@ -44,7 +44,7 @@ Built, reviewed (/code-review, two axes), not deployed (Code.gs/ChinaOrders.gs g
   a comment-only change goes through `setTransactionComment`, so it works on locked (>30 days) and
   China-owned receipts too; the locked-receipt banner says «Комментарий изменить можно».
   «История»: 💬 with the text in `title` next to «Объект»; there was NO text search before, so a
-  separate field «Поиск по комментарию» was added (matches the comment only).
+  separate field «Поиск по комментарию» was added (matches the comment only; owner 2026-09-29: a general text search is not needed).
 - **Review finding fixed:** the first version edited the comment through delete + re-commit
   (refused on old/China receipts, changed id, dropped OpID) → `setTransactionComment`.
 - **Checks:** stand 1147/0 (+21: 16 comment path, 5 comment-only action); vitest 2477 + 1 expected
