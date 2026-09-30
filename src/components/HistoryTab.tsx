@@ -21,6 +21,7 @@ import {
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { commentMatches, hasComment } from '../lib/operationComment';
+import { downloadHistoryXlsx } from '../lib/historyExport';
 import { buildDestinationOptions, destinationMain, formatCurrency, historyTypeLabel, parseAppDate, parseDestination } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -346,18 +347,8 @@ export const HistoryTab: React.FC = React.memo(() => {
     setBulkDeleteConfirm(false);
   }, [selectedIds, handleDeleteMultipleTransactions]);
 
-  const handleExportCSV = useCallback(() => {
-    const csvRows = ['id,date,type,article,quantity,price,total,destination,user'];
-    for (const t of filteredHistory) {
-      csvRows.push([t.id, t.date, historyTypeLabel(t), t.article, t.quantity, t.price, t.total, t.destination, t.user || ''].join(','));
-    }
-    const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'history.csv';
-    link.click();
-    URL.revokeObjectURL(url);
+  const handleExportXlsx = useCallback(() => {
+    downloadHistoryXlsx(filteredHistory);
   }, [filteredHistory]);
 
   return (
@@ -416,11 +407,11 @@ export const HistoryTab: React.FC = React.memo(() => {
             </button>
           )}
           <button
-            onClick={handleExportCSV}
+            onClick={handleExportXlsx}
             className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 rounded-xl hover:bg-slate-50 transition-colors font-medium border border-slate-200 shadow-sm whitespace-nowrap"
           >
             <Download size={18} />
-            CSV экспорт
+            Экспорт в Excel
           </button>
         </div>
       </div>
