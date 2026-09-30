@@ -34,10 +34,11 @@ describe('Тип строки «Истории» для «Корректиров
     expect(manual).toContain("'[" + STOCK_CORRECTION_TAG + "]'");
   });
 
-  it('«История» выводит подпись в таблице, в списке удаления и в CSV, а не сырой тип', () => {
+  it('«История» выводит подпись в таблице, в списке удаления и в выгрузке Excel, а не сырой тип', () => {
     const history = fs.readFileSync(path.join(process.cwd(), 'src/components/HistoryTab.tsx'), 'utf8');
     expect(history.match(/\{historyTypeLabel\(t\)\}/g)?.length).toBe(2);
-    expect(history).toContain('csvRows.push([t.id, t.date, historyTypeLabel(t), t.article,');
+    const exportSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/historyExport.ts'), 'utf8');
+    expect(exportSrc).toContain('historyTypeLabel(t),');
     expect(history).not.toMatch(/\{t\.type\}/);
   });
 });
