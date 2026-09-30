@@ -690,7 +690,13 @@ export const HistoryTab: React.FC = React.memo(() => {
                       <div className="flex items-start gap-1.5">
                         <DestinationCell destination={t.destination} />
                         {hasComment(t) && (
-                          <span className="shrink-0 cursor-help" title={t.comment} data-testid="history-comment-marker">💬</span>
+                          <span className="group relative shrink-0 cursor-help" aria-label={t.comment} data-testid="history-comment-marker">
+                            💬
+                            {/* App tooltip, not `title`: the browser shows `title` only after ~1 s of a still mouse. Opens up except on the first rows, which the table's overflow-hidden would clip. */}
+                            <span className={`pointer-events-none absolute right-0 ${index > 1 ? 'bottom-full mb-1.5' : 'top-full mt-1.5'} z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-pre-wrap break-words`}>
+                              {t.comment}
+                            </span>
+                          </span>
                         )}
                       </div>
                     </td>

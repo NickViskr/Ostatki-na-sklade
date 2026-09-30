@@ -78,3 +78,13 @@ describe('isCommentOnlyEdit', () => {
     expect(isCommentOnlyEdit(undefined, stored)).toBe(false);
   });
 });
+
+describe('History 💬 marker shows the comment on hover', () => {
+  it('renders the comment as an app tooltip, not a delayed browser `title`', () => {
+    const src = readFileSync('src/components/HistoryTab.tsx', 'utf8');
+    const marker = src.slice(src.indexOf('data-testid="history-comment-marker"') - 120, src.indexOf('data-testid="history-comment-marker"') + 700);
+    expect(marker).not.toContain('title={t.comment}');
+    expect(marker).toContain('group-hover:block');
+    expect(marker).toContain('{t.comment}');
+  });
+});
