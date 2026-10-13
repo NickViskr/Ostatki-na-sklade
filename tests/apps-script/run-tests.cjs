@@ -8667,6 +8667,105 @@ function roundToTwoTest(n) { return Math.round(n * 100) / 100; }
     row && row['Статус'] === 'active', JSON.stringify(row));
 })();
 
+// ---- Item 91: the live defect of 2026-10-09. Google Sheets turned the written posting stamp
+// into a Date cell; read back with String() it became 'Fri Oct 09 2026 …', split(' ')[0] gave
+// «Fri», and that landed in «Дата получения», after which getFactoryOrders threw and the whole
+// «Остатки Озон» load (getOzonInitialData) failed. The stand does not auto-convert, so the
+// conversion is staged by hand: the cell is replaced with a Date of the SAME moment. ----
+function item91DateCellBatch(h) {
+  const batch = china84PostableFixture(h);
+  h.postChinaBatch({ id: batch.id, opId: 'op-91', lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const sheet = h.getTargetSheet('Партии');
+  const dump = sheet.__dump();
+  const col = dump[0].map(function (x) { return String(x).trim(); }).indexOf('Дата оприходования');
+  // 2026-10-09 14:36 Yekaterinburg = 12:36 МСК (the stand's zone) = 09:36 UTC — the live posting.
+  dump[1][col] = new h.FakeDate('2026-10-09T09:36:00Z');
+  sheet.__setData(dump);
+  return batch;
+}
+
+(function () {
+  const h = withChina();
+  const batch = item91DateCellBatch(h);
+  // The live state: the bad sync already wrote «Fri» into the factory row.
+  const fo = h.getRegistrySheet('Заказы на фабрике');
+  const foDump = fo.__dump();
+  const recCol = foDump[0].map(function (x) { return String(x).trim(); }).indexOf('Дата получения');
+  const keyCol = foDump[0].map(function (x) { return String(x).trim(); }).indexOf('Ключ Китай');
+  let staged = 0;
+  foDump.forEach(function (r, i) {
+    if (i > 0 && String(r[keyCol]).indexOf(batch.id) !== -1) { r[recCol] = 'Fri'; staged++; }
+  });
+  fo.__setData(foDump);
+  check('91: (setup) the live «Fri» is staged on the batch\'s factory row', staged === 1, String(staged));
+
+  const posted = h.getChinaBatches().batches.filter(function (b) { return b.id === batch.id; })[0];
+  check('91: a Date cell in «Дата оприходования» reads back as the stamp, not «Fri Oct 09…»',
+    posted.postedAt === '2026-10-09 12:36:00', JSON.stringify(posted.postedAt));
+
+  h.syncChinaFactoryOrdersReport('Николай');
+  const row = h.dumpFactoryOrders().filter(function (r) { return String(r['Ключ Китай']).indexOf(batch.id) !== -1; })[0];
+  check('91: the next sync heals «Fri» in «Дата получения» to the posting date',
+    row && row['Дата получения'] === '2026-10-09', JSON.stringify(row && row['Дата получения']));
+})();
+
+(function () {
+  const h = withChina();
+  item91DateCellBatch(h);
+  const fo = h.getRegistrySheet('Заказы на фабрике');
+  const foDump = fo.__dump();
+  const headers = foDump[0].map(function (x) { return String(x).trim(); });
+  const blank = headers.map(function () { return ''; });
+  const bad = blank.slice(); bad[headers.indexOf('ID')] = 'BAD-91'; bad[headers.indexOf('Артикул')] = 'ART-BAD';
+  bad[headers.indexOf('Дата заказа')] = 'Thu'; bad[headers.indexOf('Количество')] = 5;
+  bad[headers.indexOf('Ожидаемое прибытие')] = 'Sat'; bad[headers.indexOf('Статус')] = 'received';
+  bad[headers.indexOf('Дата получения')] = 'Fri';
+  const good = blank.slice(); good[headers.indexOf('ID')] = 'GOOD-91'; good[headers.indexOf('Артикул')] = 'ART-GOOD';
+  good[headers.indexOf('Дата заказа')] = '2026-10-01'; good[headers.indexOf('Количество')] = 7;
+  good[headers.indexOf('Ожидаемое прибытие')] = '2026-10-20'; good[headers.indexOf('Статус')] = 'active';
+  foDump.push(bad, good);
+  fo.__setData(foDump);
+  h.logs.length = 0;
+
+  let orders = null, threw = '';
+  try { orders = h.getFactoryOrders(); } catch (e) { threw = e.message; }
+  check('91: one unreadable date no longer makes getFactoryOrders throw', threw === '', threw);
+  const badOut = (orders || []).filter(function (o) { return o.id === 'BAD-91'; })[0];
+  check('91: every unreadable date of the row is dropped to empty, the rest of the row kept',
+    badOut && badOut.orderedAt === '' && badOut.expectedAt === '' && badOut.receivedAt === ''
+      && badOut.qty === 5 && badOut.status === 'received', JSON.stringify(badOut));
+  const goodOut = (orders || []).filter(function (o) { return o.id === 'GOOD-91'; })[0];
+  check('91: the other rows read as before',
+    goodOut && goodOut.orderedAt === '2026-10-01' && goodOut.expectedAt === '2026-10-20' && goodOut.qty === 7,
+    JSON.stringify(goodOut));
+  check('91: each dropped date is logged with its row and column',
+    h.logs.filter(function (l) { return l.indexOf('«Дата получения»') !== -1 && l.indexOf('"Fri"') !== -1; }).length === 1
+      && h.logs.filter(function (l) { return l.indexOf('«Дата заказа»') !== -1 && l.indexOf('"Thu"') !== -1; }).length === 1
+      && h.logs.filter(function (l) { return l.indexOf('«Ожидаемое прибытие»') !== -1 && l.indexOf('"Sat"') !== -1; }).length === 1,
+    JSON.stringify(h.logs));
+  let refused = '';
+  try { h.context.normalizeFactoryDate('Fri'); } catch (e) { refused = e.message; }
+  check('91: writes still validate strictly — normalizeFactoryDate refuses «Fri»',
+    refused.indexOf('ГГГГ-ММ-ДД') !== -1, refused);
+})();
+
+(function () {
+  const h = withChina();
+  const sheet = h.getTargetSheet('Тарифы карго');
+  const dump = sheet.__dump();
+  const headers = dump[0].map(function (x) { return String(x).trim(); });
+  const row = headers.map(function () { return ''; });
+  row[headers.indexOf('Код партии')] = 'NV-T91';
+  row[headers.indexOf('Дата отгрузки')] = new h.FakeDate('2026-09-01T00:00:00+03:00');
+  row[headers.indexOf('Дата прибытия')] = new h.FakeDate('2026-09-20T00:00:00+03:00');
+  row[headers.indexOf('Обновлено')] = new h.FakeDate('2026-09-21T10:15:00+03:00');
+  sheet.__setData([dump[0], row]);
+  const t = h.chinaTariffList(h.context.chinaSpreadsheet()).filter(function (x) { return x.code === 'NV-T91'; })[0];
+  check('91: «Тарифы карго» Date cells read back as dates, not «Tue Sep 01…»',
+    t && t.shippedAt === '2026-09-01' && t.arrivedAt === '2026-09-20' && t.updatedAt === '2026-09-21 10:15:00',
+    JSON.stringify(t));
+})();
+
 // ---- cancel posting: happy path and all-or-nothing refusal ----
 (function () {
   const h = withChina();

@@ -9001,6 +9001,18 @@ function normalizeFactoryDate(value) {
 function getFactoryOrders() {
   const ctx = readFactoryOrdersSheet();
   const result = [];
+  // Item 91 (2026-10-13): one unreadable date («Fri» written by the China module on 09.10)
+  // used to throw here and take the whole «Остатки Озон» load down with it (getOzonInitialData
+  // reads this sheet too). A read now drops just that date and logs the cell; writes still
+  // validate strictly through normalizeFactoryDate.
+  const readDate = function (row, rowNum, column) {
+    try {
+      return normalizeFactoryDate(row[ctx.idx[column]]);
+    } catch (e) {
+      Logger.log('Заказы на фабрике: строка ' + rowNum + ', «' + column + '» — ' + e.message + '; дата пропущена');
+      return '';
+    }
+  };
   for (let i = 1; i < ctx.values.length; i++) {
     const row = ctx.values[i];
     if (row.join('').trim() === '') continue;
@@ -9009,13 +9021,13 @@ function getFactoryOrders() {
     result.push({
       id: id,
       article: String(row[ctx.idx['Артикул']] || '').trim(),
-      orderedAt: normalizeFactoryDate(row[ctx.idx['Дата заказа']]),
+      orderedAt: readDate(row, i + 1, 'Дата заказа'),
       qty: Number(row[ctx.idx['Количество']]) || 0,
-      expectedAt: normalizeFactoryDate(row[ctx.idx['Ожидаемое прибытие']]),
+      expectedAt: readDate(row, i + 1, 'Ожидаемое прибытие'),
       comment: String(row[ctx.idx['Комментарий']] || '').trim(),
       user: String(row[ctx.idx['Кто']] || '').trim(),
       status: String(row[ctx.idx['Статус']] || '').trim() || 'active',
-      receivedAt: normalizeFactoryDate(row[ctx.idx['Дата получения']]),
+      receivedAt: readDate(row, i + 1, 'Дата получения'),
       source: String(row[ctx.idx['Источник']] || '').trim(),
       chinaOrderNo: String(row[ctx.idx['Заказ Китай']] || '').trim(),
       chinaBatchCode: String(row[ctx.idx['Партия Китай']] || '').trim(),

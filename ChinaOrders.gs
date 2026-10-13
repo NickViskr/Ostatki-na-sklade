@@ -531,6 +531,16 @@ function chinaDateText(value, field) {
   return str;
 }
 
+// Item 91 (2026-10-13): Google Sheets turns a written 'yyyy-MM-dd HH:mm:ss' stamp into a Date
+// cell, and String(Date) reads back as 'Fri Oct 09 2026 …'. Every stamp or free-form date this
+// module reads with String() goes through here instead; never throws (read paths must not).
+function chinaCellText(value, pattern) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, _chinaTimeZone || Session.getScriptTimeZone() || 'GMT', pattern);
+  }
+  return String(value === null || value === undefined ? '' : value).trim();
+}
+
 function chinaBatchFromRow(r) {
   return {
     id: String(r['ID'] || '').trim(),
@@ -559,7 +569,7 @@ function chinaBatchFromRow(r) {
     weightFactor: r['Коэффициент веса'] === '' ? null : parseNumber(r['Коэффициент веса']),
     comment: String(r['Комментарий'] || '').trim(),
     user: String(r['Кто'] || '').trim(),
-    updatedAt: String(r['Обновлено'] || '').trim(),
+    updatedAt: chinaCellText(r['Обновлено'], 'yyyy-MM-dd HH:mm:ss'),
     // Item 81e: «Дата приёмки» is the only INPUT among the new batch columns; the rest is
     // chinaPackagingStats, rewritten on every save/recalc — read back here so a plain
     // getChinaBatches() (no recalc) still answers with the packaging analytics.
@@ -612,7 +622,7 @@ function chinaBatchFromRow(r) {
     checkNote: String(r['Проверка: детали'] || '').trim(),
     // Item 84 (stage 1): posting state and the per-article record of what is already on stock.
     postingState: String(r['Оприходование'] || '').trim(),
-    postedAt: String(r['Дата оприходования'] || '').trim(),
+    postedAt: chinaCellText(r['Дата оприходования'], 'yyyy-MM-dd HH:mm:ss'),
     postedBy: String(r['Кто оприходовал'] || '').trim(),
     postingOpId: String(r['Операция оприходования'] || '').trim(),
     postingRecords: chinaParsePostingRecords(r['Учёт по артикулам (JSON)'])
@@ -3107,7 +3117,7 @@ function chinaReportFromRow(r) {
   try { parsed = JSON.parse(String(r['Данные (JSON)'] || '') || '{}'); } catch (e) { parsed = {}; }
   return {
     id: String(r['ID'] || '').trim(),
-    loadedAt: String(r['Загружен'] || '').trim(),
+    loadedAt: chinaCellText(r['Загружен'], 'yyyy-MM-dd HH:mm:ss'),
     reportDate: chinaDateText(r['Дата отчёта'], 'Дата отчёта'),
     source: String(r['Источник'] || '').trim(),
     aiReason: String(r['Причина ИИ'] || '').trim(),
@@ -4213,8 +4223,8 @@ function chinaTariffFromRow(r) {
   return {
     code: String(r['Код партии'] || '').trim(),
     orderNo: String(r['Номер заказа'] || '').trim(),
-    shippedAt: String(r['Дата отгрузки'] || '').trim(),
-    arrivedAt: String(r['Дата прибытия'] || '').trim(),
+    shippedAt: chinaCellText(r['Дата отгрузки'], 'yyyy-MM-dd'),
+    arrivedAt: chinaCellText(r['Дата прибытия'], 'yyyy-MM-dd'),
     transitDays: transitRaw === '' || transitRaw === null || transitRaw === undefined ? null : parseNumber(transitRaw),
     rate: parseNumber(r['Ставка $']),
     basis: String(r['Тариф за'] || '').trim(),
@@ -4227,7 +4237,7 @@ function chinaTariffFromRow(r) {
     extrasPct: parseNumber(r['Надбавка, %']),
     realPerKgUsd: parseNumber(r['Реально за 1 кг $']),
     reportId: String(r['Отчёт'] || '').trim(),
-    updatedAt: String(r['Обновлено'] || '').trim()
+    updatedAt: chinaCellText(r['Обновлено'], 'yyyy-MM-dd HH:mm:ss')
   };
 }
 
@@ -4632,7 +4642,7 @@ function chinaForecastFromRow(r) {
     comment: String(r['Комментарий'] || '').trim(),
     lines: Array.isArray(input.lines) ? input.lines : [],
     result: result,
-    updatedAt: String(r['Обновлено'] || '').trim(),
+    updatedAt: chinaCellText(r['Обновлено'], 'yyyy-MM-dd HH:mm:ss'),
     expectedShipAt: chinaDateText(r['Ожидаемая отгрузка с фабрики'], 'Ожидаемая отгрузка с фабрики')
   };
 }
