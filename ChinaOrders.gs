@@ -4971,7 +4971,13 @@ function syncChinaFactoryOrders(username) {
       const col = CHINA_FACTORY_FIELD_COLUMN[field];
       const want = d[field] === undefined || d[field] === null ? '' : d[field];
       const have = ctx.values[rowNum - 1][ctx.idx[col]];
-      const haveText = have === undefined || have === null ? '' : have;
+      // Item 92: Sheets turns a written 'yyyy-MM-dd' into a Date cell, and String(Date) never
+      // equals the text — so every unchanged date was rewritten (and counted as «updated») on
+      // every sync. Compare dates as the same text `normalizeFactoryDate` (Code.gs) produces. A
+      // non-date text such as «Fri» stays unequal and is still healed.
+      const haveText = have instanceof Date
+        ? Utilities.formatDate(have, Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd')
+        : (have === undefined || have === null ? '' : have);
       if (String(haveText) !== String(want)) {
         ctx.sheet.getRange(rowNum, ctx.idx[col] + 1).setValue(want);
         changed = true;

@@ -7639,6 +7639,51 @@ function byKeySuffix(rows, needle) {
     again.added === 0 && again.updated === 0 && again.removed === 0, JSON.stringify(again));
 })();
 
+// ---- Item 92: real Sheets turns the written 'yyyy-MM-dd' of a factory row into a Date cell; the
+// stand does not auto-convert, so the conversion is staged by hand. A sync over such cells used to
+// compare String(Date) with the text, rewrite every date and report them as «updated». ----
+(function () {
+  const h = withChina();
+  h.saveChinaBatch({
+    orderNo: '92', code: 'NV-0910-1', status: 'В пути', shippedAt: '2026-09-01',
+    lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 5, article: 'ART-92DATE' }]
+  }, 'Николай');
+  const fo = h.getRegistrySheet('Заказы на фабрике');
+  const dump = fo.__dump();
+  const headers = dump[0].map(function (x) { return String(x).trim(); });
+  const dateCols = ['Дата заказа', 'Ожидаемое прибытие'].map(function (n) { return headers.indexOf(n); });
+  const keyCol = headers.indexOf('Ключ Китай');
+  const want = {};
+  dump.forEach(function (r, i) {
+    if (i === 0 || String(r[keyCol]).indexOf('ART-92DATE') === -1) return;
+    dateCols.forEach(function (c) {
+      want[c] = r[c];
+      r[c] = new h.FakeDate(String(r[c]) + 'T00:00:00+03:00');
+    });
+  });
+  fo.__setData(dump);
+  check('92: (setup) both date cells of the batch row are staged as Date cells',
+    dateCols.every(function (c) { return /^\d{4}-\d{2}-\d{2}$/.test(String(want[c])); }), JSON.stringify(want));
+
+  const again = h.syncChinaFactoryOrders('Николай');
+  check('92: a sync over Date cells holding the same dates reports nothing updated',
+    again.added === 0 && again.updated === 0 && again.removed === 0, JSON.stringify(again));
+  const after = fo.__dump().filter(function (r, i) { return i > 0 && String(r[keyCol]).indexOf('ART-92DATE') !== -1; })[0];
+  check('92: and leaves those cells as they were — no rewrite to text',
+    dateCols.every(function (c) { return typeof after[c] !== 'string'; }), JSON.stringify(after));
+
+  // A genuinely different date still gets written.
+  const dump2 = fo.__dump();
+  dump2.forEach(function (r, i) {
+    if (i > 0 && String(r[keyCol]).indexOf('ART-92DATE') !== -1) r[dateCols[1]] = new h.FakeDate('2026-05-05T00:00:00+03:00');
+  });
+  fo.__setData(dump2);
+  const fixed = h.syncChinaFactoryOrders('Николай');
+  const row = h.dumpFactoryOrders().filter(function (r) { return String(r['Ключ Китай']).indexOf('ART-92DATE') !== -1; })[0];
+  check('92: a Date cell holding a different date is still corrected and counted',
+    fixed.updated === 1 && row && row['Ожидаемое прибытие'] === want[dateCols[1]], JSON.stringify(fixed) + JSON.stringify(row));
+})();
+
 // ---- 83f: manual rows are byte-for-byte untouched by China writes ----
 (function () {
   const h = withChina();
