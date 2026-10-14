@@ -5,6 +5,7 @@
 const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
+const crypto = require('crypto');
 
 const CODE_GS_PATH = path.join(__dirname, '..', '..', 'Code.gs');
 const src = fs.readFileSync(CODE_GS_PATH, 'utf8');
@@ -218,7 +219,14 @@ const sandbox = {
   },
   Utilities: {
     formatDate: (date, tz, fmt) => formatDateImpl(date, tz, fmt),
-    getUuid: () => 'uuid-' + (++uuidCounter)
+    getUuid: () => 'uuid-' + (++uuidCounter),
+    // hashPassword: Apps Script returns the digest as SIGNED bytes (-128..127).
+    computeDigest: (algorithm, value, charset) => {
+      if (algorithm !== 'SHA_256' || charset !== 'UTF_8') throw new Error('Стенд: computeDigest умеет только SHA_256 / UTF_8');
+      return Array.from(crypto.createHash('sha256').update(String(value), 'utf8').digest()).map(b => (b > 127 ? b - 256 : b));
+    },
+    DigestAlgorithm: { SHA_256: 'SHA_256' },
+    Charset: { UTF_8: 'UTF_8' }
   },
   Session: {
     getScriptTimeZone: () => 'Europe/Moscow'

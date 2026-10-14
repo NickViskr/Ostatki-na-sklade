@@ -20,6 +20,8 @@ not translated back; files drift to English as they are edited.
   passes through Cloud Run. It is the MCP token, not KAN's separate API token.
 - `.clasp.json` (script id) is git-ignored and exists only on the owner's Mac in `repo/`.
 - The «Пользователи» sheet holds a plaintext admin password — never copy it anywhere.
+- No default password in code: a new «Админ» password goes into the Script Property
+  `auth_newAdminPassword`; the next login applies it and deletes the property.
 - The assistant never types a password to authenticate, even with the owner's permission.
 
 ## Git

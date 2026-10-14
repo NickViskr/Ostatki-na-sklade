@@ -10487,6 +10487,72 @@ const T93_MARK = 'удалено из цепочки';
     oldPayload[0] === oldPayload[1] && JSON.stringify(JSON.parse(oldPayload[1])[0].slice(10)) === JSON.stringify(['', '', false]), oldPayload.join(' | '));
 })();
 
+// ================= Admin password from a Script Property: no password written in Code.gs =================
+// The repository is public. «Админ» gets its password only from the Script Property
+// auth_newAdminPassword, applied on the next login and then deleted.
+(function testAdminPasswordProperty() {
+  const sha = (s) => require('crypto').createHash('sha256').update(s, 'utf8').digest('hex');
+  const setup = (userRows) => {
+    const h = freshHarness();
+    h.setNow('2026-10-14T09:00:00Z');
+    h.setRegistrySheet('Пользователи', [['Username', 'Password', 'Role']].concat(userRows));
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt']]);
+    return h;
+  };
+  const prop = (h) => h.context.PropertiesService.getScriptProperties().getProperty('auth_newAdminPassword');
+  const loginError = (h, u, p) => { try { h.context.loginUser(u, p); return ''; } catch (e) { return String(e.message || e); } };
+  // A refused login is a failed check, not a crash of the whole stand.
+  const loginUserOf = (h, u, p) => { try { return h.context.loginUser(u, p).user; } catch (e) { return { error: String(e.message || e) }; } };
+
+  // 1. No users, no property: nobody logs in and no user is created.
+  {
+    const h = setup([]);
+    const err = loginError(h, 'Админ', 'Any-1');
+    const rows = h.dumpRegistrySheet('Пользователи');
+    check('Admin password: no users and no property → login refused naming the property, no user created',
+      err.indexOf('auth_newAdminPassword') !== -1 && rows.length === 1, 'err=' + err + ' rows=' + rows.length);
+  }
+  // 2. No users, property set with stray spaces: «Админ» is created from the trimmed value.
+  {
+    const h = setup([]);
+    h.setScriptProperty('auth_newAdminPassword', '  Bootstrap-1  ');
+    const user = loginUserOf(h, 'админ', 'Bootstrap-1');
+    const rows = h.dumpRegistrySheet('Пользователи');
+    check('Admin password: no users + property → «Админ» created with the trimmed password, login succeeds, property deleted',
+      user.role === 'admin' && rows.length === 2 && rows[1][0] === 'Админ' && rows[1][1] === sha('Bootstrap-1')
+        && rows[1][2] === 'admin' && prop(h) === null,
+      JSON.stringify(user) + ' ' + JSON.stringify(rows.map(r => [r[0], String(r[1]).slice(0, 8), r[2]])) + ' prop=' + prop(h));
+  }
+  // 3. Existing «Админ»: any login attempt replaces its password in place; the old one stops working.
+  {
+    const h = setup([['Админ', sha('Old-1'), 'admin'], ['Кладовщик', sha('Worker-1'), 'user']]);
+    h.setScriptProperty('auth_newAdminPassword', 'New-1');
+    const err = loginError(h, 'Админ', 'Old-1');
+    const rows = h.dumpRegistrySheet('Пользователи');
+    const okNew = loginUserOf(h, 'Админ', 'New-1').username === 'Админ';
+    check('Admin password: property set → «Админ» password replaced in place, old one refused, other users untouched, property deleted',
+      err.indexOf('Неверное имя') !== -1 && okNew && rows.length === 3 && rows[1][1] === sha('New-1')
+        && rows[2][1] === sha('Worker-1') && prop(h) === null,
+      'err=' + err + ' okNew=' + okNew + ' rows=' + rows.length + ' prop=' + prop(h));
+  }
+  // 4. No property: login behaves as before.
+  {
+    const h = setup([['Админ', sha('Old-1'), 'admin']]);
+    const ok = loginUserOf(h, ' админ ', 'Old-1').role === 'admin';
+    const err = loginError(h, 'Админ', 'Wrong-1');
+    const rows = h.dumpRegistrySheet('Пользователи');
+    check('Admin password: no property → right password logs in, wrong one refused, sheet unchanged',
+      ok && err.indexOf('Неверное имя') !== -1 && rows.length === 2 && rows[1][1] === sha('Old-1'),
+      'ok=' + ok + ' err=' + err + ' rows=' + rows.length);
+  }
+  // 5. No hashPassword call with a written-in password anywhere in Code.gs.
+  {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+    const n = (src.match(/hashPassword\(\s*['"`]/g) || []).length;
+    check('Admin password: Code.gs has no hashPassword call with a string literal', n === 0, 'literal calls: ' + n);
+  }
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

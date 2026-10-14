@@ -856,8 +856,7 @@ function setupDatabase(targetSs) {
     usersSheet = ss.insertSheet('Пользователи');
     usersSheet.appendRow(['Username', 'Password', 'Role']);
     usersSheet.getRange('A1:C1').setFontWeight('bold');
-    // Add default admin
-    usersSheet.appendRow(['Админ', hashPassword('Admin_Mercurius_2025!'), 'admin']);
+    // No default admin here: loginUser creates «Админ» from ADMIN_PASSWORD_PROPERTY.
   }
   
   // Sheet: Сессии
@@ -3564,6 +3563,34 @@ function hashPassword(password) {
   return bytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
 }
 
+// The repository is public, so no password is written in this file. The owner puts a new
+// «Админ» password into this Script Property (Apps Script editor → Project Settings → Script
+// Properties); the next login sets it on «Админ» — adding the row when the sheet has no users —
+// and deletes the property, so the plaintext does not stay there.
+const ADMIN_PASSWORD_PROPERTY = 'auth_newAdminPassword';
+
+function applyNewAdminPassword(sheet) {
+  const props = PropertiesService.getScriptProperties();
+  // Trimmed like the password typed at login, or a stray space would lock the owner out.
+  const newPass = String(props.getProperty(ADMIN_PASSWORD_PROPERTY) || '').trim();
+  if (!newPass) return;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1 && data[0].join('') === '') {
+    sheet.clear();
+    sheet.appendRow(['Username', 'Password', 'Role']);
+  }
+  let adminRow = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim().toLowerCase() === 'админ') { adminRow = i + 1; break; }
+  }
+  if (adminRow) {
+    sheet.getRange(adminRow, 2).setValue(hashPassword(newPass));
+  } else {
+    sheet.appendRow(['Админ', hashPassword(newPass), 'admin']);
+  }
+  props.deleteProperty(ADMIN_PASSWORD_PROPERTY);
+}
+
 function loginUser(username, password) {
   const ss = getSpreadsheet();
   let sheet = ss.getSheetByName('Пользователи');
@@ -3574,16 +3601,10 @@ function loginUser(username, password) {
     sheet = ss.getSheetByName('Пользователи');
   }
   
-  let data = sheet.getDataRange().getValues();
-  
-  // If sheet is empty or only has headers, add default admin
-  if (data.length <= 1 || (data.length === 1 && data[0].join('') === '')) {
-    if (data.length === 0 || data[0].join('') === '') {
-      sheet.clear();
-      sheet.appendRow(['Username', 'Password', 'Role']);
-    }
-    sheet.appendRow(['Админ', hashPassword('Admin_Mercurius_2025!'), 'admin']);
-    data = sheet.getDataRange().getValues();
+  applyNewAdminPassword(sheet);
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    throw new Error('В базе нет ни одного пользователя. Администратору: впишите пароль в свойство скрипта «' + ADMIN_PASSWORD_PROPERTY + '» (редактор Apps Script → Настройки проекта → Свойства скрипта) и войдите как «Админ» с этим паролем');
   }
   
   let user = null;
