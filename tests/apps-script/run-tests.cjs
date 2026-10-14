@@ -9719,6 +9719,698 @@ function item91DateCellBatch(h) {
     /commitTransaction\(data, payload\.type, payload\.destination, payload\.deliveryDate, currentUser\.username, null, payload\.opId, payload\.additionalCosts, undefined, payload\.comment, payload\.shipmentId\)/.test(codeSrc));
 })();
 
+// ================= Item 93, ticket 02: the cost journal follows a pencil edit, a deletion and a restore =================
+//
+// The journal «Себестоимость Озон» is read as chains of links (one shipment = one link, however many
+// rows it owns), see buildOzonCostChain in Code.gs. Fixture, MaxiStore / ART-C — every figure was
+// computed with a node snippet using the production roundToTwo, never by hand:
+//   blend(base, prior, qty, cost) = round2((base * prior + qty * cost) / (base + qty))
+//   seed 2026-08-01                                                       100.00
+//   L1 2026-09-01 op-A  base 100, 100 pcs @200  blend(100, 100, 100, 200) = 150.00
+//   L2 2026-09-05 op-B  base 200, 200 pcs @300  blend(200, 150, 200, 300) = 225.00
+//   L3 2026-09-10 op-C  base 400, 100 pcs @125  blend(400, 225, 100, 125) = 205.00
+// Bystanders that must stay byte for byte: ART-X / MaxiStore (seed 50, one link 50.91) and
+// ART-C / Mercurius (seed 70, one link 85.00). «История» holds the matching rows with the OpIDs,
+// written by the real commitTransaction; the journal is then replaced by the exact fixture rows.
+// A pencil edit takes the price the form sends; the stock average (300) is set so it is known.
+
+const T93_DEST = 'Ozon (MaxiStore)';
+const T93_STAMP = '2026-09-02 10:00:00 admin';
+const T93_SEED_SOURCE = 'остаток и себестоимость на 01.08.2026';
+
+function t93Fixture(opts) {
+  opts = opts || {};
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  const stock = () => h.setStockSheet([
+    { article: 'ART-C', quantity: 1000, avgCost: 300, capitalization: 300000 },
+    { article: 'ART-X', quantity: 1000, avgCost: 50, capitalization: 50000 },
+    { article: 'ART-D', quantity: 100, avgCost: 400, capitalization: 40000 }
+  ]);
+  stock();
+  h.setOzonCostSheet([]);
+  h.setOzonStocksSheet([]);
+  const ship = (article, qty, price, dest, delivery, opId, madeOn, extras, shipmentId) =>
+    h.commitTransaction([{ article, quantity: qty, price }], 'Расход', dest, delivery, 'tester', madeOn + 'T10:00:00.000Z',
+      opId, extras, undefined, '', shipmentId);
+  const dayA = opts.sameDay ? '2026-09-05' : '2026-09-01';
+  ship('ART-C', 100, 200, T93_DEST, dayA, 'op-A', '2026-08-31');
+  if (opts.extrasOnB) ship('ART-C', 200, 295, T93_DEST, '2026-09-05', 'op-B', '2026-09-03', 1000, 'ship-B');
+  else ship('ART-C', 200, 300, T93_DEST, '2026-09-05', 'op-B', '2026-09-03', undefined, 'ship-B');
+  if (!opts.noTail) ship('ART-C', 100, 125, T93_DEST, '2026-09-10', 'op-C', '2026-09-08');
+  ship('ART-X', 10, 60, T93_DEST, '2026-09-02', 'op-X', '2026-09-01');
+  ship('ART-C', 30, 100, 'Ozon (Mercurius)', '2026-09-05', 'op-M', '2026-09-03');
+  stock();
+
+  const link = (date, cab, art, after, opId, base, before, qty, cost, extra) =>
+    costRow(date, cab, art, after, opId, Object.assign({ sku: 'S-' + art, stockBefore: base, costBefore: before, shipped: qty, shippedCost: cost, source: 'отгрузка' }, extra || {}));
+  const rows = [
+    costRow('2026-08-01', 'MaxiStore', 'ART-C', 100, 'НАЧАЛЬНАЯ ТОЧКА', { sku: 'S-ART-C', source: T93_SEED_SOURCE, exported: T93_STAMP }),
+    // opts.drift: the recorded figure of L1 is a couple of kopecks off its blend (150.02 instead of 150.00), as live chains are
+    link(dayA, 'MaxiStore', 'ART-C', opts.drift ? 150.02 : 150, 'op-A', 100, 100, 100, 200, { exported: T93_STAMP }),
+    link('2026-09-05', 'MaxiStore', 'ART-C', 225, 'op-B', 200, 150, 200, 300)
+  ];
+  if (!opts.noTail) rows.push(link('2026-09-10', 'MaxiStore', 'ART-C', 205, 'op-C', 400, 225, 100, 125));
+  if (opts.legacy) {
+    // Corrections an older receipt edit wrote (price of op-B 300 -> 320): blend(200, 150, 200, 320) = 235.00,
+    // blend(400, 235, 100, 125) = 213.00. The state is the LAST row (213.00).
+    rows.push(link('2026-09-05', 'MaxiStore', 'ART-C', 235, 'op-B', 200, 150, 200, 320, { source: 'пересчёт после правки прихода' }));
+    rows.push(link('2026-09-10', 'MaxiStore', 'ART-C', 213, 'op-C', 400, 235, 100, 125, { source: 'пересчёт после правки прихода' }));
+  }
+  rows.push(
+    costRow('2026-08-01', 'MaxiStore', 'ART-X', 50, 'НАЧАЛЬНАЯ ТОЧКА', { sku: 'S-ART-X', source: T93_SEED_SOURCE, exported: T93_STAMP }),
+    link('2026-09-02', 'MaxiStore', 'ART-X', 50.91, 'op-X', 100, 50, 10, 60, { exported: T93_STAMP }),
+    costRow('2026-08-01', 'Mercurius', 'ART-C', 70, 'НАЧАЛЬНАЯ ТОЧКА', { sku: 'S-M', source: T93_SEED_SOURCE, exported: T93_STAMP }),
+    link('2026-09-05', 'Mercurius', 'ART-C', 85, 'op-M', 30, 70, 30, 100)
+  );
+  h.setOzonCostSheet(rows);
+  return h;
+}
+
+const t93Chain = h => h.dumpOzonCost().filter(r => r['Кабинет'] === 'MaxiStore' && r['Артикул'] === 'ART-C');
+const t93Day = r => String(r['Дата']).slice(0, 10);
+const t93Shape = rows => JSON.stringify(rows.map(r => [t93Day(r), r['OpID'], r['Себестоимость после'], r['Источник']]));
+const t93Bystanders = h => JSON.stringify(h.dumpOzonCost().filter(r => !(r['Кабинет'] === 'MaxiStore' && r['Артикул'] === 'ART-C')));
+const t93Frozen = h => JSON.stringify([h.dumpTransSheet(), h.dumpStockSheet(), h.dumpOzonCost(), h.dumpArchive()]);
+const t93State = (h, cab, art) => (h.getOzonCostState()[(cab || 'MaxiStore') + '|' + (art || 'ART-C')] || {}).cost;
+// The last row of every day of ART-C / MaxiStore — what the sender reads.
+const t93PerDay = h => { const m = {}; t93Chain(h).forEach(r => { m[t93Day(r)] = r; }); return m; };
+const t93Row = (h, opId, article) => h.getTransactions().rows.find(t => t.opId === opId && t.article === (article || 'ART-C') && t.type === 'Расход');
+const t93Edit = (h, opId, over, article) => {
+  const row = t93Row(h, opId, article);
+  return h.updateTransaction(row.id, Object.assign({
+    article: row.article, quantity: row.quantity, price: row.price, type: 'Расход',
+    destination: row.destination, deliveryDate: row.deliveryDate, date: row.date
+  }, over), 'tester');
+};
+const T93_EDIT = 'пересчёт после правки отгрузки';
+const T93_DEL = 'пересчёт после удаления отгрузки';
+const T93_RES = 'пересчёт после восстановления отгрузки';
+const T93_RECEIPT = 'пересчёт после правки прихода';
+const T93_MARK = 'удалено из цепочки';
+
+(function test93PureCore() {
+  const h = freshHarness();
+  check('93/02: a row whose source is «удалено из цепочки» is a drop marker, no other source is',
+    h.isOzonCostDropRow({ source: T93_MARK }) && !h.isOzonCostDropRow({ source: 'отгрузка' })
+      && !h.isOzonCostDropRow({ source: T93_EDIT }) && !h.isOzonCostDropRow({ source: '' }) && !h.isOzonCostDropRow({}));
+
+  // The fixture rows as the journal reader returns them.
+  const read = (rows) => { h.setOzonCostSheet(rows); return h.getOzonCostJournal(); };
+  const seed = costRow('2026-08-01', 'MaxiStore', 'A', 100, 'НАЧАЛЬНАЯ ТОЧКА', { source: T93_SEED_SOURCE });
+  const one = (date, after, opId, base, before, qty, cost, source) =>
+    costRow(date, 'MaxiStore', 'A', after, opId, { stockBefore: base, costBefore: before, shipped: qty, shippedCost: cost, source: source || 'отгрузка' });
+
+  // blend(100, 100, 100, 200) = 150.00 ; blend(200, 150, 200, 300) = 225.00
+  // A reader that throws on a valid chain must fail the check below, not crash the whole stand run.
+  let chainError = '';
+  let chain = { links: [], entries: [] };
+  try {
+    chain = h.buildOzonCostChain(read([seed, one('2026-09-01', 150, 'o1', 100, 100, 100, 200), one('2026-09-05', 225, 'o2', 200, 150, 200, 300),
+      one('2026-09-05', 235, 'o2', 200, 150, 200, 320, T93_RECEIPT)]));
+  } catch (e) { chainError = String(e.message || e); }
+  check('93/02: a corrected shipment is ONE link however many rows it owns, in the order of its first appearance',
+    chain.links.length === 2 && chain.links[1].key === 'op:o2' && chain.links[1].rows.length === 2 && chain.entries.length === 3,
+    chainError || JSON.stringify(chain.links.map(l => [l.key, l.rows.length])));
+
+  const throws = (rows) => { try { h.buildOzonCostChain(read(rows)); return ''; } catch (e) { return String(e.message || e); } };
+  check('93/02: two originals under one OpID make the chain unreadable',
+    throws([seed, one('2026-09-01', 150, 'o1', 100, 100, 100, 200), one('2026-09-02', 160, 'o1', 100, 100, 100, 200)]).indexOf('две отгрузки') !== -1);
+  check('93/02: a correction that belongs to no shipment makes the chain unreadable',
+    throws([seed, one('2026-09-01', 150, 'o1', 100, 100, 100, 200), one('2026-09-05', 235, 'o9', 200, 150, 200, 320, T93_RECEIPT)]).indexOf('не относится ни к одной отгрузке') !== -1);
+  check('93/02: an OpID-less correction that fits two OpID-less originals is refused, not guessed',
+    throws([seed, one('2026-09-01', 150, '', 100, 100, 100, 200), one('2026-09-01', 160, '', 100, 100, 100, 210),
+      one('2026-09-01', 170, '', 100, 100, 100, 220, T93_RECEIPT)]).indexOf('нельзя отнести к одной отгрузке') !== -1);
+  const mixed = h.buildOzonCostChain(read([seed, one('2026-09-01', 150, '', 100, 100, 100, 200), one('2026-09-01', 160, '', 100, 100, 100, 200, T93_RECEIPT)]));
+  check('93/02: an OpID-less correction joins the single OpID-less original with the same day and base',
+    mixed.links.length === 1 && mixed.links[0].key === 'row:3' && mixed.links[0].rows.length === 2, JSON.stringify(mixed.links.map(l => l.key)));
+})();
+
+// ---- Scenario 1: hole 4 — legacy corrections must not make a supply count twice ----
+(function test93Hole4() {
+  const h = t93Fixture({ legacy: true });
+  const bys = t93Bystanders(h);
+  const before = h.dumpOzonCost().length;
+  check('93/02 s1: before the second receipt edit the state is the last legacy correction (213.00)', t93State(h) === 213, String(t93State(h)));
+  // Second receipt edit: the price of op-B 320 -> 340. blend(200, 150, 200, 340) = 245.00 ; blend(400, 245, 100, 125) = 221.00.
+  const res = h.reissueOzonCostRows([{ id: 'x', opId: 'op-B', date: '2026-09-03T10:00:00.000Z', kanDay: '2026-09-05', operationDay: '2026-09-03',
+    destination: T93_DEST, article: 'ART-C', quantity: 200, oldUnitCost: 320, newUnitCost: 340 }], 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s1: only the supply and the links after it are written — once each, not once per old row',
+    res.appended === 2 && t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', 245, T93_RECEIPT], ['2026-09-10', 'op-C', 221, T93_RECEIPT]]),
+    t93Shape(added));
+  check('93/02 s1: the recorded base and the shipped pieces of the supply are kept, the unit cost is the new one',
+    added[0]['Остаток до'] === 200 && added[0]['Себестоимость до'] === 150 && added[0]['Отгружено'] === 200 && added[0]['Себестоимость отгрузки'] === 340,
+    JSON.stringify(added[0]));
+  check('93/02 s1: the state is the last row and it is the tail (221.00); the bystanders are byte for byte',
+    t93State(h) === 221 && t93Bystanders(h) === bys, String(t93State(h)));
+
+  // The other half of hole 4: the tail's own value does not move (base 0 -> its cost is its unit cost),
+  // yet the LAST row of the chain must be the tail. blend(100, 100, 100, 240) = 170.00 ; the tail stays 125.00.
+  const t = freshHarness();
+  t.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-T', 100, 'НАЧАЛЬНАЯ ТОЧКА', { source: T93_SEED_SOURCE }),
+    costRow('2026-09-01', 'MaxiStore', 'ART-T', 150, 'op-m1', { stockBefore: 100, costBefore: 100, shipped: 100, shippedCost: 200, source: 'отгрузка' }),
+    costRow('2026-09-05', 'MaxiStore', 'ART-T', 125, 'op-m2', { stockBefore: 0, costBefore: 150, shipped: 50, shippedCost: 125, source: 'отгрузка' })
+  ]);
+  const beforeT = t.dumpOzonCost().length;
+  t.reissueOzonCostRows([{ id: 'y', opId: 'op-m1', date: '2026-08-31T10:00:00.000Z', kanDay: '2026-09-01', operationDay: '2026-08-31',
+    destination: T93_DEST, article: 'ART-T', quantity: 100, oldUnitCost: 200, newUnitCost: 240 }], 'tester');
+  const addedT = t.dumpOzonCost().slice(beforeT);
+  check('93/02 s1: when the tail does not move it is still written LAST, so the state is the tail',
+    t93Shape(addedT) === JSON.stringify([['2026-09-01', 'op-m1', 170, T93_RECEIPT], ['2026-09-05', 'op-m2', 125, T93_RECEIPT]])
+      && t93State(t, 'MaxiStore', 'ART-T') === 125, t93Shape(addedT));
+
+  // An entry without an OpID (an old «История» row) is matched by day against alive OpID-less links ONLY.
+  // blend(200, 150, 100, 330) = 210.00
+  const n = freshHarness();
+  n.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-N', 100, 'НАЧАЛЬНАЯ ТОЧКА', { source: T93_SEED_SOURCE }),
+    costRow('2026-09-05', 'MaxiStore', 'ART-N', 150, 'op-n1', { stockBefore: 100, costBefore: 100, shipped: 100, shippedCost: 200, source: 'отгрузка' }),
+    costRow('2026-09-05', 'MaxiStore', 'ART-N', 200, '', { stockBefore: 200, costBefore: 150, shipped: 100, shippedCost: 300, source: 'отгрузка' })
+  ]);
+  const beforeN = n.dumpOzonCost().length;
+  const nres = n.reissueOzonCostRows([{ id: 'z', opId: '', date: '2026-09-03T10:00:00.000Z', kanDay: '2026-09-05', operationDay: '2026-09-03',
+    destination: T93_DEST, article: 'ART-N', quantity: 100, oldUnitCost: 300, newUnitCost: 330 }], 'tester');
+  const addedN = n.dumpOzonCost().slice(beforeN);
+  check('93/02 s1: an entry without an OpID corrects the OpID-less link of that day and leaves the OpID\'d link of the same day alone',
+    nres.appended === 1 && t93Shape(addedN) === JSON.stringify([['2026-09-05', '', 210, T93_RECEIPT]]), t93Shape(addedN));
+})();
+
+// ---- Scenario 2: the same price again writes nothing ----
+(function test93Unchanged() {
+  const h = t93Fixture();
+  const before = JSON.stringify(h.dumpOzonCost());
+  const res = h.reissueOzonCostRows([{ id: 'x', opId: 'op-B', date: '2026-09-03T10:00:00.000Z', kanDay: '2026-09-05', operationDay: '2026-09-03',
+    destination: T93_DEST, article: 'ART-C', quantity: 200, oldUnitCost: 300, newUnitCost: 300 }], 'tester');
+  check('93/02 s2: a receipt edit that leaves the unit cost of a shipment as it is appends no rows',
+    res.appended === 0 && JSON.stringify(h.dumpOzonCost()) === before, JSON.stringify(res));
+})();
+
+// ---- Scenario 3: a pencil edit of the quantity ----
+(function test93EditQuantity() {
+  const h = t93Fixture();
+  const bys = t93Bystanders(h);
+  const before = h.dumpOzonCost().length;
+  // qty 200 -> 100 at 300: blend(200, 150, 100, 300) = 200.00 ; blend(400, 200, 100, 125) = 185.00
+  const res = t93Edit(h, 'op-B', { quantity: 100 });
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s3: a pencil edit of the quantity rewrites that supply (200.00) and the one after it (185.00) — no «отгрузка» row',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', 200, T93_EDIT], ['2026-09-10', 'op-C', 185, T93_EDIT]]), t93Shape(added));
+  check('93/02 s3: the corrected row carries the recorded base, the new pieces and the old unit cost',
+    added[0]['Остаток до'] === 200 && added[0]['Себестоимость до'] === 150 && added[0]['Отгружено'] === 100 && added[0]['Себестоимость отгрузки'] === 300,
+    JSON.stringify(added[0]));
+  check('93/02 s3: the journal gained no row without an OpID, the edited «История» row kept its OpID',
+    h.dumpOzonCost().every(r => r['OpID'] !== '') && t93Row(h, 'op-B').quantity === 100, JSON.stringify(h.dumpOzonCost().map(r => r['OpID'])));
+  check('93/02 s3: the state is the tail (185.00); other articles and the other cabinet are byte for byte',
+    t93State(h) === 185 && t93Bystanders(h) === bys && !res.costJournalError, String(t93State(h)));
+})();
+
+(function test93EditPrice() {
+  // price 300 -> 350: blend(200, 150, 200, 350) = 250.00 ; blend(400, 250, 100, 125) = 225.00
+  const h = t93Fixture();
+  const bys = t93Bystanders(h);
+  const before = h.dumpOzonCost().length;
+  t93Edit(h, 'op-B', { price: 350 });
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s3: a pencil edit of the price rewrites that supply (250.00) and the one after it (225.00) with the new unit cost',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', 250, T93_EDIT], ['2026-09-10', 'op-C', 225, T93_EDIT]])
+      && added[0]['Себестоимость отгрузки'] === 350 && added[0]['Отгружено'] === 200 && t93Bystanders(h) === bys, t93Shape(added));
+
+  // A supply that carries additional costs: the edit rebuilds the row with its share of the whole shipment (item 80),
+  // and the journal takes the price of the rebuilt row. qty 200 -> 100, the 1000 spread over 100 pieces: price 305.00.
+  // blend(200, 150, 100, 305) = 201.67 ; blend(400, 201.67, 100, 125) = 186.34
+  const x = t93Fixture({ extrasOnB: true });
+  const beforeX = x.dumpOzonCost().length;
+  t93Edit(x, 'op-B', { quantity: 100 });
+  const addedX = x.dumpOzonCost().slice(beforeX);
+  check('93/02 s3: an edit of a supply with additional costs writes the price of the rebuilt row (305.00), not the old one',
+    t93Row(x, 'op-B').price === 305 && t93Shape(addedX) === JSON.stringify([['2026-09-05', 'op-B', 201.67, T93_EDIT], ['2026-09-10', 'op-C', 186.34, T93_EDIT]])
+      && addedX[0]['Себестоимость отгрузки'] === 305, t93Shape(addedX));
+})();
+
+(function test93EditDrift() {
+  // The chain keeps its recorded figures before the first change: L1 stays 150.02 and is not touched, L2 is blended on the RECORDED 150.02.
+  // blend(200, 150.02, 100, 300) = 200.01 ; blend(400, 200.01, 100, 125) = 185.01
+  const h = t93Fixture({ drift: true });
+  const before = h.dumpOzonCost().length;
+  t93Edit(h, 'op-B', { quantity: 100 });
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s3: links before the edited one keep their recorded figures — a kopeck-level drift of L1 is not rewritten',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', 200.01, T93_EDIT], ['2026-09-10', 'op-C', 185.01, T93_EDIT]]), t93Shape(added));
+})();
+
+// ---- Scenario 4: an edit that changes nothing ----
+(function test93EditNothing() {
+  const h = t93Fixture();
+  const before = JSON.stringify(h.dumpOzonCost());
+  const res = t93Edit(h, 'op-B', {});
+  check('93/02 s4: a pencil edit with nothing changed appends nothing to the journal',
+    JSON.stringify(h.dumpOzonCost()) === before && !res.costJournalError, JSON.stringify(h.dumpOzonCost()).length + ' vs ' + before.length);
+})();
+
+// ---- Scenario 5: the delivery date moves inside the neighbours ----
+(function test93EditDate() {
+  const h = t93Fixture();
+  const bys = t93Bystanders(h);
+  const before = h.dumpOzonCost().length;
+  t93Edit(h, 'op-B', { deliveryDate: '2026-09-07' });
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s5: a moved delivery date writes a marker for the old day, the supply on the new day, and ends with the tail',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', '', T93_MARK], ['2026-09-07', 'op-B', 225, T93_EDIT], ['2026-09-10', 'op-C', 205, T93_EDIT]]),
+    t93Shape(added));
+  check('93/02 s5: the marker keeps the recorded base and carries no cost; «История» holds the new delivery date',
+    added[0]['Остаток до'] === 200 && added[0]['Отгружено'] === 0 && added[0]['Себестоимость после'] === '' && t93Row(h, 'op-B').deliveryDate === '2026-09-07',
+    JSON.stringify(added[0]));
+  const exportRows = h.getOzonCostExport().rows.filter(r => r.cabinet === 'MaxiStore' && r.article === 'ART-C');
+  check('93/02 s5: the file for KAN leaves the emptied day 09-05 out and carries the new day 09-07',
+    !exportRows.some(r => String(r.date).slice(0, 10) === '2026-09-05') && exportRows.some(r => String(r.date).slice(0, 10) === '2026-09-07')
+      && exportRows.every(r => r.source !== T93_MARK), JSON.stringify(exportRows.map(r => [r.date, r.cost])));
+  check('93/02 s5: the state is 205.00 and the bystanders are byte for byte', t93State(h) === 205 && t93Bystanders(h) === bys);
+
+  // Onto the day of the NEXT supply (the boundary is allowed): that supply must stay the last row of its day.
+  const b = t93Fixture();
+  const beforeB = b.dumpOzonCost().length;
+  t93Edit(b, 'op-B', { deliveryDate: '2026-09-10' });
+  const addedB = b.dumpOzonCost().slice(beforeB);
+  check('93/02 s5: a supply moved onto the day of the next one — the next one is re-stated after it and stays the day\'s last row',
+    t93Shape(addedB) === JSON.stringify([['2026-09-05', 'op-B', '', T93_MARK], ['2026-09-10', 'op-B', 225, T93_EDIT], ['2026-09-10', 'op-C', 205, T93_EDIT]])
+      && t93PerDay(b)['2026-09-10']['OpID'] === 'op-C', t93Shape(addedB));
+
+  // Two supplies on 09-05; the LATER one moves to 09-07. Its marker would be the last row of 09-05 and read as «the day is deleted»,
+  // while the earlier supply (150.00, it does not change) is still there: it must be re-stated after the marker.
+  const s = t93Fixture({ sameDay: true });
+  const beforeS = s.dumpOzonCost().length;
+  t93Edit(s, 'op-B', { deliveryDate: '2026-09-07' });
+  const addedS = s.dumpOzonCost().slice(beforeS);
+  // The sender reads a day by its LAST row in the file, so the last row of 09-05 must be the earlier supply.
+  const sentDay = s.getOzonCostExport().rows.filter(r => r.cabinet === 'MaxiStore' && r.article === 'ART-C' && String(r.date).slice(0, 10) === '2026-09-05');
+  check('93/02 s5: the later of two same-day supplies moved away — the earlier one is re-stated after the marker and the old day keeps 150.00',
+    t93Shape(addedS) === JSON.stringify([['2026-09-05', 'op-B', '', T93_MARK], ['2026-09-05', 'op-A', 150, T93_EDIT], ['2026-09-07', 'op-B', 225, T93_EDIT], ['2026-09-10', 'op-C', 205, T93_EDIT]])
+      && t93PerDay(s)['2026-09-05']['OpID'] === 'op-A' && sentDay.length > 0 && sentDay[sentDay.length - 1].opId === 'op-A'
+      && sentDay[sentDay.length - 1].cost === 150, t93Shape(addedS));
+})();
+
+// ---- Scenario 6: a date outside the neighbours is refused before anything is written ----
+(function test93EditDateRefused() {
+  const h = t93Fixture();
+  const frozen = t93Frozen(h);
+  let late = '', early = '';
+  try { t93Edit(h, 'op-B', { deliveryDate: '2026-09-12' }); } catch (e) { late = String(e.message || e); }
+  try { t93Edit(h, 'op-B', { deliveryDate: '2026-08-30' }); } catch (e) { early = String(e.message || e); }
+  check('93/02 s6: a delivery date after the next supply is refused, naming the allowed range',
+    late.indexOf('от 01.09.2026 до 10.09.2026') !== -1 && late.indexOf('Ничего не записано') !== -1, late);
+  check('93/02 s6: a delivery date before the previous supply is refused too', early.indexOf('от 01.09.2026 до 10.09.2026') !== -1, early);
+  check('93/02 s6: after the refusals «История», «Остатки», the journal and the archive are byte for byte', t93Frozen(h) === frozen);
+})();
+
+// ---- Scenario 7: another cabinet / a write-off / a different operation are refused before any write ----
+(function test93EditRefused() {
+  const h = t93Fixture();
+  h.commitTransaction([{ article: 'ART-X', quantity: 5, price: 60 }], 'Расход', 'Яндекс', '2026-09-03', 'tester', '2026-09-03T10:00:00.000Z', 'op-Y');
+  const frozen = t93Frozen(h);
+  const msgOf = (fn) => { try { fn(); return ''; } catch (e) { return String(e.message || e); } };
+  const toCabinet = msgOf(() => t93Edit(h, 'op-B', { destination: 'Ozon (Mercurius)' }));
+  const toWriteOff = msgOf(() => t93Edit(h, 'op-B', { destination: 'Склад [Списание - Брак]' }));
+  const toReceipt = msgOf(() => t93Edit(h, 'op-B', { type: 'Приход', destination: 'Склад' }));
+  const intoOzon = msgOf(() => t93Edit(h, 'op-Y', { destination: T93_DEST }, 'ART-X'));
+  check('93/02 s7: another Ozon cabinet is refused with «удалите операцию и проведите её заново»', toCabinet.indexOf('удалите операцию и проведите её заново') !== -1, toCabinet);
+  check('93/02 s7: Ozon -> «Списание», Ozon -> a receipt and a plain shipment -> Ozon are refused too',
+    [toWriteOff, toReceipt, intoOzon].every(m => m.indexOf('удалите операцию и проведите её заново') !== -1), [toWriteOff, toReceipt, intoOzon].join(' | '));
+  check('93/02 s7: nothing was written by any of the refused edits', t93Frozen(h) === frozen);
+  // A plain edit of a non-Ozon shipment still works and leaves the journal alone.
+  const journalBefore = JSON.stringify(h.dumpOzonCost());
+  t93Edit(h, 'op-Y', { quantity: 4 }, 'ART-X');
+  check('93/02 s7: editing a shipment that is not to Ozon works and does not touch the journal',
+    t93Row(h, 'op-Y', 'ART-X').quantity === 4 && JSON.stringify(h.dumpOzonCost()) === journalBefore);
+})();
+
+// ---- Scenario 8: deleting a supply from the middle of the chain ----
+(function test93DeleteMiddle() {
+  const h = t93Fixture();
+  const bys = t93Bystanders(h);
+  const before = h.dumpOzonCost().length;
+  const idB = t93Row(h, 'op-B').id;
+  // blend(400, 150, 100, 125) = 145.00
+  const res = h.deleteTransaction(idB, 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s8: deleting a supply writes a marker for its day and re-blends the chain after it (145.00)',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', '', T93_MARK], ['2026-09-10', 'op-C', 145, T93_DEL]]), t93Shape(added));
+  check('93/02 s8: the archive payload carries the OpID and the (empty) additional costs; the answer has no journal error',
+    h.dumpArchive()[0].data.opId === 'op-B' && h.dumpArchive()[0].data.additionalCosts === '' && !res.costJournalError, JSON.stringify(h.dumpArchive()[0].data));
+  const state = h.getOzonCostState()['MaxiStore|ART-C'];
+  check('93/02 s8: the state is the tail (145.00); the bystanders are byte for byte', state.cost === 145 && t93Bystanders(h) === bys, JSON.stringify(state));
+
+  const exp = h.getOzonCostExport();
+  const mine = exp.rows.filter(r => r.cabinet === 'MaxiStore' && r.article === 'ART-C');
+  check('93/02 s8: the file for KAN leaves the emptied day out (also the supply\'s own unsent row) and the marker, and keeps the new figure',
+    !mine.some(r => String(r.date).slice(0, 10) === '2026-09-05') && mine.some(r => r.cost === 145), JSON.stringify(mine.map(r => [r.date, r.cost])));
+  h.markOzonCostExported({ rows: exp.rows }, 'tester');
+  const sheet = t93Chain(h);
+  check('93/02 s8: stamping what was handed over leaves the marker and the emptied day unstamped',
+    sheet.filter(r => t93Day(r) === '2026-09-05').every(r => String(r['Выгружено в КАН']).trim() === '')
+      && sheet.filter(r => t93Day(r) === '2026-09-10').every(r => String(r['Выгружено в КАН']).trim() !== ''),
+    JSON.stringify(sheet.map(r => [t93Day(r), r['Выгружено в КАН']])));
+})();
+
+// ---- Scenario 9: two supplies on the same day ----
+(function test93SameDay() {
+  // P op-A and Q op-B both on 2026-09-05, no tail: P blend(100, 100, 100, 200) = 150.00, Q blend(200, 150, 200, 300) = 225.00.
+  const later = t93Fixture({ sameDay: true, noTail: true });
+  const beforeL = later.dumpOzonCost().length;
+  later.deleteTransaction(t93Row(later, 'op-B').id, 'tester');
+  const addedL = later.dumpOzonCost().slice(beforeL);
+  check('93/02 s9: deleting the LATER of two supplies of one day re-states the earlier one (150.00) — the day is not a delete',
+    t93Shape(addedL) === JSON.stringify([['2026-09-05', 'op-B', '', T93_MARK], ['2026-09-05', 'op-A', 150, T93_DEL]])
+      && t93PerDay(later)['2026-09-05']['OpID'] === 'op-A' && t93State(later) === 150, t93Shape(addedL));
+
+  // Deleting the EARLIER one: Q is re-blended on the seed: blend(200, 100, 200, 300) = 200.00
+  const earlier = t93Fixture({ sameDay: true, noTail: true });
+  const beforeE = earlier.dumpOzonCost().length;
+  earlier.deleteTransaction(t93Row(earlier, 'op-A').id, 'tester');
+  const addedE = earlier.dumpOzonCost().slice(beforeE);
+  check('93/02 s9: deleting the EARLIER of two supplies of one day re-blends the later one on the seed (200.00)',
+    t93Shape(addedE) === JSON.stringify([['2026-09-05', 'op-A', '', T93_MARK], ['2026-09-05', 'op-B', 200, T93_DEL]])
+      && t93PerDay(earlier)['2026-09-05']['OpID'] === 'op-B' && t93State(earlier) === 200, t93Shape(addedE));
+})();
+
+(function test93SameDayWithTail() {
+  // The same pair on 2026-09-05 with the tail L3 after it: deleting the LATER one of the pair changes the tail (blend(400, 150, 100, 125) = 145.00),
+  // and the earlier one — which does not change at all — must still be re-stated AFTER the marker, or the day would read as deleted.
+  const h = t93Fixture({ sameDay: true });
+  const before = h.dumpOzonCost().length;
+  h.deleteTransaction(t93Row(h, 'op-B').id, 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s9: the earlier supply of a day whose later supply is deleted is re-stated after the marker, then the tail follows (145.00)',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', '', T93_MARK], ['2026-09-05', 'op-A', 150, T93_DEL], ['2026-09-10', 'op-C', 145, T93_DEL]])
+      && t93PerDay(h)['2026-09-05']['OpID'] === 'op-A' && t93State(h) === 145, t93Shape(added));
+})();
+
+// ---- Scenario 10: deleting the tail ----
+(function test93DeleteTail() {
+  const h = t93Fixture();
+  const before = h.dumpOzonCost().length;
+  h.deleteTransaction(t93Row(h, 'op-C').id, 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s10: deleting the tail writes its marker and re-states the new tail LAST (225.00), so the state is right',
+    t93Shape(added) === JSON.stringify([['2026-09-10', 'op-C', '', T93_MARK], ['2026-09-05', 'op-B', 225, T93_DEL]]) && t93State(h) === 225,
+    t93Shape(added));
+})();
+
+// ---- Scenario 11: the only supply of a chain ----
+(function test93DeleteOnly() {
+  const mk = (withSeed) => {
+    const h = freshHarness();
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([{ article: 'ART-S', quantity: 100, avgCost: 80, capitalization: 8000 }]);
+    h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-S', available: 50 }]);
+    h.setOzonCostSheet(withSeed ? [costRow('2026-08-01', 'MaxiStore', 'ART-S', 100, 'НАЧАЛЬНАЯ ТОЧКА', { sku: 'S-S', source: T93_SEED_SOURCE })] : []);
+    return h;
+  };
+  const ship = (h, qty, price, opId) => h.commitTransaction([{ article: 'ART-S', quantity: qty, price }], 'Расход', T93_DEST, '2026-09-03', 'tester', '2026-09-02T10:00:00.000Z', opId);
+
+  // No seed: the chain empties, the next supply is a first one.
+  const a = mk(false);
+  ship(a, 20, 80, 'op-S1');
+  a.deleteTransaction(t93Row(a, 'op-S1', 'ART-S').id, 'tester');
+  check('93/02 s11: the only supply of a chain without a seed deleted — a marker last, so the chain has no state',
+    a.dumpOzonCost().length === 2 && a.dumpOzonCost()[1]['Источник'] === T93_MARK && a.getOzonCostState()['MaxiStore|ART-S'] === undefined,
+    JSON.stringify(a.dumpOzonCost().map(r => r['Источник'])));
+  ship(a, 10, 120, 'op-S2');
+  const next = a.dumpOzonCost()[2];
+  check('93/02 s11: the next supply of that article is a first one («первая отгрузка…») at its own cost',
+    next['Источник'].indexOf('первая отгрузка') === 0 && next['Себестоимость после'] === 120 && next['OpID'] === 'op-S2', JSON.stringify(next));
+
+  // With a seed: the seed is the cost in force again. blend(50, 100, 20, 80) = 94.29 ; blend(50, 100, 10, 120) = 103.33
+  const b = mk(true);
+  ship(b, 20, 80, 'op-S1');
+  check('93/02 s11: with a seed the first supply blends with it (94.29)', t93State(b, 'MaxiStore', 'ART-S') === 94.29, String(t93State(b, 'MaxiStore', 'ART-S')));
+  b.deleteTransaction(t93Row(b, 'op-S1', 'ART-S').id, 'tester');
+  check('93/02 s11: the only supply deleted with a seed — the seed is re-stated last, the state is the seed (100.00)',
+    t93State(b, 'MaxiStore', 'ART-S') === 100 && b.dumpOzonCost().length === 4 && b.dumpOzonCost()[3]['Источник'] === T93_SEED_SOURCE,
+    JSON.stringify(b.dumpOzonCost().map(r => [r['Дата'], r['Источник'], r['Себестоимость после']])));
+  ship(b, 10, 120, 'op-S2');
+  check('93/02 s11: the next supply blends with the seed (103.33), not with nothing',
+    t93State(b, 'MaxiStore', 'ART-S') === 103.33, String(t93State(b, 'MaxiStore', 'ART-S')));
+})();
+
+// ---- Scenario 12: delete, then restore from «Удаленное» ----
+(function test93Restore() {
+  const h = t93Fixture({ extrasOnB: true });
+  const perDayBefore = JSON.stringify(Object.keys(t93PerDay(h)).map(d => [d, t93PerDay(h)[d]['Себестоимость после']]));
+  const rowB = t93Row(h, 'op-B');
+  check('93/02 s12: fixture check — op-B carries 1000 of additional costs and the price 300', rowB.additionalCosts === 1000 && rowB.price === 300, JSON.stringify(rowB));
+  h.deleteTransaction(rowB.id, 'tester');
+  const archive = h.dumpArchive()[0];
+  check('93/02 s12: the archive payload keeps the OpID and the additional costs as a number',
+    archive.data.opId === 'op-B' && archive.data.additionalCosts === 1000 && archive.data.shipmentId === 'ship-B', JSON.stringify(archive.data));
+  const before = h.dumpOzonCost().length;
+  const res = h.restoreArchivedItem(archive.archiveId, 'Николай');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s12: the restore revives the supply in its old place and re-blends after it — 225.00 and 205.00',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', 225, T93_RES], ['2026-09-10', 'op-C', 205, T93_RES]]) && res.status === 'ok' && !res.costJournalError,
+    t93Shape(added));
+  const perDayAfter = JSON.stringify(Object.keys(t93PerDay(h)).map(d => [d, t93PerDay(h)[d]['Себестоимость после']]));
+  check('93/02 s12: the chain is as before the deletion to the kopeck, day by day (150 / 225 / 205), and the state is 205.00',
+    perDayAfter === perDayBefore && perDayAfter === JSON.stringify([['2026-08-01', 100], ['2026-09-01', 150], ['2026-09-05', 225], ['2026-09-10', 205]]) && t93State(h) === 205,
+    perDayAfter);
+  const restoredRaw = h.dumpTransSheet().find(r => r['ID'] === rowB.id);
+  check('93/02 s12: the restored row has the OpID, the additional costs as a NUMBER, and the shipment number',
+    restoredRaw && restoredRaw['OpID'] === 'op-B' && restoredRaw['ДопРасходы'] === 1000 && typeof restoredRaw['ДопРасходы'] === 'number' && restoredRaw['Отгрузка'] === 'ship-B',
+    JSON.stringify(restoredRaw));
+  const chain = h.buildOzonCostChain(h.getOzonCostJournal().filter(r => r.cabinet === 'MaxiStore' && r.article === 'ART-C'));
+  check('93/02 s12: the restored supply is one alive link again (one chain, nothing OpID-less)',
+    chain.byKey['op:op-B'].alive === true && chain.links.length === 3 && h.dumpOzonCost().every(r => r['OpID'] !== ''));
+})();
+
+// ---- Scenario 13: an archive row from before item 93 carries no OpID ----
+(function test93RestoreOld() {
+  const h = t93Fixture();
+  h.archiveItem('Transaction', { id: 'old-1', date: '2026-09-03T10:00:00.000Z', type: 'Расход', article: 'ART-C', quantity: 5, price: 300,
+    writeOffCost: 1500, total: 1500, destination: T93_DEST, deliveryDate: '2026-09-05', user: 'tester' }, 'admin');
+  const archiveId = h.dumpArchive()[0].archiveId;
+  const before = JSON.stringify(h.dumpOzonCost());
+  const res = h.restoreArchivedItem(archiveId, 'Николай');
+  const raw = h.dumpTransSheet().find(r => r['ID'] === 'old-1');
+  check('93/02 s13: an old payload without an OpID restores as before, the journal is not touched',
+    res.status === 'ok' && !!raw && !raw['OpID'] && JSON.stringify(h.dumpOzonCost()) === before);
+  check('93/02 s13: and the answer says the row has no OpID', String(res.costJournalError || '').indexOf('Строка без номера операции (OpID)') === 0, String(res.costJournalError));
+
+  // The same through the bulk restore.
+  h.archiveItem('Transaction', { id: 'old-2', date: '2026-09-03T10:00:00.000Z', type: 'Расход', article: 'ART-C', quantity: 4, price: 300,
+    writeOffCost: 1200, total: 1200, destination: T93_DEST, deliveryDate: '2026-09-05', user: 'tester' }, 'admin');
+  const bulk = h.restoreMultipleArchivedItems([h.dumpArchive()[0].archiveId], 'Николай');
+  check('93/02 s13: an old payload restored in bulk: the row is back, the journal is not touched, the answer says why',
+    h.dumpTransSheet().some(r => r['ID'] === 'old-2') && JSON.stringify(h.dumpOzonCost()) === before
+      && String(bulk.costJournalError || '').indexOf('Строка без номера операции (OpID)') === 0, String(bulk.costJournalError));
+})();
+
+// ---- Scenario 14: several shipments deleted and restored at once ----
+(function test93Bulk() {
+  const h = t93Fixture({ extrasOnB: true });
+  const bys = t93Bystanders(h);
+  const before = h.dumpOzonCost().length;
+  const ids = [t93Row(h, 'op-A').id, t93Row(h, 'op-B').id];
+  // L3 on the seed: blend(400, 100, 100, 125) = 105.00
+  const res = h.deleteMultipleTransactions(ids, 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s14: a bulk delete of two supplies writes exactly 3 rows: two markers and the tail re-blended on the seed (105.00)',
+    added.length === 3 && t93Shape(added) === JSON.stringify([['2026-09-01', 'op-A', '', T93_MARK], ['2026-09-05', 'op-B', '', T93_MARK], ['2026-09-10', 'op-C', 105, T93_DEL]])
+      && t93State(h) === 105 && !res.costJournalError && t93Bystanders(h) === bys, t93Shape(added));
+  check('93/02 s14: the bulk archive payloads carry the OpIDs and the additional costs',
+    h.dumpArchive().map(a => [a.data.opId, a.data.additionalCosts]).sort().join('|') === 'op-A,|op-B,1000', JSON.stringify(h.dumpArchive().map(a => a.data)));
+
+  const restoredAt = h.dumpOzonCost().length;
+  const back = h.restoreMultipleArchivedItems(h.dumpArchive().map(a => a.archiveId), 'Николай');
+  const addedBack = h.dumpOzonCost().slice(restoredAt);
+  check('93/02 s14: a bulk restore revives both supplies and the chain is 150 / 225 / 205 again',
+    t93Shape(addedBack) === JSON.stringify([['2026-09-01', 'op-A', 150, T93_RES], ['2026-09-05', 'op-B', 225, T93_RES], ['2026-09-10', 'op-C', 205, T93_RES]])
+      && t93State(h) === 205 && !back.costJournalError, t93Shape(addedBack));
+  const rawB = h.dumpTransSheet().find(r => r['OpID'] === 'op-B');
+  check('93/02 s14: the bulk-restored row has its OpID and its additional costs as a number',
+    !!rawB && rawB['ДопРасходы'] === 1000 && typeof rawB['ДопРасходы'] === 'number' && rawB['Отгрузка'] === 'ship-B', JSON.stringify(rawB));
+})();
+
+// ---- Scenario 15: a re-sort (item 68 / commitShipmentPeresort) ----
+(function test93Peresort() {
+  const h = t93Fixture();
+  const idB = t93Row(h, 'op-B').id;
+  h.setExternalShipmentsSheet([{ postingId: 'P-93', cabinet: 'MaxiStore', status: 'processed', items: [{ offerId: 'ART-C', quantity: 200 }],
+    transGroupInfo: JSON.stringify([idB]), orderNumber: '1300' }]);
+  const sheet = h.getRegistrySheet('Внешние отгрузки');
+  const dump = sheet.__dump();
+  dump[1][dump[0].indexOf('ПересортJSON')] = JSON.stringify({ pairs: [{ fromArticle: 'ART-C', toArticle: 'ART-D', fromOfferId: 'ART-C', toOfferId: 'ART-D', qty: 50 }] });
+  sheet.__setData(dump);
+  const others = () => JSON.stringify(h.dumpOzonCost().filter(r => r['Кабинет'] !== 'MaxiStore' || (r['Артикул'] !== 'ART-C' && r['Артикул'] !== 'ART-D')));
+  const bys = others();
+  const before = h.dumpOzonCost().length;
+  // 200 -> 150 of ART-C at 300: blend(200, 150, 150, 300) = 214.29 ; blend(400, 214.29, 100, 125) = 196.43 ; ART-D 50 @400 is its first supply (400.00)
+  const res = h.commitShipmentPeresort('P-93', 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  const c = added.filter(r => r['Артикул'] === 'ART-C'), d = added.filter(r => r['Артикул'] === 'ART-D');
+  check('93/02 s15: a re-sort rewrites the chain of the old article by the OpID (214.29, 196.43) — no OpID-less row anywhere',
+    t93Shape(c) === JSON.stringify([['2026-09-05', 'op-B', 214.29, T93_EDIT], ['2026-09-10', 'op-C', 196.43, T93_EDIT]])
+      && c[0]['Отгружено'] === 150 && h.dumpOzonCost().every(r => r['OpID'] !== ''), t93Shape(c));
+  check('93/02 s15: the new article gets a link of its own with the OpID of the supply, a first one at 400.00',
+    d.length === 1 && d[0]['OpID'] === 'op-B' && d[0]['Отгружено'] === 50 && d[0]['Себестоимость после'] === 400 && d[0]['Источник'].indexOf('первая отгрузка') === 0,
+    JSON.stringify(d));
+  check('93/02 s15: the other articles and the other cabinet are byte for byte, the answer carries no journal error',
+    others() === bys && res.success === true && !res.costJournalError, JSON.stringify(res.costJournalError));
+})();
+
+// ---- Scenario 16: «История» rows without an OpID ----
+(function test93OpIdLess() {
+  const h = t93Fixture();
+  h.commitTransaction([{ article: 'ART-X', quantity: 8, price: 70 }], 'Расход', T93_DEST, '2026-09-04', 'tester', '2026-09-03T12:00:00.000Z', '');
+  const noOp = h.getTransactions().rows.find(t => t.article === 'ART-X' && t.opId === '' && t.type === 'Расход');
+  const journalRows = h.dumpOzonCost().length;
+  const edited = h.updateTransaction(noOp.id, { article: 'ART-X', quantity: 6, price: 70, type: 'Расход', destination: T93_DEST, deliveryDate: '2026-09-04', date: noOp.date }, 'tester');
+  check('93/02 s16: an edit of an Ozon row without an OpID is done in «История», the journal is not touched, the owner is told',
+    h.getTransactions().rows.find(t => t.article === 'ART-X' && t.opId === '' && t.quantity === 6) !== undefined
+      && h.dumpOzonCost().length === journalRows && edited.costJournalError.indexOf('Строка без номера операции (OpID)') === 0, edited.costJournalError);
+  const again = h.getTransactions().rows.find(t => t.article === 'ART-X' && t.opId === '' && t.type === 'Расход');
+  const deleted = h.deleteTransaction(again.id, 'tester');
+  check('93/02 s16: a deletion of an Ozon row without an OpID is done, the journal is not touched, the owner is told',
+    !h.getTransactions().rows.some(t => t.id === again.id) && h.dumpOzonCost().length === journalRows
+      && deleted.costJournalError.indexOf('Строка без номера операции (OpID)') === 0, deleted.costJournalError);
+})();
+
+// ---- Scenario 17: the journal fails — the operation still stands ----
+(function test93JournalFailure() {
+  const h = t93Fixture();
+  h.context.applyOzonCostChainOps = function() { throw new Error('журнал недоступен'); };
+  const journal = JSON.stringify(h.dumpOzonCost());
+  const idB = t93Row(h, 'op-B').id;
+  const res = h.deleteTransaction(idB, 'tester');
+  check('93/02 s17: a journal failure on a deletion does not undo it, and the answer says so',
+    !h.getTransactions().rows.some(t => t.id === idB) && h.dumpArchive().length === 1
+      && res.costJournalError.indexOf('Операция удалена, но журнал «Себестоимость Озон» для КАН НЕ обновлён') === 0 && res.costJournalError.indexOf('журнал недоступен') !== -1
+      && JSON.stringify(h.dumpOzonCost()) === journal, res.costJournalError);
+  const edited = t93Edit(h, 'op-C', { quantity: 90 });
+  check('93/02 s17: a journal failure on a pencil edit does not undo it either',
+    t93Row(h, 'op-C').quantity === 90 && edited.costJournalError.indexOf('журнал недоступен') !== -1, edited.costJournalError);
+
+  // A chain that cannot be read stops only itself.
+  const g = t93Fixture();
+  g.setOzonCostSheet(g.dumpOzonCost().map(r => Object.keys(r).map(k => r[k])).concat([
+    // a second original under op-X for ART-X — that chain is broken
+    ['2026-09-03', 'MaxiStore', 'ART-X', 'S-ART-X', 110, 50.91, 10, 60, 52, 'op-X', '', 'отгрузка']]));
+  const edit = t93Edit(g, 'op-B', { quantity: 100 });
+  check('93/02 s17: an unreadable chain of another article does not stop the edit of this one',
+    !edit.costJournalError && t93State(g) === 185, String(edit.costJournalError));
+  const broken = t93Edit(g, 'op-X', { quantity: 9 }, 'ART-X');
+  check('93/02 s17: the unreadable chain itself fails alone: «История» is edited, the answer names the chain',
+    t93Row(g, 'op-X', 'ART-X').quantity === 9 && broken.costJournalError.indexOf('две отгрузки') !== -1, String(broken.costJournalError));
+})();
+
+// ---- A combined shipment (item 90): the edit touches the link of ITS order only ----
+(function test93CombinedEdit() {
+  // Three orders as in the item 90 fixture: A x10 (op-comb-1), B x20 (op-comb-2), A x20 + B x10 (op-comb-3), all at 620 per piece
+  // with their share of the batch. The row A x20 of order 3 becomes A x25: the row is rebuilt at 617.14 (see test90t03c).
+  // blend(900, 620, 25, 617.14) = 619.92
+  const h = t90ThreeOrders();
+  const edited = t90Rows(h).find(t => t.opId === `${T90_SHIP}-3` && t.article === 'A');
+  const before = h.dumpOzonCost().length;
+  h.updateTransaction(edited.id, {
+    article: 'A', quantity: 25, price: edited.price, writeOffCost: edited.writeOffCost,
+    type: 'Расход', destination: edited.destination, deliveryDate: '2026-09-22', date: edited.date
+  }, 'tester');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s3: a row edit inside a combined shipment rewrites only the link of its own order and article (619.92)',
+    added.length === 1 && added[0]['OpID'] === `${T90_SHIP}-3` && added[0]['Артикул'] === 'A' && added[0]['Отгружено'] === 25
+      && added[0]['Себестоимость отгрузки'] === 617.14 && added[0]['Себестоимость после'] === 619.92 && h.dumpOzonCost().every(r => r['OpID'] !== ''),
+    JSON.stringify(added));
+})();
+
+// ---- Review fixes: a kit component brought back by a bulk restore, and a supply on the seed's own day ----
+(function test93ReviewFixes() {
+  // A bulk restore writes «isComponent» back empty, so a kit component row of op-B comes back looking like a
+  // shipment of its own (ART-D under op-B, Ozon destination). Only a re-sort may add a link to the journal.
+  const h = t93Fixture();
+  const C = h.context;
+  const comp = h.commitTransaction([{ article: 'ART-D', quantity: 5, price: 400 }], 'Расход', T93_DEST, '2026-09-05', 'tester',
+    '2026-09-03T10:00:00.000Z', 'tmp-K', undefined, undefined, '', 'ship-B', true);
+  C.stampOpIdOnTransactions(comp.newTransactions, 'op-B');
+  const sheet = C.getTransactionSheet(C.getSpreadsheet());
+  const hdr = C.readHeaderRow(sheet);
+  const compId = String(comp.newTransactions[0].id);
+  const ids = sheet.getRange(1, hdr.indexOf('ID') + 1, sheet.getLastRow(), 1).getValues().map(r => String(r[0]));
+  sheet.getRange(ids.indexOf(compId) + 1, hdr.indexOf('isComponent') + 1).setValue(true);
+  h.deleteMultipleTransactions([t93Row(h, 'op-B').id, compId], 'tester');
+  const back = h.restoreMultipleArchivedItems(h.dumpArchive().map(a => a.archiveId), 'tester');
+  const compBack = h.getTransactions().rows.find(t => String(t.id) === compId);
+  check('93/02 s14: a kit component restored in bulk without «isComponent» gets no link of its own; the chain is 150 / 225 / 205 again',
+    compBack && compBack.opId === 'op-B' && compBack.isComponent !== true
+      && h.dumpOzonCost().every(r => r['Артикул'] !== 'ART-D') && t93State(h) === 205 && !back.costJournalError,
+    JSON.stringify(h.dumpOzonCost().filter(r => r['Артикул'] === 'ART-D')));
+
+  // A supply dropped on the seed's own day: the day keeps the seed's cost (re-stated after the marker), it is
+  // not a KAN delete. seed 100; op-a 08-01 base 100, 100 @200 -> 150; op-b 08-05 base 200, 100 @250 -> 183.33;
+  // without op-a: op-b = blend(200, 100, 100, 250) = 150.00.
+  const t = freshHarness();
+  t.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-S2', 100, 'НАЧАЛЬНАЯ ТОЧКА', { source: T93_SEED_SOURCE, exported: T93_STAMP }),
+    costRow('2026-08-01', 'MaxiStore', 'ART-S2', 150, 'op-a', { stockBefore: 100, costBefore: 100, shipped: 100, shippedCost: 200, source: 'отгрузка', exported: T93_STAMP }),
+    costRow('2026-08-05', 'MaxiStore', 'ART-S2', 183.33, 'op-b', { stockBefore: 200, costBefore: 150, shipped: 100, shippedCost: 250, source: 'отгрузка', exported: T93_STAMP })
+  ]);
+  const b0 = t.dumpOzonCost().length;
+  t.applyOzonCostChainOps('MaxiStore', 'ART-S2', { 'op:op-a': { drop: true } }, 'пересчёт после удаления отгрузки');
+  const added = t.dumpOzonCost().slice(b0);
+  const lastOfSeedDay = t.dumpOzonCost().filter(r => String(r['Дата']).slice(0, 10) === '2026-08-01').pop();
+  const fileDays = t.getOzonCostExport().rows.map(r => String(r.date).slice(0, 10) + '=' + r.cost);
+  check('93/02 s9: a supply dropped on the seed\'s own day leaves the seed (100.00) as that day\'s last row, not a KAN delete',
+    t93Shape(added) === JSON.stringify([['2026-08-01', 'op-a', '', T93_MARK], ['2026-08-01', 'НАЧАЛЬНАЯ ТОЧКА', 100, T93_SEED_SOURCE], ['2026-08-05', 'op-b', 150, 'пересчёт после удаления отгрузки']])
+      && lastOfSeedDay['Себестоимость после'] === 100 && t93State(t, 'MaxiStore', 'ART-S2') === 150
+      && fileDays.join(',') === '2026-08-01=100,2026-08-05=150',
+    t93Shape(added) + ' file ' + fileDays.join(','));
+})();
+
+// ---- A retry of a deleted supply with the same OpID, and the entry point of ticket 06 ----
+(function test93RetryAndEntryPoint() {
+  const h = t93Fixture();
+  h.deleteTransaction(t93Row(h, 'op-B').id, 'tester');
+  const before = h.dumpOzonCost().length;
+  const res = h.commitTransaction([{ article: 'ART-C', quantity: 200, price: 300 }], 'Расход', T93_DEST, '2026-09-05', 'tester', '2026-09-03T10:00:00.000Z', 'op-B');
+  const added = h.dumpOzonCost().slice(before);
+  check('93/02 s20: committing the same OpID again after its deletion revives the link in place (225.00 / 205.00), no new «отгрузка» row',
+    t93Shape(added) === JSON.stringify([['2026-09-05', 'op-B', 225, T93_RES], ['2026-09-10', 'op-C', 205, T93_RES]]) && !res.costJournalError
+      && t93State(h) === 205, t93Shape(added));
+
+  // Ticket 06: the live chain with an OpID-less link (row 60 of the live journal) and two explicit corrections.
+  // seed 200 -> r1 base 100, 50 @220: 206.67 ; no-OpID base 150, 20 @240: 210.59 ; op2 base 170, 30 @260: 218.00
+  // dropping the no-OpID link: op2 = blend(170, 206.67, 30, 260) = 214.67 ; explicit cost 280 on op2: blend(170, 206.67, 30, 280) = 217.67
+  const t = freshHarness();
+  t.setOzonCostSheet([
+    costRow('2026-08-01', 'MaxiStore', 'ART-L', 200, 'НАЧАЛЬНАЯ ТОЧКА', { source: T93_SEED_SOURCE }),
+    costRow('2026-09-01', 'MaxiStore', 'ART-L', 206.67, 'op-1', { stockBefore: 100, costBefore: 200, shipped: 50, shippedCost: 220, source: 'отгрузка' }),
+    costRow('2026-09-12', 'MaxiStore', 'ART-L', 210.59, '', { stockBefore: 150, costBefore: 206.67, shipped: 20, shippedCost: 240, source: 'отгрузка' }),
+    costRow('2026-09-19', 'MaxiStore', 'ART-L', 218, 'op-2', { stockBefore: 170, costBefore: 210.59, shipped: 30, shippedCost: 260, source: 'отгрузка' })
+  ]);
+  const b0 = t.dumpOzonCost().length;
+  const dropped = t.applyOzonCostChainOps('MaxiStore', 'ART-L', { 'row:4': { drop: true } }, 'пересчёт после ручной правки');
+  const a0 = t.dumpOzonCost().slice(b0);
+  check('93/02 s19: the entry point drops an OpID-less link: its marker keeps the empty OpID and base, the rest is re-blended once',
+    dropped.appended === 2 && t93Shape(a0) === JSON.stringify([['2026-09-12', '', '', T93_MARK], ['2026-09-19', 'op-2', 214.67, 'пересчёт после ручной правки']])
+      && a0[0]['Остаток до'] === 150 && t93State(t, 'MaxiStore', 'ART-L') === 214.67, t93Shape(a0));
+  const b1 = t.dumpOzonCost().length;
+  t.applyOzonCostChainOps('MaxiStore', 'ART-L', { 'op:op-2': { shippedCost: 280 } }, 'пересчёт после ручной правки');
+  check('93/02 s19: an explicit unit cost op corrects one link (217.67) on top of the dropped OpID-less one',
+    t93Shape(t.dumpOzonCost().slice(b1)) === JSON.stringify([['2026-09-19', 'op-2', 217.67, 'пересчёт после ручной правки']]));
+  const dropAgain = t.applyOzonCostChainOps('MaxiStore', 'ART-L', { 'row:4': { drop: true } }, 'пересчёт после ручной правки');
+  check('93/02 s19: dropping a link that is already dropped writes nothing', dropAgain.appended === 0);
+  let unknown = '';
+  try { t.applyOzonCostChainOps('MaxiStore', 'ART-L', { 'op:nope': { drop: true } }, 'пересчёт после ручной правки'); } catch (e) { unknown = String(e.message || e); }
+  check('93/02 s19: an op for a link the chain does not have is an error, not a guess', unknown.indexOf('op:nope') !== -1, unknown);
+  // A source that is not a «пересчёт…» text would be read back as a second original of the link.
+  const b2 = t.dumpOzonCost().length;
+  let badSource = '';
+  try { t.applyOzonCostChainOps('MaxiStore', 'ART-L', { 'op:op-2': { shippedCost: 290 } }, 'исправление журнала'); } catch (e) { badSource = String(e.message || e); }
+  check('93/02 s19: a source that does not start with «пересчёт» is refused and nothing is written',
+    badSource.indexOf('должен начинаться со слова «пересчёт»') !== -1 && t.dumpOzonCost().length === b2, badSource);
+})();
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

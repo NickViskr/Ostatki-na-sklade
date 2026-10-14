@@ -1671,6 +1671,9 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
   const wocIdx = headers.indexOf('Себестоимость списания');
   const destIdx = headers.indexOf('Объект') !== -1 ? headers.indexOf('Объект') : 8;
 
+  const opIdHeaderIdx = headers.indexOf('OpID');
+  const addHeaderIdx = headers.indexOf('ДопРасходы');
+
   let rowIndex = -1;
   let transData = null;
   
@@ -1726,7 +1729,11 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
       deliveryDate: deliveryDateStr,
       user: String(transData[10] || ''),
       comment: headers.indexOf('Комментарий') !== -1 ? String(transData[headers.indexOf('Комментарий')] || '').trim() : '',
-      shipmentId: headers.indexOf('Отгрузка') !== -1 ? String(transData[headers.indexOf('Отгрузка')] || '').trim() : ''
+      shipmentId: headers.indexOf('Отгрузка') !== -1 ? String(transData[headers.indexOf('Отгрузка')] || '').trim() : '',
+      // Item 93: what a restore needs to find the row's link in the cost journal again, and to keep the
+      // row's share of the additional costs as a number (empty when the cell was empty — a stored 0 differs).
+      opId: opIdHeaderIdx !== -1 ? String(transData[opIdHeaderIdx] || '').trim() : '',
+      additionalCosts: (addHeaderIdx !== -1 && String(transData[addHeaderIdx]).trim() !== '') ? parseNumber(transData[addHeaderIdx]) : ''
     }, deletedBy);
   }
   
@@ -1803,7 +1810,19 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
 
   transSheet.deleteRow(rowIndex);
   SpreadsheetApp.flush();
-  return { stock: getStock(), transactions: getTransactions().rows };
+
+  // Item 93: a deleted shipment to Ozon leaves the chain of its cabinet+article. An edit or a re-sort
+  // (isUpdate) re-writes the row at once and follows the journal itself.
+  let costJournalError = '';
+  const wasComponent = cIdx !== -1 && (transData[cIdx] === true || String(transData[cIdx]).toLowerCase() === 'true');
+  if (!isUpdate && isOzonShipmentHistoryRow(type, dest, wasComponent)) {
+    const deletedOpId = opIdHeaderIdx !== -1 ? String(transData[opIdHeaderIdx] || '').trim() : '';
+    costJournalError = followOzonCostJournal(deletedOpId ? [deletedOpId] : [], deletedOpId ? 0 : 1, OZON_COST_SOURCE_DELETE,
+      'Операция удалена, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ');
+  }
+  const deleteResult = { stock: getStock(), transactions: getTransactions().rows };
+  if (costJournalError) deleteResult.costJournalError = costJournalError;
+  return deleteResult;
 }
 
 /**
@@ -1930,6 +1949,8 @@ function updateTransaction(id, data, username) {
   if (storedRow && String(storedRow.type) === 'Приход') {
     assertReceiptWithinEditWindow(storedRow.type, storedRow.date, 'править');
   }
+  // Item 93: an Ozon shipment the cost journal could not follow is refused before anything is written.
+  const ozonEditCheck = assertOzonShipmentEditAllowed(storedRow, data);
   const editedAdditional = (data.additionalCosts !== null && data.additionalCosts !== undefined
     && String(data.additionalCosts).trim() !== '') ? data.additionalCosts : storedAdditional;
 
@@ -1986,10 +2007,21 @@ function updateTransaction(id, data, username) {
   const keptOpId = storedRow ? String(storedRow.opId || '') : '';
 
   deleteTransaction(id, username, true, replacementQty);
-  const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty, editedComment, keptShipmentId);
+  // The last argument keeps the commit away from the cost journal: the edit follows «История» in
+  // it afterwards, by the OpID the rows keep (item 93).
+  const commitResult = commitTransaction(editData, data.type, data.destination, data.deliveryDate || '', username, data.date || '', '', editedAdditional, shipmentQty, editedComment, keptShipmentId, true);
   // Not passed to the commit as its opId: the order's sibling rows still carry it and the
   // idempotency guard would skip the write. Stamped on the rows the commit has just written.
   stampOpIdOnTransactions(commitResult.newTransactions, keptOpId);
+
+  // Item 93: an edited shipment to Ozon — the chain of its cabinet+article is rewritten from this
+  // supply onwards, the corrected figure replacing the old one (never a second «отгрузка» row).
+  let costJournalError = '';
+  if (storedRow && isOzonShipmentHistoryRow(storedRow.type, storedRow.destination, storedRow.isComponent)) {
+    costJournalError = followOzonCostJournal(keptOpId ? [keptOpId] : [], keptOpId ? 0 : 1, OZON_COST_SOURCE_EDIT,
+      'Строка истории исправлена, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ',
+      { username: username, dateFromHistory: ozonEditCheck.dateFromHistory });
+  }
 
   // Подэтап 4. ПЕРЕСЧЁТ. Приход изменился — значит изменилась средняя, по которой уезжали
   // все последующие отгрузки. Проигрываем историю артикула заново и дописываем в журнал
@@ -1997,16 +2029,25 @@ function updateTransaction(id, data, username) {
   let recalculated = { changed: [], appended: 0 };
   if (replayFromMs !== null) {
     const applied = applyReplayCorrections(storedRow.article, replayFromMs);
-    const reissued = reissueOzonCostRows(applied.changed, username);
-    recalculated = { changed: applied.changed, appended: reissued.appended };
+    recalculated = { changed: applied.changed, appended: 0 };
+    // The receipt and the shipments are already rewritten; a journal failure is reported, not thrown (item 93).
+    try {
+      recalculated.appended = reissueOzonCostRows(applied.changed, username).appended;
+    } catch (e) {
+      Logger.log('Ozon cost journal not rewritten after the receipt edit: ' + e);
+      costJournalError = 'Приход исправлен, но исправленная себестоимость НЕ записана в журнал «Себестоимость Озон» для КАН: '
+        + errorMessage(e);
+    }
   }
 
-  return {
+  const updateResult = {
     stock: getStock(),
     newTransactions: getTransactions().rows,
     skus: getSkus(),
     recalculated: recalculated
   };
+  if (costJournalError) updateResult.costJournalError = costJournalError;
+  return updateResult;
 }
 
 /**
@@ -2253,6 +2294,8 @@ function applyReplayCorrections(article, fromDateMs) {
     transSheet.getRange(sheetRow, tIdx + 1).setValue(roundToTwo(newPrice * q));
     changed.push({
       id: st.tx.id,
+      // Item 93: the journal link of this shipment is found by the OpID of its «История» row.
+      opId: st.tx.opId,
       date: st.tx.date,
       // The journal is dated by the day of the SUPPLY since 03.09.2026, and the rows written
       // before that carry the day of the write-off. The recomputation has to find both, so it
@@ -2278,6 +2321,547 @@ function applyReplayCorrections(article, fromDateMs) {
 }
 
 /**
+ * ==========================================================================================
+ * Item 93, ticket 02. THE COST JOURNAL READ AS CHAINS OF LINKS.
+ * ==========================================================================================
+ *
+ * The journal «Себестоимость Озон» is append-only, but ONE shipment to Ozon (a LINK) may own
+ * several rows of it: the original, then «пересчёт…» corrections written by later edits, and —
+ * since item 93 — a drop marker «удалено из цепочки» once the shipment was deleted. Reading
+ * every row as a shipment of its own (what reissueOzonCostRows did before item 93) counted a
+ * corrected supply twice, and appending only the changed rows left the last row of a chain
+ * pointing at the wrong place — and the last row IS the state (getOzonCostState).
+ *
+ * The rows of one cabinet+article are folded into LINKS in BLEND order (the order of the first
+ * appearance of the original row — a restored shipment takes its old place back, not the end):
+ *
+ *   - link key `op:<OpID>`, or `row:<sheet row>` for an original written without an OpID;
+ *   - an OpID-less correction/marker belongs to the single OpID-less original with the same
+ *     date and «Остаток до»; an orphan, an ambiguous match or two originals under one key make
+ *     the chain unreadable (throws — that chain only, never a guess about money);
+ *   - a seed row (no «Отгружено») is the starting cost, not a link; a seed re-stated by
+ *     E4 below folds into the seed it copies.
+ *
+ * A rewrite appends ONE block of rows, never edits a row:
+ *   E1 a drop marker per newly dropped link, and one at the OLD date of a moved link;
+ *   E2 the corrections from the first changed link to the tail (only changed links and links
+ *      whose «Себестоимость после» moved by more than half a kopeck);
+ *   E3 for every date the block touches, the last alive link of that date is re-stated if it is
+ *      not already the last row of that date in the block — the sender reads each
+ *      (cabinet, article, date) by its LAST row: a marker there means «delete from KAN»;
+ *   E4 the block always ends with the tail's current version (the tail may be the seed), so
+ *      the last row of the chain is its state even when the tail's own value did not move.
+ * «Остаток до» of every link stays as recorded; only the shipment's pieces and cost move.
+ */
+const OZON_COST_DROP_SOURCE = 'удалено из цепочки';
+const OZON_COST_SOURCE_EDIT = 'пересчёт после правки отгрузки';
+const OZON_COST_SOURCE_DELETE = 'пересчёт после удаления отгрузки';
+const OZON_COST_SOURCE_RESTORE = 'пересчёт после восстановления отгрузки';
+const OZON_COST_SOURCE_RECEIPT = 'пересчёт после правки прихода';
+const OZON_COST_NO_OPID_ERROR = 'Строка без номера операции (OpID): журнал «Себестоимость Озон» не изменён — исправьте цепочку этого товара вручную.';
+
+/** A drop marker row: the shipment of that date was deleted from the chain. */
+function isOzonCostDropRow(row) {
+  return String((row && row.source) || '').trim().indexOf('удалено') === 0;
+}
+
+/** 'drop' | 'correction' | 'seed' | 'original' — decided by «Источник» first, then by «Отгружено». */
+function ozonCostRowKind(row) {
+  if (isOzonCostDropRow(row)) return 'drop';
+  if (String(row.source || '').trim().indexOf('пересчёт') === 0) return 'correction';
+  if (!row.shipped) return 'seed';
+  return 'original';
+}
+
+/** What a link looks like now: its last row that is not a marker. */
+function ozonCostLinkNow(link) {
+  const r = link.lastLive;
+  return {
+    date: String(r.date || '').slice(0, 10),
+    base: Number(link.original.stockBefore) || 0,
+    costBefore: r.costBefore > 0 ? r.costBefore : null,
+    shipped: r.shipped,
+    shippedCost: r.shippedCost,
+    costAfter: r.costAfter
+  };
+}
+
+/**
+ * Folds the journal rows of ONE cabinet+article (sheet order) into the chain described above.
+ * Returns { cabinet, article, entries, links, byKey }; `entries` holds the seeds and the links
+ * in blend order. Throws when the rows cannot be read as a chain.
+ */
+function buildOzonCostChain(rows) {
+  const list = rows || [];
+  const cabinet = list.length > 0 ? list[0].cabinet : '';
+  const article = list.length > 0 ? list[0].article : '';
+  const name = '«' + cabinet + ' / ' + article + '»';
+  const entries = [];
+  const byKey = {};
+  const linksWithoutOpId = [];
+
+  list.forEach(function(r) {
+    if (r.cabinet !== cabinet || r.article !== article) {
+      throw new Error('В цепочку ' + name + ' попала строка другого товара или кабинета (строка журнала ' + r.row + ').');
+    }
+    const kind = ozonCostRowKind(r);
+
+    if (kind === 'seed') {
+      // A seed copied by a rewrite (E4) is the same starting point, not a second one.
+      const twin = entries.filter(function(e) {
+        return e.kind === 'seed' && String(e.row.date).slice(0, 10) === String(r.date).slice(0, 10)
+          && Math.abs(e.row.costAfter - r.costAfter) < 0.005;
+      })[0];
+      if (twin) { twin.rows.push(r); return; }
+      entries.push({ kind: 'seed', row: r, rows: [r] });
+      return;
+    }
+
+    if (kind === 'original') {
+      const key = r.opId ? 'op:' + r.opId : 'row:' + r.row;
+      if (byKey[key]) {
+        throw new Error('В цепочке ' + name + ' две отгрузки с одним номером операции ' + r.opId + ' (строки журнала '
+          + byKey[key].original.row + ' и ' + r.row + ').');
+      }
+      const link = { key: key, opId: r.opId, original: r, rows: [r], lastLive: r, alive: true };
+      byKey[key] = link;
+      entries.push({ kind: 'link', link: link });
+      if (!r.opId) linksWithoutOpId.push(link);
+      return;
+    }
+
+    // A correction or a drop marker belongs to a link that was written before it.
+    let link = null;
+    if (r.opId) {
+      link = byKey['op:' + r.opId] || null;
+    } else {
+      const matches = linksWithoutOpId.filter(function(l) {
+        return String(l.original.date).slice(0, 10) === String(r.date).slice(0, 10)
+          && Math.abs(Number(l.original.stockBefore) - Number(r.stockBefore)) < 0.0001;
+      });
+      if (matches.length > 1) {
+        throw new Error('В цепочке ' + name + ' строку журнала ' + r.row + ' без номера операции нельзя отнести к одной отгрузке: '
+          + 'подходят строки ' + matches.map(function(l) { return l.original.row; }).join(' и ') + '.');
+      }
+      link = matches[0] || null;
+    }
+    if (!link) {
+      throw new Error('В цепочке ' + name + ' строка журнала ' + r.row + ' («' + r.source + '») не относится ни к одной отгрузке.');
+    }
+    link.rows.push(r);
+    if (kind === 'drop') {
+      link.alive = false;
+    } else {
+      link.alive = true;
+      link.lastLive = r;
+    }
+  });
+
+  return {
+    cabinet: cabinet,
+    article: article,
+    entries: entries,
+    links: entries.filter(function(e) { return e.kind === 'link'; }).map(function(e) { return e.link; }),
+    byKey: byKey
+  };
+}
+
+/**
+ * Pure. What to append to the journal so that the chain reflects `ops` (E1-E4 above).
+ *
+ * ops[key] = { drop: true }                    — take the shipment out of the chain;
+ *          = { shipped?, shippedCost?, date? } — new pieces / unit cost / day (fields not given
+ *            keep the link's current values); on a dropped link this REVIVES it in place.
+ * `source` is written to «Источник» of every correction row.
+ * Returns { rows, items }: `rows` are the arrays for setValues, `items` the same block with the
+ * kind ('marker' | 'state') and the date of each row.
+ */
+function planOzonCostChainRewrite(chain, ops, source) {
+  const wanted = ops || {};
+  const name = '«' + chain.cabinet + ' / ' + chain.article + '»';
+  // The chain builder reads a row as a correction only when its «Источник» starts with «пересчёт»: any
+  // other text would make every written row a second original of its link and the chain unreadable.
+  if (String(source || '').trim().indexOf('пересчёт') !== 0) {
+    throw new Error('Источник пересчёта цепочки ' + name + ' должен начинаться со слова «пересчёт», а не «' + String(source || '') + '».');
+  }
+  Object.keys(wanted).forEach(function(key) {
+    if (!chain.byKey[key]) throw new Error('В цепочке ' + name + ' журнала «Себестоимость Озон» нет отгрузки ' + key + '.');
+  });
+
+  // 1. What every link should look like afterwards.
+  const plans = {};
+  chain.entries.forEach(function(entry) {
+    if (entry.kind !== 'link') return;
+    const link = entry.link;
+    const now = ozonCostLinkNow(link);
+    const plan = {
+      link: link, now: now, alive: link.alive, dropNow: false, moved: false, changed: false, emit: false,
+      date: now.date, shipped: now.shipped, shippedCost: now.shippedCost, final: null
+    };
+    plans[link.key] = plan;
+    const op = wanted[link.key];
+    if (!op) return;
+    if (op.drop === true) {
+      if (link.alive) { plan.alive = false; plan.dropNow = true; plan.changed = true; }
+      return;
+    }
+    if (op.shipped !== undefined) plan.shipped = Number(op.shipped);
+    if (op.shippedCost !== undefined) plan.shippedCost = roundToTwo(Number(op.shippedCost));
+    if (op.date !== undefined) plan.date = String(op.date).slice(0, 10);
+    if (!(plan.shipped > 0) || !(plan.shippedCost >= 0) || !/^\d{4}-\d{2}-\d{2}$/.test(plan.date)) {
+      throw new Error('Для отгрузки ' + link.key + ' в цепочке ' + name + ' заданы неверные штуки, цена или дата.');
+    }
+    plan.moved = plan.date !== now.date;
+    if (plan.moved && !link.opId) {
+      throw new Error('Отгрузку без номера операции (' + link.key + ') в цепочке ' + name + ' нельзя перенести на другую дату.');
+    }
+    plan.alive = true;
+    plan.changed = !link.alive || plan.moved
+      || Math.abs(plan.shipped - now.shipped) > 0.000001
+      || Math.abs(plan.shippedCost - now.shippedCost) > 0.005;
+  });
+
+  // 2. Walk the chain in blend order. Before the first change the recorded figures are kept
+  //    as they are — whatever drift is there is not ours to correct; from the first change on
+  //    every alive link is re-blended on the recorded base.
+  let prior = null;
+  let started = false;
+  let tail = null;
+  chain.entries.forEach(function(entry) {
+    if (entry.kind === 'seed') {
+      prior = entry.row.costAfter;
+      tail = entry;
+      return;
+    }
+    const plan = plans[entry.link.key];
+    if (plan.dropNow) { started = true; return; }
+    if (!plan.alive) return;
+    tail = entry;
+    const now = plan.now;
+    if (!started && !plan.changed) {
+      plan.final = { date: now.date, base: now.base, costBefore: now.costBefore, shipped: now.shipped,
+        shippedCost: now.shippedCost, costAfter: now.costAfter };
+      prior = now.costAfter;
+      return;
+    }
+    started = true;
+    const costAfter = (prior === null || now.base <= 0)
+      ? roundToTwo(plan.shippedCost)
+      : roundToTwo((now.base * prior + plan.shipped * plan.shippedCost) / (now.base + plan.shipped));
+    plan.final = { date: plan.date, base: now.base, costBefore: prior, shipped: plan.shipped,
+      shippedCost: plan.shippedCost, costAfter: costAfter };
+    plan.emit = plan.changed || Math.abs(costAfter - now.costAfter) > 0.005;
+    prior = costAfter;
+  });
+
+  // 3. The block: the markers first, then the re-stated links in blend order. A link is written
+  //    at most once, so the last row of a day is the last alive link of that day and the last
+  //    row of the block is the tail (E3, E4).
+  const stateRow = function(plan) {
+    const f = plan.final;
+    return [f.date, chain.cabinet, chain.article, plan.link.original.sku, f.base, f.costBefore === null ? '' : f.costBefore,
+      f.shipped, roundToTwo(f.shippedCost), f.costAfter, plan.link.opId, '', source];
+  };
+  const items = [];
+  const touchedDates = [];
+  const touch = function(date) { if (touchedDates.indexOf(date) === -1) touchedDates.push(date); };
+  // E1
+  chain.entries.forEach(function(entry) {
+    if (entry.kind !== 'link') return;
+    const plan = plans[entry.link.key];
+    if (!(plan.dropNow || (plan.alive && plan.moved))) return;
+    touch(plan.now.date);
+    items.push({
+      kind: 'marker', date: plan.now.date, key: plan.link.key,
+      row: [plan.now.date, chain.cabinet, chain.article, plan.link.original.sku, plan.now.base, '', 0, '', '', plan.link.opId, '', OZON_COST_DROP_SOURCE]
+    });
+  });
+  // E2, then E3 and E4 as marks on the same links
+  const restate = {};
+  chain.entries.forEach(function(entry) {
+    if (entry.kind !== 'link') return;
+    const plan = plans[entry.link.key];
+    if (plan.alive && plan.emit) { restate[plan.link.key] = true; touch(plan.final.date); }
+  });
+  // A seed counts too: a dropped supply on the seed's own day must leave the seed's cost there, not
+  // a marker the sender would read as «delete this day in KAN».
+  const restateSeeds = [];
+  touchedDates.forEach(function(date) {
+    let lastAlive = null;
+    chain.entries.forEach(function(entry) {
+      if (entry.kind === 'seed') {
+        if (String(entry.row.date).slice(0, 10) === date) lastAlive = entry;
+        return;
+      }
+      const plan = plans[entry.link.key];
+      if (plan.alive && plan.final.date === date) lastAlive = plan;
+    });
+    if (lastAlive && lastAlive.kind === 'seed') restateSeeds.push(lastAlive);
+    else if (lastAlive) restate[lastAlive.link.key] = true;
+  });
+  const wroteAny = items.length > 0 || Object.keys(restate).length > 0;
+  if (wroteAny && tail && tail.kind === 'link') restate[tail.link.key] = true;
+  const seedRow = function(seed) {
+    const seedDay = String(seed.date).slice(0, 10);
+    return [seedDay, chain.cabinet, chain.article, seed.sku, '', '', '', '', seed.costAfter, seed.opId, '', seed.source];
+  };
+  chain.entries.forEach(function(entry) {
+    if (entry.kind === 'seed') {
+      // Seeds come first in blend order, so a re-stated seed never ends the block while a link is alive.
+      if (restateSeeds.indexOf(entry) !== -1 && !(tail === entry)) {
+        items.push({ kind: 'state', date: String(entry.row.date).slice(0, 10), key: 'seed', row: seedRow(entry.row) });
+      }
+      return;
+    }
+    if (!restate[entry.link.key]) return;
+    const plan = plans[entry.link.key];
+    items.push({ kind: 'state', date: plan.final.date, key: plan.link.key, row: stateRow(plan) });
+  });
+  // E4 when the tail is the seed: every shipment is gone, the seed is the cost in force.
+  if (wroteAny && tail && tail.kind === 'seed') {
+    items.push({ kind: 'state', date: String(tail.row.date).slice(0, 10), key: 'seed', row: seedRow(tail.row) });
+  }
+
+  return {
+    rows: items.map(function(item) { return item.row; }),
+    items: items.map(function(item) { return { kind: item.kind, date: item.date, key: item.key }; })
+  };
+}
+
+/** Appends already planned rows to the journal in ONE write. */
+function appendOzonCostRows(rows) {
+  if (!rows || rows.length === 0) return;
+  const ss = getSpreadsheet();
+  const sheet = getOzonCostSheet(ss);
+  ensureColumns(sheet, OZON_COST_HEADERS);
+  const startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 1, rows.length, OZON_COST_HEADERS.length).setValues(rows);
+  SpreadsheetApp.flush();
+}
+
+/**
+ * Journal -> chain -> plan -> ONE append -> flush, for one cabinet+article. The entry point of
+ * every chain rewrite (ticket 06 uses it for the two live chains that need a one-off repair:
+ * {'row:60': {drop: true}} for BowlGrayMini_01 / MaxiStore, explicit {shippedCost} ops for
+ * Полка_выдв_27см / Mercurius). Returns { appended }. Throws on an unreadable chain.
+ */
+function applyOzonCostChainOps(cabinet, article, ops, source) {
+  const cab = String(cabinet || '').trim();
+  const art = String(article || '').trim();
+  const rows = getOzonCostJournal().filter(function(r) { return r.cabinet === cab && r.article === art; });
+  const plan = planOzonCostChainRewrite(buildOzonCostChain(rows), ops, source);
+  appendOzonCostRows(plan.rows);
+  return { appended: plan.rows.length };
+}
+
+/**
+ * «История» as the journal should see it: the shipment rows to Ozon (not kit components) that
+ * carry one of the given OpIDs, folded to one entry per OpID + cabinet + article — pieces
+ * summed, price value-weighted (as appendOzonCostForShipment folds the rows of one operation).
+ * Returns { opId: { 'cabinet|article': { cabinet, article, qty, price, day, date, deliveryDate, destination } } }.
+ */
+function ozonShipmentsByOpFromHistory(opIdSet) {
+  const out = {};
+  // getTransactions hands the newest first; the oldest row of a pair gives the date.
+  getTransactions().rows.slice().reverse().forEach(function(t) {
+    if (!opIdSet[t.opId]) return;
+    if (!isOzonShipmentHistoryRow(t.type, t.destination, t.isComponent)) return;
+    const qty = Number(t.quantity) || 0;
+    if (qty <= 0) return;
+    const cabinet = ozonCabinetFromDestination(t.destination);
+    const article = String(t.article).trim();
+    const pairKey = cabinet + '|' + article;
+    if (!out[t.opId]) out[t.opId] = {};
+    if (!out[t.opId][pairKey]) {
+      out[t.opId][pairKey] = {
+        cabinet: cabinet, article: article, qty: 0, value: 0, price: 0,
+        date: t.date, deliveryDate: t.deliveryDate, destination: t.destination,
+        day: ozonCostDayFor(t.deliveryDate, t.date)
+      };
+    }
+    const info = out[t.opId][pairKey];
+    info.qty += qty;
+    info.value += qty * (Number(t.price) || 0);
+    info.price = roundToTwo(info.value / info.qty);
+  });
+  return out;
+}
+
+/** One order's shipment to Ozon — the only kind of «История» row the cost journal follows. */
+function isOzonShipmentHistoryRow(type, destination, isComponent) {
+  return String(type) === 'Расход' && isComponent !== true && !!ozonCabinetFromDestination(destination);
+}
+
+/**
+ * Brings the journal in line with «История» for the given operations (OpIDs). Used after every
+ * History operation on an Ozon shipment: a pencil edit, a re-sort, a deletion, a restore.
+ *
+ * For each (cabinet, article) that has a link of one of the OpIDs, or a History pair of one of
+ * them: the link is compared with the pair (pieces, unit cost) and rewritten when they differ;
+ * a link whose pair is gone is dropped; a dropped link whose pair is back is revived in place.
+ * A pair that has no link yet is appended as a new shipment ONLY when the caller allows it
+ * (options.allowNewLinks — the re-sort, whose rows move to another article) and only for an OpID
+ * the journal already knows: an old shipment from before the journal must not suddenly appear in
+ * it, and a bulk restore brings kit component rows back without «isComponent» — under the kit's
+ * OpID and Ozon destination they would read as shipments of their own. Only the OpIDs the operation touched may be passed: an OpID with no
+ * History rows is read as «the operation deleted them».
+ *
+ * The link's day comes from «История» ONLY for the pairs named in options.dateFromHistory
+ * (['cabinet|article', …]) — the caller says the delivery date was edited. Otherwise the link
+ * keeps its journal day: the reconstructed August links are dated 08-23/08-25 while «История»
+ * says 08-22, and moving them would re-date money already in KAN.
+ * options.username is passed to appendOzonCostForShipment. Returns { appended }.
+ */
+function resyncOzonCostForOps(opIds, source, options) {
+  const opts = options || {};
+  const dateKeys = opts.dateFromHistory || [];
+  const idSet = {};
+  (opIds || []).forEach(function(id) { const k = String(id || '').trim(); if (k) idSet[k] = true; });
+  const ids = Object.keys(idSet);
+  if (ids.length === 0) return { appended: 0 };
+
+  const history = ozonShipmentsByOpFromHistory(idSet);
+  const journal = getOzonCostJournal();
+
+  const pairs = {};
+  const opsKnownToJournal = {};
+  journal.forEach(function(r) {
+    if (!idSet[r.opId] || !r.cabinet || !r.article) return;
+    opsKnownToJournal[r.opId] = true;
+    pairs[r.cabinet + '|' + r.article] = { cabinet: r.cabinet, article: r.article };
+  });
+  ids.forEach(function(id) {
+    Object.keys(history[id] || {}).forEach(function(pairKey) {
+      const info = history[id][pairKey];
+      pairs[pairKey] = { cabinet: info.cabinet, article: info.article };
+    });
+  });
+
+  let appended = 0;
+  const newPairs = [];
+  Object.keys(pairs).forEach(function(pairKey) {
+    const pair = pairs[pairKey];
+    const rows = journal.filter(function(r) { return r.cabinet === pair.cabinet && r.article === pair.article; });
+    const chain = buildOzonCostChain(rows);
+    const ops = {};
+    ids.forEach(function(id) {
+      const info = history[id] && history[id][pairKey];
+      const link = chain.byKey['op:' + id];
+      if (link && info) {
+        const now = ozonCostLinkNow(link);
+        const day = dateKeys.indexOf(pairKey) !== -1 ? info.day : undefined;
+        if (!link.alive || (day !== undefined && day !== now.date)
+          || Math.abs(info.qty - now.shipped) > 0.000001 || Math.abs(info.price - now.shippedCost) > 0.005) {
+          ops[link.key] = { shipped: info.qty, shippedCost: info.price, date: day };
+        }
+      } else if (link && !info) {
+        if (link.alive) ops[link.key] = { drop: true };
+      } else if (!link && info && opsKnownToJournal[id] && opts.allowNewLinks === true) {
+        newPairs.push({ id: id, info: info });
+      }
+    });
+    if (Object.keys(ops).length > 0) {
+      appended += applyOzonCostChainOps(pair.cabinet, pair.article, ops, source).appended;
+    }
+  });
+
+  newPairs.forEach(function(entry) {
+    const info = entry.info;
+    const res = appendOzonCostForShipment(
+      [{ article: info.article, quantity: info.qty, price: info.price, status: 'ok' }],
+      info.destination, info.date, entry.id, opts.username || '', info.deliveryDate);
+    appended += res.written;
+  });
+  return { appended: appended };
+}
+
+/**
+ * After a History operation on Ozon shipment rows: follow «История» in the journal. A failure
+ * NEVER undoes the operation — the expense is what the user asked for, the journal is
+ * bookkeeping on top of it; it is logged and returned as the text for `costJournalError`
+ * ('' when all is well). `opIdLessRows` counts the affected Ozon rows that carry no OpID: the
+ * journal cannot find their link, so it is left alone and the owner is told.
+ */
+function followOzonCostJournal(opIds, opIdLessRows, source, failurePrefix, options) {
+  const messages = [];
+  if (opIdLessRows > 0) messages.push(OZON_COST_NO_OPID_ERROR);
+  if ((opIds || []).length > 0) {
+    try {
+      resyncOzonCostForOps(opIds, source, options);
+    } catch (e) {
+      Logger.log('Ozon cost journal not updated (' + source + '): ' + e);
+      messages.push(failurePrefix + errorMessage(e));
+    }
+  }
+  return messages.join(' ');
+}
+
+/** 'yyyy-mm-dd' -> 'дд.мм.гггг' for a message to the owner. */
+function ozonCostRuDate(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[3] + '.' + m[2] + '.' + m[1] : String(iso || '');
+}
+
+/**
+ * Item 93: a pencil edit of an Ozon shipment row is refused BEFORE anything is written when the
+ * journal could not follow it. (1) The row may not change its Ozon cabinet, nor turn into / out
+ * of a shipment to Ozon: those are a different chain, delete and re-enter. (2) The delivery
+ * date may move only between the day of the previous alive link (or the seed) and the day of
+ * the next alive link of the same chain: the blend order must stay the date order, because KAN
+ * reads the cost by date. Returns { dateFromHistory: ['cabinet|article'] } for the follow-up.
+ */
+function assertOzonShipmentEditAllowed(storedRow, data) {
+  const none = { dateFromHistory: [] };
+  if (!storedRow || storedRow.isComponent === true) return none;
+  const oldCabinet = isOzonShipmentHistoryRow(storedRow.type, storedRow.destination, false)
+    ? ozonCabinetFromDestination(storedRow.destination) : '';
+  const newCabinet = isOzonShipmentHistoryRow(data.type, data.destination, false)
+    ? ozonCabinetFromDestination(data.destination) : '';
+  if (!oldCabinet && !newCabinet) return none;
+  if (oldCabinet !== newCabinet) {
+    throw new Error('Отгрузку на Ozon нельзя правкой перенести в другой кабинет, в списание или в другую операцию (и обратно): '
+      + 'удалите операцию и проведите её заново. Ничего не записано.');
+  }
+
+  const storedDay = ozonCostDayFor(storedRow.deliveryDate, storedRow.date);
+  const editedDay = ozonCostDayFor(data.deliveryDate || '', data.date || '');
+  const article = String(storedRow.article).trim();
+  const opId = String(storedRow.opId || '').trim();
+  if (editedDay === storedDay || !opId || String(data.article).trim() !== article) return none;
+
+  // The date moved: stay between the neighbours of the link.
+  let chain = null;
+  try {
+    chain = buildOzonCostChain(getOzonCostJournal().filter(function(r) { return r.cabinet === oldCabinet && r.article === article; }));
+  } catch (e) {
+    return { dateFromHistory: [oldCabinet + '|' + article] };   // an unreadable chain fails later, in the follow-up, with its own message
+  }
+  const link = chain.byKey['op:' + opId];
+  if (link && link.alive) {
+    let index = -1;
+    chain.entries.forEach(function(entry, i) { if (entry.kind === 'link' && entry.link === link) index = i; });
+    let low = '', high = '';
+    for (let i = index - 1; i >= 0 && !low; i--) {
+      const e = chain.entries[i];
+      if (e.kind === 'seed') low = String(e.row.date).slice(0, 10);
+      else if (e.link.alive) low = ozonCostLinkNow(e.link).date;
+    }
+    for (let i = index + 1; i < chain.entries.length && !high; i++) {
+      const e = chain.entries[i];
+      if (e.kind === 'link' && e.link.alive) high = ozonCostLinkNow(e.link).date;
+    }
+    if ((low && editedDay < low) || (high && editedDay > high)) {
+      const range = low && high ? 'от ' + ozonCostRuDate(low) + ' до ' + ozonCostRuDate(high)
+        : (low ? 'не раньше ' + ozonCostRuDate(low) : 'не позже ' + ozonCostRuDate(high));
+      throw new Error('Дату поставки этой отгрузки можно двигать только между соседними отгрузками этого товара (' + range
+        + '): иначе порядок пересчёта себестоимости для КАН нарушится. Чтобы изменить дату сильнее, удалите операцию '
+        + 'и проведите её заново. Ничего не записано.');
+    }
+  }
+  return { dateFromHistory: [oldCabinet + '|' + article] };
+}
+
+/**
  * Пункт 47, этап 4, подэтап 4. Переписывает цепочку себестоимости на Озоне после того, как
  * пересчитались сами отгрузки, и дописывает исправленные строки в журнал — с ДАТАМИ ТЕХ
  * отгрузок, как решил владелец 26.08.2026.
@@ -2297,81 +2881,55 @@ function reissueOzonCostRows(changedShipments, username) {
   });
   if (relevant.length === 0) return { appended: 0 };
 
-  const newCostByKey = {};
-  // Item 90: orders of one combined shipment share the article and the day; a journal row that
-  // carries an OpID is matched by it first, so each order gets its OWN corrected unit cost.
-  // Entries without opId (receipt recompute) leave this map empty and behave as before.
-  const newCostByOp = {};
+  // Item 93: the journal is read as chains of links (buildOzonCostChain), not as a flat list of
+  // shipments — a corrected supply is ONE link however many rows it owns. An entry that carries
+  // an OpID (item 90: each order of a combined shipment gets its own unit cost) is matched to
+  // the link of that OpID; an entry without one (an old «История» row) is matched by day, and
+  // only against alive links that have no OpID either.
+  const entriesByPair = {};
   relevant.forEach(function(c) {
-    const cabinet = ozonCabinetFromDestination(c.destination);
-    // Both days point at the same replacement: rows written since 03.09.2026 are dated by the
-    // supply, older ones by the write-off, and one edit can touch either.
-    const days = [c.kanDay, c.operationDay, String(c.date).slice(0, 10)];
-    days.forEach(function(day) {
-      if (!day) return;
-      newCostByKey[cabinet + '|' + c.article + '|' + day] = c.newUnitCost;
-      if (c.opId) newCostByOp[cabinet + '|' + c.article + '|' + day + '|' + c.opId] = c.newUnitCost;
+    const pairKey = ozonCabinetFromDestination(c.destination) + '|' + String(c.article).trim();
+    if (!entriesByPair[pairKey]) entriesByPair[pairKey] = [];
+    entriesByPair[pairKey].push({
+      opId: String(c.opId || '').trim(),
+      // The journal is dated by the day of the SUPPLY since 03.09.2026, and the rows written
+      // before that carry the day of the write-off: one edit can touch either.
+      days: [c.kanDay, c.operationDay, String(c.date).slice(0, 10)].filter(function(d) { return !!d; }),
+      cost: c.newUnitCost
     });
   });
 
   const journal = getOzonCostJournal();
-  const groups = {};
+  const rowsByPair = {};
   journal.forEach(function(r) {
-    const key = r.cabinet + '|' + r.article;
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(r);
+    const pairKey = r.cabinet + '|' + r.article;
+    if (!entriesByPair[pairKey]) return;
+    if (!rowsByPair[pairKey]) rowsByPair[pairKey] = [];
+    rowsByPair[pairKey].push(r);
   });
 
-  const rowsToAppend = [];
-  const stampOf = function(r) { return r.cabinet + '|' + r.article + '|' + String(r.date).slice(0, 10); };
-
-  Object.keys(groups).forEach(function(key) {
-    const rows = groups[key];
-    let prior = null;
-    let started = false;
-    rows.forEach(function(r) {
-      // «НАЧАЛЬНАЯ ТОЧКА» и любая строка без отгрузки задают точку отсчёта и не пересчитываются.
-      if (!r.shipped) { prior = r.costAfter; return; }
-      const opKey = r.opId ? stampOf(r) + '|' + r.opId : '';
-      const replacement = (opKey && newCostByOp.hasOwnProperty(opKey))
-        ? newCostByOp[opKey]
-        : (newCostByKey.hasOwnProperty(stampOf(r)) ? newCostByKey[stampOf(r)] : null);
-      // ГЛАВНОЕ ПРАВИЛО ЭТОЙ ФУНКЦИИ. Пока не встретилась сдвинувшаяся отгрузка, цепочку не
-      // пересчитываем вовсе: там всё как было, и любое расхождение — чужое, не наше дело.
-      // Оно же оставляет в покое ЦЕЛИКОМ те пары «магазин + товар», которых правка не
-      // касалась: у них ни одна отгрузка не сдвинулась, значит started так и не включится.
-      // Без этого правила правка одного товара дописывала строки по чужим — у их цепочек на
-      // Озоне есть собственный копеечный дрейф, и пересчёт объявлял его расхождением.
-      // Найдено 26.08.2026 прогоном на боевой базе: на стенде такого случая не было, там
-      // журнал всегда идеально сходился сам с собой.
-      if (!started && replacement === null) { prior = r.costAfter; return; }
-      started = true;
-      const shippedCost = (replacement !== null) ? replacement : r.shippedCost;
-      const base = Number(r.stockBefore) || 0;
-      let costAfter;
-      if (prior === null || base <= 0) {
-        costAfter = roundToTwo(shippedCost);
-      } else {
-        costAfter = roundToTwo((base * prior + r.shipped * shippedCost) / (base + r.shipped));
+  let rowsToAppend = [];
+  Object.keys(entriesByPair).forEach(function(pairKey) {
+    if (!rowsByPair[pairKey]) return;
+    const chain = buildOzonCostChain(rowsByPair[pairKey]);
+    const ops = {};
+    entriesByPair[pairKey].forEach(function(entry) {
+      if (entry.opId) {
+        const link = chain.byKey['op:' + entry.opId];
+        if (link && link.alive) ops[link.key] = { shippedCost: entry.cost };
+        return;
       }
-      if (replacement !== null || Math.abs(costAfter - r.costAfter) > 0.005) {
-        rowsToAppend.push([
-          r.date, r.cabinet, r.article, r.sku,
-          base, prior === null ? '' : prior, r.shipped, roundToTwo(shippedCost), costAfter,
-          r.opId, '', 'пересчёт после правки прихода'
-        ]);
-      }
-      prior = costAfter;
+      chain.links.forEach(function(link) {
+        if (link.opId || !link.alive) return;
+        if (entry.days.indexOf(ozonCostLinkNow(link).date) !== -1) ops[link.key] = { shippedCost: entry.cost };
+      });
     });
+    if (Object.keys(ops).length > 0) {
+      rowsToAppend = rowsToAppend.concat(planOzonCostChainRewrite(chain, ops, OZON_COST_SOURCE_RECEIPT).rows);
+    }
   });
 
-  if (rowsToAppend.length === 0) return { appended: 0 };
-  const ss = getSpreadsheet();
-  const sheet = getOzonCostSheet(ss);
-  ensureColumns(sheet, OZON_COST_HEADERS);
-  const startRow = sheet.getLastRow() + 1;
-  sheet.getRange(startRow, 1, rowsToAppend.length, OZON_COST_HEADERS.length).setValues(rowsToAppend);
-  SpreadsheetApp.flush();
+  appendOzonCostRows(rowsToAppend);
   return { appended: rowsToAppend.length };
 }
 
@@ -2470,7 +3028,11 @@ function findTransactionsByOpId(transSheet, opIdStr) {
   return found;
 }
 
-function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride, comment, shipmentId) {
+// Item 93: `skipOzonCost` is set by the callers that delete and re-write rows of an Ozon shipment
+// (a pencil edit, a re-sort): they follow «История» in the journal themselves, afterwards, by the
+// OpID of the rows — a commit with no OpID would write an OpID-less «отгрузка» row as if the
+// re-written rows were another shipment.
+function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride, comment, shipmentId, skipOzonCost) {
   const items = Array.isArray(data) ? data : [data];
   // Item 90: optional operation note, written to «Комментарий» on every row of the operation
   const operationComment = String(comment || '').trim();
@@ -2878,7 +3440,8 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
 
   // Item 47, stage 2: a shipment to Ozon moves the cost of the goods lying there.
   // Never at the price of the expense itself — that is the operation the user asked for.
-  if (type === 'Расход') {
+  let costJournalError = '';
+  if (type === 'Расход' && skipOzonCost !== true) {
     try {
       // ВАЖНО: берём УЖЕ ПРОВЕДЁННЫЕ строки, а не позиции клиента. Клиент присылает базовые
       // цены, а долю упаковки и услуг сервер добавляет сам чуть выше (mainPrice). На Ozon
@@ -2890,9 +3453,15 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
         .map(function(t) {
           return { article: t.article, quantity: t.quantity, price: t.price, status: 'ok' };
         });
-      appendOzonCostForShipment(shippedRows, destination, dateStr, opIdStr, username, deliveryDate);
+      const costResult = appendOzonCostForShipment(shippedRows, destination, dateStr, opIdStr, username, deliveryDate);
+      // Item 93: the journal already counts this OpID — a retry of a shipment that a deletion took
+      // out of the chain. The link is revived in place (and brought to the figures just written).
+      if (costResult.skipped > 0 && opIdStr) {
+        resyncOzonCostForOps([opIdStr], OZON_COST_SOURCE_RESTORE, { username: username });
+      }
     } catch (costErr) {
       Logger.log('Себестоимость Озон не обновлена: ' + costErr);
+      costJournalError = 'Операция проведена, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ' + errorMessage(costErr);
     }
   }
 
@@ -2900,6 +3469,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     stock: getStock(),
     newTransactions: newTransactions
   };
+  if (costJournalError) commitResult.costJournalError = costJournalError;
   // 27.08.2026: the SKU list is re-read only when the operation has actually created an
   // article. It used to be read on every single commit although it changes in almost none of
   // them; when it is absent the client keeps the list it already holds.
@@ -3237,6 +3807,7 @@ function restoreArchivedItem(archiveId, restoredBy) {
   if (!archiveRecord) throw new Error('Нет данных в архиве');
   
   const { type, payload } = archiveRecord;
+  let costJournalError = '';
   
   if (type === 'SKU') {
     const skus = getSkus();
@@ -3256,7 +3827,7 @@ function restoreArchivedItem(archiveId, restoredBy) {
       }
     }
   } else if (type === 'Transaction') {
-    restoreTransaction(payload);
+    costJournalError = restoreTransaction(payload) || '';
   } else if (type === 'ChinaBatch') {
     // Owner, 2026-09-24: the module «Заказы в Китае» lives in its OWN spreadsheet —
     // restoreChinaBatch (ChinaOrders.gs) is the one place that knows how to write the batch
@@ -3269,9 +3840,12 @@ function restoreArchivedItem(archiveId, restoredBy) {
   }
 
   sheet.deleteRow(rowIndex);
-  return { status: 'ok' };
+  const restored = { status: 'ok' };
+  if (costJournalError) restored.costJournalError = costJournalError;
+  return restored;
 }
 
+/** Returns the text for `costJournalError` ('' when the cost journal followed the restore, or has nothing to follow). */
 function restoreTransaction(payload) {
   const ss = getSpreadsheet();
   const transSheet = getTransactionSheet(ss);
@@ -3383,21 +3957,43 @@ function restoreTransaction(payload) {
     payload.isComponent || false
   ]);
   writeRestoredLateCells(transSheet, transSheet.getLastRow(), payload);
+
+  // Item 93: a restored shipment to Ozon takes its place in the chain of its cabinet+article again. An
+  // old archive row carries no OpID: the row is restored as before and the owner is told the journal was not touched.
+  const wasComponent = payload.isComponent === true || String(payload.isComponent).toLowerCase() === 'true';
+  if (isOzonShipmentHistoryRow(payload.type, payload.destination, wasComponent)) {
+    const restoredOpId = String(payload.opId || '').trim();
+    return followOzonCostJournal(restoredOpId ? [restoredOpId] : [], restoredOpId ? 0 : 1, OZON_COST_SOURCE_RESTORE,
+      'Операция восстановлена, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ');
+  }
+  return '';
 }
 
 /**
  * Item 90. Restore paths append rows positionally (first 13 columns); the note and the shipment
  * number live in «Комментарий» / «Отгрузка» found BY HEADER at the end of the sheet, so they are
  * written separately. Empty values are skipped (old payloads restore with empty cells).
+ * Item 93: the same for «OpID» and «ДопРасходы» (a NUMBER — the third element of the pair), which the
+ * archive payload carries since then; without them a restored row lost its link to the cost journal.
  */
-const RESTORED_LATE_CELLS = [['Комментарий', 'comment'], ['Отгрузка', 'shipmentId']];
+const RESTORED_LATE_CELLS = [['Комментарий', 'comment'], ['Отгрузка', 'shipmentId'], ['OpID', 'opId'], ['ДопРасходы', 'additionalCosts', 'number']];
+/** The value for one late cell of a restored row: '' when the payload holds nothing for it. */
+function restoredLateCellValue(pair, payload) {
+  const raw = payload ? payload[pair[1]] : '';
+  if (pair[2] === 'number') {
+    if (raw === '' || raw === null || raw === undefined) return '';
+    const n = Number(raw);
+    return isNaN(n) ? '' : n;
+  }
+  return String(raw || '').trim();
+}
 function writeRestoredLateCells(transSheet, rowNumber, payload) {
   const lastCol = transSheet.getLastColumn();
   const headers = transSheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
   RESTORED_LATE_CELLS.forEach(function(pair) {
-    const text = String((payload && payload[pair[1]]) || '').trim();
+    const value = restoredLateCellValue(pair, payload);
     const idx = headers.indexOf(pair[0]);
-    if (text && idx !== -1) transSheet.getRange(rowNumber, idx + 1).setValue(text);
+    if (value !== '' && idx !== -1) transSheet.getRange(rowNumber, idx + 1).setValue(value);
   });
 }
 
@@ -3434,6 +4030,11 @@ function deleteMultipleTransactions(ids, deletedBy) {
   const isComponentIdx = headers.indexOf('isComponent');
   const commentIdxBulk = headers.map(h => String(h).trim()).indexOf('Комментарий');
   const shipmentIdxBulk = headers.map(h => String(h).trim()).indexOf('Отгрузка');
+  const opIdIdxBulk = headers.map(h => String(h).trim()).indexOf('OpID');
+  const addIdxBulk = headers.map(h => String(h).trim()).indexOf('ДопРасходы');
+  // Item 93: the OpIDs of the Ozon shipment rows being deleted — one follow-up of the cost journal for all of them.
+  const ozonOpIds = [];
+  let ozonRowsWithoutOpId = 0;
 
   // Словари для быстрого поиска и работы
   const idsSet = new Set(ids);
@@ -3501,9 +4102,15 @@ function deleteMultipleTransactions(ids, deletedBy) {
         groupId: groupIdVal !== null && groupIdVal !== undefined ? groupIdVal : '',
         isComponent: isComponentVal !== null && isComponentVal !== undefined ? isComponentVal : '',
         comment: commentIdxBulk !== -1 ? String(transDataAll[i][commentIdxBulk] || '').trim() : '',
-        shipmentId: shipmentIdxBulk !== -1 ? String(transDataAll[i][shipmentIdxBulk] || '').trim() : ''
+        shipmentId: shipmentIdxBulk !== -1 ? String(transDataAll[i][shipmentIdxBulk] || '').trim() : '',
+        // Item 93: see deleteTransaction.
+        opId: opIdIdxBulk !== -1 ? String(transDataAll[i][opIdIdxBulk] || '').trim() : '',
+        additionalCosts: (addIdxBulk !== -1 && String(transDataAll[i][addIdxBulk]).trim() !== '') ? parseNumber(transDataAll[i][addIdxBulk]) : ''
       };
       rowsToArchive.push([Utilities.getUuid(), 'Transaction', deletedAt, JSON.stringify(archiveObj), deletedBy]);
+      if (isOzonShipmentHistoryRow(type, dest, isComponentVal === true || String(isComponentVal).toLowerCase() === 'true')) {
+        if (archiveObj.opId) ozonOpIds.push(archiveObj.opId); else ozonRowsWithoutOpId += 1;
+      }
 
       //  откат остатков
       if (stockChanges[article]) {
@@ -3590,18 +4197,30 @@ function deleteMultipleTransactions(ids, deletedBy) {
     }
     if (apiDelErrors > 0) {
       SpreadsheetApp.flush();
-      return { stock: getStock(), transactions: getTransactions().rows, partial: true, message: `Удалено с ошибками: ${apiDelErrors}.` };
+      const failedDelete = { stock: getStock(), transactions: getTransactions().rows, partial: true, message: `Удалено с ошибками: ${apiDelErrors}.` };
+      // «История» is the truth: the follow-up reads it, so the rows that did go are handled and the ones that stayed keep their links.
+      const failedJournalError = followOzonCostJournal(ozonOpIds, ozonRowsWithoutOpId, OZON_COST_SOURCE_DELETE,
+        'Операции удалены, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ');
+      if (failedJournalError) failedDelete.costJournalError = failedJournalError;
+      return failedDelete;
     }
   }
 
+  SpreadsheetApp.flush();
+  // Item 93: the deleted Ozon shipments leave their chains — ONE follow-up for all the OpIDs.
+  const bulkJournalError = followOzonCostJournal(ozonOpIds, ozonRowsWithoutOpId, OZON_COST_SOURCE_DELETE,
+    'Операции удалены, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ');
+
   const notFoundCount = ids.length - rowsToDelete.length;
   if (notFoundCount > 0) {
-    SpreadsheetApp.flush();
-    return { stock: getStock(), transactions: getTransactions().rows, partial: true, message: `Внимание! Удалено: ${rowsToDelete.length}. Не найдено в базе: ${notFoundCount}.` };
+    const notFound = { stock: getStock(), transactions: getTransactions().rows, partial: true, message: `Внимание! Удалено: ${rowsToDelete.length}. Не найдено в базе: ${notFoundCount}.` };
+    if (bulkJournalError) notFound.costJournalError = bulkJournalError;
+    return notFound;
   }
 
-  SpreadsheetApp.flush();
-  return { stock: getStock(), transactions: getTransactions().rows };
+  const bulkDeleted = { stock: getStock(), transactions: getTransactions().rows };
+  if (bulkJournalError) bulkDeleted.costJournalError = bulkJournalError;
+  return bulkDeleted;
 }
 
 function restoreMultipleArchivedItems(archiveIds, restoredBy) {
@@ -3716,7 +4335,7 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
       // under «Комментарий» / «Отгрузка» by header.
       const restoreHeaders = activeTransData[0].map(h => String(h).trim());
       const lateCols = RESTORED_LATE_CELLS
-        .map(function(pair) { return { idx: restoreHeaders.indexOf(pair[0]), key: pair[1] }; })
+        .map(function(pair) { return { idx: restoreHeaders.indexOf(pair[0]), pair: pair }; })
         .filter(function(c) { return c.idx !== -1; });
       const restoreWidth = lateCols.length > 0
         ? Math.max(restoreHeaders.length, filteredToRestore[0].length)
@@ -3726,7 +4345,7 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
         if (lateCols.length === 0) return out;
         while (out.length < restoreWidth) out.push('');
         const src = restoredLateById[String(r[0])] || {};
-        lateCols.forEach(function(c) { out[c.idx] = String(src[c.key] || '').trim(); });
+        lateCols.forEach(function(c) { out[c.idx] = restoredLateCellValue(c.pair, src); });
         return out;
       });
       transSheet.getRange(transSheet.getLastRow() + 1, 1, rowsToWrite.length, restoreWidth).setValues(rowsToWrite);
@@ -3836,6 +4455,18 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
     stockSheet.getRange(1, 1, stockDataAll.length, Math.max(stockDataAll[0].length, 6)).setValues(stockDataAll);
   }
 
+  // Item 93: the restored Ozon shipments take their places in the chains again — ONE follow-up for all of them.
+  const restoredOzonOpIds = [];
+  let restoredOzonWithoutOpId = 0;
+  transactionsToRestore.forEach(function(row) {
+    const src = restoredLateById[String(row[0])] || {};
+    if (!isOzonShipmentHistoryRow(row[2], row[8], src.isComponent === true || String(src.isComponent).toLowerCase() === 'true')) return;
+    const restoredOpId = String(src.opId || '').trim();
+    if (restoredOpId) restoredOzonOpIds.push(restoredOpId); else restoredOzonWithoutOpId += 1;
+  });
+  const restoreJournalError = followOzonCostJournal(restoredOzonOpIds, restoredOzonWithoutOpId, OZON_COST_SOURCE_RESTORE,
+    'Операции восстановлены, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ');
+
   if (duplicatesCount > 0 || apiErrors > 0 || warnings.length > 0 || chinaRestored > 0 || chinaErrors.length > 0) {
      restoreMsg = `Восстановлено: ${transactionsToRestore.length}. `;
      if (chinaRestored > 0) restoreMsg += `Партий «Заказы в Китае» восстановлено: ${chinaRestored}. `;
@@ -3843,10 +4474,14 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
      if (duplicatesCount > 0) restoreMsg += `Пропущено дубликатов: ${duplicatesCount}. `;
      if (apiErrors > 0) restoreMsg += `Ошибок удаления из архива: ${apiErrors}. `;
      if (warnings.length > 0) restoreMsg += `Предупреждения: ${warnings.join('; ')}.`;
-     return { stock: getStock(), archived: getArchivedItems(), transactions: getTransactions().rows, partial: true, message: restoreMsg.trim() };
+     const partialRestore = { stock: getStock(), archived: getArchivedItems(), transactions: getTransactions().rows, partial: true, message: restoreMsg.trim() };
+     if (restoreJournalError) partialRestore.costJournalError = restoreJournalError;
+     return partialRestore;
   }
 
-  return { stock: getStock(), archived: getArchivedItems(), transactions: getTransactions().rows };
+  const bulkRestored = { stock: getStock(), archived: getArchivedItems(), transactions: getTransactions().rows };
+  if (restoreJournalError) bulkRestored.costJournalError = restoreJournalError;
+  return bulkRestored;
 }
 
 function hardDeleteArchivedItems(archiveIds) {
@@ -5188,6 +5823,9 @@ function getOzonCostState() {
   const state = {};
   getOzonCostJournal().forEach(function(r) {
     if (!r.cabinet || !r.article) return;
+    // Item 93: a drop marker as the LAST row of a chain means the chain has nothing left — there
+    // is no state, and the next shipment takes the «первая отгрузка» branch.
+    if (isOzonCostDropRow(r)) { delete state[r.cabinet + '|' + r.article]; return; }
     state[r.cabinet + '|' + r.article] = {
       cabinet: r.cabinet,
       article: r.article,
@@ -5496,9 +6134,17 @@ function getOzonCostExport() {
     };
   };
 
+  // Item 93: a drop marker is never a cost, and a (cabinet, article, date) whose LAST journal row
+  // is a marker has no supply left on that day: its earlier rows are left out of the file too
+  // (and so never stamped) — the date is for the sender of ticket 03 to delete in KAN.
+  const lastRowOfDay = {};
+  const dayKey = function(r) { return r.cabinet + '|' + r.article + '|' + String(r.date).slice(0, 10); };
+  journal.forEach(function(r) { lastRowOfDay[dayKey(r)] = r; });
+  const leftOut = function(r) { return isOzonCostDropRow(r) || isOzonCostDropRow(lastRowOfDay[dayKey(r)]); };
+
   const pending = [];
   journal.forEach(function(r) {
-    if (r.exported) return;
+    if (r.exported || leftOut(r)) return;
     pending.push(asRow(r));
   });
   if (pending.length > 0) {
@@ -5514,7 +6160,7 @@ function getOzonCostExport() {
   });
   const repeatRows = [];
   journal.forEach(function(r) {
-    if (String(r.exported || '').slice(0, 19) === lastStamp && lastStamp) repeatRows.push(asRow(r));
+    if (String(r.exported || '').slice(0, 19) === lastStamp && lastStamp && !leftOut(r)) repeatRows.push(asRow(r));
   });
   return {
     rows: repeatRows,
@@ -8187,9 +8833,26 @@ function commitShipmentPeresort(postingId, username) {
   }
   // Item 56, stage 2: the additional costs come from the stored column of the original
   // expense, so a batch write-off is not re-charged the cost of the whole batch.
-  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts, undefined, firstTx.comment, firstTx.shipmentId);
+  var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts, undefined, firstTx.comment, firstTx.shipmentId, true);
   // Item 90: the re-written rows keep the OpID of the rows they replace (see updateTransaction).
   stampOpIdOnTransactions(commitResult.newTransactions, firstTx.opId);
+
+  // Item 93: the journal follows «История» by OpID — the rows that were taken out (every OpID of the
+  // old rows: the links of the orders that vanished drop, their pieces join the first order's link)
+  // and the rows written in their place (the first row's OpID). A row without an OpID leaves the
+  // journal untouched, and the owner is told.
+  var costJournalError = '';
+  if (ozonCabinetFromDestination(destination)) {
+    var peresortOpIds = [];
+    var peresortWithoutOpId = 0;
+    mainTxRows.forEach(function(tx) {
+      if (!tx.opId) peresortWithoutOpId += 1;
+      else if (peresortOpIds.indexOf(tx.opId) === -1) peresortOpIds.push(tx.opId);
+    });
+    // The first row's OpID (firstTx is mainTxRows[0]) is the one the new rows carry.
+    costJournalError = followOzonCostJournal(peresortWithoutOpId > 0 ? [] : peresortOpIds, peresortWithoutOpId > 0 ? 1 : 0,
+      OZON_COST_SOURCE_EDIT, 'Пересорт проведён, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ', { username: username, allowNewLinks: true });
+  }
 
   // Шаг 10. Собери newTxIds: из commitResult.newTransactions возьми элементы с isComponent !== true, их String(id). const linkInfo = JSON.stringify(newTxIds).
   var newTxIds = commitResult.newTransactions
@@ -8252,11 +8915,13 @@ function commitShipmentPeresort(postingId, username) {
 
   // Шаг 15. SpreadsheetApp.flush(); верни { success: true, stock: getStock(), transactions: getTransactions().rows }.
   SpreadsheetApp.flush();
-  return {
+  var peresortResult = {
     success: true,
     stock: getStock(),
     transactions: getTransactions().rows
   };
+  if (costJournalError) peresortResult.costJournalError = costJournalError;
+  return peresortResult;
 }
 
 function saveShipmentShortageRecalc(postingId, recalcJSON, historyNotes, username) {

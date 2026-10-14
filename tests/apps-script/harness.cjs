@@ -636,6 +636,13 @@ module.exports = {
   parseBatchNoteGs: (...args) => context.parseBatchNoteGs(...args),
   extrasTotalGs: (...args) => context.extrasTotalGs(...args),
   reissueOzonCostRows: (...args) => context.reissueOzonCostRows(...args),
+  // Item 93, ticket 02: the cost journal as chains of links.
+  isOzonCostDropRow: (...args) => context.isOzonCostDropRow(...args),
+  buildOzonCostChain: (...args) => context.buildOzonCostChain(...args),
+  planOzonCostChainRewrite: (...args) => context.planOzonCostChainRewrite(...args),
+  applyOzonCostChainOps: (...args) => context.applyOzonCostChainOps(...args),
+  resyncOzonCostForOps: (...args) => context.resyncOzonCostForOps(...args),
+  commitShipmentPeresort: (...args) => context.commitShipmentPeresort(...args),
   replayArticle: (...args) => context.replayArticle(...args),
   replayMatchesFacts: (...args) => context.replayMatchesFacts(...args),
   articleRowsForReplay: (...args) => context.articleRowsForReplay(...args),

@@ -23,3 +23,9 @@ for the toasts and markers; the «Отправлю сам» path is money-adjace
 - [ ] vitest on the pure helpers (outcome → toast text, journal status → marker, access rule)
 
 ## Comments
+
+- 2026-10-14, from ticket 02: `updateTransaction`, `deleteTransaction`, `deleteMultipleTransactions`,
+  `restoreArchivedItem`, `restoreMultipleArchivedItems`, `commitShipmentPeresort` and `commitTransaction` now
+  return `costJournalError` (Russian text, only when non-empty) when the History operation succeeded but the
+  cost journal did not follow (incl. a row without OpID). The browser shows it only for «Вся отгрузка» today
+  (`useWarehouseStore.ts` ≈:910) — show it as a red toast on these paths too.

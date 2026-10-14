@@ -21,3 +21,12 @@ Spec: `../spec.md`.
 - [ ] Item 93 closed on the owner's word
 
 ## Comments
+
+- 2026-10-14, from ticket 02: the one-time journal fix is `applyOzonCostChainOps(cabinet, article, ops, source)`;
+  `source` MUST start with «пересчёт» (e.g. «пересчёт: исправление журнала, пункт 93»), otherwise it is refused.
+  BowlGrayMini_01 / MaxiStore: `{'row:60': {drop: true}}` (check first that sheet row 60 is still the OpID-less
+  «отгрузка» of 12.09, base 335). Полка_выдв_27см / Mercurius: either explicit `{'op:444547eb-…': {shippedCost:
+  667.5}, 'op:fe030a3b-…': {shippedCost: 658.82}}`, or ONE `resyncOzonCostForOps([both OpIDs], source)` — two
+  separate resyncs give an intermediate 709.53 in between. Dry run on the 2026-10-14 export: 241.99 and 709.51.
+  Optional, owner's word: stamp «История» row `5258f18d` (BowlGrayMini_01 12.09, no OpID) with the OpID of its
+  journal link row 57 (`8d776830…-1`), so later edits of that row reach the journal.

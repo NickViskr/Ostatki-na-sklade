@@ -28,3 +28,10 @@ Decisions). Money-critical.
 - [ ] Mutations 3–5; `TZ=Asia/Yekaterinburg` run
 
 ## Comments
+
+- 2026-10-14, from ticket 02: the journal now carries drop markers. Read each (cabinet, article, date) by its
+  LAST row: `isOzonCostDropRow(r)` (source «удалено из цепочки», «Отгружено» 0, «Себестоимость после» empty) →
+  KAN `delete` of that date (entry id from `get_product_costs`); anything else → upsert «Себестоимость после».
+  Markers are never stamped «Выгружено в КАН» and `getOzonCostExport` leaves marker-ended days out of the CSV.
+  A chain rewrite appends ONE block with a single `setValues`; take the per-date view from one journal read.
+  Status writes must not touch columns 1–12, and new columns go at the END (ensureColumns).
