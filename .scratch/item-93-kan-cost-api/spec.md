@@ -71,8 +71,8 @@ unchanged.
 - MCP JSON-RPC at `https://kultura-analitiki.ru/mcp/`, `tools/call`, Bearer token. `Code.gs` already
   has `kanCall(tool, args)` and the token in Script Property `kan_mcpToken` (never leaves Apps Script).
 - `list_shops` → `access.scopes` must contain `mcp:product_cost:write`; shops: MaxiStore id 2771,
-  Mercurius id 1765 (= the cabinet names in the journal). The chat token had the scope; the
-  SCRIPT token was not checked.
+  Mercurius id 1765 (= the cabinet names in the journal). Both the chat token and the SCRIPT token
+  `kan_mcpToken` have the scope (script token checked by the owner 2026-10-14, ticket 01).
 - `preview_product_cost_changes` `{operation: 'import', shop_id: [id], rows: [{sku_article, date
   'YYYY-MM-DD', cost_price, expense}]}` → `{preview_id, expires_at (15 min), items[{before, after}],
   summary{created, updated, skipped, issues, ...}}`. Upsert by product+date; last duplicate in a
@@ -84,10 +84,16 @@ unchanged.
 - `get_product_costs` `{shop_id: [id], product_id?, date__gte?, date__lte?, limit ≤1000, offset,
   ordering}` → `items[{id, product_id, sku_article, dt, dt_end, cost_price, expense}]`, paginated by
   `next_offset`. `id` is the entry id a `delete` needs.
-- The CSV has a column «Статус» = MAIN; the API has no such field — check on a preview.
+- The CSV column «Статус» = MAIN is the PRODUCT state (MAIN / ARCHIVED of `list_products`); cost
+  entries carry no status. An API import matches ARCHIVED products too (ticket 01: BowlGrayMini_01 into
+  1765 matched the archived Mercurius product) — the shop id must come strictly from the journal's cabinet.
+- Ticket 01 previews (2026-10-14): a future `date` is accepted (`created`, `dt_end null`); an unknown
+  article does NOT fail the preview — `imported 0`, `skipped {"Товар не найден": n}`, `issues[{row_number,
+  sku_article (lower-cased), reason}]`, and in a mixed batch the known rows still pass; a batch with both
+  shop ids skips an article present in both shops as «Товар определён неоднозначно» — one shop per batch.
 - KAN's rule text says apply only after the user's approval in chat; the owner decided that the
   click «Оформить» on a shipment is that approval (his account, his call).
-- Unknown until tried: a future `date` (delivery date ahead of today), rate limits.
+- Unknown until tried: rate limits.
 
 ## Implementation Decisions
 

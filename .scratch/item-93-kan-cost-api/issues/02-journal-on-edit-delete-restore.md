@@ -31,3 +31,17 @@ Design constraints:
 - [ ] Mutations 3–5; `TZ=Asia/Yekaterinburg` run
 
 ## Comments
+
+- 2026-10-14, from ticket 01 (replay of the real `Code.gs` on the live export, details in
+  `01-diagnosis-and-reconciliation.md` «Result»): holes 1 (edit → second OpID-less «отгрузка» row,
+  +10.82 ₽/pc on the test row) and 2 (delete → journal untouched, both `deleteTransaction` and
+  `deleteMultipleTransactions`) confirmed. Hole 3, new and in scope here: a restore loses the row's
+  OpID, «ДопРасходы» and «Отгрузка» — `archiveItem` in `deleteTransaction` stores none of
+  `opId`/`additionalCosts`, so `restoreTransaction` writes them empty; the restore cannot find its
+  journal row by OpID and a later edit re-parses the extras from the text. The archive payload must
+  carry them (old archive rows without them stay restorable).
+- Live journal rows that need the same chain rewrite once (written in ticket 06, decided by the owner):
+  row 60 (BowlGrayMini_01 / MaxiStore, OpID '', re-blend of 12.09) and rows 40–41 (Полка_выдв_27см /
+  Mercurius, a reverted receipt edit). Build the chain rewrite so ticket 06 can reuse it for them.
+- An empty-OpID journal row exists in production (row 60): the new code must not treat '' as a
+  shipment key, and «История» row `5258f18d` has no OpID either.
