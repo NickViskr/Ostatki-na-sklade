@@ -10,7 +10,7 @@ Decisions). Money-critical.
 
 **Blocked by:** 01 (its replay decides the exact holes; adjust this ticket to what 01 found).
 
-**Status:** done 2026-10-14 (planner → coder → tester → orchestrator review fixes; result below). Not deployed: Code.gs goes live in ticket 06 together with 03–05.
+**Status:** done 2026-10-14 (planner → coder → tester → orchestrator review fixes; result below); commit `9903b6e`, pushed to GitHub 2026-10-14 on the owner's word. Not deployed: Code.gs goes live in ticket 06 together with 03–05.
 
 Design constraints:
 - `getOzonCostState` (state = last row per cabinet+article in sheet order) and `isOzonCostCounted`
