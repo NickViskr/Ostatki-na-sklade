@@ -30,3 +30,8 @@ Spec: `../spec.md`.
   separate resyncs give an intermediate 709.53 in between. Dry run on the 2026-10-14 export: 241.99 and 709.51.
   Optional, owner's word: stamp «История» row `5258f18d` (BowlGrayMini_01 12.09, no OpID) with the OpID of its
   journal link row 57 (`8d776830…-1`), so later edits of that row reach the journal.
+- 2026-10-14, outside the item: Code.gs also carries `6ae6961` (default admin password removed from the code;
+  owner chose to ship it with this ticket, not as a hotfix). After the Code.gs deploy tell the owner: a new «Админ»
+  password goes into the Script Property `auth_newAdminPassword` (Apps Script editor → Project Settings → Script
+  Properties); the next login applies it and deletes the property. The assistant never sets, types or reads it.
+  If the owner cleared the «Админ» password cell meanwhile, the property restores «Админ».
