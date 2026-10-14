@@ -47,3 +47,12 @@ Spec: `../spec.md`.
   the `apply_product_cost_changes` answer shape (`history_saved` read at the top or in `summary`; a wrong guess only
   words the reason — acceptance is the read-back) and the `delete` preview without `shop_id`. The first live send makes
   the three status columns appear at the end of «Себестоимость Озон».
+
+- 2026-10-15, from ticket 04: install the watch trigger (`setupKanCostWatchTrigger` run once in the Apps Script editor:
+  Run → choose the function; running it again leaves one trigger) only AFTER the first live send and the backlog send
+  (or the owner's decision to skip it) — NOT right after the Code.gs deploy as the description above says. Its first run
+  gives every pending unsent row a first-seen time and sends them all 5–20 min later, with no preview shown to the
+  owner. Check in the editor (Triggers, the clock icon) that exactly one `kanCostWatch` trigger «every 15 minutes»
+  exists. The watch never throws (errors go to the execution log, «Executions»), so no failure mails are expected.
+  Also: «Время КАН» cells are written as plain text (format '@') — the script zone is Asia/Yekaterinburg and the
+  spreadsheet's own zone may differ; after the first live send check that the cell shows the time just written.

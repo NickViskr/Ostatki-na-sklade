@@ -137,6 +137,9 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   // cached read shows them yet. It answers before the global lock in Code.gs (it calls KAN for
   // minutes), which is why it is listed with the early writes in gasActions.test.ts.
   sendOzonCostToKan: write(),
+  // Item 93 ticket 04: «Отправлю сам» writes the same status columns of the journal (no cached read shows them)
+  // and, like the sender, is answered before the global lock because it takes the sender lease.
+  switchOzonCostToManual: write(),
   // Item 68 stage 2: a return moves stock, adds history rows and marks the supply row.
   commitUnshippedReturn: write('getInitialData', 'getStock', 'getTransactions', 'getExternalShipments'),
   // Item 79b: the documents record lands in the journal from /api/ozon/supply/docs, which

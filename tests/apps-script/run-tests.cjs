@@ -11117,14 +11117,17 @@ const t03Accepted = (row, answer, stamp) => row['Статус КАН'] === T03_O
     JSON.stringify(t.h.dumpOzonCostFull().map(t03State)));
 
   // Rows of other hands between ours are written back as they were (a Date in «Время КАН», an old stamp).
+  // The Date must come from the harness that reads it (an instance of another harness's FakeDate is no `Date` to the code under test).
+  t = t03Setup([]);
   const dateCell = new t.h.FakeDate(Date.parse('2026-09-02T07:00:00Z'));
-  t = t03Setup([t03One(), t03Row('2026-09-02', 'Mercurius', 'ART-M', 85, 'op-m', { exported: T03_OLD_STAMP, status: T03_OK, answer: 'КАН принял 85,00', time: dateCell }),
-    t03Row(T03_DAY, 'MaxiStore', 'ART-Y', 70, 'op-y')]);
+  t.h.setOzonCostSheet([t03One(), t03Row('2026-09-02', 'Mercurius', 'ART-M', 85, 'op-m', { exported: T03_OLD_STAMP, status: T03_OK, answer: 'КАН принял 85,00', time: dateCell }),
+    t03Row(T03_DAY, 'MaxiStore', 'ART-Y', 70, 'op-y')], t.h.OZON_COST_HEADERS.concat(t.h.OZON_COST_KAN_HEADERS));
   const between = t.h.dumpOzonCostFull()[1];
   t.h.sendOzonCostToKan('tester');
   const afterBetween = t.h.dumpOzonCostFull();
-  check('93/03 H: a row between two rows of ours (accepted by hand earlier, a Date in «Время КАН», an old stamp) comes out of the two block writes as it went in',
-    t03Canon(afterBetween[1]) === t03Canon(between) && afterBetween[1]['Время КАН'] === dateCell
+  // Item 93 ticket 04: a Date cell of another hand comes back as the TEXT of the same moment (the column is text now).
+  check('93/03 H: a row between two rows of ours (accepted by hand earlier, a Date in «Время КАН», an old stamp) comes out of the two block writes as it went in — its time as the text of the same moment',
+    t03Canon(afterBetween[1]) === t03Canon(Object.assign({}, between, { 'Время КАН': '2026-09-02 10:00:00' })) && afterBetween[1]['Время КАН'] === '2026-09-02 10:00:00'
       && t03Accepted(afterBetween[0], 'КАН принял 233,67', T03_TIME + ' tester') && t03Accepted(afterBetween[2], 'КАН принял 70,00', T03_TIME + ' tester'),
     JSON.stringify(afterBetween.map(t03State)));
 
@@ -11169,6 +11172,786 @@ const t03Accepted = (row, answer, stamp) => row['Статус КАН'] === T03_O
   withSessions(t);
   out = t.h.callDoPost({ action: 'sendOzonCostToKan', sessionToken: 'nobody' });
   check('93/03 I: without a valid session nothing is sent', out.status === 'error' && t.h.fetchLog.length === 0, JSON.stringify(out));
+})();
+
+// ================= Item 93 ticket 04: the watch trigger and the «Отправлю сам» switch =================
+// kanCostWatch runs every 15 minutes: it gives a never-seen row its first-seen time, looks rows switched to
+// «вручную» up in KAN (15/30/45/60 min after the switch) and re-sends «ошибка» / «отправляется» rows (and
+// unsent rows older than 5 min) whose last attempt is 60 min old. The clock is faked with setNow; minute 0 is
+// the stand's 2026-10-14 13:00:00 in the script zone. Fixture: MaxiStore / ART-C on 2026-10-13 at 233.67.
+
+const T04_MANUAL = 'вручную';
+const T04_WAIT = 'ждём файл в КАН';
+const T04_BY_HAND = ' загружено вручную';
+const t04Iso = (min) => new Date(Date.parse(T03_NOW) + min * 60000).toISOString();
+const t04Text = (min) => new Date(Date.parse(T03_NOW) + (min * 60 + 3 * 3600) * 1000).toISOString().slice(0, 19).replace('T', ' ');
+// A group switched to manual at minute 0 (the 3 KAN columns hold «вручную» / the wait text / the switch time).
+const t04Manual = (extra) => t03One(Object.assign({ status: T04_MANUAL, answer: T04_WAIT, time: T03_TIME }, extra || {}));
+// Moves the clock to `minutes`, runs the watch and records what it asked KAN and what the sheet holds now.
+function t04Go(t, minutes) {
+  t.h.setNow(t04Iso(minutes));
+  const from = t.h.fetchLog.length;
+  t.res = t.h.kanCostWatch();
+  t.calls = t.h.fetchLog.slice(from).map((f) => f.body.params.name);
+  t.after = t.h.dumpOzonCostFull();
+  return t;
+}
+const t04Sheet = (t) => t03Canon(t.h.dumpOzonCostFull());
+// «Статус КАН» / «Ответ КАН» / «Время КАН» / «Выгружено в КАН» of a row are exactly these.
+const t04Is = (row, status, answer, time, stamp) => t03Canon(t03State(row)) === t03Canon([status, answer, time, stamp]);
+// KAN already holds this figure (a file the owner uploaded by hand).
+const t04KanHolds = (t, shopId, article, date, cost) => {
+  (t.kan.store[shopId] = t.kan.store[shopId] || []).push({ id: 7000 + (t.kan.idSeq++), productId: 70000, article: article, date: date, cost: cost });
+};
+const T04_READ = { shop_id: [2771], date__gte: T03_DAY, date__lte: T03_DAY, limit: 1000, offset: 0 };
+const T04_LOOKUP = 'list_shops,get_product_costs';
+
+(function test93s04Pure() {
+  const h = freshHarness();
+  const journal = h.ozonCostRowsFromValues([h.OZON_COST_HEADERS.concat(h.OZON_COST_KAN_HEADERS),
+    t03Row(T03_DAY, 'MaxiStore', 'E-old', 1, 'o1', { status: T03_ERR, time: '2026-10-14 11:59:59' }),
+    t03Row(T03_DAY, 'MaxiStore', 'E-new', 1, 'o2', { status: T03_ERR, time: '2026-10-14 12:00:01' }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-old', 1, 'o3', { status: T03_SENDING, time: '2026-10-14 12:00:00' }),
+    t03Row(T03_DAY, 'MaxiStore', 'N-none', 1, 'o4'),
+    t03Row(T03_DAY, 'MaxiStore', 'N-old', 1, 'o5', { status: '', time: '2026-10-14 12:54:59' }),
+    t03Row(T03_DAY, 'MaxiStore', 'N-young', 1, 'o6', { status: '', time: '2026-10-14 12:55:01' }),
+    t03Row(T03_DAY, 'MaxiStore', 'N-csv', 1, 'o7', { exported: T03_OLD_STAMP }),
+    t03Row(T03_DAY, 'MaxiStore', 'E-junk', 1, 'o8', { status: T03_ERR, time: 'вчера' }),
+    t03Row(T03_DAY, 'MaxiStore', 'M-1', 7, 'o9', { status: T04_MANUAL, time: '2026-10-14 12:30:00' }),
+    t03Row('2026-10-11', 'MaxiStore', 'M-2', 8, 'o10', { status: T04_MANUAL, time: '2026-10-14 12:31:00' })]);
+  const cut = { retry: '2026-10-14 12:00:00', fresh: '2026-10-14 12:55:00' };
+  const withCut = h.collectOzonCostKanGroups(journal, cut);
+  check('93/04 pure: with cut-offs «ошибка» / «отправляется» is pending only when its time is at or before the retry cut-off (a time that is not yyyy-MM-dd HH:mm:ss counts as old)',
+    withCut.pending.map((g) => g.article).filter((a) => /^[ES]-/.test(a)).join() === 'E-old,S-old,E-junk', withCut.pending.map((g) => g.article).join());
+  check('93/04 pure: with cut-offs an unsent row is pending only when its time is at or before the fresh cut-off; no time at all goes to `unseen` (last row, not sent); a CSV-stamped row is neither',
+    withCut.pending.map((g) => g.article).filter((a) => a[0] === 'N').join() === 'N-old' && withCut.unseen.map((g) => g.article).join() === 'N-none'
+      && withCut.unseen[0].rows.length === 1, withCut.pending.map((g) => g.article).join() + ' | ' + withCut.unseen.map((g) => g.article).join());
+  check('93/04 pure: «вручную» groups come back in `manual` with action, cost and the switch time, are counted in skippedManual, and are never pending',
+    t03Canon(withCut.manual.map((g) => [g.article, g.date, g.action, g.cost, g.lastTime])) === t03Canon([['M-1', T03_DAY, 'upsert', 7, '2026-10-14 12:30:00'], ['M-2', '2026-10-11', 'upsert', 8, '2026-10-14 12:31:00']])
+      && withCut.skippedManual === 2 && withCut.pending.every((g) => g.article[0] !== 'M'), JSON.stringify(withCut.manual.map((g) => g.article)));
+  const noCut = h.collectOzonCostKanGroups(journal);
+  check('93/04 pure: without cut-offs the age is ignored — every unsent, «отправляется» and «ошибка» group is pending and nothing is unseen',
+    noCut.pending.map((g) => g.article).join() === 'E-old,E-new,S-old,N-none,N-old,N-young,E-junk' && noCut.unseen.length === 0 && noCut.skippedManual === 2,
+    noCut.pending.map((g) => g.article).join());
+})();
+
+(function test93s04ManualChecks() {
+  // The group is not due before 15 min: no request, no write, and not even a lock or a lease.
+  let t = t03Setup([t04Manual()]);
+  let locks = t.h.lockRequests();
+  let frozen = t04Sheet(t);
+  t04Go(t, 14);
+  check('93/04 A: 14 min after the switch the watch makes no request, writes nothing and takes neither the lease nor a lock',
+    t.calls.length === 0 && t04Sheet(t) === frozen && t.h.lockRequests() === locks && t.h.getScriptProperty('kan_costSenderUntil') === null && t.res.idle === true,
+    JSON.stringify([t.calls, t.res]));
+
+  // 15 / 30 / 45: one list_shops and ONE read each; the row stays «вручную» byte for byte.
+  [15, 30, 45].forEach((min) => {
+    t04Go(t, min);
+    check('93/04 A: ' + min + ' min after the switch KAN is read once (list_shops, one read over the day); the row stays «вручную» and the sheet is untouched',
+      t.calls.join() === T04_LOOKUP && t03Canon(t03Args(t.h, 'get_product_costs').slice(-1)[0]) === t03Canon(T04_READ) && t04Sheet(t) === frozen
+        && t.res.manualAccepted === 0 && t.res.manualMissed === 0 && t.h.getScriptProperty('kan_costSenderUntil') === null,
+      JSON.stringify([t.calls, t.res]));
+  });
+  check('93/04 A: the checks never write to KAN and need nothing but reads (3 checks = 3 list_shops + 3 reads)',
+    t.h.fetchLog.length === 6 && t.kan.writes === 0 && t.kan.previewCount === 0 && t.h.fetchesWhileLocked() === 0, String(t.h.fetchLog.length));
+
+  // 60: the 4th miss turns the row into an error, unstamped; the sheet columns 1-12 stay byte for byte.
+  const before = t.h.dumpOzonCostFull();
+  t04Go(t, 60);
+  check('93/04 A: 60 min after the switch a miss makes the row «ошибка» / «в КАН не найдено» with the time of the check, NOT stamped; columns 1-12 byte for byte',
+    t.calls.join() === T04_LOOKUP && t04Is(t.after[0], T03_ERR, 'в КАН не найдено', t04Text(60), '') && t03Fixed(t.after[0]) === t03Fixed(before[0])
+      && t.res.manualMissed === 1 && t.res.manualAccepted === 0,
+    JSON.stringify([t.calls, t03State(t.after[0]), t.res]));
+
+  // Back on the normal hourly retry: nothing for 59 min after the error, then the re-send, stamped «автоотправка».
+  frozen = t04Sheet(t);
+  t04Go(t, 75);
+  const quiet75 = t.calls.length === 0 && t04Sheet(t) === frozen;
+  t04Go(t, 119);
+  check('93/04 A: after the miss the row waits for the hourly retry — 15 and 59 min later nothing is asked and nothing is written',
+    quiet75 && t.calls.length === 0 && t04Sheet(t) === frozen, JSON.stringify(t.calls));
+  t04Go(t, 120);
+  check('93/04 A: 60 min after the miss the row is sent by the normal retry (4 requests) and accepted with the «автоотправка» stamp',
+    t.calls.join() === 'list_shops,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(120), t04Text(120) + ' автоотправка') && t.res.accepted === 1 && t.res.failed === 0,
+    JSON.stringify([t.calls, t03State(t.after[0]), t.res]));
+
+  // Found as soon as the file is in KAN: «принято», the answer says it was by hand, the stamp too.
+  t = t03Setup([t04Manual()]);
+  t04Go(t, 15);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  const beforeFound = t.h.dumpOzonCostFull();
+  t04Go(t, 30);
+  check('93/04 B: found at the 30-min check — «принято», «КАН принял 233,67 (загружено вручную)», the time of the check, the stamp «время загружено вручную»; columns 1-12 byte for byte; nothing written to KAN',
+    t.calls.join() === T04_LOOKUP && t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(30), t04Text(30) + T04_BY_HAND)
+      && t03Fixed(t.after[0]) === t03Fixed(beforeFound[0]) && t.res.manualAccepted === 1 && t.kan.writes === 0 && t.kan.previewCount === 0,
+    JSON.stringify([t.calls, t03State(t.after[0]), t.res]));
+  frozen = t04Sheet(t);
+  const requests = t.h.fetchLog.length;
+  t04Go(t, 45);
+  t04Go(t, 600);
+  check('93/04 B: once accepted the row is never touched again — the next runs (even hours later) make no request and the sheet is identical',
+    t.h.fetchLog.length === requests && t04Sheet(t) === frozen, String(t.h.fetchLog.length - requests));
+
+  // The manual check reads only: a token without the write scope is enough; the article is case-blind like in the sender.
+  t = t03Setup([t04Manual()], { scopes: ['mcp:product_cost:read'] });
+  t04KanHolds(t, 2771, 'art-c', T03_DAY, 233.67);
+  t04Go(t, 15);
+  check('93/04 B: a token with the read scope only still accepts a found row, and the article is matched without regard to case',
+    t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(15), t04Text(15) + T04_BY_HAND), JSON.stringify(t03State(t.after[0])));
+
+  // A figure that differs by one kopeck, or two entries, is not a find.
+  t = t03Setup([t04Manual()]);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.66);
+  t04Go(t, 15);
+  frozen = t04Sheet(t);
+  t04Go(t, 45);
+  const stayed = t04Sheet(t) === frozen;
+  t04Go(t, 60);
+  check('93/04 B: a figure 1 kopeck off (233.66 for 233.67) is not accepted — the row stays «вручную» until the 60-min miss, then «ошибка» / «в КАН не найдено»',
+    stayed && t04Is(t.after[0], T03_ERR, 'в КАН не найдено', t04Text(60), ''), JSON.stringify(t03State(t.after[0])));
+  t = t03Setup([t04Manual()]);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04Go(t, 15);
+  const twoStayed = t03State(t.after[0])[0] === T04_MANUAL;
+  t04Go(t, 60);
+  check('93/04 B: two KAN entries for the same article and day are not a find either (exactly one counts)',
+    twoStayed && t04Is(t.after[0], T03_ERR, 'в КАН не найдено', t04Text(60), ''), JSON.stringify(t03State(t.after[0])));
+
+  // A cabinet KAN does not know: list_shops only, no read; a miss at 60.
+  t = t03Setup([t03Row(T03_DAY, 'Ghost', 'ART-G', 50, 'op-g', { status: T04_MANUAL, answer: T04_WAIT, time: T03_TIME })]);
+  t04Go(t, 15);
+  const ghost15 = t.calls.join() === 'list_shops' && t03State(t.after[0])[0] === T04_MANUAL;
+  t04Go(t, 60);
+  check('93/04 B: a cabinet KAN does not know is looked up with list_shops only (no read); at 60 min it is «ошибка» / «в КАН не найдено»',
+    ghost15 && t.calls.join() === 'list_shops' && t04Is(t.after[0], T03_ERR, 'в КАН не найдено', t04Text(60), ''), JSON.stringify([t.calls, t03State(t.after[0])]));
+
+  // KAN failing: nothing is written before the 60th minute (the next run looks again); at 60 min the group goes back
+  // to «ошибка» with KAN's own failure as the reason — never «вручную» for ever (token revoked, KAN down for days).
+  t = t03Setup([t04Manual()], { listShops: 'http500' });
+  frozen = t04Sheet(t);
+  t04Go(t, 15);
+  const down15 = t.calls.join() === 'list_shops' && t04Sheet(t) === frozen;
+  t04Go(t, 45);
+  const down45 = t.calls.join() === 'list_shops' && t04Sheet(t) === frozen;
+  t04Go(t, 60);
+  check('93/04 B: when list_shops fails nothing is written before 60 min; at 60 min the row is «ошибка» / «КАН недоступен» (KAN\'s own reason), the time of the check, not stamped',
+    down15 && down45 && t.calls.join() === 'list_shops' && t04Is(t.after[0], T03_ERR, 'КАН недоступен', t04Text(60), '') && t.res.manualMissed === 1 && t.res.manualAccepted === 0,
+    JSON.stringify([down15, down45, t.calls, t03State(t.after[0]), t.res]));
+  t = t03Setup([t04Manual()], { readBack: 'http500' });
+  frozen = t04Sheet(t);
+  t04Go(t, 45);
+  const readDown45 = t.calls.join() === T04_LOOKUP && t04Sheet(t) === frozen;
+  t04Go(t, 60);
+  check('93/04 B: when the read fails nothing is written before 60 min; at 60 min the row is «ошибка» / «КАН недоступен», not stamped',
+    readDown45 && t.calls.join() === T04_LOOKUP && t04Is(t.after[0], T03_ERR, 'КАН недоступен', t04Text(60), '') && t.res.manualMissed === 1,
+    JSON.stringify([readDown45, t.calls, t03State(t.after[0]), t.res]));
+  t = t03Setup([t04Manual()], { listShops: 'http401' });
+  t04Go(t, 15);
+  const rejected15 = t04Is(t.after[0], T04_MANUAL, T04_WAIT, T03_TIME, '');
+  t04Go(t, 60);
+  check('93/04 B: a token KAN rejects does not leave the row «вручную»: at 60 min it is «ошибка» / «КАН отверг токен»',
+    rejected15 && t04Is(t.after[0], T03_ERR, 'КАН отверг токен', t04Text(60), ''), JSON.stringify(t03State(t.after[0])));
+  // After that the normal hourly retry takes the row (here KAN is back).
+  t.h.setFetchHandler(fakeKanCost().handler);
+  t04Go(t, 119);
+  const quietAfterReject = t.calls.length === 0;
+  t04Go(t, 120);
+  check('93/04 B: after the «ошибка» of an unreadable KAN the hourly retry sends the row 60 min later and it is accepted',
+    quietAfterReject && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(120), t04Text(120) + ' автоотправка'), JSON.stringify([quietAfterReject, t03State(t.after[0])]));
+})();
+
+(function test93s04ManualShops() {
+  // Two days of one cabinet and a second cabinet: ONE list_shops, ONE read per shop over the min..max days.
+  const manual = { status: T04_MANUAL, answer: T04_WAIT, time: T03_TIME };
+  let t = t03Setup([t03Row('2026-10-10', 'MaxiStore', 'ART-C', 210.5, 'op-0', manual), t04Manual(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m', manual)]);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04KanHolds(t, 1765, 'ART-M', T03_DAY, 85);
+  t04Go(t, 60);
+  check('93/04 C: one list_shops, then one read per shop over its own dates (MaxiStore 10-10..10-13, Mercurius 10-13)',
+    t.calls.join() === 'list_shops,get_product_costs,get_product_costs'
+      && t03Args(t.h, 'get_product_costs').map(t03Canon).sort().join('|') === [
+        { shop_id: [2771], date__gte: '2026-10-10', date__lte: T03_DAY, limit: 1000, offset: 0 },
+        { shop_id: [1765], date__gte: T03_DAY, date__lte: T03_DAY, limit: 1000, offset: 0 }].map(t03Canon).sort().join('|'),
+    JSON.stringify(t03Args(t.h, 'get_product_costs')));
+  check('93/04 C: each group gets its own verdict — the day KAN holds and the other cabinet are accepted, the day KAN lacks is «ошибка» at 60 min',
+    t04Is(t.after[0], T03_ERR, 'в КАН не найдено', t04Text(60), '') && t04Is(t.after[1], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(60), t04Text(60) + T04_BY_HAND)
+      && t04Is(t.after[2], T03_OK, 'КАН принял 85,00 (загружено вручную)', t04Text(60), t04Text(60) + T04_BY_HAND) && t.res.manualAccepted === 2 && t.res.manualMissed === 1,
+    JSON.stringify(t.after.map(t03State)));
+
+  // One shop's read failing: before 60 min only that shop's group is left as it was; at 60 min it is «ошибка» / «КАН недоступен».
+  t = t03Setup([t04Manual(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m', manual)], { readFailShop: 1765 });
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  const before = t.h.dumpOzonCostFull();
+  t04Go(t, 15);
+  check('93/04 C: when the read of one shop fails, that shop\'s group is left as it was and the other shop\'s group is still accepted',
+    t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(15), t04Text(15) + T04_BY_HAND) && t03Canon(t.after[1]) === t03Canon(before[1]),
+    JSON.stringify(t.after.map(t03State)));
+  t = t03Setup([t04Manual(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m', manual)], { readFailShop: 1765 });
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04Go(t, 60);
+  check('93/04 C: at 60 min the group of the shop that cannot be read is «ошибка» / «КАН недоступен» (no stamp) while the other shop\'s group is accepted',
+    t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(60), t04Text(60) + T04_BY_HAND)
+      && t04Is(t.after[1], T03_ERR, 'КАН недоступен', t04Text(60), '') && t.res.manualAccepted === 1 && t.res.manualMissed === 1,
+    JSON.stringify([t.after.map(t03State), t.res]));
+
+  // A combined shipment: every row of the group gets the verdict; the stamp goes on the unstamped rows only.
+  const rowsOfGroup = [t03Row(T03_DAY, 'MaxiStore', 'ART-C', 231, 'op-1', manual), t03Row(T03_DAY, 'MaxiStore', 'ART-C', 233.67, 'op-2', Object.assign({ exported: T03_OLD_STAMP }, manual))];
+  t = t03Setup(rowsOfGroup);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04Go(t, 15);
+  check('93/04 C: both rows of a two-row group become «принято»; the row without a stamp gets «время загружено вручную», the row with an older stamp keeps it',
+    t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(15), t04Text(15) + T04_BY_HAND)
+      && t04Is(t.after[1], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(15), T03_OLD_STAMP), JSON.stringify(t.after.map(t03State)));
+})();
+
+(function test93s04Retry() {
+  // «ошибка»: nothing before 60 min since the last attempt, then sent and stamped «автоотправка».
+  let t = t03Setup([t03One({ status: T03_ERR, answer: 'КАН недоступен', time: T03_TIME })]);
+  const frozen = t04Sheet(t);
+  const locks = t.h.lockRequests();
+  t04Go(t, 59);
+  check('93/04 D: an «ошибка» row whose last attempt is 59 min old is not sent: no request, no write, no lock',
+    t.calls.length === 0 && t04Sheet(t) === frozen && t.h.lockRequests() === locks, JSON.stringify(t.calls));
+  t04Go(t, 60);
+  check('93/04 D: at 60 min the «ошибка» row is sent and accepted; the stamp ends with «автоотправка»; columns 1-10 and 12 byte for byte',
+    t.calls.join() === 'list_shops,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(60), t04Text(60) + ' автоотправка') && t.res.accepted === 1 && t.res.failed === 0,
+    JSON.stringify([t.calls, t03State(t.after[0])]));
+
+  // «отправляется» (a sender that died) follows the same rule.
+  t = t03Setup([t03One({ status: T03_SENDING, time: T03_TIME })]);
+  t04Go(t, 59);
+  const sending59 = t.calls.length === 0;
+  t04Go(t, 60);
+  check('93/04 D: a row left «отправляется» is retried by the same 60-min rule',
+    sending59 && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(60), t04Text(60) + ' автоотправка'), JSON.stringify(t03State(t.after[0])));
+
+  // A failed retry stays an error with the new time (the next retry is 60 min after THAT).
+  t = t03Setup([t03One({ status: T03_ERR, answer: 'КАН недоступен', time: T03_TIME })], { preview: 'http500' });
+  t04Go(t, 60);
+  const failedAt60 = t04Is(t.after[0], T03_ERR, 'КАН недоступен', t04Text(60), '') && t.res.failed === 1;
+  const again = t.after;
+  t04Go(t, 119);
+  check('93/04 D: a retry that fails writes «ошибка» with the new time, and the next attempt is 60 min after that one (nothing at +59 from it)',
+    failedAt60 && t.calls.length === 0 && t03Canon(t.after) === t03Canon(again), JSON.stringify(t03State(t.after[0])));
+
+  // The time may be a Date cell (Sheets) or junk typed by hand.
+  const withDateCell = (minutes) => {
+    const setup = t03Setup([]);
+    const cell = new setup.h.FakeDate(Date.parse(t04Iso(minutes)));
+    setup.h.setOzonCostSheet([t03One({ status: T03_ERR, answer: 'КАН недоступен', time: cell })], setup.h.OZON_COST_HEADERS.concat(setup.h.OZON_COST_KAN_HEADERS));
+    return setup;
+  };
+  t = withDateCell(-61);
+  t04Go(t, 0);
+  check('93/04 D: a Date cell in «Время КАН» is read as text: 61 min old means due',
+    t.calls.length === 4 && t.after[0]['Статус КАН'] === T03_OK, JSON.stringify([t.calls, t03State(t.after[0])]));
+  t = withDateCell(-59);
+  t04Go(t, 0);
+  check('93/04 D: a Date cell 59 min old is not due',
+    t.calls.length === 0 && t.after[0]['Статус КАН'] === T03_ERR, JSON.stringify([t.calls, t03State(t.after[0])]));
+  t = t03Setup([t03One({ status: T03_ERR, answer: 'КАН недоступен', time: 'вчера вечером' })]);
+  t04Go(t, 0);
+  check('93/04 D: a time that is not yyyy-MM-dd HH:mm:ss counts as old, so the row is sent',
+    t.calls.length === 4 && t.after[0]['Статус КАН'] === T03_OK, JSON.stringify([t.calls, t03State(t.after[0])]));
+
+  // Accepted and CSV-stamped rows are never touched, however old.
+  t = t03Setup([t03One({ status: T03_OK, answer: 'КАН принял 233,67', time: '2026-10-01 10:00:00', exported: T03_OLD_STAMP }),
+    t03Row(T03_DAY, 'MaxiStore', 'ART-L', 40, 'op-l', { exported: T03_OLD_STAMP })]);
+  const old = t04Sheet(t);
+  t04Go(t, 0);
+  t04Go(t, 24 * 60);
+  check('93/04 D: accepted rows and legacy CSV-stamped rows are never touched — no request, nothing written, not even a first-seen time',
+    t.calls.length === 0 && t04Sheet(t) === old && t.res.idle === true, JSON.stringify(t.calls));
+})();
+
+(function test93s04Fresh() {
+  // A row nobody has seen: the first run writes ONLY the time, on the LAST row of the group, and asks KAN nothing.
+  let t = t03Setup([t03Row(T03_DAY, 'MaxiStore', 'ART-C', 231, 'op-1'), t03Row(T03_DAY, 'MaxiStore', 'ART-C', 233.67, 'op-2')]);
+  const before = t.h.dumpOzonCostFull();
+  t04Go(t, 0);
+  check('93/04 E: an unsent row without a time gets the first-seen time on the LAST row of its group only (status and answer empty), and KAN is not asked',
+    t.calls.length === 0 && t04Is(t.after[0], '', '', '', '') && t04Is(t.after[1], '', '', t04Text(0), '') && t.res.firstSeen === 1
+      && t.after.every((r, i) => t03Fixed(r) === t03Fixed(before[i])), JSON.stringify([t.calls, t.after.map(t03State)]));
+  const seen = t04Sheet(t);
+  const locks = t.h.lockRequests();
+  t04Go(t, 4);
+  check('93/04 E: 4 min after the first-seen time nothing happens (no request, no write, no lock)',
+    t.calls.length === 0 && t04Sheet(t) === seen && t.h.lockRequests() === locks, JSON.stringify(t.calls));
+  t04Go(t, 5);
+  check('93/04 E: 5 min after the first-seen time the group is sent and accepted («автоотправка»); both rows get the status',
+    t.calls.join() === 'list_shops,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t.after.every((r) => t04Is(r, T03_OK, 'КАН принял 233,67', t04Text(5), t04Text(5) + ' автоотправка')), JSON.stringify(t.after.map(t03State)));
+
+  // A row with a time that is already old goes at once; the browser's own send never waits.
+  t = t03Setup([t03One({ status: '', time: t04Text(-10) })]);
+  t04Go(t, 0);
+  check('93/04 E: an unsent row whose time is 10 min old is sent at once',
+    t.calls.length === 4 && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(0), t04Text(0) + ' автоотправка'), JSON.stringify([t.calls, t03State(t.after[0])]));
+  t = t03Run([t03One({ status: T03_ERR, answer: 'КАН недоступен', time: T03_TIME })]);
+  check('93/04 E: the browser\'s send ignores the age — a fresh «ошибка» row is sent at once and stamped with the user name',
+    t.res.accepted.length === 1 && t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester'), JSON.stringify(t.res));
+
+  // A deletion group (the last row is a drop marker) is looked at the same way.
+  t = t03Setup([t03Row(T03_DAY, 'MaxiStore', 'ART-D', 90, 'op-d'), t03Marker(T03_DAY, 'ART-D', 'op-d')], { entries: { 2771: [{ article: 'ART-D', date: T03_DAY, cost: 90 }] } });
+  t04Go(t, 0);
+  const deleteSeen = t.calls.length === 0 && t04Is(t.after[1], '', '', t04Text(0), '') && t04Is(t.after[0], '', '', '', '');
+  t04Go(t, 5);
+  check('93/04 E: a deletion group gets the first-seen time on its marker row, and 5 min later KAN\'s entry is deleted',
+    deleteSeen && t.kan.entries(2771).length === 0 && t.after.every((r) => r['Статус КАН'] === T03_OK && r['Выгружено в КАН'] === ''), JSON.stringify(t.after.map(t03State)));
+})();
+
+(function test93s04Lease() {
+  const lease = (h) => h.getScriptProperty('kan_costSenderUntil');
+  const due = () => [t03One({ status: T03_ERR, answer: 'КАН недоступен', time: '2026-10-14 11:00:00' })];
+  // Another sender is running: due work waits, nothing is asked or written, the lease stays.
+  let t = t03Setup(due());
+  const live = String(Date.parse(T03_NOW) + 300000);
+  t.h.setScriptProperty('kan_costSenderUntil', live);
+  let frozen = t04Sheet(t);
+  t04Go(t, 0);
+  check('93/04 F: while a sender holds the lease the watch returns busy without a request or a write, and the lease stays',
+    t.res.busy === true && t.res.message === 'уже отправляется' && t.calls.length === 0 && t04Sheet(t) === frozen && lease(t.h) === live, JSON.stringify(t.res));
+  t = t03Setup(due());
+  t.h.setScriptLockBusy(true);
+  frozen = t04Sheet(t);
+  t04Go(t, 0);
+  check('93/04 F: when the table lock cannot be taken the watch returns busy «таблица занята, отправка позже» and leaves no lease',
+    t.res.busy === true && t.res.message === 'таблица занята, отправка позже' && t.calls.length === 0 && t04Sheet(t) === frozen && lease(t.h) === null, JSON.stringify(t.res));
+  // An idle run never asks for the lease: a live lease changes nothing.
+  t = t03Setup([t04Manual()]);
+  t.h.setScriptProperty('kan_costSenderUntil', live);
+  t04Go(t, 5);
+  check('93/04 F: with no due work the watch returns idle even while another sender holds the lease', t.res.idle === true && t.res.busy === false && lease(t.h) === live, JSON.stringify(t.res));
+
+  // A normal run frees the lease and the lock and asks KAN outside any script lock.
+  t = t03Setup(due());
+  t04Go(t, 0);
+  check('93/04 F: a run frees the lease and the lock, makes no request under a script lock and never takes a lock twice',
+    lease(t.h) === null && !t.h.isScriptLockHeld() && t.h.fetchesWhileLocked() === 0 && t.h.nestedLockTakes() === 0 && t.res.accepted === 1, JSON.stringify(t.res));
+
+  // The watch NEVER throws (a throwing trigger mails the owner on every run): the summary carries the error, one line
+  // is logged, and the lease and the lock are still freed.
+  const odd = ['Статус КАН', 'Время КАН', 'Ответ КАН'];
+  t = t03Setup([t03One()]);
+  t.h.setOzonCostSheet([t03One()], t.h.OZON_COST_HEADERS.concat(odd));
+  let thrown = '';
+  let summary = null;
+  try { summary = t.h.kanCostWatch(); } catch (e) { thrown = String(e.message || e); }
+  const errorLines = t.h.logs.filter((l) => l.indexOf('kanCostWatch: error') === 0);
+  check('93/04 F: when the run fails inside (status columns out of order) the watch does not throw: the summary carries the Russian error, one line is logged, KAN was not asked, the lease and the lock are freed',
+    thrown === '' && summary && summary.error.indexOf('должны идти подряд') !== -1 && summary.idle === false && summary.busy === false
+      && errorLines.length === 1 && errorLines[0].indexOf('должны идти подряд') !== -1
+      && t.h.fetchLog.length === 0 && lease(t.h) === null && !t.h.isScriptLockHeld(),
+    JSON.stringify([thrown, summary, errorLines]));
+  // A failure BEFORE the lease (the sheet cannot be read) does not throw either and takes no lease.
+  t = t03Setup([t03One()]);
+  t.h.getRegistrySheet('Себестоимость Озон').getDataRange = function () { throw new Error('Service Spreadsheets timed out'); };
+  thrown = '';
+  summary = null;
+  try { summary = t.h.kanCostWatch(); } catch (e) { thrown = String(e.message || e); }
+  check('93/04 F: a failure before the lease (the journal cannot be read) does not throw: the summary carries the message and no lease was taken',
+    thrown === '' && summary && summary.error === 'Service Spreadsheets timed out' && lease(t.h) === null && t.h.fetchLog.length === 0
+      && t.h.logs.filter((l) => l.indexOf('kanCostWatch: error') === 0).length === 1,
+    JSON.stringify([thrown, summary]));
+  // The lease cannot be released (Script Properties down): the run still ends normally, the error is in the summary.
+  t = t03Setup(due());
+  t.h.context.releaseKanCostLease = function () { throw new Error('Service Properties failed'); };
+  thrown = '';
+  summary = null;
+  try { summary = t.h.kanCostWatch(); } catch (e) { thrown = String(e.message || e); }
+  check('93/04 F: a lease that cannot be released does not make the watch throw; the work done stays in the summary, the error is added',
+    thrown === '' && summary && summary.accepted === 1 && summary.error === 'Service Properties failed', JSON.stringify([thrown, summary]));
+  // A clean run has an empty error field.
+  t = t03Setup(due());
+  t04Go(t, 0);
+  check('93/04 F: a clean run and an idle run report an empty error', t.res.error === '' && t.res.accepted === 1, JSON.stringify(t.res));
+
+  // All three jobs in one run: first-seen (no request), the manual check, the retry — in that order.
+  const manual = { status: T04_MANUAL, answer: T04_WAIT, time: T03_TIME };
+  t = t03Setup([t03One(manual), t03Row(T03_DAY, 'MaxiStore', 'ART-E', 40, 'op-e', { status: T03_ERR, answer: 'КАН недоступен', time: '2026-10-14 11:00:00' }), t03Row(T03_DAY, 'MaxiStore', 'ART-U', 55, 'op-u')]);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04Go(t, 15);
+  check('93/04 F: one run does all three jobs — the manual row is accepted by hand, the error row is re-sent, the unseen row only gets its time; KAN is never asked about the unseen one',
+    t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(15), t04Text(15) + T04_BY_HAND)
+      && t04Is(t.after[1], T03_OK, 'КАН принял 40,00', t04Text(15), t04Text(15) + ' автоотправка') && t04Is(t.after[2], '', '', t04Text(15), '')
+      && t.calls.join() === 'list_shops,get_product_costs,list_shops,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t03Args(t.h, 'preview_product_cost_changes').every((a) => a.rows.length === 1 && a.rows[0].sku_article === 'ART-E')
+      && t.res.firstSeen === 1 && t.res.manualAccepted === 1 && t.res.manualMissed === 0 && t.res.accepted === 1 && t.res.failed === 0,
+    JSON.stringify([t.calls, t.after.map(t03State), t.res]));
+})();
+
+(function test93s04Switch() {
+  // The matrix: switched = pending groups ('' unstamped, «отправляется», «ошибка») and «вручную» ones with a good date and cost.
+  const row = (date, cab, art, cost, opId, extra) => t03Row(date, cab, art, cost, opId, extra);
+  const matrix = () => [
+    row(T03_DAY, 'MaxiStore', 'ART-A', 100, 'op-a1'),                                                                   // row 2  \ one group, last figure 110
+    row(T03_DAY, 'MaxiStore', 'ART-A', 110, 'op-a2'),                                                                   // row 3  /
+    row(T03_DAY, 'MaxiStore', 'ART-B', 50, 'op-b', { status: T03_ERR, answer: 'КАН недоступен', time: '2026-10-13 09:00:00' }),    // row 4
+    row(T03_DAY, 'MaxiStore', 'ART-C', 60, 'op-c', { status: T03_SENDING, time: '2026-10-13 09:00:00' }),                          // row 5
+    row(T03_DAY, 'MaxiStore', 'ART-D', 70, 'op-d', { status: T04_MANUAL, answer: T04_WAIT, time: '2026-10-14 12:00:00' }),        // row 6
+    row(T03_DAY, 'MaxiStore', 'ART-E', 80, 'op-e', { status: T03_OK, answer: 'КАН принял 80,00', time: '2026-10-13 09:00:00', exported: T03_OLD_STAMP }), // row 7
+    row(T03_DAY, 'MaxiStore', 'ART-F', 90, 'op-f', { exported: T03_OLD_STAMP }),                                         // row 8: CSV-stamped, no status
+    row(T03_DAY, 'MaxiStore', 'ART-G', 120, 'op-g'),                                                                    // row 9  \ the last row is a drop marker
+    t03Marker(T03_DAY, 'ART-G', 'op-g'),                                                                               // row 10 /
+    row('13.10.2026', 'MaxiStore', 'ART-H', 30, 'op-h'),                                                                // row 11: not an ISO date
+    row(T03_DAY, 'MaxiStore', 'ART-I', 0, 'op-i'),                                                                      // row 12: zero cost
+    row(T03_DAY, 'Mercurius', 'ART-J', 85, 'op-j')                                                                      // row 13
+  ];
+  const exportRow = (n, art, cost, opId, cab) => ({ row: n, date: T03_DAY, cabinet: cab || 'MaxiStore', article: art, sku: 'S-' + art, cost: cost, opId: opId, source: 'отгрузка' });
+
+  let t = t03Setup(matrix());
+  const before = t.h.dumpOzonCostFull();
+  const res = t.h.switchOzonCostToManual('tester');
+  const after = t.h.dumpOzonCostFull();
+  const switchedRows = [2, 3, 4, 5, 6, 13];
+  check('93/04 G: the answer lists the LAST row of each switched group in the export shape and journal order, with the counts',
+    t03Canon(res) === t03Canon({ busy: false, message: '', switched: 5, notWritten: 0, rows: [
+      exportRow(3, 'ART-A', 110, 'op-a2'), exportRow(4, 'ART-B', 50, 'op-b'), exportRow(5, 'ART-C', 60, 'op-c'), exportRow(6, 'ART-D', 70, 'op-d'), exportRow(13, 'ART-J', 85, 'op-j', 'Mercurius')] }),
+    JSON.stringify(res));
+  check('93/04 G: EVERY row of a switched group is «вручную» / «ждём файл в КАН» / now — the whole of an unsent group, an «ошибка», a «отправляется», a re-switched «вручную» and a second cabinet',
+    switchedRows.every((n) => t04Is(after[n - 2], T04_MANUAL, T04_WAIT, T03_TIME, '')), JSON.stringify(switchedRows.map((n) => t03State(after[n - 2]))));
+  check('93/04 G: «Выгружено в КАН» is NOT set on any switched row, and columns 1-12 of every row are byte for byte',
+    switchedRows.every((n) => after[n - 2]['Выгружено в КАН'] === '') && after.every((r, i) => t03Fixed(r) === t03Fixed(before[i])), JSON.stringify(after.map(t03State)));
+  check('93/04 G: accepted, CSV-stamped, drop-marker (deletion), bad-date and zero-cost groups are left exactly as they were',
+    [7, 8, 9, 10, 11, 12].every((n) => t03Canon(after[n - 2]) === t03Canon(before[n - 2])), JSON.stringify([7, 8, 9, 10, 11, 12].map((n) => t03State(after[n - 2]))));
+  check('93/04 G: switching asks KAN nothing and leaves no lease behind',
+    t.h.fetchLog.length === 0 && t.h.getScriptProperty('kan_costSenderUntil') === null && !t.h.isScriptLockHeld() && t.h.nestedLockTakes() === 0, String(t.h.fetchLog.length));
+
+  // A re-switch restarts the 15-min timer.
+  t = t03Setup([t04Manual()]);
+  t.h.setNow(t04Iso(10));
+  const again = t.h.switchOzonCostToManual('tester');
+  const restamped = t04Is(t.h.dumpOzonCostFull()[0], T04_MANUAL, T04_WAIT, t04Text(10), '') && again.switched === 1;
+  t04Go(t, 24);
+  const quiet = t.calls.length === 0;
+  t04Go(t, 25);
+  check('93/04 G: a re-switch of a «вручную» group resets its time — 14 min after it the watch is quiet, 15 min after it KAN is read',
+    restamped && quiet && t.calls.join() === T04_LOOKUP, JSON.stringify([restamped, quiet, t.calls]));
+
+  // The sender no longer touches a switched group, but the watch will.
+  t = t03Setup([t03One()]);
+  t.h.switchOzonCostToManual('tester');
+  const skipped = t.h.sendOzonCostToKan('tester');
+  check('93/04 G: after the switch the browser sender skips the group (counted in skippedManual) and sends nothing',
+    skipped.skippedManual === 1 && skipped.accepted.length === 0 && t.h.fetchLog.length === 0, JSON.stringify(skipped));
+
+  // Another sender holds the lease: refused, nothing written.
+  t = t03Setup([t03One()]);
+  const live = String(Date.parse(T03_NOW) + 300000);
+  t.h.setScriptProperty('kan_costSenderUntil', live);
+  const frozen = t04Sheet(t);
+  const busy = t.h.switchOzonCostToManual('tester');
+  check('93/04 G: while a sender holds the lease the switch answers busy «уже отправляется» with no rows, and writes nothing',
+    t03Canon(busy) === t03Canon({ busy: true, message: 'уже отправляется', rows: [], switched: 0, notWritten: 0 }) && t04Sheet(t) === frozen && t.h.getScriptProperty('kan_costSenderUntil') === live,
+    JSON.stringify(busy));
+
+  // A row changed under us between the read and the write: that group is not switched and not returned.
+  t = t03Setup([t03Row(T03_DAY, 'MaxiStore', 'ART-A', 100, 'op-a'), t03Row(T03_DAY, 'MaxiStore', 'ART-B', 50, 'op-b')]);
+  const sheet = t.h.getRegistrySheet('Себестоимость Озон');
+  const realGet = sheet.getDataRange;
+  let reads = 0;
+  sheet.getDataRange = function () {
+    const range = realGet.call(sheet);
+    if (++reads === 1) {
+      const getValues = range.getValues;
+      range.getValues = function () { const values = getValues.call(range); sheet.getRange(2, 9).setValue(240); return values; };
+    }
+    return range;
+  };
+  const moved = t.h.switchOzonCostToManual('tester');
+  const afterMoved = t.h.dumpOzonCostFull();
+  check('93/04 G: a group whose row changed between the read and the write is not switched and not returned (notWritten 1); the other group is switched',
+    moved.switched === 1 && moved.notWritten === 1 && moved.rows.length === 1 && moved.rows[0].article === 'ART-B'
+      && t04Is(afterMoved[0], '', '', '', '') && afterMoved[0]['Себестоимость после'] === 240 && t04Is(afterMoved[1], T04_MANUAL, T04_WAIT, T03_TIME, ''),
+    JSON.stringify([moved, afterMoved.map(t03State)]));
+})();
+
+(function test93s04DoPostAndTrigger() {
+  const withSessions = (t) => t.h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+    ['tok-user', 'Кладовщик', 'user', String(Date.parse('2030-01-01T00:00:00Z'))], ['tok-admin', 'boss', 'admin', String(Date.parse('2030-01-01T00:00:00Z'))]]);
+  let t = t03Setup([t03One()]);
+  withSessions(t);
+  let frozen = t04Sheet(t);
+  let out = t.h.callDoPost({ action: 'switchOzonCostToManual', sessionToken: 'tok-admin', devMode: true });
+  check('93/04 H: in dev mode doPost refuses the switch with the Russian message and writes nothing',
+    out.status === 'error' && out.message.indexOf('недоступно в режиме разработки') !== -1 && t04Sheet(t) === frozen, JSON.stringify(out));
+  t.h.vm.runInContext('_devModeSpreadsheet = ({})', t.h.context);
+  let direct = '';
+  try { t.h.switchOzonCostToManual('boss'); } catch (e) { direct = String(e.message || e); }
+  t.h.vm.runInContext('_devModeSpreadsheet = null', t.h.context);
+  check('93/04 H: the switch itself refuses too when the dev-mode spreadsheet is set, and takes no lease',
+    direct.indexOf('недоступно в режиме разработки') !== -1 && t04Sheet(t) === frozen && t.h.getScriptProperty('kan_costSenderUntil') === null, direct);
+
+  t = t03Setup([t03One()]);
+  withSessions(t);
+  out = t.h.callDoPost({ action: 'switchOzonCostToManual', sessionToken: 'tok-user' });
+  check('93/04 H: a signed-in user\'s call returns success with the switched rows, outside the global lock (no 10 s waitLock)',
+    out.status === 'success' && out.data.switched === 1 && out.data.rows.length === 1 && out.data.rows[0].article === 'ART-C' && out.data.rows[0].cost === 233.67
+      && t.h.waitLockTimeouts().indexOf(10000) === -1 && t04Is(t.h.dumpOzonCostFull()[0], T04_MANUAL, T04_WAIT, T03_TIME, ''),
+    JSON.stringify([out.status, out.data, t.h.waitLockTimeouts()]));
+  t = t03Setup([t03One()]);
+  withSessions(t);
+  frozen = t04Sheet(t);
+  out = t.h.callDoPost({ action: 'switchOzonCostToManual', sessionToken: 'nobody' });
+  check('93/04 H: without a valid session nothing is switched', out.status === 'error' && t04Sheet(t) === frozen, JSON.stringify(out));
+
+  // The trigger: one «kanCostWatch» every 15 minutes, whatever was there before; other triggers stay.
+  const h = freshHarness();
+  h.context.ScriptApp.newTrigger('unrelatedJob').timeBased().everyMinutes(30).create();
+  h.context.ScriptApp.newTrigger('kanCostWatch').timeBased().everyMinutes(5).create();
+  h.setupKanCostWatchTrigger();
+  h.setupKanCostWatchTrigger();
+  check('93/04 H: installing the trigger twice leaves ONE kanCostWatch trigger of 15 minutes (the old one is replaced) and keeps the unrelated trigger',
+    t03Canon(h.scriptTriggers()) === t03Canon([{ handler: 'unrelatedJob', kind: 'time', minutes: 30 }, { handler: 'kanCostWatch', kind: 'time', minutes: 15 }]),
+    JSON.stringify(h.scriptTriggers()));
+  const idle = t03Setup([t03One({ status: T03_OK, answer: 'КАН принял 233,67', time: T03_TIME, exported: T03_OLD_STAMP })]);
+  t04Go(idle, 0);
+  check('93/04 H: a run logs one line and returns the summary', idle.h.logs.filter((l) => l.indexOf('kanCostWatch') === 0).length === 1 && idle.res.idle === true,
+    JSON.stringify(idle.h.logs));
+})();
+
+// Item 93 ticket 04, second pass (independent QA): old sheets, the shop lookup of the manual check, a journal
+// that moves under the manual check, a correction appended to a «вручную» group, groups KAN cannot be asked
+// about, and the two whole paths of the owner (the file lands in KAN / nothing lands).
+(function test93s04Gaps() {
+  const manual = { status: T04_MANUAL, answer: T04_WAIT, time: T03_TIME };
+  const ALL_HEADERS = (h) => h.OZON_COST_HEADERS.concat(h.OZON_COST_KAN_HEADERS).join('|');
+
+  // ---- An old journal sheet with the 12 columns only ----
+  let t = t03Setup([t03One()], null, true);
+  let before = t.h.dumpOzonCostFull();
+  t04Go(t, 0);
+  check('93/04 I: on an old 12-column sheet the watch adds the three KAN columns and gives the last row its first-seen time, asking KAN nothing',
+    Object.keys(t.after[0]).join('|') === ALL_HEADERS(t.h) && t04Is(t.after[0], '', '', t04Text(0), '') && t03Fixed(t.after[0]) === t03Fixed(before[0])
+      && t.calls.length === 0 && t.res.firstSeen === 1,
+    JSON.stringify([Object.keys(t.after[0]), t03State(t.after[0]), t.calls]));
+  t04Go(t, 5);
+  check('93/04 I: on that upgraded sheet the next watch run 5 min later sends the row and it is accepted',
+    t.calls.length === 4 && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(5), t04Text(5) + ' автоотправка'), JSON.stringify([t.calls, t03State(t.after[0])]));
+
+  t = t03Setup([t03One(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m')], null, true);
+  before = t.h.dumpOzonCostFull();
+  const res = t.h.switchOzonCostToManual('tester');
+  const after = t.h.dumpOzonCostFull();
+  check('93/04 I: on an old 12-column sheet the switch adds the three KAN columns first, then switches both groups (not stamped, columns 1-12 byte for byte)',
+    res.switched === 2 && res.notWritten === 0 && Object.keys(after[0]).join('|') === ALL_HEADERS(t.h)
+      && after.every((r, i) => t04Is(r, T04_MANUAL, T04_WAIT, T03_TIME, '') && t03Fixed(r) === t03Fixed(before[i])),
+    JSON.stringify([res, after.map(t03State)]));
+
+  // ---- The shop lookup of the manual check: Wildberries is not an Ozon cabinet, two Ozon shops of one name are never guessed ----
+  t = t03Setup([t04Manual()], { shops: [
+    { id: 999, name: 'MaxiStore', marketplace: 'wildberries', is_active: true },
+    { id: 2771, name: 'MaxiStore', marketplace: 'ozon', is_active: true }] });
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04Go(t, 15);
+  check('93/04 J: a Wildberries shop with the cabinet\'s name is ignored by the manual check — the read goes to the Ozon shop only and the figure is found',
+    t.calls.join() === T04_LOOKUP && t03Canon(t03Args(t.h, 'get_product_costs')) === t03Canon([T04_READ])
+      && t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(15), t04Text(15) + T04_BY_HAND),
+    JSON.stringify([t.calls, t03Args(t.h, 'get_product_costs'), t03State(t.after[0])]));
+
+  t = t03Setup([t04Manual()], { shops: [
+    { id: 2771, name: 'MaxiStore', marketplace: 'ozon', is_active: true },
+    { id: 3000, name: 'MaxiStore', marketplace: 'ozon', is_active: true }] });
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  const twinFrozen = t04Sheet(t);
+  t04Go(t, 15);
+  const twin15 = t.calls.join() === 'list_shops' && t04Sheet(t) === twinFrozen;
+  t04Go(t, 60);
+  check('93/04 J: two Ozon shops with the cabinet\'s name are never guessed between — no read at all, even when one of them holds the figure; at 60 min «ошибка» / «в КАН не найдено»',
+    twin15 && t.calls.join() === 'list_shops' && t04Is(t.after[0], T03_ERR, 'в КАН не найдено', t04Text(60), ''),
+    JSON.stringify([twin15, t.calls, t03State(t.after[0])]));
+
+  // The journal lists the later day first (a correction of an older day is appended after it): the read still spans min..max.
+  t = t03Setup([t04Manual(), t03Row('2026-10-10', 'MaxiStore', 'ART-C', 210.5, 'op-0', manual)]);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04KanHolds(t, 2771, 'ART-C', '2026-10-10', 210.5);
+  t04Go(t, 15);
+  check('93/04 J: the read of a shop spans its earliest to its latest day whatever the order of the groups in the journal (later day listed first), and both groups are found',
+    t03Canon(t03Args(t.h, 'get_product_costs')) === t03Canon([{ shop_id: [2771], date__gte: '2026-10-10', date__lte: T03_DAY, limit: 1000, offset: 0 }])
+      && t.res.manualAccepted === 2 && t.after.every((r) => r['Статус КАН'] === T03_OK),
+    JSON.stringify([t03Args(t.h, 'get_product_costs'), t.after.map(t03State)]));
+
+  // ---- Groups KAN cannot be asked about are left for a person: no request, no write ----
+  const marker = (date, art, opId) => t03Marker(date, art, opId).concat([T04_MANUAL, T04_WAIT, T03_TIME]);
+  t = t03Setup([
+    t03Row('13.10.2026', 'MaxiStore', 'ART-H', 30, 'op-h', manual),
+    t03Row(T03_DAY, 'MaxiStore', 'ART-I', 0, 'op-i', manual),
+    t03Row(T03_DAY, 'MaxiStore', 'ART-D', 90, 'op-d', manual),
+    marker(T03_DAY, 'ART-D', 'op-d')]);
+  const unaskable = t04Sheet(t);
+  t04Go(t, 60);
+  t04Go(t, 600);
+  check('93/04 K: a «вручную» group with a bad date, a zero figure or a deletion marker as its last row is never looked up in KAN — no request, nothing written, idle',
+    t.calls.length === 0 && t04Sheet(t) === unaskable && t.res.idle === true && t.h.fetchLog.length === 0, JSON.stringify([t.calls, t.res]));
+
+  // ---- The journal moves under the manual check (the row is edited while KAN is being read) ----
+  const moveRow2 = (name, args) => {
+    if (name === 'get_product_costs' && args.shop_id[0] === 2771 && !moveRow2.done) {
+      moveRow2.done = true;
+      t.h.getRegistrySheet('Себестоимость Озон').getRange(2, 9).setValue(240);
+    }
+  };
+  moveRow2.done = false;
+  t = t03Setup([t04Manual(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m', manual)], { onCall: (name, args) => moveRow2(name, args) });
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04KanHolds(t, 1765, 'ART-M', T03_DAY, 85);
+  t04Go(t, 15);
+  check('93/04 L: a found group whose row the journal moved between the read and the write is not accepted and not counted; the other group is accepted',
+    t.res.manualAccepted === 1 && t.res.manualMissed === 0 && t.after[0]['Себестоимость после'] === 240 && t04Is(t.after[0], T04_MANUAL, T04_WAIT, T03_TIME, '')
+      && t04Is(t.after[1], T03_OK, 'КАН принял 85,00 (загружено вручную)', t04Text(15), t04Text(15) + T04_BY_HAND),
+    JSON.stringify([t.res, t.after.map(t03State)]));
+  t04Go(t, 30);
+  check('93/04 L: the moved row is judged by its NEW figure on the next run (KAN holds 233.67, the journal says 240 — still «вручную»)',
+    t04Is(t.after[0], T04_MANUAL, T04_WAIT, T03_TIME, '') && t.res.manualAccepted === 0, JSON.stringify(t03State(t.after[0])));
+
+  moveRow2.done = false;
+  t = t03Setup([t04Manual(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m', manual)], { onCall: (name, args) => moveRow2(name, args) });
+  t04KanHolds(t, 1765, 'ART-M', T03_DAY, 85);
+  t04Go(t, 60);
+  check('93/04 L: a missed group (60 min) whose row the journal moved meanwhile is not turned into «ошибка» and not counted as missed; the other group is accepted',
+    t.res.manualMissed === 0 && t.res.manualAccepted === 1 && t04Is(t.after[0], T04_MANUAL, T04_WAIT, T03_TIME, '') && t.after[0]['Себестоимость после'] === 240
+      && t.after[1]['Статус КАН'] === T03_OK, JSON.stringify([t.res, t.after.map(t03State)]));
+
+  // ---- A new correction row appended to a «вручную» group: the group leaves manual and is handled as unsent ----
+  const correction = [t03Row(T03_DAY, 'MaxiStore', 'ART-C', 231, 'op-1', manual), t03Row(T03_DAY, 'MaxiStore', 'ART-C', 233.67, 'op-2')];
+  t = t03Setup(correction);
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04Go(t, 15);
+  check('93/04 M: a correction row (no status) appended to a «вручную» group takes the group out of manual — KAN is not asked, the old row stays «вручную», only the new last row gets its first-seen time',
+    t.calls.length === 0 && t04Is(t.after[0], T04_MANUAL, T04_WAIT, T03_TIME, '') && t04Is(t.after[1], '', '', t04Text(15), '') && t.res.firstSeen === 1 && t.res.manualAccepted === 0,
+    JSON.stringify([t.calls, t.after.map(t03State), t.res]));
+  t04Go(t, 19);
+  const correction19 = t.calls.length === 0;
+  t04Go(t, 20);
+  check('93/04 M: 5 min after that the whole group is sent by the normal sender and both rows end «принято» with the «автоотправка» stamp',
+    correction19 && t.calls.join() === 'list_shops,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t.after.every((r) => t04Is(r, T03_OK, 'КАН принял 233,67', t04Text(20), t04Text(20) + ' автоотправка')), JSON.stringify([t.calls, t.after.map(t03State)]));
+  t = t03Setup(correction);
+  const again = t.h.switchOzonCostToManual('tester');
+  const afterAgain = t.h.dumpOzonCostFull();
+  check('93/04 M: pressing «Отправлю сам» again switches the whole group back to «вручную» (both rows) and returns its last row',
+    again.switched === 1 && again.rows.length === 1 && again.rows[0].row === 3 && again.rows[0].cost === 233.67
+      && afterAgain.every((r) => t04Is(r, T04_MANUAL, T04_WAIT, T03_TIME, '')), JSON.stringify([again, afterAgain.map(t03State)]));
+
+  // ---- The whole paths of the owner: the browser send fails, «Отправлю сам», then KAN either gets the file or does not ----
+  const owner = () => {
+    const state = { down: true };
+    const o = t03Setup([t03One()], { onCall: () => { if (state.down) throw new Error('Exception: Timeout: https://kultura-analitiki.ru/mcp/'); } });
+    o.state = state;
+    o.h.setNow(t04Iso(0));
+    o.browser = o.h.sendOzonCostToKan('Кладовщик');
+    o.switched = o.h.switchOzonCostToManual('Кладовщик');
+    o.state.down = false;
+    return o;
+  };
+  t = owner();
+  check('93/04 N: the browser send with KAN down leaves a failed group, and «Отправлю сам» then switches that «ошибка» row and hands back its line for the file (not stamped)',
+    t.browser.failed.length === 1 && t.browser.failed[0].reason === 'КАН недоступен' && t.switched.switched === 1 && t.switched.rows.length === 1
+      && t.switched.rows[0].article === 'ART-C' && t.switched.rows[0].cost === 233.67 && t04Is(t.h.dumpOzonCostFull()[0], T04_MANUAL, T04_WAIT, T03_TIME, ''),
+    JSON.stringify([t.browser, t.switched]));
+  t04KanHolds(t, 2771, 'ART-C', T03_DAY, 233.67);
+  t04Go(t, 14);
+  const wait14 = t.calls.length === 0 && t.res.idle === true;
+  t04Go(t, 15);
+  check('93/04 N: the owner\'s file lands in KAN — the watch 15 min after the switch accepts it with «загружено вручную» and the stamp, and writes nothing to KAN',
+    wait14 && t04Is(t.after[0], T03_OK, 'КАН принял 233,67 (загружено вручную)', t04Text(15), t04Text(15) + T04_BY_HAND) && t.kan.writes === 0 && t.kan.previewCount === 0,
+    JSON.stringify([wait14, t03State(t.after[0]), t.kan.writes]));
+
+  t = owner();
+  [15, 30, 45].forEach((min) => t04Go(t, min));
+  const stillManual = t04Is(t.after[0], T04_MANUAL, T04_WAIT, T03_TIME, '') && t.kan.writes === 0;
+  t04Go(t, 60);
+  const errorAt60 = t04Is(t.after[0], T03_ERR, 'в КАН не найдено', t04Text(60), '');
+  t04Go(t, 119);
+  const quiet119 = t.calls.length === 0;
+  t04Go(t, 120);
+  check('93/04 N: nothing lands in KAN — «вручную» through 45 min, «ошибка» / «в КАН не найдено» at 60, quiet until the hourly retry at 120, which sends the figure through the API and is accepted («автоотправка»)',
+    stillManual && errorAt60 && quiet119 && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(120), t04Text(120) + ' автоотправка')
+      && t.kan.entries(2771).length === 1 && t.kan.entries(2771)[0].cost === 233.67,
+    JSON.stringify([stillManual, errorAt60, quiet119, t03State(t.after[0]), t.kan.entries(2771)]));
+})();
+
+// ---- Item 93 ticket 04, review: «Время КАН» is stored as TEXT, whatever zone the spreadsheet lives in ----
+// The real script zone is Asia/Yekaterinburg; a spreadsheet may carry another zone. Writing '2026-10-14 15:30:00' into
+// a General cell makes Sheets parse it as a date-time, and getValues then returns a Date in the SPREADSHEET's zone,
+// which the reader formats in the SCRIPT zone: every age decision of the watch shifts by the zone difference. The stand
+// switches that behaviour on with setSheetAutoDates(zone); here the sheet is in Yekaterinburg (UTC+5) and the stand's
+// script zone is Moscow (UTC+3), so a Date cell would read 2 hours EARLIER than what was written.
+(function test93s04TimeAsText() {
+  const SHEET_ZONE = 'Asia/Yekaterinburg';
+  const timeColumn = (h) => h.OZON_COST_HEADERS.length + 3;                  // 1-based column of «Время КАН»
+  const cellOf = (t, row, col) => t.h.getRegistrySheet('Себестоимость Озон').__dump()[row - 1][col - 1];
+  const timeCell = (t, row) => cellOf(t, row, timeColumn(t.h));
+  const formatOf = (t, row, col) => t.h.getRegistrySheet('Себестоимость Озон').__getFormat(row, col);
+
+  // The switch at minute 0, the watch at +14 (quiet) and +15 (one look, still «вручную»).
+  let t = t03Setup([t03One()]);
+  t.h.setSheetAutoDates(SHEET_ZONE);
+  t.h.setNow(t04Iso(0));
+  t.h.switchOzonCostToManual();
+  check('93/04 P: on a sheet that turns written times into dates the switch still leaves «Время КАН» as the TEXT of the script zone',
+    timeCell(t, 2) === T03_TIME, typeof timeCell(t, 2) + ' ' + String(timeCell(t, 2)));
+  const frozen = t04Sheet(t);
+  t04Go(t, 14);
+  const quiet14 = t.calls.length === 0 && t.res.idle === true;
+  t04Go(t, 15);
+  check('93/04 P: switched at minute 0, the watch is quiet at +14 and reads KAN once at +15, and the row stays «вручную» (the sheet zone shifts no age)',
+    quiet14 && t.calls.join() === T04_LOOKUP && t04Sheet(t) === frozen && t.res.manualMissed === 0, JSON.stringify([quiet14, t.calls, t03State(t.after[0])]));
+  t04Go(t, 45);
+  check('93/04 P: the row is not given up on before the 60th minute (+45: one more look, still «вручную», nothing written)',
+    t.calls.join() === T04_LOOKUP && t04Sheet(t) === frozen, JSON.stringify([t.calls, t03State(t.after[0])]));
+
+  // An «ошибка» written by a failed send is not retried at +59, and is at +60.
+  const state = { down: true };
+  t = t03Setup([t03One()], { onCall: () => { if (state.down) throw new Error('Exception: Timeout: https://kultura-analitiki.ru/mcp/'); } });
+  t.h.setSheetAutoDates(SHEET_ZONE);
+  t.h.setNow(t04Iso(0));
+  const failed = t.h.sendOzonCostToKan('Кладовщик');
+  check('93/04 P: a send that fails leaves «ошибка» with its time as TEXT on a sheet that turns written times into dates',
+    failed.failed.length === 1 && t03Canon(t03State(t.h.dumpOzonCostFull()[0])) === t03Canon([T03_ERR, 'КАН недоступен', T03_TIME, '']) && timeCell(t, 2) === T03_TIME,
+    JSON.stringify([failed, typeof timeCell(t, 2), t03State(t.h.dumpOzonCostFull()[0])]));
+  state.down = false;
+  t04Go(t, 59);
+  const quiet59 = t.calls.length === 0 && t.res.idle === true;
+  t04Go(t, 60);
+  check('93/04 P: that «ошибка» is not retried at +59 and is sent and accepted at +60 (the retry is not early by the zone difference)',
+    quiet59 && t.calls.join() === 'list_shops,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(60), t04Text(60) + ' автоотправка') && timeCell(t, 2) === t04Text(60),
+    JSON.stringify([quiet59, t.calls, t03State(t.after[0])]));
+
+  // The first-seen time of an unseen row is text as well: 4 min quiet, 5 min sent.
+  t = t03Setup([t03One()]);
+  t.h.setSheetAutoDates(SHEET_ZONE);
+  t04Go(t, 0);
+  const seenAsText = timeCell(t, 2) === T03_TIME;
+  t04Go(t, 4);
+  const quiet4 = t.calls.length === 0;
+  t04Go(t, 5);
+  check('93/04 P: the first-seen time is text too — the unsent row waits 4 min and is sent at 5 min, not at once',
+    seenAsText && quiet4 && t.calls.length === 4 && t04Is(t.after[0], T03_OK, 'КАН принял 233,67', t04Text(5), t04Text(5) + ' автоотправка'), JSON.stringify([seenAsText, quiet4, t.calls]));
+
+  // The time cells carry the text format after a write; other columns do not; the rows of other hands inside the span too.
+  const setup = t03Setup([]);
+  const dateCell = new setup.h.FakeDate(Date.parse('2026-09-02T07:00:00Z'));          // 10:00:00 in the stand's script zone
+  setup.h.setOzonCostSheet([t03One(), t03Row('2026-09-02', 'Mercurius', 'ART-M', 85, 'op-m', { exported: T03_OLD_STAMP, status: T03_OK, answer: 'КАН принял 85,00', time: dateCell }),
+    t03Row(T03_DAY, 'MaxiStore', 'ART-Y', 70, 'op-y')], setup.h.OZON_COST_HEADERS.concat(setup.h.OZON_COST_KAN_HEADERS));
+  setup.h.setSheetAutoDates(SHEET_ZONE);
+  t = setup;
+  const colTime = timeColumn(t.h);
+  check('93/04 P: before any write the time cells have no format (fixture check)', [2, 3, 4].every((n) => formatOf(t, n, colTime) === ''), formatOf(t, 2, colTime));
+  t.h.sendOzonCostToKan('tester');
+  check('93/04 P: after a write the «Время КАН» cells of the whole written block (the rows of other hands inside it too) are formatted as text, and the neighbouring columns are not',
+    [2, 3, 4].every((n) => formatOf(t, n, colTime) === '@') && [2, 3, 4].every((n) => formatOf(t, n, colTime - 1) === '' && formatOf(t, n, colTime - 2) === '' && formatOf(t, n, colTime + 1) === ''),
+    JSON.stringify([2, 3, 4].map((n) => [formatOf(t, n, colTime - 2), formatOf(t, n, colTime - 1), formatOf(t, n, colTime), formatOf(t, n, colTime + 1)])));
+  check('93/04 P: the row of another hand inside the block gets its Date back as TEXT of the same moment («2026-09-02 10:00:00»), not as a Date; its status, answer and stamp are as they were',
+    timeCell(t, 3) === '2026-09-02 10:00:00' && t03Canon([cellOf(t, 3, colTime - 2), cellOf(t, 3, colTime - 1), cellOf(t, 3, 11)]) === t03Canon([T03_OK, 'КАН принял 85,00', T03_OLD_STAMP]),
+    typeof timeCell(t, 3) + ' ' + String(timeCell(t, 3)));
+  check('93/04 P: the times of the two rows of ours are text too («2026-10-14 13:00:00»)',
+    timeCell(t, 2) === T03_TIME && timeCell(t, 4) === T03_TIME, JSON.stringify([timeCell(t, 2), timeCell(t, 4)]));
 })();
 
 // ================= Bulk restore writes columns 11–13 like the single restore (2026-10-14) =================

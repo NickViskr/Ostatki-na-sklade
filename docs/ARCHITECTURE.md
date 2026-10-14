@@ -87,7 +87,9 @@ Sheets of «БД Склад»:
 
 Time triggers (Apps Script, HEAD version): Ozon sync at 05:00 and 17:00 МСК (writes to the DB named
 by Script Property `ozon_autoSyncTarget`, normally `prod`), stock summary at 02:00, monthly
-archive at 03:00, daily analytics at 04:00, session clean-up at 03:00.
+archive at 03:00, daily analytics at 04:00, session clean-up at 03:00. Item 93: the KAN cost watch
+`kanCostWatch` every 15 minutes (installed once by the owner with `setupKanCostWatchTrigger` in the
+editor; it never throws — a failing trigger mails the owner on every run).
 
 ## Two databases
 

@@ -121,6 +121,9 @@ function doPost(e) {
       if (action === 'sendOzonCostToKan') {
         throw new Error('Отправка себестоимости в КАН недоступна в режиме разработки');
       }
+      if (action === 'switchOzonCostToManual') {
+        throw new Error('Переключение на ручную загрузку недоступно в режиме разработки');
+      }
       const testDbId = PropertiesService.getScriptProperties().getProperty('test_dbSpreadsheetId');
       if (!testDbId) {
         throw new Error('Тестовая БД не создана. Настройки → «Создать/обновить тестовую БД»');
@@ -184,6 +187,13 @@ function doPost(e) {
     // user may press the button.
     if (action === 'sendOzonCostToKan') {
       return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: sendOzonCostToKan(currentUser.username) }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // Item 93 ticket 04: «Отправлю сам». It takes the sender lease (a running send holds it for minutes) and its own
+    // short script locks, so it is answered before the global lock too; any signed-in user may press the button.
+    if (action === 'switchOzonCostToManual') {
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: switchOzonCostToManual() }))
         .setMimeType(ContentService.MimeType.JSON);
     }
 
@@ -5820,6 +5830,15 @@ const KAN_COST_BATCH = 200;
 const KAN_COST_LEASE_PROPERTY = 'kan_costSenderUntil';
 // A sender that crashed leaves its lease behind; after this long the lease no longer blocks anyone.
 const KAN_COST_LEASE_MS = 600000;
+// Item 93 ticket 04, the watch trigger (kanCostWatch, every 15 minutes). A row left «ошибка» or «отправляется»
+// is sent again once its last attempt is this old.
+const KAN_COST_RETRY_MS = 3600000;
+// An unsent row waits this long after the watch first saw it, so the browser's own send gets the first chance.
+const KAN_COST_FRESH_MS = 300000;
+// A row switched to «вручную» is looked up in KAN this long after the switch (and on every run after that) ...
+const KAN_COST_MANUAL_CHECK_MS = 900000;
+// ... and when KAN still lacks it this long after the switch, it goes back to «ошибка» (the hourly retry takes it).
+const KAN_COST_MANUAL_GIVE_UP_MS = 3600000;
 
 /** Every row of the journal, oldest first — the order they were written in. */
 function getOzonCostJournal() {
@@ -6170,6 +6189,20 @@ function appendOzonCostForShipment(items, destination, dateStr, opId, username, 
   return { written: rows.length, skipped: skipped };
 }
 
+/** A journal row in the shape of the KAN file rows (getOzonCostExport, and the switch to «вручную» of item 93). */
+function ozonCostExportRow(r) {
+  return {
+    row: r.row,
+    date: r.date,
+    cabinet: r.cabinet,
+    article: r.article,
+    sku: r.sku,
+    cost: r.costAfter,
+    opId: r.opId,
+    source: r.source
+  };
+}
+
 /**
  * Item 47, stage 3: the rows the «Себестоимость КАН» button has to put into the file.
  *
@@ -6190,18 +6223,7 @@ function appendOzonCostForShipment(items, destination, dateStr, opId, username, 
  */
 function getOzonCostExport() {
   const journal = getOzonCostJournal();
-  const asRow = function(r) {
-    return {
-      row: r.row,
-      date: r.date,
-      cabinet: r.cabinet,
-      article: r.article,
-      sku: r.sku,
-      cost: r.costAfter,
-      opId: r.opId,
-      source: r.source
-    };
-  };
+  const asRow = ozonCostExportRow;
 
   // Item 93: a drop marker is never a cost, and a (cabinet, article, date) whose LAST journal row
   // is a marker has no supply left on that day: its earlier rows are left out of the file too
@@ -6332,15 +6354,46 @@ function releaseKanCostLease(token) {
   if (props.getProperty(KAN_COST_LEASE_PROPERTY) === String(token)) props.deleteProperty(KAN_COST_LEASE_PROPERTY);
 }
 
+// «Время КАН» is written by kanCostNow(): text in the script zone, so two of them compare as text.
+const KAN_COST_TIME_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/** The text a «Время КАН» must not be later than to be at least `ageMs` old at `nowMs`. */
+function kanCostCutoff(nowMs, ageMs) {
+  return Utilities.formatDate(new Date(nowMs - ageMs), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+}
+
+/** The cut-offs the watch trigger works with at `nowMs`: { retry, fresh, manualCheck, manualGiveUp }. */
+function kanCostCutoffs(nowMs) {
+  return {
+    retry: kanCostCutoff(nowMs, KAN_COST_RETRY_MS),
+    fresh: kanCostCutoff(nowMs, KAN_COST_FRESH_MS),
+    manualCheck: kanCostCutoff(nowMs, KAN_COST_MANUAL_CHECK_MS),
+    manualGiveUp: kanCostCutoff(nowMs, KAN_COST_MANUAL_GIVE_UP_MS)
+  };
+}
+
+/** True when the «Время КАН» text is at or before the cut-off. A time nobody can read (typed by hand) counts as old. */
+function kanCostIsOlder(time, cutoff) {
+  const text = String(time || '');
+  return !KAN_COST_TIME_PATTERN.test(text) || text <= cutoff;
+}
+
 /**
  * Journal rows -> the groups the sender has to push. Pure.
- * Returns { pending: [group], skippedManual }. A group is { cabinet, article, date, rows, action
- * ('upsert' | 'delete'), cost (null for a delete), opIds, lastStatus }.
+ * Returns { pending, skippedManual, unseen, manual }, each list of groups. A group is { cabinet, article, date,
+ * rows, lastStatus, lastTime } and, in `pending` and `manual`, also { action ('upsert' | 'delete'), cost (null for
+ * a delete), opIds }.
  * Pending = the group's last row has no status, or «отправляется» (a sender died) or «ошибка» —
  * except an empty status with a «Выгружено в КАН» stamp: that row reached KAN through the CSV.
- * «вручную» is counted and left alone; any other status text is neither sent nor counted.
+ * «вручную» is counted (skippedManual), listed in `manual` and left alone; any other status text is neither
+ * sent nor counted.
+ *
+ * Without `cut` every pending group is returned whatever its age (the browser's button). The watch trigger
+ * passes { retry, fresh }, cut-off texts made by kanCostCutoff: «отправляется» / «ошибка» is pending only when its
+ * last attempt is at or before `retry`; an unsent row only when its time is at or before `fresh`, and one with no
+ * time at all goes to `unseen` (the watch writes a first-seen time on its last row and does not send it).
  */
-function collectOzonCostKanGroups(journal) {
+function collectOzonCostKanGroups(journal, cut) {
   const byKey = {};
   const order = [];
   (journal || []).forEach(function(r) {
@@ -6354,24 +6407,35 @@ function collectOzonCostKanGroups(journal) {
     byKey[key].rows.push(r);
   });
 
+  const describe = function(g, last) {
+    g.action = isOzonCostDropRow(last) ? 'delete' : 'upsert';
+    g.cost = g.action === 'upsert' ? last.costAfter : null;
+    g.opIds = [];
+    g.rows.forEach(function(r) { if (r.opId && g.opIds.indexOf(r.opId) === -1) g.opIds.push(r.opId); });
+  };
+
   const pending = [];
+  const unseen = [];
+  const manual = [];
   let skippedManual = 0;
   order.forEach(function(key) {
     const g = byKey[key];
     const last = g.rows[g.rows.length - 1];
     const status = String(last.kanStatus || '').toLowerCase();
     g.lastStatus = status;
-    if (status === KAN_COST_STATUS.MANUAL) { skippedManual += 1; return; }
+    g.lastTime = String(last.kanTime || '');
+    if (status === KAN_COST_STATUS.MANUAL) { skippedManual += 1; describe(g, last); manual.push(g); return; }
     const sendable = status === '' || status === KAN_COST_STATUS.SENDING || status === KAN_COST_STATUS.ERROR;
     if (!sendable) return;
     if (status === '' && last.exported) return;
-    g.action = isOzonCostDropRow(last) ? 'delete' : 'upsert';
-    g.cost = g.action === 'upsert' ? last.costAfter : null;
-    g.opIds = [];
-    g.rows.forEach(function(r) { if (r.opId && g.opIds.indexOf(r.opId) === -1) g.opIds.push(r.opId); });
+    if (cut) {
+      if (status === '' && g.lastTime === '') { unseen.push(g); return; }
+      if (!kanCostIsOlder(g.lastTime, status === '' ? cut.fresh : cut.retry)) return;
+    }
+    describe(g, last);
     pending.push(g);
   });
-  return { pending: pending, skippedManual: skippedManual };
+  return { pending: pending, skippedManual: skippedManual, unseen: unseen, manual: manual };
 }
 
 /**
@@ -6416,6 +6480,11 @@ function kanCostEntriesOf(items, article, date) {
   return items.filter(function(item) {
     return String(item.sku_article || '').trim().toLowerCase() === wanted && String(item.dt || '').slice(0, 10) === date;
   });
+}
+
+/** True when KAN holds exactly ONE entry and it equals the figure to the kopeck. */
+function kanCostHoldsFigure(entries, figure) {
+  return entries.length === 1 && Math.abs(Number(entries[0].cost_price) - figure) < 0.005;
 }
 
 /** 233.6 -> «233,60», the way the owner reads money. */
@@ -6478,6 +6547,23 @@ function kanCostAttachIssues(batch, issues) {
 }
 
 /**
+ * The Ozon shops of a list_shops answer by exact name: { idByName, twoShopsNamed }. A Wildberries shop may carry
+ * the same name as an Ozon cabinet; costs go to Ozon shops only. A name carried by two Ozon shops is flagged in
+ * twoShopsNamed — the shop must come strictly from the cabinet, so callers never guess between them.
+ */
+function kanCostOzonShops(listed) {
+  const idByName = {};
+  const twoShopsNamed = {};
+  (listed.shops || []).forEach(function(s) {
+    if (String(s.marketplace || '').toLowerCase() !== 'ozon') return;
+    const name = String(s.name || '').trim();
+    if (idByName.hasOwnProperty(name)) twoShopsNamed[name] = true;
+    else idByName[name] = Number(s.id);
+  });
+  return { idByName: idByName, twoShopsNamed: twoShopsNamed };
+}
+
+/**
  * Sends the groups of ONE KAN shop and settles g.ok / g.reason / g.answer on every one of them.
  * Deletes first (entry ids come from one pre-read), then the upserts in batches, then ONE read-back
  * over all the dates of the shop — always, even after an error: KAN's state, not our log of what we
@@ -6534,8 +6620,7 @@ function kanCostSendShop(shopId, groups) {
     if (items === null) { g.ok = false; g.reason = g.stepError || readError; return; }
     const entries = kanCostEntriesOf(items, g.article, g.date);
     const sent = g.action === 'upsert' ? roundToTwo(g.cost) : null;
-    if (g.action === 'delete' ? entries.length === 0
-      : (entries.length === 1 && Math.abs(Number(entries[0].cost_price) - sent) < 0.005)) {
+    if (g.action === 'delete' ? entries.length === 0 : kanCostHoldsFigure(entries, sent)) {
       g.ok = true;
       g.answer = g.action === 'delete' ? (g.removed ? 'КАН: запись удалена' : 'КАН: записи не было') : 'КАН принял ' + kanCostMoney(sent);
       return;
@@ -6605,10 +6690,15 @@ function writeOzonCostKanStatuses(startRowsByNumber, updates, stampText) {
       const last = writableRows[writableRows.length - 1];
       const block = [];
       for (let n = first; n <= last; n++) {
+        // A row of another hand is written back as it is, except its time: always as TEXT (see the format below).
         block.push(writable[n]
           ? [updates[n].status, updates[n].answer, updates[n].time]
-          : [cellOf(n, colStatus), cellOf(n, colStatus + 1), cellOf(n, colStatus + 2)]);
+          : [cellOf(n, colStatus), cellOf(n, colStatus + 1), fresh[n] ? fresh[n].kanTime : '']);
       }
+      // «Время КАН» must stay TEXT. Written into a General cell, '2026-10-14 15:30:00' becomes a date-time, getValues
+      // returns it as a Date in the SPREADSHEET's zone and ozonCostRowsFromValues formats it in the SCRIPT zone — when
+      // the two zones differ, every age the watch decides on shifts by the difference.
+      sheet.getRange(first, colStatus + 3, last - first + 1, 1).setNumberFormat('@');
       sheet.getRange(first, colStatus + 1, last - first + 1, 3).setValues(block);
 
       const toStamp = {};
@@ -6670,12 +6760,16 @@ function sendOzonCostToKan(username) {
   }
 }
 
-function runKanCostSend(username) {
+/**
+ * The send itself, under the lease. `cut` (optional) is the watch trigger's age filter, see
+ * collectOzonCostKanGroups; the button passes none and sends every pending group.
+ */
+function runKanCostSend(username, cut) {
   // Outside any lock on purpose: ensureColumns takes and releases the script lock itself.
   const sheet = getOzonCostSheet(getSpreadsheet());
   ensureColumns(sheet, OZON_COST_HEADERS.concat(OZON_COST_KAN_HEADERS));
   const journal = getOzonCostJournal();
-  const collected = collectOzonCostKanGroups(journal);
+  const collected = collectOzonCostKanGroups(journal, cut);
   const answer = { busy: false, message: '', accepted: [], failed: [], skippedManual: collected.skippedManual, notWritten: 0 };
   if (collected.pending.length === 0) return answer;
 
@@ -6698,19 +6792,11 @@ function runKanCostSend(username) {
       if (scopes.indexOf(KAN_COST_WRITE_SCOPE) === -1) {
         sendable.forEach(function(g) { kanCostFail(g, 'токен без права записи себестоимости'); });
       } else {
-        const shopIdByName = {};
-        const twoShopsNamed = {};
-        (listed.shops || []).forEach(function(s) {
-          // A Wildberries shop may carry the same name as an Ozon cabinet; costs go to Ozon shops only.
-          if (String(s.marketplace || '').toLowerCase() !== 'ozon') return;
-          const name = String(s.name || '').trim();
-          if (shopIdByName.hasOwnProperty(name)) twoShopsNamed[name] = true;
-          else shopIdByName[name] = Number(s.id);
-        });
+        const shops = kanCostOzonShops(listed);
         sendable.forEach(function(g) {
           // Two Ozon shops of one name: the shop must come strictly from the cabinet, so never guess.
-          if (twoShopsNamed[g.cabinet]) kanCostFail(g, 'в КАН два магазина с именем «' + g.cabinet + '»');
-          else if (shopIdByName.hasOwnProperty(g.cabinet)) shopOfGroup.push({ group: g, shopId: shopIdByName[g.cabinet] });
+          if (shops.twoShopsNamed[g.cabinet]) kanCostFail(g, 'в КАН два магазина с именем «' + g.cabinet + '»');
+          else if (shops.idByName.hasOwnProperty(g.cabinet)) shopOfGroup.push({ group: g, shopId: shops.idByName[g.cabinet] });
           else kanCostFail(g, 'кабинет «' + g.cabinet + '» не найден в КАН');
         });
       }
@@ -6765,6 +6851,229 @@ function runKanCostSend(username) {
     (g.ok ? answer.accepted : answer.failed).push(kanCostGroupSummary(g));
   });
   return answer;
+}
+
+// ─── Item 93 ticket 04: the watch trigger and «Отправлю сам» ───────────────────────────────────
+//
+// kanCostWatch runs every 15 minutes (setupKanCostWatchTrigger). Under the sender lease it does three jobs:
+// gives a row nobody has seen a first-seen time, looks the groups switched to «вручную» up in KAN, and re-sends
+// the rows whose last attempt is old (the same sender as the button, so the stamps and statuses come out the same).
+// switchOzonCostToManual is the server half of the «Отправлю сам» button. Like the sender, nothing here makes a
+// request to KAN under a script lock, and ensureColumns / getOzonCostJournal are never called inside one.
+
+/** An upsert group with an ISO day and a positive figure: the only kind a KAN file can carry or KAN can be asked about. */
+function kanCostIsUploadable(g) {
+  return g.action === 'upsert' && /^\d{4}-\d{2}-\d{2}$/.test(g.date) && roundToTwo(g.cost) > 0;
+}
+
+/** What the watch has to do at `nowMs`: the cut-offs, the groups collected with them, and the manual groups due for a look. */
+function kanCostWatchWork(journal, nowMs) {
+  const cut = kanCostCutoffs(nowMs);
+  const collected = collectOzonCostKanGroups(journal, cut);
+  // A manual group KAN cannot be asked about (no ISO day, no figure, a deletion) is left for a person.
+  const manualDue = collected.manual.filter(function(g) {
+    return kanCostIsUploadable(g) && kanCostIsOlder(g.lastTime, cut.manualCheck);
+  });
+  return { cut: cut, collected: collected, manualDue: manualDue };
+}
+
+/**
+ * Writes the first-seen time (status and answer stay empty) on the LAST row of every group the watch has never
+ * seen. No request to KAN. Returns how many groups got it.
+ */
+function kanCostMarkFirstSeen(groups, startRows) {
+  if (groups.length === 0) return 0;
+  const time = kanCostNow();
+  const updates = {};
+  groups.forEach(function(g) {
+    updates[g.rows[g.rows.length - 1].row] = { status: '', answer: '', time: time, stamp: false };
+  });
+  return groups.length - writeOzonCostKanStatuses(startRows, updates, '').notWritten;
+}
+
+/**
+ * The 15-minute looks at the groups switched to «вручную»: ONE list_shops (a read, the write scope is not needed),
+ * then ONE read per shop over the dates of its groups. KAN holding exactly the journal figure → «принято»
+ * («загружено вручную», stamp «время загружено вручную»). Not found — also a different figure, or a cabinet KAN
+ * does not know — and the switch was 60 min ago → «ошибка» / «в КАН не найдено» (the hourly retry takes it from
+ * there). A KAN that cannot be read (down, token refused) decides nothing before the 60th minute; from then on the
+ * group goes back to «ошибка» with the failure's own reason (kanCostReason), so it is never left «вручную» for ever.
+ * Younger groups that are not found or not readable are not written at all.
+ * Returns { accepted, missed } — the groups actually written «принято» / turned back to «ошибка».
+ */
+function kanCostCheckManual(groups, startRows, cut) {
+  const result = { accepted: 0, missed: 0 };
+  if (groups.length === 0) return result;
+  // g.found: true = KAN holds the figure, false = it does not; g.unreadable = the reason KAN could not be read.
+  let shops = null;
+  try {
+    shops = kanCostOzonShops(kanCall('list_shops', {}));
+  } catch (e) {
+    const reason = kanCostReason(e).reason;
+    groups.forEach(function(g) { g.unreadable = reason; });
+  }
+  const byShop = {};
+  if (shops) {
+    groups.forEach(function(g) {
+      if (shops.twoShopsNamed[g.cabinet] || !shops.idByName.hasOwnProperty(g.cabinet)) { g.found = false; return; }
+      const shopId = shops.idByName[g.cabinet];
+      if (!byShop[shopId]) byShop[shopId] = [];
+      byShop[shopId].push(g);
+    });
+  }
+  Object.keys(byShop).forEach(function(shopKey) {
+    const inShop = byShop[shopKey];
+    const days = inShop.map(function(g) { return g.date; }).sort();
+    let items;
+    try {
+      items = kanCostReadAll(Number(shopKey), days[0], days[days.length - 1]);
+    } catch (e) {
+      const reason = kanCostReason(e).reason;
+      inShop.forEach(function(g) { g.unreadable = reason; });
+      return;
+    }
+    inShop.forEach(function(g) {
+      g.found = kanCostHoldsFigure(kanCostEntriesOf(items, g.article, g.date), roundToTwo(g.cost));
+    });
+  });
+
+  const now = kanCostNow();
+  const updates = {};
+  const settled = [];
+  groups.forEach(function(g) {
+    let update = null;
+    if (g.found === true) {
+      update = { status: KAN_COST_STATUS.ACCEPTED, answer: 'КАН принял ' + kanCostMoney(roundToTwo(g.cost)) + ' (загружено вручную)', time: now, stamp: true };
+    } else if (kanCostIsOlder(g.lastTime, cut.manualGiveUp)) {
+      update = { status: KAN_COST_STATUS.ERROR, answer: g.found === false ? 'в КАН не найдено' : g.unreadable, time: now, stamp: false };
+    }
+    if (!update) return;
+    g.rows.forEach(function(r) { updates[r.row] = update; });
+    settled.push(g);
+  });
+  if (settled.length === 0) return result;
+  const written = writeOzonCostKanStatuses(startRows, updates, now + ' загружено вручную');
+  settled.forEach(function(g) {
+    if (g.rows.some(function(r) { return written.unwritten[r.row]; })) return;
+    if (g.found === true) result.accepted += 1;
+    else result.missed += 1;
+  });
+  return result;
+}
+
+/**
+ * The trigger handler, every 15 minutes. First a look WITHOUT the lease: when nothing is due it returns at once,
+ * with no request to KAN, so the trigger rarely meets the browser's send. Otherwise, under the sender lease (busy →
+ * back off): (a) the first-seen time of unseen rows, (b) the looks at «вручную» groups, (c) the re-send of rows whose
+ * last attempt is 60 min old (stamp «… автоотправка»). Returns { busy, message, idle, firstSeen, manualAccepted,
+ * manualMissed, accepted, failed, error } and logs one line.
+ * It NEVER throws: a trigger that throws mails the owner on every run (up to 96 a day). Any failure ends up in
+ * `error` and in the log line; the lease is freed in `finally`, and the next run starts from the sheet again.
+ */
+function kanCostWatch() {
+  const summary = { busy: false, message: '', idle: false, firstSeen: 0, manualAccepted: 0, manualMissed: 0, accepted: 0, failed: 0, error: '' };
+  let leaseToken = null;
+  try {
+    // Outside any lock on purpose: ensureColumns takes and releases the script lock itself.
+    const sheet = getOzonCostSheet(getSpreadsheet());
+    ensureColumns(sheet, OZON_COST_HEADERS.concat(OZON_COST_KAN_HEADERS));
+    const look = kanCostWatchWork(getOzonCostJournal(), Date.now());
+    if (look.collected.unseen.length + look.collected.pending.length + look.manualDue.length === 0) {
+      summary.idle = true;
+      Logger.log('kanCostWatch: nothing due');
+      return summary;
+    }
+    const lease = acquireKanCostLease();
+    if (!lease.token) {
+      summary.busy = true;
+      summary.message = lease.message;
+      Logger.log('kanCostWatch: busy (' + lease.message + ')');
+      return summary;
+    }
+    leaseToken = lease.token;
+    // The sheet may have moved since the look above: work from a fresh read. One «now» (work.cut) serves the whole run.
+    const journal = getOzonCostJournal();
+    const work = kanCostWatchWork(journal, Date.now());
+    const startRows = {};
+    journal.forEach(function(r) { startRows[r.row] = r; });
+    summary.firstSeen = kanCostMarkFirstSeen(work.collected.unseen, startRows);
+    const manual = kanCostCheckManual(work.manualDue, startRows, work.cut);
+    summary.manualAccepted = manual.accepted;
+    summary.manualMissed = manual.missed;
+    const sent = runKanCostSend(null, work.cut);
+    summary.accepted = sent.accepted.length;
+    summary.failed = sent.failed.length;
+    Logger.log('kanCostWatch: first seen ' + summary.firstSeen + ', manual accepted ' + summary.manualAccepted + ' / missed ' + summary.manualMissed
+      + ', sent accepted ' + summary.accepted + ' / failed ' + summary.failed);
+  } catch (e) {
+    summary.error = String((e && e.message) || e);
+    Logger.log('kanCostWatch: error ' + summary.error);
+  } finally {
+    if (leaseToken) {
+      try {
+        releaseKanCostLease(leaseToken);
+      } catch (e) {
+        // The lease expires by itself after KAN_COST_LEASE_MS; the watch still must not throw.
+        if (!summary.error) {
+          summary.error = String((e && e.message) || e);
+          Logger.log('kanCostWatch: error ' + summary.error);
+        }
+      }
+    }
+  }
+  return summary;
+}
+
+/**
+ * The «Отправлю сам» button: every group the sender would send ('' unstamped, «отправляется», «ошибка») and every
+ * group already «вручную» (a re-switch restarts its timer) — upserts with an ISO day and a positive figure — gets
+ * «вручную» / «ждём файл в КАН» / now on ALL its rows. «Выгружено в КАН» is never set here: the stamp comes when
+ * the watch finds the figure in KAN. Takes the sender lease, so it never runs beside a send. Accepted groups, legacy
+ * CSV-stamped rows, deletions, bad days and zero figures are left alone. Returns { busy, message, rows, switched,
+ * notWritten }; `rows` is the LAST row of each switched group in the shape of getOzonCostExport (journal order),
+ * for the file the browser builds. A group with a row the journal moved meanwhile is neither switched nor returned.
+ */
+function switchOzonCostToManual() {
+  if (_devModeSpreadsheet) throw new Error('Переключение на ручную загрузку недоступно в режиме разработки');
+  const lease = acquireKanCostLease();
+  if (!lease.token) return { busy: true, message: lease.message, rows: [], switched: 0, notWritten: 0 };
+  try {
+    // Outside any lock on purpose: ensureColumns takes and releases the script lock itself.
+    const sheet = getOzonCostSheet(getSpreadsheet());
+    ensureColumns(sheet, OZON_COST_HEADERS.concat(OZON_COST_KAN_HEADERS));
+    const journal = getOzonCostJournal();
+    const collected = collectOzonCostKanGroups(journal);
+    const groups = collected.pending.concat(collected.manual).filter(kanCostIsUploadable);
+    const startRows = {};
+    journal.forEach(function(r) { startRows[r.row] = r; });
+    const time = kanCostNow();
+    const updates = {};
+    groups.forEach(function(g) {
+      g.rows.forEach(function(r) { updates[r.row] = { status: KAN_COST_STATUS.MANUAL, answer: 'ждём файл в КАН', time: time, stamp: false }; });
+    });
+    const written = writeOzonCostKanStatuses(startRows, updates, '');
+    const switched = groups.filter(function(g) {
+      return !g.rows.some(function(r) { return written.unwritten[r.row]; });
+    });
+    return {
+      busy: false,
+      message: '',
+      rows: switched.map(function(g) { return ozonCostExportRow(g.rows[g.rows.length - 1]); })
+        .sort(function(a, b) { return a.row - b.row; }),
+      switched: switched.length,
+      notWritten: written.notWritten
+    };
+  } finally {
+    releaseKanCostLease(lease.token);
+  }
+}
+
+/** Run once by the owner from the editor: the KAN cost watch every 15 minutes. Other triggers are left alone. */
+function setupKanCostWatchTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'kanCostWatch'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('kanCostWatch').timeBased().everyMinutes(15).create();
 }
 
 function getOzonSupplyRequests() {

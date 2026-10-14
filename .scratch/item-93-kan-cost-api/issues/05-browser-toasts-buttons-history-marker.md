@@ -39,3 +39,18 @@ for the toasts and markers; the «Отправлю сам» path is money-adjace
   90 s timeout (a 504 means Apps Script may still finish — re-read the statuses instead of assuming a failure). Any
   signed-in user may call the action; answer 7 (author + admin) is for the buttons/markers. Journal status values for
   the marker: «принято» / «ошибка» / «вручную» / «отправляется» / '' (rows before item 93: no status — show nothing).
+
+- 2026-10-15, from ticket 04: action `switchOzonCostToManual` (no data) is the server half of «Отправлю сам». It
+  switches EVERY unaccepted upsert group (last row '' unstamped / «отправляется» / «ошибка», or already «вручную» — a
+  re-switch restarts its hour) with an ISO date and cost > 0 to «вручную» / «ждём файл в КАН» / now, NEVER stamps
+  «Выгружено в КАН», and answers `{busy, message, rows, switched, notWritten}`; `rows` = the LAST journal row of each
+  switched group in the `getOzonCostExport` row shape `{row, date, cabinet, article, sku, cost, opId, source}`, journal
+  order — feed them to `collapseKanCostRows` + `buildKanCostCsv` as the old button does, and never call
+  `markOzonCostExported`. Order: switch FIRST, then build and download the file (a lost download only costs one hour:
+  the watch gives up and the hourly retry sends by API). Deletions (drop-marker days) are never switched — the file
+  cannot carry a delete — and stay on the automatic path. `busy: true` («уже отправляется» / «таблица занята, отправка
+  позже»): nothing switched, show it neutrally. Dev mode throws «Переключение на ручную загрузку недоступно в режиме
+  разработки». Like the sender, any signed-in user may call it on the server (one call pauses auto-retry of every
+  pending group for up to an hour; the journal has no author column) — answer 7 (author + admin) is enforced by who
+  sees the buttons; decide here whether that is enough. Marker texts the watch writes: «КАН принял 233,67 (загружено
+  вручную)» (stamp «<время> загружено вручную»), «в КАН не найдено», or the read failure's reason after an hour.

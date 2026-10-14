@@ -16,6 +16,7 @@ function pad(n) { return String(n).padStart(2, '0'); }
 function tzOffsetMs(tz) {
   if (tz === 'Europe/Moscow') return 3 * 3600 * 1000; // UTC+3, без учёта DST
   if (tz === 'UTC') return 0;
+  if (tz === 'Asia/Yekaterinburg') return 5 * 3600 * 1000; // UTC+5, the real script zone (appsscript.json)
   throw new Error('Неподдерживаемая таймзона в стенде: ' + tz);
 }
 
@@ -52,6 +53,12 @@ FakeDate.__now = Date.parse('2026-01-05T09:00:00Z'); // понедельник, 
 // ---------- Логи ----------
 const logs = [];
 
+// Item 93 ticket 04: Google Sheets turns a written text like '2026-10-14 15:30:00' into a date-time unless the cell is
+// formatted as plain text ('@'), and getValues then returns a Date in the SPREADSHEET's zone. Off by default so no
+// older check changes; setSheetAutoDates(zone) switches the fake setValue/setValues to that behaviour, the wall time
+// being read in `zone` (a zone other than the script zone of the stand shows what the shift does to an age).
+let sheetAutoDateZone = null;
+
 // ---------- Item «faster saveChinaBatch»: a global counter of Spreadsheet service calls ----------
 // Real Apps Script bills time for EVERY Spreadsheet service call (openById, getSheetByName,
 // getRange().getValues()/setValues, getLastRow, flush), 0.1-1 s each — the measurement this
@@ -74,6 +81,13 @@ function makeFakeSheet(headers, name) {
   // and the price of a slow operation is the NUMBER of requests — so a test that claims a
   // sheet is read once has to be able to count.
   let getValuesCallCount = 0;
+  // Item 93 ticket 04: the number format every cell was given by setNumberFormat ('row:col' -> format text).
+  const formats = {};
+  const autoDate = (value, row, col) => {
+    if (!sheetAutoDateZone || typeof value !== 'string' || formats[row + ':' + col] === '@') return value;
+    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return value;
+    return new FakeDate(Date.parse(value.replace(' ', 'T') + 'Z') - tzOffsetMs(sheetAutoDateZone));
+  };
   return {
     getName() { return name; },
     appendRow(row) {
@@ -135,14 +149,14 @@ function makeFakeSheet(headers, name) {
             while (data.length <= rowIdx) data.push([]);
             for (let c = 0; c < values[r].length; c++) {
               const colIdx = startCol - 1 + c;
-              data[rowIdx][colIdx] = values[r][c];
+              data[rowIdx][colIdx] = autoDate(values[r][c], rowIdx + 1, colIdx + 1);
             }
           }
         },
         setValue(value) {
           const rowIdx = startRow - 1;
           while (data.length <= rowIdx) data.push([]);
-          data[rowIdx][startCol - 1] = value;
+          data[rowIdx][startCol - 1] = autoDate(value, startRow, startCol);
         },
         clearContent() {
           for (let r = 0; r < numRows; r++) {
@@ -157,7 +171,12 @@ function makeFakeSheet(headers, name) {
         },
         // Item 87 step 1: cosmetic in the stand — no visual representation to format — but
         // Code.gs calls it on sheet creation, so it must exist or the call throws.
-        setNumberFormat() { return this; }
+        setNumberFormat(format) {
+          for (let r = 0; r < numRows; r++) {
+            for (let c = 0; c < numCols; c++) formats[(startRow + r) + ':' + (startCol + c)] = format;
+          }
+          return this;
+        }
       };
     },
     // Удаление строки. Пункт 47, этап 4: без него стенд не мог пройти ни правку операции,
@@ -175,6 +194,8 @@ function makeFakeSheet(headers, name) {
     },
     // сервисные методы стенда (не часть Apps Script API)
     __dump() { return data.map(r => r.slice()); },
+    // The number format of one cell ('' when none was set), 1-based like Apps Script.
+    __getFormat(row, col) { return formats[row + ':' + col] || ''; },
     __setData(d) { data = d.map(r => r.slice()); },
     getSheetId: () => 1,
     __getSetValuesCallCount() { return setValuesCallCount; },
@@ -205,6 +226,11 @@ let scriptLockHeld = false;
 let waitLockTimeouts = [];
 let fetchesWhileLocked = 0;
 let nestedLockTakes = 0;
+
+// Item 93 ticket 04: the project's triggers. The fake models only newTrigger(handler).timeBased().everyMinutes(n)
+// .create(), the chain setupKanCostWatchTrigger builds; doPost also builds `.timeBased().after(100)` triggers,
+// which the fake does not model. Every created trigger is kept so a test can read it back.
+let projectTriggers = [];
 
 // ---------- Свойства скрипта и ЧУЖАЯ таблица платёжного календаря ----------
 let scriptProperties = {};
@@ -255,6 +281,23 @@ const sandbox = {
   },
   Logger: {
     log: (msg) => { logs.push(String(msg)); }
+  },
+  ScriptApp: {
+    getProjectTriggers: () => projectTriggers.slice(),
+    deleteTrigger: (trigger) => { projectTriggers = projectTriggers.filter((t) => t !== trigger); },
+    newTrigger: (handler) => {
+      const spec = { handler, kind: null, minutes: null };
+      const builder = {
+        timeBased() { spec.kind = 'time'; return builder; },
+        everyMinutes(n) { spec.minutes = n; return builder; },
+        create() {
+          const trigger = { getHandlerFunction: () => handler, spec };
+          projectTriggers.push(trigger);
+          return trigger;
+        }
+      };
+      return builder;
+    }
   },
   Date: FakeDate,
   // ensureColumns takes a script lock before widening a header row (25.08.2026: the
@@ -736,6 +779,15 @@ module.exports = {
   kanCostReason: (...args) => context.kanCostReason(...args),
   releaseKanCostLease: (...args) => context.releaseKanCostLease(...args),
   sendOzonCostToKan: (...args) => context.sendOzonCostToKan(...args),
+  // Item 93 ticket 04: the watch trigger, the «Отправлю сам» switch and the trigger installer.
+  kanCostWatch: (...args) => context.kanCostWatch(...args),
+  switchOzonCostToManual: (...args) => context.switchOzonCostToManual(...args),
+  setupKanCostWatchTrigger: (...args) => context.setupKanCostWatchTrigger(...args),
+  // Item 93 ticket 04: the fake sheets start to parse 'yyyy-MM-dd HH:mm:ss' texts into Dates (wall time in `zone`)
+  // unless the cell is formatted '@'; setSheetAutoDates(null) turns it off again.
+  setSheetAutoDates(zone) { sheetAutoDateZone = zone || null; },
+  // The triggers as plain data: { handler, kind, minutes }.
+  scriptTriggers() { return projectTriggers.map((t) => ({ handler: t.spec.handler, kind: t.spec.kind, minutes: t.spec.minutes })); },
   // A real doPost call; the answer is the parsed JSON text the browser would get.
   callDoPost(payload) {
     const out = context.doPost({ postData: { contents: JSON.stringify(payload) } });

@@ -42,9 +42,10 @@ describe('item 89 C: the action table agrees with Code.gs', () => {
   });
 
   it('every action Code.gs answers before the lock is a read, except the known background writes', () => {
-    // These four start a background job, call the proxy back or talk to KAN for minutes (item 93
-    // ticket 03: sendOzonCostToKan, outside the global lock on purpose); they are writes on purpose.
-    const EARLY_WRITES = ['archiveTransactions', 'runOzonSyncNow', 'runOzonStocksSyncNow', 'sendOzonCostToKan'];
+    // These start a background job, call the proxy back or talk to KAN for minutes (item 93 ticket 03:
+    // sendOzonCostToKan; ticket 04: switchOzonCostToManual takes the same lease), outside the global
+    // lock on purpose; they are writes on purpose.
+    const EARLY_WRITES = ['archiveTransactions', 'runOzonSyncNow', 'runOzonStocksSyncNow', 'sendOzonCostToKan', 'switchOzonCostToManual'];
     expect([...EARLY].filter((a) => !isGasRead(a)).sort()).toEqual([...EARLY_WRITES].sort());
   });
 
@@ -80,6 +81,14 @@ describe('item 89 C: the rules of the table', () => {
     expect(gasCacheTtlMs('someNewAction')).toBe(0);
     // commit is described nowhere on purpose: it touches stock, history and everything else.
     expect(gasReadsInvalidatedBy('commit')).toBeNull();
+  });
+
+  it('the KAN cost sender and the «Отправлю сам» switch are listed writes that wipe no cached read (item 93)', () => {
+    // They only touch the journal's status columns, which no cached read shows; unlisted they would wipe the whole cache.
+    for (const a of ['sendOzonCostToKan', 'switchOzonCostToManual']) {
+      expect(isGasRead(a), a).toBe(false);
+      expect(gasReadsInvalidatedBy(a), a).toEqual([]);
+    }
   });
 
   it('cache lifetimes: reference 10 min, Ozon 60 min, operational 30 s', () => {
