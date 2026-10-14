@@ -10326,8 +10326,9 @@ const T93_MARK = 'удалено из цепочки';
 
 // ---- Review fixes: a kit component brought back by a bulk restore, and a supply on the seed's own day ----
 (function test93ReviewFixes() {
-  // A bulk restore writes «isComponent» back empty, so a kit component row of op-B comes back looking like a
-  // shipment of its own (ART-D under op-B, Ozon destination). Only a re-sort may add a link to the journal.
+  // Until 2026-10-14 a bulk restore wrote «isComponent» back empty, so a kit component row of op-B came back looking
+  // like a shipment of its own (ART-D under op-B, Ozon destination). Since then it comes back as a component; rows
+  // restored before that still sit in «История» without the flag, and only a re-sort may add a link for them.
   const h = t93Fixture();
   const C = h.context;
   const comp = h.commitTransaction([{ article: 'ART-D', quantity: 5, price: 400 }], 'Расход', T93_DEST, '2026-09-05', 'tester',
@@ -10341,9 +10342,18 @@ const T93_MARK = 'удалено из цепочки';
   h.deleteMultipleTransactions([t93Row(h, 'op-B').id, compId], 'tester');
   const back = h.restoreMultipleArchivedItems(h.dumpArchive().map(a => a.archiveId), 'tester');
   const compBack = h.getTransactions().rows.find(t => String(t.id) === compId);
-  check('93/02 s14: a kit component restored in bulk without «isComponent» gets no link of its own; the chain is 150 / 225 / 205 again',
-    compBack && compBack.opId === 'op-B' && compBack.isComponent !== true
+  check('93/02 s14: a kit component restored in bulk comes back as a component and gets no link of its own; the chain is 150 / 225 / 205 again',
+    compBack && compBack.opId === 'op-B' && compBack.isComponent === true
       && h.dumpOzonCost().every(r => r['Артикул'] !== 'ART-D') && t93State(h) === 205 && !back.costJournalError,
+    JSON.stringify(h.dumpOzonCost().filter(r => r['Артикул'] === 'ART-D')));
+  // The same row as an older bulk restore left it (no «isComponent»): a later delete + restore of op-B still adds no link for it.
+  const ids2 = sheet.getRange(1, hdr.indexOf('ID') + 1, sheet.getLastRow(), 1).getValues().map(r => String(r[0]));
+  sheet.getRange(ids2.indexOf(compId) + 1, hdr.indexOf('isComponent') + 1).setValue('');
+  h.deleteMultipleTransactions([t93Row(h, 'op-B').id], 'tester');
+  const back2 = h.restoreMultipleArchivedItems(h.dumpArchive().map(a => a.archiveId), 'tester');
+  check('93/02 s14: a component row left without «isComponent» by an older bulk restore gets no link of its own either; the chain is 205 again',
+    h.getTransactions().rows.find(t => String(t.id) === compId).isComponent !== true
+      && h.dumpOzonCost().every(r => r['Артикул'] !== 'ART-D') && t93State(h) === 205 && !back2.costJournalError,
     JSON.stringify(h.dumpOzonCost().filter(r => r['Артикул'] === 'ART-D')));
 
   // A supply dropped on the seed's own day: the day keeps the seed's cost (re-stated after the marker), it is
@@ -10409,6 +10419,72 @@ const T93_MARK = 'удалено из цепочки';
   try { t.applyOzonCostChainOps('MaxiStore', 'ART-L', { 'op:op-2': { shippedCost: 290 } }, 'исправление журнала'); } catch (e) { badSource = String(e.message || e); }
   check('93/02 s19: a source that does not start with «пересчёт» is refused and nothing is written',
     badSource.indexOf('должен начинаться со слова «пересчёт»') !== -1 && t.dumpOzonCost().length === b2, badSource);
+})();
+
+// ================= Bulk restore writes columns 11–13 like the single restore (2026-10-14) =================
+// restoreMultipleArchivedItems used to stop at column 10, so «Пользователь», «groupId» and «isComponent»
+// came back empty and a kit component row read as a plain expense row.
+(function testBulkRestoreKitColumns() {
+  const D = '2026-01-05T09:00:00Z';
+  const cells = (r) => [r['Пользователь'], r['groupId'], r['isComponent']];
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setKitSheet([{ kitSku: 'KITB', componentSku: 'COMPB', quantity: 2, kitType: 'virtual' }]);
+  h.setStockSheet([{ article: 'COMPB', quantity: 20, avgCost: 5, capitalization: 100 },
+                   { article: 'ARTB', quantity: 50, avgCost: 10, capitalization: 500 }]);
+  h.commitTransaction([{ article: 'KITB', quantity: 3, price: 0 }], 'Расход', 'Склад', '', 'tester', D, '');
+  h.commitTransaction([{ article: 'ARTB', quantity: 2, price: 10 }], 'Расход', 'Склад', '', 'tester', D, '');
+  const before = {};
+  h.dumpTransSheet().forEach(r => { before[r['ID']] = JSON.stringify(cells(r)); });
+  const stockBefore = JSON.stringify(h.dumpStockSheet());
+  const ids = Object.keys(before);
+  const comp = h.dumpTransSheet().find(r => r['isComponent'] === true);
+  const main = h.dumpTransSheet().find(r => r['Артикул'] === 'KITB');
+
+  h.deleteMultipleTransactions(ids, 'tester');
+  h.restoreMultipleArchivedItems(h.dumpArchive().map(a => a.archiveId), 'tester');
+  const after = h.dumpTransSheet();
+  check('Bulk restore 11-13: every restored row gets back «Пользователь», «groupId», «isComponent» as they were',
+    after.length === 3 && !!comp && comp['groupId'] !== '' && after.every(r => before[r['ID']] === JSON.stringify(cells(r))),
+    JSON.stringify(after.map(cells)) + ' vs ' + JSON.stringify(before));
+  const parsed = h.getTransactions().rows;
+  const pComp = parsed.find(r => r.id === comp['ID']);
+  const pMain = parsed.find(r => r.id === main['ID']);
+  check('Bulk restore 11-13: the read model sees the component row as a component of the kit\'s group again',
+    pComp && pComp.isComponent === true && pMain && pMain.isComponent === false && pComp.groupId === pMain.groupId && pMain.groupId !== '',
+    JSON.stringify(parsed.map(r => [r.article, r.groupId, r.isComponent])));
+  check('Bulk restore 11-13: bulk delete + bulk restore leave «Остатки» byte-identical (stock arithmetic untouched)',
+    JSON.stringify(h.dumpStockSheet()) === stockBefore, JSON.stringify(h.dumpStockSheet()));
+  // A later single delete of the kit main row finds its component through groupId/isComponent:
+  // both rows leave «История» and the component's stock comes back.
+  h.deleteTransaction(main['ID'], 'tester');
+  const compStock = h.stockOf('COMPB');
+  check('Bulk restore 11-13: deleting the restored kit main row cascades to its component (20 pcs, 100 ₽ back)',
+    h.dumpTransSheet().length === 1 && h.dumpTransSheet()[0]['Артикул'] === 'ARTB'
+      && compStock && compStock.quantity === 20 && compStock.capitalization === 100,
+    JSON.stringify(h.dumpTransSheet().map(r => r['Артикул'])) + ' ' + JSON.stringify(compStock));
+
+  // The same archive payload restored by both paths writes the same 13 positional cells — with the fields and
+  // without. (The late cells are compared by item 90/93 checks; the bulk path pads them, so the sheets differ in width.)
+  const first13 = (r) => h.TRANS_HEADERS.concat(['groupId', 'isComponent']).map(k => r[k]);
+  const viaBoth = (payload) => ['single', 'bulk'].map(path => {
+    const t = freshHarness();
+    t.ensureTransSheet();
+    t.ensureArchiveSheet();
+    t.setStockSheet([{ article: 'COMPB', quantity: 20, avgCost: 5, capitalization: 100 }]);
+    t.archiveItem('Transaction', payload, 'tester');
+    const archiveId = t.dumpArchive()[0].archiveId;
+    if (path === 'single') t.restoreArchivedItem(archiveId, 'tester'); else t.restoreMultipleArchivedItems([archiveId], 'tester');
+    return JSON.stringify(t.dumpTransSheet().map(first13));
+  });
+  const basePayload = { id: 'ID-B-1', date: D, type: 'Расход', article: 'COMPB', quantity: 6, price: 0, writeOffCost: 30, total: 0, destination: 'Склад', deliveryDate: '' };
+  const withFields = viaBoth(Object.assign({ user: 'tester', groupId: 'G-1', isComponent: true }, basePayload));
+  check('Bulk restore 11-13: a component payload restores to the same cells via restoreArchivedItem and restoreMultipleArchivedItems',
+    withFields[0] === withFields[1] && withFields[1].indexOf('"G-1"') !== -1, withFields.join(' | '));
+  const oldPayload = viaBoth(basePayload);
+  check('Bulk restore 11-13: an old payload without the fields restores with empty user/groupId and isComponent false, same as the single path',
+    oldPayload[0] === oldPayload[1] && JSON.stringify(JSON.parse(oldPayload[1])[0].slice(10)) === JSON.stringify(['', '', false]), oldPayload.join(' | '));
 })();
 
 // ================= Итог =================

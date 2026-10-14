@@ -2702,8 +2702,8 @@ function isOzonShipmentHistoryRow(type, destination, isComponent) {
  * A pair that has no link yet is appended as a new shipment ONLY when the caller allows it
  * (options.allowNewLinks — the re-sort, whose rows move to another article) and only for an OpID
  * the journal already knows: an old shipment from before the journal must not suddenly appear in
- * it, and a bulk restore brings kit component rows back without «isComponent» — under the kit's
- * OpID and Ozon destination they would read as shipments of their own. Only the OpIDs the operation touched may be passed: an OpID with no
+ * it, and kit component rows bulk-restored before 2026-10-14 sit in «История» without «isComponent» —
+ * under the kit's OpID and Ozon destination they would read as shipments of their own. Only the OpIDs the operation touched may be passed: an OpID with no
  * History rows is read as «the operation deleted them».
  *
  * The link's day comes from «История» ONLY for the pairs named in options.dateFromHistory
@@ -4277,10 +4277,13 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
         let dateStr = payload.date ? String(payload.date) : new Date().toISOString();
         let deliveryStr = payload.deliveryDate ? String(payload.deliveryDate) : "";
 
+        // Columns 11–13 exactly as restoreTransaction writes them: until 2026-10-14 the bulk path stopped
+        // at column 10, and a kit component row came back as a plain expense row (groupId/isComponent empty).
         transactionsToRestore.push([
           payload.id, dateStr, payload.type, payload.article,
           payload.quantity, payload.price, payload.writeOffCost, payload.total,
-          payload.destination || '', deliveryStr
+          payload.destination || '', deliveryStr,
+          payload.user || '', payload.groupId || '', payload.isComponent || false
         ]);
         // Item 90: note and shipment number are written by header at write time (columns sit at the sheet's end)
         restoredLateById[String(payload.id)] = payload;
