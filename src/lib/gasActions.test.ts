@@ -42,8 +42,9 @@ describe('item 89 C: the action table agrees with Code.gs', () => {
   });
 
   it('every action Code.gs answers before the lock is a read, except the known background writes', () => {
-    // These three start a background job or call the proxy back; they are writes on purpose.
-    const EARLY_WRITES = ['archiveTransactions', 'runOzonSyncNow', 'runOzonStocksSyncNow'];
+    // These four start a background job, call the proxy back or talk to KAN for minutes (item 93
+    // ticket 03: sendOzonCostToKan, outside the global lock on purpose); they are writes on purpose.
+    const EARLY_WRITES = ['archiveTransactions', 'runOzonSyncNow', 'runOzonStocksSyncNow', 'sendOzonCostToKan'];
     expect([...EARLY].filter((a) => !isGasRead(a)).sort()).toEqual([...EARLY_WRITES].sort());
   });
 

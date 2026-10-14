@@ -20,3 +20,18 @@ owner runs once in the editor (like `kanTurnoverDaily`). Spec: `../spec.md` (ans
 - [ ] Mutations 3–5
 
 ## Comments
+
+- 2026-10-14, from ticket 03 (details in its «Result»): reuse `sendOzonCostToKan(username)` (`Code.gs` ≈6662) — it
+  sends EVERY pending group (last-row status '' / «отправляется» / «ошибка», except '' with a «Выгружено в КАН» stamp);
+  the «≥60 min since the last attempt» filter is this ticket's to add (e.g. an option read from «Время КАН»). A call
+  without a username stamps «… автоотправка». The status columns are «Статус КАН», «Ответ КАН», «Время КАН» at the END
+  (`OZON_COST_KAN_HEADERS`; `ensureColumns` with `OZON_COST_HEADERS.concat(OZON_COST_KAN_HEADERS)`, never widen
+  `OZON_COST_HEADERS`); «Время КАН» is 'yyyy-MM-dd HH:mm:ss' in the script zone, read back as text even when Sheets made
+  it a Date (`ozonCostRowsFromValues`). The manual switch must take the SAME lease (`acquireKanCostLease` /
+  `releaseKanCostLease`) and write through `writeOzonCostKanStatuses` (short script lock, fresh read, identity check, never
+  touches columns 1–12); never call `ensureColumns` or `getOzonCostJournal` inside a script-lock section — its own
+  `releaseLock` would release ours. The «вручную» status is already skipped by the sender (counted in `skippedManual`).
+- Open question for the owner (from the ticket-03 spec review): the old «Себестоимость КАН» button still stamps rows
+  without any read-back, and a stamped row with an empty status counts as done for the sender — after go-live a row
+  exported through that button is never verified. Options: leave it (the button is the admin's manual path), or make
+  the button also write «вручную» so this ticket's 15-minute check verifies it.

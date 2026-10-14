@@ -118,6 +118,9 @@ function doPost(e) {
       if (action === 'archiveTransactions') {
         throw new Error('Архивация недоступна в режиме разработки: фоновый процесс выполнился бы на боевой БД');
       }
+      if (action === 'sendOzonCostToKan') {
+        throw new Error('Отправка себестоимости в КАН недоступна в режиме разработки');
+      }
       const testDbId = PropertiesService.getScriptProperties().getProperty('test_dbSpreadsheetId');
       if (!testDbId) {
         throw new Error('Тестовая БД не создана. Настройки → «Создать/обновить тестовую БД»');
@@ -176,6 +179,14 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
     
+    // Item 93 ticket 03: the KAN cost sender talks to KAN for a long time, so it must NOT run under the
+    // global lock below. It takes its own short script locks (lease and status writes); any signed-in
+    // user may press the button.
+    if (action === 'sendOzonCostToKan') {
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: sendOzonCostToKan(currentUser.username) }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // Читающие Ozon-экшены обслуживаются без LockService: они только читают листы,
     // а захват общего замка приводил к таймаутам при параллельной загрузке вкладки «Остатки Озон».
     //
@@ -5797,16 +5808,38 @@ function getOzonCostSheet(ss) {
   return getOrCreateSheet(ss, 'Себестоимость Озон', OZON_COST_HEADERS);
 }
 
+// Item 93 ticket 03: the KAN sender keeps its state in three more columns at the END of the journal.
+// They are a SEPARATE list on purpose: appendOzonCostRows / appendOzonCostForShipment write rows as
+// wide as OZON_COST_HEADERS, so widening that list would make every writer pad or overflow.
+const OZON_COST_KAN_HEADERS = ['Статус КАН', 'Ответ КАН', 'Время КАН'];
+const KAN_COST_STATUS = { SENDING: 'отправляется', ACCEPTED: 'принято', ERROR: 'ошибка', MANUAL: 'вручную' };
+const KAN_COST_WRITE_SCOPE = 'mcp:product_cost:write';
+// KAN takes at most 200 rows per preview.
+const KAN_COST_BATCH = 200;
+// One sender at a time: the Script Property holds the moment its lease ends.
+const KAN_COST_LEASE_PROPERTY = 'kan_costSenderUntil';
+// A sender that crashed leaves its lease behind; after this long the lease no longer blocks anyone.
+const KAN_COST_LEASE_MS = 600000;
+
 /** Every row of the journal, oldest first — the order they were written in. */
 function getOzonCostJournal() {
   const ss = getSpreadsheet();
   const sheet = getOzonCostSheet(ss);
   ensureColumns(sheet, OZON_COST_HEADERS);
-  const values = sheet.getDataRange().getValues();
-  if (values.length <= 1) return [];
+  return ozonCostRowsFromValues(sheet.getDataRange().getValues());
+}
+
+/**
+ * The pure half of getOzonCostJournal: sheet values (header row first) -> journal rows. The KAN
+ * sender reads the same values again under its status lock, so the parsing lives in one place.
+ * A column the sheet does not have yet (the KAN status columns of an old sheet) reads as ''.
+ */
+function ozonCostRowsFromValues(values) {
+  if (!values || values.length <= 1) return [];
   const headers = values[0].map(function(h) { return String(h).trim(); });
   const idx = {};
-  OZON_COST_HEADERS.forEach(function(h) { idx[h] = headers.indexOf(h); });
+  OZON_COST_HEADERS.concat(OZON_COST_KAN_HEADERS).forEach(function(h) { idx[h] = headers.indexOf(h); });
+  const cell = function(row, header) { return idx[header] >= 0 ? row[idx[header]] : ''; };
   const rows = [];
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
@@ -5818,6 +5851,15 @@ function getOzonCostJournal() {
       catch (e) { dateStr = String(rawDate); }
     } else {
       dateStr = String(rawDate || '');
+    }
+    // Sheets turns the text «2026-10-14 15:30:00» into a Date cell; the sender compares and shows text.
+    const rawKanTime = cell(row, 'Время КАН');
+    let kanTime = '';
+    if (rawKanTime instanceof Date) {
+      try { kanTime = Utilities.formatDate(rawKanTime, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss'); }
+      catch (e) { kanTime = String(rawKanTime); }
+    } else {
+      kanTime = String(rawKanTime || '').trim();
     }
     rows.push({
       // Sheet row number, needed by the KAN export to stamp exactly the rows it took.
@@ -5833,7 +5875,10 @@ function getOzonCostJournal() {
       costAfter: parseNumber(row[idx['Себестоимость после']]),
       opId: String(row[idx['OpID']] || '').trim(),
       exported: String(row[idx['Выгружено в КАН']] || '').trim(),
-      source: String(row[idx['Источник']] || '').trim()
+      source: String(row[idx['Источник']] || '').trim(),
+      kanStatus: String(cell(row, 'Статус КАН') || '').trim(),
+      kanAnswer: String(cell(row, 'Ответ КАН') || ''),
+      kanTime: kanTime
     });
   }
   return rows;
@@ -6246,6 +6291,480 @@ function markOzonCostExported(data, username) {
 
   SpreadsheetApp.flush();
   return { marked: marked, mismatched: mismatched };
+}
+
+// ─── Item 93 ticket 03: the KAN cost sender ───────────────────────────────────────────────────
+//
+// Pushes what the journal holds to KAN. The send unit is (cabinet, article, date): the LAST journal
+// row of that day wins; a drop marker (ticket 02) as the last row means «delete that day in KAN».
+// Every step is verified by reading KAN back — a group is «принято» only when KAN holds exactly the
+// journal figure (or no entry, for a deleted day). The journal keeps the outcome in three columns
+// (OZON_COST_KAN_HEADERS); «Выгружено в КАН» is stamped only on verified upserts, so the CSV button
+// of item 47 keeps working on it.
+//
+// Locking: the sender never holds a script lock across a network call. A short lock guards the lease
+// (one sender at a time) and another one every status write; KAN calls run between them, and
+// ensureColumns (which takes and RELEASES the script lock itself) is never called inside a lock.
+
+/**
+ * Takes the sender lease. Returns { token, message }: a token on success, or token null and the
+ * reason in Russian when another sender is running or the table lock is busy.
+ */
+function acquireKanCostLease() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return { token: null, message: 'таблица занята, отправка позже' };
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const now = Date.now();
+    const until = Number(props.getProperty(KAN_COST_LEASE_PROPERTY)) || 0;
+    if (until > now) return { token: null, message: 'уже отправляется' };
+    const token = String(now + KAN_COST_LEASE_MS);
+    props.setProperty(KAN_COST_LEASE_PROPERTY, token);
+    return { token: token, message: '' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Frees the lease, but only if it is still ours (an expired lease may have been taken over). */
+function releaseKanCostLease(token) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty(KAN_COST_LEASE_PROPERTY) === String(token)) props.deleteProperty(KAN_COST_LEASE_PROPERTY);
+}
+
+/**
+ * Journal rows -> the groups the sender has to push. Pure.
+ * Returns { pending: [group], skippedManual }. A group is { cabinet, article, date, rows, action
+ * ('upsert' | 'delete'), cost (null for a delete), opIds, lastStatus }.
+ * Pending = the group's last row has no status, or «отправляется» (a sender died) or «ошибка» —
+ * except an empty status with a «Выгружено в КАН» stamp: that row reached KAN through the CSV.
+ * «вручную» is counted and left alone; any other status text is neither sent nor counted.
+ */
+function collectOzonCostKanGroups(journal) {
+  const byKey = {};
+  const order = [];
+  (journal || []).forEach(function(r) {
+    if (!r.cabinet || !r.article) return;
+    const date = String(r.date || '').slice(0, 10);
+    const key = r.cabinet + '|' + r.article + '|' + date;
+    if (!byKey[key]) {
+      byKey[key] = { cabinet: r.cabinet, article: r.article, date: date, rows: [] };
+      order.push(key);
+    }
+    byKey[key].rows.push(r);
+  });
+
+  const pending = [];
+  let skippedManual = 0;
+  order.forEach(function(key) {
+    const g = byKey[key];
+    const last = g.rows[g.rows.length - 1];
+    const status = String(last.kanStatus || '').toLowerCase();
+    g.lastStatus = status;
+    if (status === KAN_COST_STATUS.MANUAL) { skippedManual += 1; return; }
+    const sendable = status === '' || status === KAN_COST_STATUS.SENDING || status === KAN_COST_STATUS.ERROR;
+    if (!sendable) return;
+    if (status === '' && last.exported) return;
+    g.action = isOzonCostDropRow(last) ? 'delete' : 'upsert';
+    g.cost = g.action === 'upsert' ? last.costAfter : null;
+    g.opIds = [];
+    g.rows.forEach(function(r) { if (r.opId && g.opIds.indexOf(r.opId) === -1) g.opIds.push(r.opId); });
+    pending.push(g);
+  });
+  return { pending: pending, skippedManual: skippedManual };
+}
+
+/**
+ * An error thrown by kanCall (or by UrlFetchApp) -> the Russian reason the owner reads, and whether
+ * it was a transport failure (the one kind of failure an apply is retried after).
+ */
+function kanCostReason(e) {
+  const text = String((e && e.message) || e || '');
+  if (/^Токен KAN не задан/.test(text)) return { reason: 'токен КАН не задан', transport: false };
+  if (/^KAN отверг токен/.test(text)) return { reason: 'КАН отверг токен', transport: false };
+  const refusal = text.match(/^KAN (?:отказал|ошибка) на [^:]+: ([\s\S]*)$/);
+  if (refusal) {
+    let detail = refusal[1];
+    try {
+      const parsed = JSON.parse(detail);
+      const inner = parsed && ((parsed.error && parsed.error.message) || parsed.message);
+      if (inner) detail = String(inner);
+    } catch (notJson) { /* plain text: keep it as it is */ }
+    return { reason: 'КАН отказал: ' + detail.slice(0, 150), transport: false };
+  }
+  // HTTP 5xx, not JSON, an unreadable answer, or the raw UrlFetchApp exception of a timeout.
+  return { reason: 'КАН недоступен', transport: true };
+}
+
+/** All cost entries of one KAN shop with dt in [dateFrom, dateTo], every page. Throws when KAN fails. */
+function kanCostReadAll(shopId, dateFrom, dateTo) {
+  const items = [];
+  let offset = 0;
+  for (let page = 0; page < 50; page++) {
+    const res = kanCall('get_product_costs', { shop_id: [shopId], date__gte: dateFrom, date__lte: dateTo, limit: 1000, offset: offset });
+    (res.items || []).forEach(function(item) { items.push(item); });
+    if (res.next_offset === null || res.next_offset === undefined) return items;
+    offset = Number(res.next_offset);
+  }
+  // Never treat a partly read answer as complete: «no entry» would then be believed.
+  throw new Error('KAN вернул слишком много страниц на get_product_costs');
+}
+
+/** The entries of KAN's answer that belong to one article and day (the article is case-blind in KAN). */
+function kanCostEntriesOf(items, article, date) {
+  const wanted = String(article).trim().toLowerCase();
+  return items.filter(function(item) {
+    return String(item.sku_article || '').trim().toLowerCase() === wanted && String(item.dt || '').slice(0, 10) === date;
+  });
+}
+
+/** 233.6 -> «233,60», the way the owner reads money. */
+function kanCostMoney(value) {
+  return Number(value).toFixed(2).replace('.', ',');
+}
+
+/** apply_product_cost_changes reports history_saved at the top or inside `summary`. */
+function kanCostHistorySaved(applied) {
+  return !!applied && (applied.history_saved === true || (!!applied.summary && applied.summary.history_saved === true));
+}
+
+/**
+ * One preview -> apply round trip. Returns { reason, issues, historySaved }; reason is '' when apply
+ * answered. A lost apply answer (transport failure) is retried ONCE with the SAME preview_id — KAN
+ * answers a repeated apply of one preview without writing twice. A refusal or an expired preview is
+ * not retried: the next run makes a fresh preview.
+ */
+function kanCostPreviewAndApply(previewArgs) {
+  let preview;
+  try {
+    preview = kanCall('preview_product_cost_changes', previewArgs);
+  } catch (e) {
+    return { reason: kanCostReason(e).reason, issues: [], historySaved: false };
+  }
+  const issues = (preview && preview.summary && Array.isArray(preview.summary.issues)) ? preview.summary.issues
+    : ((preview && Array.isArray(preview.issues)) ? preview.issues : []);
+  if (!preview || !preview.preview_id) return { reason: 'КАН не вернул preview_id', issues: issues, historySaved: false };
+
+  const applyArgs = { preview_id: preview.preview_id, confirm: true };
+  let applied;
+  try {
+    applied = kanCall('apply_product_cost_changes', applyArgs);
+  } catch (first) {
+    const mapped = kanCostReason(first);
+    if (!mapped.transport) return { reason: mapped.reason, issues: issues, historySaved: false };
+    try {
+      applied = kanCall('apply_product_cost_changes', applyArgs);
+    } catch (second) {
+      return { reason: kanCostReason(second).reason, issues: issues, historySaved: false };
+    }
+  }
+  return { reason: '', issues: issues, historySaved: kanCostHistorySaved(applied) };
+}
+
+/** Marks the groups of a batch that KAN skipped (preview issues) with the reason to show. */
+function kanCostAttachIssues(batch, issues) {
+  issues.forEach(function(issue) {
+    const article = String((issue && issue.sku_article) || '').trim().toLowerCase();
+    const rowNumber = Number(issue && issue.row_number);
+    const byRow = rowNumber >= 1 ? batch[rowNumber - 1] : null;
+    // row_number is 1-based into the rows we sent; when it does not point at that article, go by the article.
+    const targets = (byRow && (!article || byRow.article.toLowerCase() === article))
+      ? [byRow]
+      : batch.filter(function(g) { return g.article.toLowerCase() === article; });
+    const text = String((issue && issue.reason) || '');
+    const reason = text.indexOf('не найден') !== -1 ? 'товара нет в КАН' : 'КАН пропустил строку: ' + text;
+    targets.forEach(function(g) { if (!g.issue) g.issue = reason; });
+  });
+}
+
+/**
+ * Sends the groups of ONE KAN shop and settles g.ok / g.reason / g.answer on every one of them.
+ * Deletes first (entry ids come from one pre-read), then the upserts in batches, then ONE read-back
+ * over all the dates of the shop — always, even after an error: KAN's state, not our log of what we
+ * did, decides. A failure here never reaches another shop (the caller isolates it too).
+ */
+function kanCostSendShop(shopId, groups) {
+  const deletes = groups.filter(function(g) { return g.action === 'delete'; });
+  const upserts = groups.filter(function(g) { return g.action !== 'delete'; });
+
+  if (deletes.length > 0) {
+    const days = deletes.map(function(g) { return g.date; }).sort();
+    let existing = null;
+    try {
+      existing = kanCostReadAll(shopId, days[0], days[days.length - 1]);
+    } catch (e) {
+      const reason = kanCostReason(e).reason;
+      deletes.forEach(function(g) { g.stepError = reason; });
+    }
+    if (existing) {
+      deletes.forEach(function(g) {
+        const entries = kanCostEntriesOf(existing, g.article, g.date);
+        if (entries.length === 0) return;
+        if (entries.length > 1) { g.stepError = 'в КАН несколько записей на эту дату'; return; }
+        g.removed = true;
+        const step = kanCostPreviewAndApply({ operation: 'delete', entry_id: entries[0].id });
+        g.historySaved = step.historySaved;
+        if (step.reason) g.stepError = step.reason;
+      });
+    }
+  }
+
+  for (let from = 0; from < upserts.length; from += KAN_COST_BATCH) {
+    const batch = upserts.slice(from, from + KAN_COST_BATCH);
+    const rows = batch.map(function(g) {
+      return { sku_article: g.article, date: g.date, cost_price: roundToTwo(g.cost), expense: 0 };
+    });
+    const step = kanCostPreviewAndApply({ operation: 'import', shop_id: [shopId], rows: rows });
+    batch.forEach(function(g) {
+      g.historySaved = step.historySaved;
+      if (step.reason) g.stepError = step.reason;
+    });
+    kanCostAttachIssues(batch, step.issues);
+  }
+
+  const allDays = groups.map(function(g) { return g.date; }).sort();
+  let items = null;
+  let readError = '';
+  try {
+    items = kanCostReadAll(shopId, allDays[0], allDays[allDays.length - 1]);
+  } catch (e) {
+    readError = kanCostReason(e).reason;
+  }
+  groups.forEach(function(g) {
+    if (items === null) { g.ok = false; g.reason = g.stepError || readError; return; }
+    const entries = kanCostEntriesOf(items, g.article, g.date);
+    const sent = g.action === 'upsert' ? roundToTwo(g.cost) : null;
+    if (g.action === 'delete' ? entries.length === 0
+      : (entries.length === 1 && Math.abs(Number(entries[0].cost_price) - sent) < 0.005)) {
+      g.ok = true;
+      g.answer = g.action === 'delete' ? (g.removed ? 'КАН: запись удалена' : 'КАН: записи не было') : 'КАН принял ' + kanCostMoney(sent);
+      return;
+    }
+    g.ok = false;
+    // KAN's own word about THIS row (a preview issue) outranks a failure of the whole step: a batch
+    // of an unknown article whose apply is refused still reads «товара нет в КАН».
+    if (g.issue) g.reason = g.issue;
+    else if (g.stepError) g.reason = g.stepError;
+    else if (entries.length > 1) g.reason = 'в КАН несколько записей на эту дату';
+    else if (g.action === 'delete') g.reason = 'запись в КАН не удалена';
+    else {
+      const notSaved = g.historySaved === true ? '' : 'КАН не сохранил изменения; ';
+      g.reason = notSaved + (entries.length === 1
+        ? 'КАН записал ' + kanCostMoney(entries[0].cost_price) + ' вместо ' + kanCostMoney(sent)
+        : 'в КАН нет записи после отправки');
+    }
+  });
+}
+
+/**
+ * Writes the KAN status columns (and the «Выгружено в КАН» stamp) of the given journal rows.
+ * `updates` is { rowNumber: { status, answer, time, stamp } }; `startRowsByNumber` holds the rows as
+ * the sender first read them. Under a short script lock (no network inside) the sheet is read FRESH
+ * and a row is written only if it is still the same row — (cabinet, article, date, opId, source,
+ * costAfter) — otherwise it is counted in notWritten and left for the next run. Rows appended since
+ * the start read are never in `updates` and are never touched. The status block is ONE setValues over
+ * the span of the rows (rows of other hands inside the span are written back as they are); the stamp
+ * goes only on a verified upsert row that has no stamp yet, never on a drop marker, never over an
+ * existing stamp (a CSV stamp keeps «first reached KAN»).
+ */
+function writeOzonCostKanStatuses(startRowsByNumber, updates, stampText) {
+  const wanted = Object.keys(updates).map(Number).sort(function(a, b) { return a - b; });
+  if (wanted.length === 0) return { notWritten: 0, unwritten: {} };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = getOzonCostSheet(getSpreadsheet());
+    const values = sheet.getDataRange().getValues();
+    const headers = values[0].map(function(h) { return String(h).trim(); });
+    const colStatus = headers.indexOf(OZON_COST_KAN_HEADERS[0]);
+    const colStamp = headers.indexOf('Выгружено в КАН');
+    if (colStatus < 0 || colStamp < 0 || headers.indexOf(OZON_COST_KAN_HEADERS[1]) !== colStatus + 1
+        || headers.indexOf(OZON_COST_KAN_HEADERS[2]) !== colStatus + 2) {
+      throw new Error('В листе «Себестоимость Озон» колонки «Статус КАН», «Ответ КАН», «Время КАН» должны идти подряд, а колонка «Выгружено в КАН» — быть на месте. Статусы не записаны.');
+    }
+    const cellOf = function(rowNumber, col) {
+      const row = values[rowNumber - 1];
+      return row && row[col] !== undefined ? row[col] : '';
+    };
+
+    const fresh = {};
+    ozonCostRowsFromValues(values).forEach(function(r) { fresh[r.row] = r; });
+    const writable = {};
+    const writableRows = [];
+    wanted.forEach(function(n) {
+      const now = fresh[n];
+      const start = startRowsByNumber[n];
+      const same = !!now && !!start && now.cabinet === start.cabinet && now.article === start.article
+        && now.date === start.date && now.opId === start.opId && now.source === start.source && now.costAfter === start.costAfter;
+      if (same) { writable[n] = true; writableRows.push(n); }
+    });
+
+    if (writableRows.length > 0) {
+      const first = writableRows[0];
+      const last = writableRows[writableRows.length - 1];
+      const block = [];
+      for (let n = first; n <= last; n++) {
+        block.push(writable[n]
+          ? [updates[n].status, updates[n].answer, updates[n].time]
+          : [cellOf(n, colStatus), cellOf(n, colStatus + 1), cellOf(n, colStatus + 2)]);
+      }
+      sheet.getRange(first, colStatus + 1, last - first + 1, 3).setValues(block);
+
+      const toStamp = {};
+      const stampRows = writableRows.filter(function(n) {
+        const ok = updates[n].stamp === true && String(cellOf(n, colStamp)).trim() === '' && !isOzonCostDropRow(fresh[n]);
+        if (ok) toStamp[n] = true;
+        return ok;
+      });
+      if (stampRows.length > 0) {
+        const stampFirst = stampRows[0];
+        const stampLast = stampRows[stampRows.length - 1];
+        const stampBlock = [];
+        for (let n = stampFirst; n <= stampLast; n++) stampBlock.push([toStamp[n] ? stampText : cellOf(n, colStamp)]);
+        sheet.getRange(stampFirst, colStamp + 1, stampLast - stampFirst + 1, 1).setValues(stampBlock);
+      }
+      SpreadsheetApp.flush();
+    }
+    const unwritten = {};
+    wanted.forEach(function(n) { if (!writable[n]) unwritten[n] = true; });
+    return { notWritten: wanted.length - writableRows.length, unwritten: unwritten };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function kanCostNow() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+}
+
+function kanCostFail(group, reason) {
+  group.ok = false;
+  group.reason = reason;
+}
+
+/** What the browser gets back for one group: enough to find its «История» rows by OpID. */
+function kanCostGroupSummary(group) {
+  const summary = {
+    cabinet: group.cabinet, article: group.article, date: group.date, action: group.action,
+    cost: group.action === 'upsert' ? group.cost : null, opIds: group.opIds
+  };
+  if (!group.ok) summary.reason = group.reason;
+  return summary;
+}
+
+/**
+ * Sends every journal row KAN has not accepted (see collectOzonCostKanGroups) and verifies it by
+ * reading KAN back. Returns { busy, message, accepted, failed, skippedManual, notWritten }; `busy`
+ * means another sender holds the lease (or the table lock) and nothing was sent.
+ * Called from the button (doPost, outside the global lock) and by the trigger of ticket 04.
+ */
+function sendOzonCostToKan(username) {
+  if (_devModeSpreadsheet) throw new Error('Отправка себестоимости в КАН недоступна в режиме разработки');
+  const lease = acquireKanCostLease();
+  if (!lease.token) return { busy: true, message: lease.message, accepted: [], failed: [], skippedManual: 0, notWritten: 0 };
+  try {
+    return runKanCostSend(username);
+  } finally {
+    releaseKanCostLease(lease.token);
+  }
+}
+
+function runKanCostSend(username) {
+  // Outside any lock on purpose: ensureColumns takes and releases the script lock itself.
+  const sheet = getOzonCostSheet(getSpreadsheet());
+  ensureColumns(sheet, OZON_COST_HEADERS.concat(OZON_COST_KAN_HEADERS));
+  const journal = getOzonCostJournal();
+  const collected = collectOzonCostKanGroups(journal);
+  const answer = { busy: false, message: '', accepted: [], failed: [], skippedManual: collected.skippedManual, notWritten: 0 };
+  if (collected.pending.length === 0) return answer;
+
+  const startRows = {};
+  journal.forEach(function(r) { startRows[r.row] = r; });
+
+  // A group that cannot be sent is settled here and never leaves Apps Script.
+  const sendable = [];
+  collected.pending.forEach(function(g) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(g.date)) return kanCostFail(g, 'неверная дата в журнале');
+    if (g.action === 'upsert' && !(roundToTwo(g.cost) > 0)) return kanCostFail(g, 'нулевая себестоимость — не отправлено');
+    sendable.push(g);
+  });
+
+  const shopOfGroup = [];
+  if (sendable.length > 0) {
+    try {
+      const listed = kanCall('list_shops', {});
+      const scopes = (listed.access && listed.access.scopes) || [];
+      if (scopes.indexOf(KAN_COST_WRITE_SCOPE) === -1) {
+        sendable.forEach(function(g) { kanCostFail(g, 'токен без права записи себестоимости'); });
+      } else {
+        const shopIdByName = {};
+        const twoShopsNamed = {};
+        (listed.shops || []).forEach(function(s) {
+          // A Wildberries shop may carry the same name as an Ozon cabinet; costs go to Ozon shops only.
+          if (String(s.marketplace || '').toLowerCase() !== 'ozon') return;
+          const name = String(s.name || '').trim();
+          if (shopIdByName.hasOwnProperty(name)) twoShopsNamed[name] = true;
+          else shopIdByName[name] = Number(s.id);
+        });
+        sendable.forEach(function(g) {
+          // Two Ozon shops of one name: the shop must come strictly from the cabinet, so never guess.
+          if (twoShopsNamed[g.cabinet]) kanCostFail(g, 'в КАН два магазина с именем «' + g.cabinet + '»');
+          else if (shopIdByName.hasOwnProperty(g.cabinet)) shopOfGroup.push({ group: g, shopId: shopIdByName[g.cabinet] });
+          else kanCostFail(g, 'кабинет «' + g.cabinet + '» не найден в КАН');
+        });
+      }
+    } catch (e) {
+      const reason = kanCostReason(e).reason;
+      sendable.forEach(function(g) { kanCostFail(g, reason); });
+    }
+  }
+
+  const updatesFor = function(groups, build) {
+    const updates = {};
+    groups.forEach(function(g) { g.rows.forEach(function(r) { updates[r.row] = build(g); }); });
+    return updates;
+  };
+
+  if (shopOfGroup.length > 0) {
+    const sendingTime = kanCostNow();
+    writeOzonCostKanStatuses(startRows, updatesFor(shopOfGroup.map(function(x) { return x.group; }), function() {
+      return { status: KAN_COST_STATUS.SENDING, answer: '', time: sendingTime, stamp: false };
+    }), '');
+
+    const byShop = {};
+    shopOfGroup.forEach(function(x) {
+      if (!byShop[x.shopId]) byShop[x.shopId] = [];
+      byShop[x.shopId].push(x.group);
+    });
+    Object.keys(byShop).forEach(function(shopKey) {
+      try {
+        kanCostSendShop(Number(shopKey), byShop[shopKey]);
+      } catch (e) {
+        // One shop's failure never stops another: whatever it left undecided fails with the reason.
+        const reason = kanCostReason(e).reason;
+        byShop[shopKey].forEach(function(g) { if (g.ok === undefined) kanCostFail(g, reason); });
+      }
+    });
+  }
+
+  const doneTime = kanCostNow();
+  const stampText = doneTime + ' ' + (username || 'автоотправка');
+  const written = writeOzonCostKanStatuses(startRows, updatesFor(collected.pending, function(g) {
+    return g.ok
+      ? { status: KAN_COST_STATUS.ACCEPTED, answer: g.answer, time: doneTime, stamp: g.action === 'upsert' }
+      : { status: KAN_COST_STATUS.ERROR, answer: g.reason, time: doneTime, stamp: false };
+  }), stampText);
+  answer.notWritten = written.notWritten;
+  collected.pending.forEach(function(g) {
+    // The answer never claims more than the sheet holds: a group with a row the journal moved during
+    // the run is not «принято» there, so it is not reported as accepted either (the next run sends it).
+    if (g.ok && g.rows.some(function(r) { return written.unwritten[r.row]; })) {
+      kanCostFail(g, 'журнал изменился во время отправки — отправится снова');
+    }
+    (g.ok ? answer.accepted : answer.failed).push(kanCostGroupSummary(g));
+  });
+  return answer;
 }
 
 function getOzonSupplyRequests() {

@@ -10421,6 +10421,756 @@ const T93_MARK = 'удалено из цепочки';
     badSource.indexOf('должен начинаться со слова «пересчёт»') !== -1 && t.dumpOzonCost().length === b2, badSource);
 })();
 
+// ================= Item 93 ticket 03: the KAN cost sender =================
+// The sender pushes the journal «Себестоимость Озон» to KAN and accepts a group only after reading KAN
+// back. The stand fakes KAN behind UrlFetchApp (fakeKanCost): a stateful store of cost entries per shop,
+// the live answer shapes observed on 2026-10-14, and failure modes. Fixture: MaxiStore / ART-C on
+// 2026-10-13 at 233.67 (one shipment, op-1). KAN's shops: MaxiStore 2771, Mercurius 1765.
+// The stand's clock is 2026-10-14 10:00 UTC = 13:00:00 in the script zone (Europe/Moscow).
+
+const T03_TOKEN = 'tok-93-03';
+const T03_NOW = '2026-10-14T10:00:00Z';
+const T03_TIME = '2026-10-14 13:00:00';
+const T03_OLD_STAMP = '2026-09-02 10:00:00 admin';
+const T03_DAY = '2026-10-13';
+const T03_ERR = 'ошибка';
+const T03_OK = 'принято';
+const T03_SENDING = 'отправляется';
+const T03_MARKER = 'удалено из цепочки';
+
+// JSON with sorted keys: the assertions are about the content of a request, not its key order.
+const t03Canon = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x))
+  ? Object.keys(x).sort().reduce((o, key) => { o[key] = x[key]; return o; }, {}) : x);
+
+function fakeKanCost(options) {
+  const o = Object.assign({
+    scopes: ['mcp:product_cost:read', 'mcp:product_cost:write'],
+    shops: [
+      { id: 2771, name: 'MaxiStore', marketplace: 'ozon', is_active: true },
+      { id: 1765, name: 'Mercurius', marketplace: 'ozon', is_active: true }
+    ],
+    entries: {},             // shopId -> [{ article, date, cost }] KAN already holds
+    known: null,             // lower-cased articles KAN knows; null = every article
+    issueReason: 'Товар не найден',
+    issueRowNumbers: 'right', // 'wrong': row_number points at no sent row
+    listShops: 'ok',         // 'ok' | 'timeout' | 'http500' | 'http401'
+    preview: 'ok',           // 'ok' | 'refuse' | 'http500' | 'timeout' | 'noId'
+    previewFailShop: null,   // a shop id whose previews answer HTTP 500
+    apply: 'ok',             // 'ok' | 'lostFirst' (written, answer lost) | 'timeout' | 'expired' | 'refuse'
+    writeDelta: 0,           // apply stores cost + writeDelta: a KAN that writes a wrong figure
+    lostWrite: false,        // apply says «ok» and writes nothing
+    historySaved: true,
+    readBack: 'ok',          // 'ok' | 'http500'
+    readFailShop: null,      // a shop id whose get_product_costs answers HTTP 500
+    readFailNth: null,       // the n-th get_product_costs call (1-based) answers HTTP 500
+    pageSize: 1000,
+    onCall: null
+  }, options || {});
+  const state = { store: {}, previews: {}, seq: 0, idSeq: 1000, writes: 0, applies: 0, previewCount: 0, reads: 0, calls: [] };
+  Object.keys(o.entries).forEach((shop) => {
+    state.store[shop] = o.entries[shop].map((e) => ({ id: ++state.idSeq, productId: state.idSeq * 10, article: e.article, date: e.date, cost: e.cost }));
+  });
+  const shopEntries = (shopId) => (state.store[shopId] = state.store[shopId] || []);
+  const text = (obj, isError) => ({ code: 200, body: { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj) }], isError: !!isError } } });
+  const timeout = () => new Error('Exception: Timeout: https://kultura-analitiki.ru/mcp/');
+  const lower = (s) => String(s).trim().toLowerCase();
+
+  state.handler = function (url, request) {
+    const body = JSON.parse(request.payload);
+    const name = body.params.name;
+    const args = body.params.arguments || {};
+    state.calls.push(name);
+    if (o.onCall) o.onCall(name, args, state);
+
+    if (name === 'list_shops') {
+      if (o.listShops === 'timeout') throw timeout();
+      if (o.listShops === 'http500') return { code: 500, body: 'Internal Server Error' };
+      if (o.listShops === 'http401') return { code: 401, body: { detail: 'Invalid or missing MCP credentials.' } };
+      return text({ access: { scopes: o.scopes, role: 'read_write' }, shops: o.shops });
+    }
+
+    if (name === 'preview_product_cost_changes') {
+      if (o.preview === 'timeout') throw timeout();
+      if (o.preview === 'http500' || (o.previewFailShop && args.shop_id && args.shop_id[0] === o.previewFailShop)) return { code: 500, body: 'boom' };
+      if (o.preview === 'refuse') return text('Недостаточно прав на запись себестоимости', true);
+      state.previewCount++;
+      const id = 'prev-' + (++state.seq);
+      if (args.operation === 'delete') {
+        const found = Object.keys(state.store).some((shop) => state.store[shop].some((e) => e.id === args.entry_id));
+        if (!found) return text(JSON.stringify({ error: { code: 'not_found', message: 'Запись себестоимости не найдена' } }), true);
+        state.previews[id] = { kind: 'delete', entryId: args.entry_id, applied: false, result: null };
+        return text({ preview_id: id, operation: 'delete', confirmation_required: true, items: [], summary: { history_saved: false, total: 1, imported: 0, issues: [] } });
+      }
+      if (!Array.isArray(args.shop_id) || args.shop_id.length !== 1) {
+        return text(JSON.stringify({ error: { code: 'invalid_params', message: 'Укажите ровно один магазин' } }), true);
+      }
+      const issues = [];
+      const good = [];
+      args.rows.forEach((row, i) => {
+        if (o.known && o.known.indexOf(lower(row.sku_article)) === -1) {
+          issues.push({ row_number: o.issueRowNumbers === 'wrong' ? 99 : i + 1, sku: '', sku_article: lower(row.sku_article), reason: o.issueReason });
+        } else {
+          good.push(row);
+        }
+      });
+      state.previews[id] = { kind: 'import', shopId: args.shop_id[0], rows: good, applied: false, result: null };
+      const answer = {
+        operation: 'import', expires_at: '2026-10-14T15:58:27.220501+00:00', confirmation_required: true,
+        items: good.map((r) => ({ before: null, after: { sku_article: r.sku_article, dt: r.date, cost_price: Number(r.cost_price).toFixed(4) } })),
+        summary: {
+          history_saved: false, update_task_failed: false, interval_update_queued: false, task_id: null,
+          total: args.rows.length, imported: good.length, created: good.length, updated: 0, unique_products: good.length, duplicates: 0,
+          skipped: issues.length ? { 'Товар не найден': issues.length } : {}, issues
+        },
+        date_default: T03_DAY
+      };
+      if (o.preview !== 'noId') answer.preview_id = id;
+      return text(answer);
+    }
+
+    if (name === 'apply_product_cost_changes') {
+      state.applies++;
+      const p = state.previews[args.preview_id];
+      if (args.confirm !== true) return text('confirm=true required', true);
+      if (!p) return text('Предпросмотр не найден', true);
+      if (o.apply === 'expired') return text('Предпросмотр истёк', true);
+      if (o.apply === 'refuse') return text('КАН не может применить изменения', true);
+      if (o.apply === 'timeout') throw timeout();
+      if (p.applied) return text(p.result);              // the same preview again: its result, no second write
+      if (!o.lostWrite) {
+        if (p.kind === 'delete') {
+          Object.keys(state.store).forEach((shop) => {
+            const before = state.store[shop].length;
+            state.store[shop] = state.store[shop].filter((e) => e.id !== p.entryId);
+            if (state.store[shop].length !== before) state.writes++;
+          });
+        } else {
+          p.rows.forEach((row) => {
+            const list = shopEntries(p.shopId);
+            const cost = Math.round((Number(row.cost_price) + o.writeDelta) * 100) / 100;
+            const existing = list.find((e) => lower(e.article) === lower(row.sku_article) && e.date === row.date);
+            if (existing) existing.cost = cost;
+            else list.push({ id: ++state.idSeq, productId: state.idSeq * 10, article: row.sku_article, date: row.date, cost });
+            state.writes++;
+          });
+        }
+      }
+      p.applied = true;
+      p.result = { summary: { history_saved: o.historySaved, interval_update_queued: true, update_task_failed: false } };
+      if (o.apply === 'lostFirst' && state.applies === 1) throw timeout();   // written, but the answer never came back
+      return text(p.result);
+    }
+
+    if (name === 'get_product_costs') {
+      state.reads++;
+      if (o.readBack === 'http500' || (o.readFailShop && args.shop_id && args.shop_id[0] === o.readFailShop) || (o.readFailNth && state.reads === o.readFailNth)) return { code: 500, body: 'boom' };
+      if (!Array.isArray(args.shop_id) || args.limit > 1000) return text('invalid params', true);
+      const list = shopEntries(args.shop_id[0]).filter((e) => e.date >= args.date__gte && e.date <= args.date__lte);
+      const offset = Number(args.offset) || 0;
+      const page = list.slice(offset, offset + o.pageSize);
+      const next = offset + o.pageSize < list.length ? offset + o.pageSize : null;
+      return text({
+        count: list.length, limit: args.limit, offset, returned_rows: page.length, truncated: next !== null, next_offset: next,
+        items: page.map((e) => ({ id: e.id, product_id: e.productId, shop_id: args.shop_id[0], shop_name: 'x', sku_article: e.article,
+          product_name: 'Товар', dt: e.date, dt_end: null, cost_price: Number(e.cost).toFixed(4), expense: '0.0000' }))
+      });
+    }
+    return { code: 500, body: 'unknown tool ' + name };
+  };
+  state.entries = (shopId) => shopEntries(shopId).map((e) => ({ article: e.article, date: e.date, cost: e.cost }));
+  return state;
+}
+
+// A journal row (12 columns) with optional KAN columns appended: extra.status / answer / time.
+const t03Row = (date, cab, art, cost, opId, extra) => {
+  const e = extra || {};
+  const row = costRow(date, cab, art, cost, opId, Object.assign({ sku: 'S-' + art, source: 'отгрузка', shipped: 10, shippedCost: cost, stockBefore: 100, costBefore: cost }, e));
+  return e.status !== undefined ? row.concat([e.status, e.answer || '', e.time || '']) : row;
+};
+const t03One = (extra) => t03Row(T03_DAY, 'MaxiStore', 'ART-C', 233.67, 'op-1', extra);
+const t03Marker = (date, art, opId, extra) => costRow(date, 'MaxiStore', art, '', opId, Object.assign({ source: T03_MARKER, shipped: 0, stockBefore: 100 }, extra || {}));
+
+// narrow = the sheet as it was before ticket 03: 12 columns only.
+function t03Setup(rows, kanOptions, narrow) {
+  const h = freshHarness();
+  h.setNow(T03_NOW);
+  h.setScriptProperty('kan_mcpToken', T03_TOKEN);
+  h.setOzonCostSheet(rows, narrow ? undefined : h.OZON_COST_HEADERS.concat(h.OZON_COST_KAN_HEADERS));
+  const kan = fakeKanCost(kanOptions);
+  h.setFetchHandler(kan.handler);
+  return { h, kan };
+}
+function t03Run(rows, kanOptions, username, narrow) {
+  const t = t03Setup(rows, kanOptions, narrow);
+  t.before = t.h.dumpOzonCostFull();
+  t.res = t.h.sendOzonCostToKan(username === undefined ? 'tester' : username);
+  t.after = t.h.dumpOzonCostFull();
+  return t;
+}
+const t03Names = (h) => h.fetchLog.map((f) => f.body.params.name);
+const t03Args = (h, name) => h.fetchLog.filter((f) => f.body.params.name === name).map((f) => f.body.params.arguments);
+// The 11 columns of a journal row the sender must never touch: everything but «Выгружено в КАН».
+const t03Fixed = (row) => t03Canon(Object.keys(row).filter((k) => k !== 'Выгружено в КАН' && !k.endsWith(' КАН')).map((k) => [k, row[k]]));
+// «Статус КАН» / «Ответ КАН» / «Время КАН» / «Выгружено в КАН» of a row.
+const t03State = (row) => [row['Статус КАН'], row['Ответ КАН'], row['Время КАН'], row['Выгружено в КАН']];
+// The row is an error with this exact reason, and was NOT stamped.
+const t03IsError = (row, reason) => row['Статус КАН'] === T03_ERR && row['Ответ КАН'] === reason && row['Время КАН'] === T03_TIME && row['Выгружено в КАН'] === '';
+const t03Accepted = (row, answer, stamp) => row['Статус КАН'] === T03_OK && row['Ответ КАН'] === answer && row['Время КАН'] === T03_TIME && row['Выгружено в КАН'] === stamp;
+
+(function test93s03Pure() {
+  const h = freshHarness();
+  // kanCostReason maps the texts kanCall throws (Latin «KAN») to what the owner reads.
+  const reason = (text) => h.kanCostReason(new Error(text));
+  const noToken = reason('Токен KAN не задан: добавьте свойство скрипта kan_mcpToken');
+  const rejected = reason('KAN отверг токен (HTTP 401): проверьте свойство kan_mcpToken');
+  check('93/03 reason: a missing token and a rejected token are told apart and are not retried',
+    noToken.reason === 'токен КАН не задан' && !noToken.transport && rejected.reason === 'КАН отверг токен' && !rejected.transport,
+    JSON.stringify([noToken, rejected]));
+  const plain = reason('KAN отказал на preview_product_cost_changes: Недостаточно прав');
+  const jsonTail = reason('KAN отказал на apply_product_cost_changes: ' + JSON.stringify({ error: { code: 'x', message: 'Предпросмотр истёк' } }));
+  const jsonMessage = reason('KAN ошибка на get_product_costs: ' + JSON.stringify({ message: 'Слишком много' }));
+  const long = reason('KAN отказал на preview_product_cost_changes: ' + 'я'.repeat(400));
+  check('93/03 reason: a refusal shows KAN\'s own words (plain text, error.message, message), cut to 150 characters',
+    plain.reason === 'КАН отказал: Недостаточно прав' && jsonTail.reason === 'КАН отказал: Предпросмотр истёк'
+      && jsonMessage.reason === 'КАН отказал: Слишком много' && long.reason === 'КАН отказал: ' + 'я'.repeat(150)
+      && !plain.transport && !long.transport,
+    JSON.stringify([plain, jsonTail, jsonMessage]));
+  const down = [reason('KAN ответил HTTP 500 на ping: boom'), reason('Exception: Timeout: https://kultura-analitiki.ru/mcp/'),
+    reason('KAN вернул не JSON на ping'), reason('KAN вернул нечитаемый ответ на ping'), reason('что-то совсем другое')];
+  check('93/03 reason: HTTP 5xx, a timeout, unreadable answers and anything unknown are «КАН недоступен» and count as transport',
+    down.every((d) => d.reason === 'КАН недоступен' && d.transport === true), JSON.stringify(down));
+
+  // Grouping: (cabinet, article, date), the last row wins, the OpIDs of every row come along.
+  const rows = (list) => { h.setOzonCostSheet(list, h.OZON_COST_HEADERS.concat(h.OZON_COST_KAN_HEADERS)); return h.getOzonCostJournal(); };
+  const journal = rows([
+    t03Row(T03_DAY, 'MaxiStore', 'A', 231, 'op-1'),
+    t03Row(T03_DAY, 'MaxiStore', 'A', 233.67, 'op-2'),
+    t03Row(T03_DAY, 'MaxiStore', 'A', 233.67, 'op-2'),
+    t03Row('2026-10-12', 'MaxiStore', 'A', 200, ''),
+    t03Marker('2026-10-11', 'A', 'op-3'),
+    t03Row('2026-10-11', 'MaxiStore', 'B', 99, 'op-4'),
+    t03Marker('2026-10-11', 'B', 'op-4'),
+    t03Row(T03_DAY, '', 'C', 5, 'op-5'),
+    t03Row(T03_DAY, 'MaxiStore', '', 5, 'op-6'),
+    t03Row(T03_DAY + 'T00:00:00', 'Mercurius', 'A', 70, 'op-7')
+  ]);
+  const grouped = h.collectOzonCostKanGroups(journal);
+  const brief = grouped.pending.map((g) => [g.cabinet, g.article, g.date, g.action, g.cost, g.opIds, g.rows.length]);
+  check('93/03 groups: one group per cabinet, article and day; the last row\'s figure; OpIDs unique and in row order; empty cabinet or article skipped',
+    t03Canon(brief) === t03Canon([
+      ['MaxiStore', 'A', T03_DAY, 'upsert', 233.67, ['op-1', 'op-2'], 3],
+      ['MaxiStore', 'A', '2026-10-12', 'upsert', 200, [], 1],
+      ['MaxiStore', 'A', '2026-10-11', 'delete', null, ['op-3'], 1],
+      ['MaxiStore', 'B', '2026-10-11', 'delete', null, ['op-4'], 2],
+      ['Mercurius', 'A', T03_DAY, 'upsert', 70, ['op-7'], 1]
+    ]), JSON.stringify(brief));
+
+  // Status rules, on the LAST row of the group.
+  const ruled = rows([
+    t03Row(T03_DAY, 'MaxiStore', 'S-none', 1, 'o1'),
+    t03Row(T03_DAY, 'MaxiStore', 'S-sending', 1, 'o2', { status: T03_SENDING }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-error', 1, 'o3', { status: T03_ERR }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-ok', 1, 'o4', { status: T03_OK, exported: T03_OLD_STAMP }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-manual', 1, 'o5', { status: 'вручную' }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-legacy', 1, 'o6', { exported: T03_OLD_STAMP }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-odd', 1, 'o7', { status: 'проверить' }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-fixed', 1, 'o8', { status: T03_OK }),
+    t03Row(T03_DAY, 'MaxiStore', 'S-fixed', 2, 'o9')
+  ]);
+  const ruledGroups = h.collectOzonCostKanGroups(ruled);
+  check('93/03 groups: unsent, «отправляется» and «ошибка» are pending; accepted, an unknown status and a legacy CSV-stamped row are not; «вручную» is only counted; a newer unsent row revives an accepted group',
+    ruledGroups.pending.map((g) => g.article).join(',') === 'S-none,S-sending,S-error,S-fixed' && ruledGroups.skippedManual === 1,
+    ruledGroups.pending.map((g) => g.article).join(',') + ' manual ' + ruledGroups.skippedManual);
+
+  // The reader: absent KAN columns read as empty; a Date in «Время КАН» comes back as text.
+  const old12 = h.ozonCostRowsFromValues([h.OZON_COST_HEADERS.slice(), t03One()]);
+  const stamped = h.ozonCostRowsFromValues([h.OZON_COST_HEADERS.concat(h.OZON_COST_KAN_HEADERS),
+    t03One().concat([T03_OK, 'КАН принял 233,67', new h.FakeDate(Date.parse(T03_NOW))])]);
+  check('93/03 reader: an old 12-column sheet reads with empty KAN fields; a Date in «Время КАН» is read back as «yyyy-MM-dd HH:mm:ss» text',
+    old12.length === 1 && old12[0].kanStatus === '' && old12[0].kanAnswer === '' && old12[0].kanTime === ''
+      && stamped[0].kanStatus === T03_OK && stamped[0].kanAnswer === 'КАН принял 233,67' && stamped[0].kanTime === T03_TIME,
+    JSON.stringify([old12[0], stamped[0]]));
+})();
+
+(function test93s03Accept() {
+  const bystander = t03Row('2026-09-02', 'Mercurius', 'ART-M', 85, 'op-m', { exported: T03_OLD_STAMP, status: T03_OK, answer: 'КАН принял 85,00', time: '2026-09-02 10:00:00' });
+  const t = t03Setup([t03One(), bystander]);
+  const { h, kan } = t;
+  const sheet = h.getRegistrySheet('Себестоимость Озон');
+  const before = h.dumpOzonCostFull();
+  sheet.__resetSetValuesCallCount();
+  const res = h.sendOzonCostToKan('tester');
+  const after = h.dumpOzonCostFull();
+
+  check('93/03 A: the answer names the accepted group — cabinet, article, date, figure, OpIDs — and nothing else',
+    res.busy === false && res.skippedManual === 0 && res.notWritten === 0 && res.failed.length === 0
+      && t03Canon(res.accepted) === t03Canon([{ cabinet: 'MaxiStore', article: 'ART-C', date: T03_DAY, action: 'upsert', cost: 233.67, opIds: ['op-1'] }]),
+    JSON.stringify(res));
+  const bodies = h.fetchLog.map((f) => f.body);
+  check('93/03 A: the requests are JSON-RPC tools/call with the Bearer token, in the order list_shops, preview, apply, read-back',
+    t03Names(h).join(',') === 'list_shops,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && bodies.every((b) => b.jsonrpc === '2.0' && b.method === 'tools/call')
+      && h.fetchLog.every((f) => f.url === 'https://kultura-analitiki.ru/mcp/' && f.options.headers.Authorization === 'Bearer ' + T03_TOKEN),
+    t03Names(h).join(','));
+  check('93/03 A: the arguments — one shop id, the rounded figure, expense 0, confirm true with the preview\'s own id, the read-back over the day',
+    t03Canon(t03Args(h, 'list_shops')[0]) === '{}'
+      && t03Canon(t03Args(h, 'preview_product_cost_changes')[0]) === t03Canon({ operation: 'import', shop_id: [2771], rows: [{ sku_article: 'ART-C', date: T03_DAY, cost_price: 233.67, expense: 0 }] })
+      && t03Canon(t03Args(h, 'apply_product_cost_changes')[0]) === t03Canon({ preview_id: 'prev-1', confirm: true })
+      && t03Canon(t03Args(h, 'get_product_costs')[0]) === t03Canon({ shop_id: [2771], date__gte: T03_DAY, date__lte: T03_DAY, limit: 1000, offset: 0 }),
+    JSON.stringify(bodies.map((b) => b.params)));
+  check('93/03 A: a one-shipment run costs exactly 4 requests to KAN', h.fetchLog.length === 4, String(h.fetchLog.length));
+  check('93/03 A: the row is «принято» with the figure, the time and the stamp «время имя»; columns 1-10 and 12 are byte for byte; the other row is untouched',
+    t03Accepted(after[0], 'КАН принял 233,67', T03_TIME + ' tester') && t03Fixed(after[0]) === t03Fixed(before[0])
+      && t03Canon(after[1]) === t03Canon(before[1]),
+    JSON.stringify(after[0]));
+  check('93/03 A: KAN holds the figure after exactly one write',
+    t03Canon(kan.entries(2771)) === t03Canon([{ article: 'ART-C', date: T03_DAY, cost: 233.67 }]) && kan.writes === 1, JSON.stringify(kan.entries(2771)));
+  check('93/03 A: the statuses cost 3 sheet writes (SENDING, then status block and stamp column) and no request is made under a script lock',
+    sheet.__getSetValuesCallCount() === 3 && h.fetchesWhileLocked() === 0 && h.nestedLockTakes() === 0 && !h.isScriptLockHeld(),
+    `${sheet.__getSetValuesCallCount()} / ${h.fetchesWhileLocked()} / ${h.nestedLockTakes()}`);
+
+  // B: a second press right after success sends nothing and writes nothing.
+  const calls = h.fetchLog.length;
+  const frozen = t03Canon(h.dumpOzonCostFull());
+  sheet.__resetSetValuesCallCount();
+  const again = h.sendOzonCostToKan('tester');
+  check('93/03 B: a second call right after success makes no request and writes nothing',
+    again.accepted.length === 0 && again.failed.length === 0 && again.busy === false && h.fetchLog.length === calls
+      && t03Canon(h.dumpOzonCostFull()) === frozen && sheet.__getSetValuesCallCount() === 0,
+    JSON.stringify(again));
+
+  // No user name (the trigger) stamps «автоотправка».
+  const auto = t03Run([t03One()], {}, '');
+  check('93/03 A: with no user name the stamp ends with «автоотправка»', auto.after[0]['Выгружено в КАН'] === T03_TIME + ' автоотправка', auto.after[0]['Выгружено в КАН']);
+})();
+
+(function test93s03Failures() {
+  const known = t03One();
+  // A refusal on the preview.
+  let t = t03Run([known], { preview: 'refuse' });
+  check('93/03 C: a refusal is «ошибка» with KAN\'s words, not stamped; the read-back still runs; KAN holds nothing',
+    t03IsError(t.after[0], 'КАН отказал: Недостаточно прав на запись себестоимости') && t.res.failed[0].reason === t.after[0]['Ответ КАН']
+      && t.res.accepted.length === 0 && t03Names(t.h).join(',') === 'list_shops,preview_product_cost_changes,get_product_costs' && t.kan.entries(2771).length === 0,
+    JSON.stringify(t.after[0]) + ' ' + t03Names(t.h).join(','));
+
+  // KAN writes a wrong figure.
+  t = t03Run([known], { writeDelta: -0.07 });
+  check('93/03 C: a wrong figure written by KAN is «КАН записал 233,60 вместо 233,67» and is not stamped',
+    t03IsError(t.after[0], 'КАН записал 233,60 вместо 233,67') && t.res.failed.length === 1, JSON.stringify(t.after[0]));
+
+  // An unknown article in a mixed batch: the known one is accepted.
+  t = t03Run([known, t03Row(T03_DAY, 'MaxiStore', 'NOPE-1', 50, 'op-2')], { known: ['art-c'] });
+  check('93/03 C: an unknown article in a mixed batch is «товара нет в КАН» and not stamped; the known article of the same batch is accepted and stamped',
+    t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester') && t03IsError(t.after[1], 'товара нет в КАН')
+      && t03Canon(t03Args(t.h, 'preview_product_cost_changes')[0].rows.map((r) => r.sku_article)) === t03Canon(['ART-C', 'NOPE-1']),
+    JSON.stringify(t.after.map(t03State)));
+  t = t03Run([known, t03Row(T03_DAY, 'MaxiStore', 'NOPE-1', 50, 'op-2')], { known: ['art-c'], issueRowNumbers: 'wrong' });
+  check('93/03 C: when the issue\'s row_number points at no sent row, the issue is found by the article',
+    t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester') && t03IsError(t.after[1], 'товара нет в КАН'), JSON.stringify(t.after.map(t03State)));
+  t = t03Run([known, t03Row(T03_DAY, 'MaxiStore', 'NOPE-1', 50, 'op-2')], { known: ['art-c'], issueReason: 'Товар определён неоднозначно' });
+  check('93/03 C: any other reason KAN gives for a skipped row is shown as «КАН пропустил строку: …»',
+    t03IsError(t.after[1], 'КАН пропустил строку: Товар определён неоднозначно'), JSON.stringify(t.after[1]));
+  // KAN's word about THIS row (a preview issue) outranks a failure of the whole step.
+  t = t03Run([t03Row(T03_DAY, 'MaxiStore', 'NOPE-1', 50, 'op-2')], { known: ['art-c'], apply: 'refuse' });
+  check('93/03 C: a batch whose only row is an unknown article and whose apply is refused reads «товара нет в КАН», not KAN\'s refusal; not stamped',
+    t03IsError(t.after[0], 'товара нет в КАН') && t.res.failed.length === 1 && t.res.failed[0].reason === 'товара нет в КАН'
+      && t03Args(t.h, 'apply_product_cost_changes').length === 1 && t.kan.entries(2771).length === 0,
+    JSON.stringify(t.after[0]));
+  t = t03Run([known, t03Row(T03_DAY, 'MaxiStore', 'NOPE-1', 50, 'op-2')], { known: ['art-c'], apply: 'refuse' });
+  check('93/03 C: in a mixed batch whose apply is refused the unknown article keeps «товара нет в КАН» and the known one gets KAN\'s refusal; neither is stamped',
+    t03IsError(t.after[0], 'КАН отказал: КАН не может применить изменения') && t03IsError(t.after[1], 'товара нет в КАН') && t.res.accepted.length === 0,
+    JSON.stringify(t.after.map(t03State)));
+
+  // Transport failures.
+  t = t03Run([known], { preview: 'http500' });
+  check('93/03 C: HTTP 500 is «КАН недоступен»', t03IsError(t.after[0], 'КАН недоступен') && t.res.failed.length === 1, JSON.stringify(t.after[0]));
+  t = t03Run([known], { listShops: 'timeout' });
+  check('93/03 C: a timeout on list_shops is «КАН недоступен» after exactly 1 request',
+    t03IsError(t.after[0], 'КАН недоступен') && t.h.fetchLog.length === 1, `${t.h.fetchLog.length} ${JSON.stringify(t.after[0])}`);
+  t = t03Run([known], { listShops: 'http401' });
+  check('93/03 C: a 401 is «КАН отверг токен» after 1 request', t03IsError(t.after[0], 'КАН отверг токен') && t.h.fetchLog.length === 1, JSON.stringify(t.after[0]));
+  t = t03Setup([known]);
+  t.h.clearScriptProperties();
+  t.res = t.h.sendOzonCostToKan('tester');
+  t.after = t.h.dumpOzonCostFull();
+  check('93/03 C: with no token nothing is sent and the reason is «токен КАН не задан»',
+    t.h.fetchLog.length === 0 && t03IsError(t.after[0], 'токен КАН не задан'), JSON.stringify(t.after[0]));
+
+  // A lost apply answer.
+  t = t03Run([known], { apply: 'lostFirst' });
+  const applies = t03Args(t.h, 'apply_product_cost_changes');
+  check('93/03 C: an apply whose answer was lost is repeated ONCE with the SAME preview_id (one preview, two applies) and the row is accepted',
+    applies.length === 2 && applies[0].preview_id === applies[1].preview_id && t03Args(t.h, 'preview_product_cost_changes').length === 1
+      && t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester') && t.kan.writes === 1,
+    JSON.stringify([applies, t.after[0]]));
+  t = t03Run([known], { apply: 'timeout' });
+  check('93/03 C: an apply that times out twice is «КАН недоступен» after one preview and two applies; the read-back still runs',
+    t03IsError(t.after[0], 'КАН недоступен') && t03Args(t.h, 'apply_product_cost_changes').length === 2
+      && t03Args(t.h, 'preview_product_cost_changes').length === 1 && t03Args(t.h, 'get_product_costs').length === 1,
+    t03Names(t.h).join(','));
+  t = t03Run([known], { apply: 'expired' });
+  check('93/03 C: an expired preview is KAN\'s refusal: one apply, no second preview, the next run starts again',
+    t03IsError(t.after[0], 'КАН отказал: Предпросмотр истёк') && t03Args(t.h, 'apply_product_cost_changes').length === 1
+      && t03Args(t.h, 'preview_product_cost_changes').length === 1,
+    t03Names(t.h).join(','));
+  t = t03Run([known], { preview: 'noId' });
+  check('93/03 C: a preview without preview_id is «КАН не вернул preview_id» and nothing is applied',
+    t03IsError(t.after[0], 'КАН не вернул preview_id') && t03Args(t.h, 'apply_product_cost_changes').length === 0, JSON.stringify(t.after[0]));
+
+  // The token cannot write; the cabinet is unknown; the figure or the date is bad.
+  t = t03Run([known, t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m')], { scopes: ['mcp:product_cost:read'] });
+  check('93/03 C: a token without the write scope fails every group after exactly 1 request',
+    t.h.fetchLog.length === 1 && t03IsError(t.after[0], 'токен без права записи себестоимости') && t03IsError(t.after[1], 'токен без права записи себестоимости'),
+    JSON.stringify(t.after.map(t03State)));
+  t = t03Run([t03Row(T03_DAY, 'Ghost', 'ART-G', 10, 'op-g'), known], { shops: [
+    { id: 555, name: 'Ghost', marketplace: 'wb', is_active: true },
+    { id: 2771, name: 'MaxiStore', marketplace: 'ozon', is_active: true }
+  ] });
+  check('93/03 C: a cabinet KAN has no Ozon shop for (a Wildberries shop of that name does not count) fails alone while the other cabinet is sent',
+    t03IsError(t.after[0], 'кабинет «Ghost» не найден в КАН') && t03Accepted(t.after[1], 'КАН принял 233,67', T03_TIME + ' tester')
+      && t03Args(t.h, 'preview_product_cost_changes')[0].shop_id.join() === '2771',
+    JSON.stringify(t.after.map(t03State)));
+  t = t03Run([t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m'), known], { shops: [
+    { id: 1765, name: 'Mercurius', marketplace: 'ozon', is_active: true },
+    { id: 1766, name: 'Mercurius', marketplace: 'ozon', is_active: true },
+    { id: 2771, name: 'MaxiStore', marketplace: 'ozon', is_active: true }
+  ] });
+  check('93/03 C: two Ozon shops of one name fail that cabinet without a guess (nothing sent to either shop); the other cabinet is sent',
+    t03IsError(t.after[0], 'в КАН два магазина с именем «Mercurius»') && t03Accepted(t.after[1], 'КАН принял 233,67', T03_TIME + ' tester')
+      && t03Args(t.h, 'preview_product_cost_changes').map((a) => a.shop_id.join()).join() === '2771',
+    JSON.stringify(t.after.map(t03State)));
+  t = t03Run([t03Row(T03_DAY, 'MaxiStore', 'ART-Z', 0, 'op-z'), t03Row('13.10.2026', 'MaxiStore', 'ART-D', 10, 'op-d'), known]);
+  check('93/03 C: a zero figure and a malformed date are never sent: they fail locally, the good row of the same run is accepted',
+    t03IsError(t.after[0], 'нулевая себестоимость — не отправлено') && t03IsError(t.after[1], 'неверная дата в журнале')
+      && t03Accepted(t.after[2], 'КАН принял 233,67', T03_TIME + ' tester')
+      && t03Canon(t03Args(t.h, 'preview_product_cost_changes')[0].rows.map((r) => r.sku_article)) === t03Canon(['ART-C']),
+    JSON.stringify(t.after.map(t03State)));
+  t = t03Run([t03Row(T03_DAY, 'MaxiStore', 'ART-Z', 0, 'op-z')]);
+  check('93/03 C: when every group fails locally there is no request to KAN at all', t.h.fetchLog.length === 0 && t.res.failed.length === 1, String(t.h.fetchLog.length));
+
+  // history_saved and the read-back disagreeing.
+  t = t03Run([known], { writeDelta: -0.07, historySaved: false });
+  check('93/03 C: history_saved false plus a wrong figure adds «КАН не сохранил изменения; » in front',
+    t03IsError(t.after[0], 'КАН не сохранил изменения; КАН записал 233,60 вместо 233,67'), JSON.stringify(t.after[0]));
+  t = t03Run([known], { historySaved: false });
+  check('93/03 C: history_saved false but the read-back equals the journal — the read-back decides, the row is accepted and stamped',
+    t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester'), JSON.stringify(t.after[0]));
+  t = t03Run([known], { entries: { 2771: [{ article: 'ART-C', date: T03_DAY, cost: 200 }, { article: 'art-c', date: T03_DAY, cost: 210 }] } });
+  check('93/03 C: two KAN entries for one article and day are «в КАН несколько записей на эту дату», not stamped',
+    t03IsError(t.after[0], 'в КАН несколько записей на эту дату'), JSON.stringify(t.after[0]));
+  t = t03Run([known], { lostWrite: true });
+  check('93/03 C: apply says ok but KAN holds no entry — «в КАН нет записи после отправки», not stamped',
+    t03IsError(t.after[0], 'в КАН нет записи после отправки'), JSON.stringify(t.after[0]));
+  t = t03Run([known], { readBack: 'http500' });
+  const readFailed = t03IsError(t.after[0], 'КАН недоступен');
+  t = t03Run([known], { preview: 'refuse', readBack: 'http500' });
+  check('93/03 C: when the read-back itself fails the row is an error — with the step\'s own reason if a step failed before it, else «КАН недоступен»',
+    readFailed && t03IsError(t.after[0], 'КАН отказал: Недостаточно прав на запись себестоимости'), JSON.stringify(t.after[0]));
+})();
+
+(function test93s03Grouping() {
+  // One article on two days: one preview with both rows, one read-back over both days.
+  let t = t03Run([t03One(), t03Row('2026-10-10', 'MaxiStore', 'ART-C', 210.5, 'op-0')]);
+  check('93/03 D: one article on two days is two groups in ONE preview, read back once over both days; both accepted and stamped',
+    t03Args(t.h, 'preview_product_cost_changes').length === 1
+      && t03Canon(t03Args(t.h, 'preview_product_cost_changes')[0].rows) === t03Canon([
+        { sku_article: 'ART-C', date: T03_DAY, cost_price: 233.67, expense: 0 }, { sku_article: 'ART-C', date: '2026-10-10', cost_price: 210.5, expense: 0 }])
+      && t03Canon(t03Args(t.h, 'get_product_costs')) === t03Canon([{ shop_id: [2771], date__gte: '2026-10-10', date__lte: T03_DAY, limit: 1000, offset: 0 }])
+      && t.res.accepted.length === 2 && t.after.every((r) => r['Статус КАН'] === T03_OK && r['Выгружено в КАН'] === T03_TIME + ' tester'),
+    JSON.stringify(t.after.map(t03State)));
+
+  // A combined shipment: three journal rows of one day, the last one wins, every row gets the status and the stamp.
+  t = t03Run([t03Row(T03_DAY, 'MaxiStore', 'ART-C', 231, 'op-1'), t03Row(T03_DAY, 'MaxiStore', 'ART-C', 232.5, 'op-2'), t03Row(T03_DAY, 'MaxiStore', 'ART-C', 233.67, 'op-3')]);
+  check('93/03 D: a combined shipment (3 rows, one day) sends ONE row with the last figure; every row gets the status and the stamp; the answer lists the 3 OpIDs',
+    t03Args(t.h, 'preview_product_cost_changes')[0].rows.length === 1 && t03Args(t.h, 'preview_product_cost_changes')[0].rows[0].cost_price === 233.67
+      && t.after.every((r) => t03Accepted(r, 'КАН принял 233,67', T03_TIME + ' tester'))
+      && t03Canon(t.res.accepted[0].opIds) === t03Canon(['op-1', 'op-2', 'op-3']),
+    JSON.stringify(t.after.map(t03State)));
+
+  // 201 groups: 200 + 1, the read-back pages, the sheet is written in a few blocks, not row by row.
+  const many = [];
+  for (let i = 1; i <= 201; i++) many.push(t03Row(T03_DAY, 'MaxiStore', 'ART-' + i, 10 + i, 'op-' + i));
+  t = t03Setup(many, { pageSize: 100 });
+  t.h.getRegistrySheet('Себестоимость Озон').__resetSetValuesCallCount();
+  t.res = t.h.sendOzonCostToKan('tester');
+  t.after = t.h.dumpOzonCostFull();
+  const batchSizes = t03Args(t.h, 'preview_product_cost_changes').map((a) => a.rows.length);
+  check('93/03 D: 201 groups go as batches of 200 and 1 (two previews, two applies), read back in 3 pages; all accepted',
+    batchSizes.join() === '200,1' && t03Args(t.h, 'apply_product_cost_changes').length === 2
+      && t03Args(t.h, 'get_product_costs').map((a) => a.offset).join() === '0,100,200' && t.h.fetchLog.length === 8
+      && t.res.accepted.length === 201 && t.after.every((r) => r['Статус КАН'] === T03_OK),
+    `${batchSizes} ${t.h.fetchLog.length} ${t.res.accepted.length}`);
+  check('93/03 D: 201 rows are written with 3 sheet writes in all, not one per row',
+    t.h.getRegistrySheet('Себестоимость Озон').__getSetValuesCallCount() === 3, String(t.h.getRegistrySheet('Себестоимость Озон').__getSetValuesCallCount()));
+
+  // Two cabinets: one shop id per batch.
+  t = t03Run([t03One(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m')]);
+  check('93/03 D: two cabinets are two previews, each naming ONE shop; both accepted',
+    t03Args(t.h, 'preview_product_cost_changes').map((a) => a.shop_id.join()).sort().join('|') === '1765|2771'
+      && t.res.accepted.length === 2 && t.kan.entries(1765).length === 1 && t.kan.entries(2771).length === 1,
+    JSON.stringify(t03Args(t.h, 'preview_product_cost_changes')));
+  t = t03Run([t03One(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m')], { previewFailShop: 1765 });
+  check('93/03 D: a 500 for one shop does not stop the other: Mercurius fails, MaxiStore is accepted and stamped',
+    t03IsError(t.after[1], 'КАН недоступен') && t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester')
+      && t.res.accepted.length === 1 && t.res.failed.length === 1,
+    JSON.stringify(t.after.map(t03State)));
+  // list_shops and both writes succeed, but the read-back of ONE shop fails: that shop's row is an error, the other shop is accepted.
+  t = t03Run([t03One(), t03Row(T03_DAY, 'Mercurius', 'ART-M', 85, 'op-m')], { readFailShop: 1765 });
+  check('93/03 D: when the read-back of one shop fails, that shop\'s row is «КАН недоступен» and not stamped (KAN did get the write); the other shop is accepted and stamped',
+    t03IsError(t.after[1], 'КАН недоступен') && t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester')
+      && t.res.accepted.length === 1 && t.res.failed.length === 1 && t.kan.entries(1765).length === 1 && t.kan.entries(2771).length === 1,
+    JSON.stringify(t.after.map(t03State)));
+})();
+
+(function test93s03StatusRules() {
+  let t = t03Run([t03One({ status: 'вручную' })]);
+  check('93/03 E: a «вручную» row is not sent, is counted, and is left as it is',
+    t.h.fetchLog.length === 0 && t.res.skippedManual === 1 && t.res.accepted.length === 0 && t.res.failed.length === 0
+      && t03Canon(t.after) === t03Canon(t.before),
+    JSON.stringify(t.res));
+  t = t03Run([t03One({ exported: T03_OLD_STAMP })]);
+  check('93/03 E: a legacy row (no status, but stamped by the CSV button) is not sent and not touched',
+    t.h.fetchLog.length === 0 && t.res.skippedManual === 0 && t03Canon(t.after) === t03Canon(t.before), JSON.stringify(t.res));
+  t = t03Run([t03One({ status: T03_ERR, answer: 'КАН недоступен', time: '2026-10-13 09:00:00' }), t03Row(T03_DAY, 'MaxiStore', 'ART-S', 40, 'op-2', { status: T03_SENDING, time: '2026-10-13 09:00:00' })]);
+  check('93/03 E: rows left «ошибка» or «отправляется» by an earlier run are sent again and accepted',
+    t.res.accepted.length === 2 && t.after.every((r) => t03Accepted(r, r['Артикул'] === 'ART-C' ? 'КАН принял 233,67' : 'КАН принял 40,00', T03_TIME + ' tester')),
+    JSON.stringify(t.after.map(t03State)));
+  // A correction appended after acceptance: the group is pending again; the old stamp stays, the new row is stamped.
+  t = t03Run([t03One({ status: T03_OK, answer: 'КАН принял 233,67', time: '2026-10-13 09:00:00', exported: T03_OLD_STAMP }),
+    t03Row(T03_DAY, 'MaxiStore', 'ART-C', 235, 'op-1', { source: 'пересчёт после правки прихода' })]);
+  check('93/03 E: a correction appended after acceptance sends the new figure (235); the accepted row keeps its stamp, the new row gets one; both rows are «принято»',
+    t03Args(t.h, 'preview_product_cost_changes')[0].rows[0].cost_price === 235
+      && t03Accepted(t.after[0], 'КАН принял 235,00', T03_OLD_STAMP) && t03Accepted(t.after[1], 'КАН принял 235,00', T03_TIME + ' tester'),
+    JSON.stringify(t.after.map(t03State)));
+  t = t03Run([t03One({ status: T03_ERR, answer: 'КАН недоступен', time: '2026-10-13 09:00:00', exported: T03_OLD_STAMP })]);
+  check('93/03 E: an existing stamp on an «ошибка» row is never overwritten when the row is accepted',
+    t03Accepted(t.after[0], 'КАН принял 233,67', T03_OLD_STAMP), JSON.stringify(t.after[0]));
+})();
+
+(function test93s03Deletes() {
+  const supply = t03One();
+  const marker = t03Marker(T03_DAY, 'ART-C', 'op-1');
+  const inKan = { entries: { 2771: [{ article: 'ART-C', date: T03_DAY, cost: 233.67 }] } };
+  let t = t03Setup([supply, marker], inKan);
+  const entryId = t.kan.store[2771][0].id;
+  t.res = t.h.sendOzonCostToKan('tester');
+  t.after = t.h.dumpOzonCostFull();
+  check('93/03 F: a drop marker is a KAN delete: pre-read, preview {operation: delete, entry_id}, apply, read-back — and the entry is gone',
+    t03Names(t.h).join(',') === 'list_shops,get_product_costs,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t03Canon(t03Args(t.h, 'preview_product_cost_changes')[0]) === t03Canon({ operation: 'delete', entry_id: entryId })
+      && t.kan.entries(2771).length === 0 && t.kan.writes === 1,
+    t03Names(t.h).join(','));
+  check('93/03 F: the deleted day is «принято» ("КАН: запись удалена"), cost null in the answer; neither the marker nor the supply row of the group is stamped',
+    t03Accepted(t.after[1], 'КАН: запись удалена', '') && t03Accepted(t.after[0], 'КАН: запись удалена', '')
+      && t.res.accepted[0].action === 'delete' && t.res.accepted[0].cost === null,
+    JSON.stringify(t.after.map(t03State)));
+
+  t = t03Run([supply, marker]);
+  check('93/03 F: when KAN has no entry for the day nothing is deleted: no preview, no apply — the day is accepted ("КАН: записи не было")',
+    t03Names(t.h).join(',') === 'list_shops,get_product_costs,get_product_costs'
+      && t03Accepted(t.after[1], 'КАН: записи не было', '') && t.res.accepted.length === 1,
+    t03Names(t.h).join(','));
+  t = t03Run([supply, marker], { entries: { 2771: [{ article: 'ART-C', date: T03_DAY, cost: 200 }, { article: 'ART-C', date: T03_DAY, cost: 210 }] } });
+  check('93/03 F: two KAN entries for the day are never deleted — an error, no preview, no apply',
+    t03IsError(t.after[1], 'в КАН несколько записей на эту дату') && t03Names(t.h).join(',') === 'list_shops,get_product_costs,get_product_costs'
+      && t.kan.entries(2771).length === 2,
+    t03Names(t.h).join(','));
+  t = t03Run([supply, marker], Object.assign({ lostWrite: true }, inKan));
+  check('93/03 F: KAN says the delete is applied but still holds the entry — «запись в КАН не удалена»',
+    t03IsError(t.after[1], 'запись в КАН не удалена'), JSON.stringify(t.after[1]));
+  // A delete group whose EARLIER row was stamped by the CSV button: the old stamp stays, the marker gets none, nothing new is stamped.
+  t = t03Setup([t03One({ exported: T03_OLD_STAMP }), marker], inKan);
+  t.res = t.h.sendOzonCostToKan('tester');
+  t.after = t.h.dumpOzonCostFull();
+  check('93/03 F: a delete group with an earlier CSV-stamped row is accepted; the old stamp stays as it was and the marker gets no stamp',
+    t.res.accepted.length === 1 && t.res.accepted[0].action === 'delete' && t.kan.entries(2771).length === 0
+      && t03Accepted(t.after[0], 'КАН: запись удалена', T03_OLD_STAMP) && t03Accepted(t.after[1], 'КАН: запись удалена', ''),
+    JSON.stringify(t.after.map(t03State)));
+  // The pre-read of a delete fails (the first get_product_costs): nothing is deleted, the group is an error, the entry is still in KAN.
+  t = t03Run([supply, marker], Object.assign({ readFailNth: 1 }, inKan));
+  check('93/03 F: when the pre-read of a delete fails nothing is deleted: no preview, no apply, both rows «КАН недоступен» and unstamped, the entry stays in KAN',
+    t03Names(t.h).join(',') === 'list_shops,get_product_costs,get_product_costs'
+      && t03IsError(t.after[0], 'КАН недоступен') && t03IsError(t.after[1], 'КАН недоступен') && t.kan.entries(2771).length === 1 && t.res.failed.length === 1,
+    t03Names(t.h).join(',') + ' ' + JSON.stringify(t.after.map(t03State)));
+  // A marker followed by a re-stated row of the same day is an UPSERT group: the marker row is never stamped, the other two are.
+  t = t03Run([supply, marker, t03Row(T03_DAY, 'MaxiStore', 'ART-C', 240, 'op-2', { source: 'пересчёт после удаления отгрузки' })]);
+  check('93/03 F: a day whose last row is a re-stated figure (after a marker) is an upsert; the marker row of that day is never stamped, the other rows are',
+    t03Args(t.h, 'preview_product_cost_changes')[0].rows[0].cost_price === 240
+      && t.after[0]['Выгружено в КАН'] === T03_TIME + ' tester' && t.after[1]['Выгружено в КАН'] === '' && t.after[2]['Выгружено в КАН'] === T03_TIME + ' tester'
+      && t.after.every((r) => r['Статус КАН'] === T03_OK),
+    JSON.stringify(t.after.map(t03State)));
+  // A delete and an upsert in one shop, and an upsert-only shop makes no pre-read.
+  t = t03Run([t03Row(T03_DAY, 'MaxiStore', 'ART-A', 50, 'op-a'), t03Marker(T03_DAY, 'ART-A', 'op-a'), t03Row(T03_DAY, 'MaxiStore', 'ART-B', 60, 'op-b')],
+    { entries: { 2771: [{ article: 'ART-A', date: T03_DAY, cost: 50 }] } });
+  check('93/03 F: a delete and an upsert of one shop: pre-read, delete, upsert, one read-back; the deleted article is gone and the other is written',
+    t03Names(t.h).join(',') === 'list_shops,get_product_costs,preview_product_cost_changes,apply_product_cost_changes,preview_product_cost_changes,apply_product_cost_changes,get_product_costs'
+      && t03Canon(t.kan.entries(2771)) === t03Canon([{ article: 'ART-B', date: T03_DAY, cost: 60 }])
+      && t.res.accepted.length === 2 && t.after[2]['Выгружено в КАН'] === T03_TIME + ' tester' && t.after[0]['Выгружено в КАН'] === '' && t.after[1]['Выгружено в КАН'] === '',
+    t03Names(t.h).join(','));
+})();
+
+(function test93s03Concurrency() {
+  const lease = (h) => h.getScriptProperty('kan_costSenderUntil');
+  // A live lease: busy, nothing sent, nothing written, the lease untouched.
+  let t = t03Setup([t03One()]);
+  const live = String(Date.parse(T03_NOW) + 300000);
+  t.h.setScriptProperty('kan_costSenderUntil', live);
+  let frozen = t03Canon(t.h.dumpOzonCostFull());
+  let res = t.h.sendOzonCostToKan('tester');
+  check('93/03 G: while another sender holds the lease the answer is busy «уже отправляется», no request, the sheet and the lease are untouched',
+    res.busy === true && res.message === 'уже отправляется' && res.accepted.length === 0 && res.failed.length === 0
+      && t.h.fetchLog.length === 0 && t03Canon(t.h.dumpOzonCostFull()) === frozen && lease(t.h) === live,
+    JSON.stringify(res));
+  // An expired lease is taken over, and the property is gone afterwards.
+  t = t03Setup([t03One()]);
+  t.h.setScriptProperty('kan_costSenderUntil', String(Date.parse(T03_NOW) - 1));
+  res = t.h.sendOzonCostToKan('tester');
+  check('93/03 G: an expired lease (a sender that died) is taken over and the lease is deleted afterwards',
+    res.busy === false && res.accepted.length === 1 && lease(t.h) === null, JSON.stringify([res.busy, lease(t.h)]));
+  // The table lock is busy.
+  t = t03Setup([t03One()]);
+  t.h.setScriptLockBusy(true);
+  frozen = t03Canon(t.h.dumpOzonCostFull());
+  res = t.h.sendOzonCostToKan('tester');
+  check('93/03 G: when the table lock cannot be taken the answer is busy «таблица занята, отправка позже», no request, no lease left',
+    res.busy === true && res.message === 'таблица занята, отправка позже' && t.h.fetchLog.length === 0
+      && t03Canon(t.h.dumpOzonCostFull()) === frozen && lease(t.h) === null && !t.h.isScriptLockHeld(),
+    JSON.stringify(res));
+  // A throw inside the run frees the lease: the status columns are out of order, which the writer refuses.
+  const odd = ['Статус КАН', 'Время КАН', 'Ответ КАН'];
+  t = t03Setup([t03One()]);
+  t.h.setOzonCostSheet([t03One()], t.h.OZON_COST_HEADERS.concat(odd));
+  let thrown = '';
+  try { t.h.sendOzonCostToKan('tester'); } catch (e) { thrown = String(e.message || e); }
+  check('93/03 G: when the run throws (the status columns are not side by side) the error is Russian, nothing was sent to KAN, and the lease and the lock are freed',
+    thrown.indexOf('должны идти подряд') !== -1 && t03Args(t.h, 'preview_product_cost_changes').length === 0
+      && lease(t.h) === null && !t.h.isScriptLockHeld(),
+    thrown + ' ' + t03Names(t.h).join(','));
+  // Only the owner of a lease frees it.
+  t = t03Setup([t03One()]);
+  t.h.setScriptProperty('kan_costSenderUntil', 'someone-else');
+  t.h.releaseKanCostLease('my-token');
+  const kept = lease(t.h) === 'someone-else';
+  t.h.releaseKanCostLease('someone-else');
+  check('93/03 G: releasing a lease deletes it only if it still carries our token', kept && lease(t.h) === null, String(lease(t.h)));
+})();
+
+(function test93s03Sheet() {
+  // The sheet of an older version has 12 columns: it grows to 15, the first 12 byte for byte.
+  let t = t03Run([t03One(), t03Row(T03_DAY, 'MaxiStore', 'ART-X', 50, 'op-x', { exported: T03_OLD_STAMP })], {}, 'tester', true);
+  let res;
+  const headerRow = t.h.headerRowOf(t.h.getRegistrySheet('Себестоимость Озон'));
+  check('93/03 H: a 12-column journal gets «Статус КАН», «Ответ КАН», «Время КАН» at the END (columns 13-15); columns 1-10 and 12 stay byte for byte',
+    headerRow.length === 15 && headerRow.slice(12).join('|') === 'Статус КАН|Ответ КАН|Время КАН' && headerRow.slice(0, 12).join('|') === t.h.OZON_COST_HEADERS.join('|')
+      && t.after.every((r, i) => t03Fixed(r) === t03Fixed(t.before[i])) && t03Accepted(t.after[0], 'КАН принял 233,67', T03_TIME + ' tester'),
+    headerRow.join('|'));
+
+  // 'отправляется' is visible while KAN is being called.
+  let seen = null;
+  t = t03Setup([t03One()], { onCall: (name) => { if (name === 'apply_product_cost_changes') seen = t03State(t.h.dumpOzonCostFull()[0]); } });
+  t.h.sendOzonCostToKan('tester');
+  check('93/03 H: during apply the row already reads «отправляется» with the time, no answer and no stamp',
+    t03Canon(seen) === t03Canon([T03_SENDING, '', T03_TIME, '']), JSON.stringify(seen));
+
+  // A row changed while KAN was working is not written; the next run sends the new figure.
+  const sheetOf = () => t.h.getRegistrySheet('Себестоимость Озон');
+  t = t03Setup([t03One()], { onCall: (name, args, st) => {
+    if (name === 'apply_product_cost_changes' && !st.edited) { st.edited = true; sheetOf().getRange(2, 9).setValue(240); }
+  } });
+  res = t.h.sendOzonCostToKan('tester');
+  let row = t.h.dumpOzonCostFull()[0];
+  check('93/03 H: a row whose figure changed during the run is not written (notWritten 1): it stays «отправляется» and unstamped',
+    res.notWritten === 1 && row['Статус КАН'] === T03_SENDING && row['Выгружено в КАН'] === '' && row['Себестоимость после'] === 240,
+    JSON.stringify([res.notWritten, t03State(row)]));
+  check('93/03 H: that group is reported as failed («журнал изменился во время отправки — отправится снова»), never as accepted',
+    res.accepted.length === 0 && res.failed.length === 1 && res.failed[0].reason === 'журнал изменился во время отправки — отправится снова',
+    JSON.stringify([res.accepted, res.failed]));
+  const second = t.h.sendOzonCostToKan('tester');
+  row = t.h.dumpOzonCostFull()[0];
+  check('93/03 H: the next run sends the changed figure (240) and accepts it',
+    second.accepted.length === 1 && t03Accepted(row, 'КАН принял 240,00', T03_TIME + ' tester') && t.kan.entries(2771)[0].cost === 240, JSON.stringify(t03State(row)));
+
+  // A row deleted above ours during the run shifts the row numbers: nothing is written at the old place.
+  t = t03Setup([t03Row('2026-09-02', 'Mercurius', 'ART-M', 85, 'op-m', { exported: T03_OLD_STAMP, status: T03_OK }), t03One(), t03Row(T03_DAY, 'MaxiStore', 'ART-Y', 70, 'op-y', { exported: T03_OLD_STAMP })], { onCall: (name, args, st) => {
+    if (name === 'apply_product_cost_changes' && !st.shifted) { st.shifted = true; sheetOf().deleteRow(2); }
+  } });
+  res = t.h.sendOzonCostToKan('tester');
+  const shifted = t.h.dumpOzonCostFull();
+  check('93/03 H: when a row above ours is deleted during the run, the rows that moved are not written over (notWritten 1) and no other row is stamped',
+    res.notWritten === 1 && shifted.length === 2 && shifted[0]['Артикул'] === 'ART-C' && shifted[0]['Статус КАН'] === T03_SENDING && shifted[0]['Выгружено в КАН'] === ''
+      && shifted[1]['Артикул'] === 'ART-Y' && shifted[1]['Статус КАН'] === '' && shifted[1]['Выгружено в КАН'] === T03_OLD_STAMP,
+    JSON.stringify([res.notWritten, shifted.map(t03State)]));
+
+  // A row appended during the run is never touched, and is sent by the next run.
+  t = t03Setup([t03One()], { onCall: (name, args, st) => {
+    if (name === 'apply_product_cost_changes' && !st.appended) { st.appended = true; sheetOf().getRange(3, 1, 1, 12).setValues([t03Row(T03_DAY, 'MaxiStore', 'ART-C', 250, 'op-1', { source: 'пересчёт после правки прихода' })]); }
+  } });
+  res = t.h.sendOzonCostToKan('tester');
+  const appended = t.h.dumpOzonCostFull()[1];
+  check('93/03 H: a row appended during the run is not touched (no status, no stamp) and does not count as unwritten',
+    res.notWritten === 0 && t03Canon(t03State(appended)) === t03Canon(['', '', '', '']) && appended['Себестоимость после'] === 250 && t.h.dumpOzonCostFull()[0]['Статус КАН'] === T03_OK,
+    JSON.stringify(t.h.dumpOzonCostFull().map(t03State)));
+  const next = t.h.sendOzonCostToKan('tester');
+  check('93/03 H: the next run sends the appended figure (250); the first row keeps its stamp, the appended row gets one',
+    next.accepted.length === 1 && t.kan.entries(2771)[0].cost === 250
+      && t03Accepted(t.h.dumpOzonCostFull()[1], 'КАН принял 250,00', T03_TIME + ' tester') && t.h.dumpOzonCostFull()[0]['Выгружено в КАН'] === T03_TIME + ' tester',
+    JSON.stringify(t.h.dumpOzonCostFull().map(t03State)));
+
+  // Rows of other hands between ours are written back as they were (a Date in «Время КАН», an old stamp).
+  const dateCell = new t.h.FakeDate(Date.parse('2026-09-02T07:00:00Z'));
+  t = t03Setup([t03One(), t03Row('2026-09-02', 'Mercurius', 'ART-M', 85, 'op-m', { exported: T03_OLD_STAMP, status: T03_OK, answer: 'КАН принял 85,00', time: dateCell }),
+    t03Row(T03_DAY, 'MaxiStore', 'ART-Y', 70, 'op-y')]);
+  const between = t.h.dumpOzonCostFull()[1];
+  t.h.sendOzonCostToKan('tester');
+  const afterBetween = t.h.dumpOzonCostFull();
+  check('93/03 H: a row between two rows of ours (accepted by hand earlier, a Date in «Время КАН», an old stamp) comes out of the two block writes as it went in',
+    t03Canon(afterBetween[1]) === t03Canon(between) && afterBetween[1]['Время КАН'] === dateCell
+      && t03Accepted(afterBetween[0], 'КАН принял 233,67', T03_TIME + ' tester') && t03Accepted(afterBetween[2], 'КАН принял 70,00', T03_TIME + ' tester'),
+    JSON.stringify(afterBetween.map(t03State)));
+
+  // appendOzonCostForShipment writes 12-wide rows into the 15-wide sheet (strict setValues in the stand), and the new row reads as unsent.
+  const wide = t03Setup([t03One({ status: T03_OK, answer: 'КАН принял 233,67', time: T03_TIME, exported: T03_OLD_STAMP })]);
+  wide.h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'ART-C', available: 300 }]);
+  const written = wide.h.appendOzonCostForShipment([{ article: 'ART-C', quantity: 100, price: 300, status: 'ok' }], 'Ozon (MaxiStore)', '2026-10-14T09:00:00Z', 'op-new', 'tester');
+  const journal = wide.h.getOzonCostJournal();
+  const grouped = wide.h.collectOzonCostKanGroups(journal);
+  check('93/03 H: appendOzonCostForShipment still appends a row to the 15-column sheet; the new row has no KAN status and is pending',
+    written.written === 1 && journal.length === 2 && journal[1].kanStatus === '' && journal[1].exported === ''
+      && grouped.pending.length === 1 && grouped.pending[0].date === '2026-10-14' && grouped.pending[0].opIds.join() === 'op-new',
+    JSON.stringify([written, journal[1], grouped.pending.length]));
+})();
+
+(function test93s03DoPost() {
+  const withSessions = (t) => t.h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+    ['tok-user', 'Кладовщик', 'user', String(Date.parse('2030-01-01T00:00:00Z'))], ['tok-admin', 'boss', 'admin', String(Date.parse('2030-01-01T00:00:00Z'))]]);
+  // The dev-mode copy of the sheet must never be sent to the real KAN.
+  let t = t03Setup([t03One()]);
+  withSessions(t);
+  let out = t.h.callDoPost({ action: 'sendOzonCostToKan', sessionToken: 'tok-admin', devMode: true });
+  check('93/03 I: in dev mode doPost refuses with the Russian message and makes no request',
+    out.status === 'error' && out.message.indexOf('Отправка себестоимости в КАН недоступна в режиме разработки') !== -1 && t.h.fetchLog.length === 0,
+    JSON.stringify(out));
+  t.h.vm.runInContext('_devModeSpreadsheet = ({})', t.h.context);
+  let direct = '';
+  try { t.h.sendOzonCostToKan('boss'); } catch (e) { direct = String(e.message || e); }
+  t.h.vm.runInContext('_devModeSpreadsheet = null', t.h.context);
+  check('93/03 I: the sender itself refuses too when the dev-mode spreadsheet is set',
+    direct.indexOf('недоступна в режиме разработки') !== -1 && t.h.fetchLog.length === 0 && t.h.getScriptProperty('kan_costSenderUntil') === null, direct);
+
+  // A normal call by any signed-in user runs outside the global lock.
+  t = t03Setup([t03One()]);
+  withSessions(t);
+  out = t.h.callDoPost({ action: 'sendOzonCostToKan', sessionToken: 'tok-user' });
+  check('93/03 I: a signed-in user\'s call returns success with the groups, outside the global lock (no 10 s waitLock, no request made under a lock)',
+    out.status === 'success' && out.data.accepted.length === 1 && out.data.accepted[0].article === 'ART-C'
+      && t.h.waitLockTimeouts().indexOf(10000) === -1 && t.h.fetchesWhileLocked() === 0 && t.h.nestedLockTakes() === 0,
+    JSON.stringify([out.status, t.h.waitLockTimeouts(), t.h.fetchesWhileLocked()]));
+  t = t03Setup([t03One()]);
+  withSessions(t);
+  out = t.h.callDoPost({ action: 'sendOzonCostToKan', sessionToken: 'nobody' });
+  check('93/03 I: without a valid session nothing is sent', out.status === 'error' && t.h.fetchLog.length === 0, JSON.stringify(out));
+})();
+
 // ================= Bulk restore writes columns 11–13 like the single restore (2026-10-14) =================
 // restoreMultipleArchivedItems used to stop at column 10, so «Пользователь», «groupId» and «isComponent»
 // came back empty and a kit component row read as a plain expense row.

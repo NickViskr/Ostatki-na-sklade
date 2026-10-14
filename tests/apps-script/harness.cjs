@@ -120,6 +120,16 @@ function makeFakeSheet(headers, name) {
         setValues(values) {
           setValuesCallCount++;
           apiCallCounts.setValues++;
+          // Item 93 ticket 03: like Apps Script, refuse data whose shape differs from the range. The
+          // old fake silently stretched or cut a write, which hid width bugs on the journal.
+          if (values.length !== numRows) {
+            throw new Error('The number of rows in the data does not match the number of rows in the range. The data has ' + values.length + ' but the range has ' + numRows + '.');
+          }
+          for (let r = 0; r < values.length; r++) {
+            if (values[r].length !== numCols) {
+              throw new Error('The number of columns in the data does not match the number of columns in the range. The data has ' + values[r].length + ' but the range has ' + numCols + '.');
+            }
+          }
           for (let r = 0; r < values.length; r++) {
             const rowIdx = startRow - 1 + r;
             while (data.length <= rowIdx) data.push([]);
@@ -185,6 +195,16 @@ const sheetRegistry = {};
 // How many times a script lock was requested — ensureColumns must ask for one only when
 // it actually has a column to add.
 let lockRequests = 0;
+// Item 93 ticket 03: the KAN sender's own script-lock use. `scriptLockBusy` makes tryLock fail (another
+// execution holds the lock); `waitLockTimeouts` lists the timeout of every waitLock call (the global
+// lock of doPost waits 10000/30000 too, so a test tells them apart by who calls); `scriptLockHeld`
+// follows tryLock/waitLock/releaseLock so that a request made while the lock is held, or a lock taken
+// twice by one execution, is counted.
+let scriptLockBusy = false;
+let scriptLockHeld = false;
+let waitLockTimeouts = [];
+let fetchesWhileLocked = 0;
+let nestedLockTakes = 0;
 
 // ---------- Свойства скрипта и ЧУЖАЯ таблица платёжного календаря ----------
 let scriptProperties = {};
@@ -211,6 +231,8 @@ const sandbox = {
   console,
   UrlFetchApp: {
     fetch: (url, options) => {
+      // Item 93 ticket 03: a request to KAN may take seconds; no script lock may be held meanwhile.
+      if (scriptLockHeld) fetchesWhileLocked++;
       fetchLog.push({ url, options, body: options && options.payload ? JSON.parse(options.payload) : null });
       if (!fetchHandler) throw new Error('Стенд: UrlFetchApp.fetch вызван без обработчика');
       const r = fetchHandler(url, options);
@@ -241,8 +263,27 @@ const sandbox = {
   LockService: {
     getScriptLock: () => {
       lockRequests += 1;
-      return { waitLock: () => true, releaseLock: () => {} };
+      return {
+        waitLock: (ms) => {
+          waitLockTimeouts.push(ms);
+          if (scriptLockHeld) nestedLockTakes++;
+          scriptLockHeld = true;
+          return true;
+        },
+        tryLock: (ms) => {
+          if (scriptLockBusy) return false;
+          if (scriptLockHeld) nestedLockTakes++;
+          scriptLockHeld = true;
+          return true;
+        },
+        releaseLock: () => { scriptLockHeld = false; }
+      };
     }
+  },
+  // Item 93 ticket 03: a real doPost call returns a text output; the stand reads the text back.
+  ContentService: {
+    MimeType: { JSON: 'JSON' },
+    createTextOutput: (text) => ({ text: String(text), setMimeType() { return this; }, getContent() { return this.text; } })
   },
   // Script properties. Code.gs keeps the id of the payment-calendar spreadsheet here rather
   // than in the file itself: the repository is public.
@@ -310,6 +351,7 @@ const exportLine = `
 this.OZON_STOCKS_HEADERS = OZON_STOCKS_HEADERS;
 this.OZON_SALES_HEADERS = OZON_SALES_HEADERS;
 this.OZON_COST_HEADERS = OZON_COST_HEADERS;
+this.OZON_COST_KAN_HEADERS = OZON_COST_KAN_HEADERS;
 this.EXTERNAL_SHIPMENTS_HEADERS = EXTERNAL_SHIPMENTS_HEADERS;
 this.KAN_DAYS_HEADERS = KAN_DAYS_HEADERS;
 this.STOCK_SNAPSHOT_HEADERS = STOCK_SNAPSHOT_HEADERS;
@@ -515,8 +557,9 @@ module.exports = {
 
   // ---------- Item 47, stage 1: журнал себестоимости на Озоне ----------
   OZON_COST_HEADERS: context.OZON_COST_HEADERS,
-  setOzonCostSheet(rows) {
-    const headers = context.OZON_COST_HEADERS;
+  // `headers` (optional) builds an OLD or WIDER sheet: the 12 journal columns, or 12 + the KAN status ones.
+  setOzonCostSheet(rows, headers) {
+    headers = headers || context.OZON_COST_HEADERS;
     const sheet = makeFakeSheet(headers, 'Себестоимость Озон');
     if (rows && rows.length > 0) sheet.__setData([headers.slice(), ...rows]);
     sheetRegistry['Себестоимость Озон'] = sheet;
@@ -667,6 +710,36 @@ module.exports = {
     const last = sheet.getLastRow();
     return data.slice(1, Math.max(last, 1)).filter(r => r.some(v => String(v).trim() !== ''))
       .map(r => { const o = {}; headers.forEach((h, k) => o[h] = r[k]); return o; });
+  },
+  // The journal by the REAL header row of the sheet, every column (dumpOzonCost knows the first 12 only).
+  dumpOzonCostFull() {
+    const sheet = sheetRegistry['Себестоимость Озон'];
+    if (!sheet) return [];
+    const data = sheet.__dump();
+    const headers = data[0].map(h => String(h).trim());
+    const last = sheet.getLastRow();
+    return data.slice(1, Math.max(last, 1)).filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => { const o = {}; headers.forEach((h, k) => o[h] = r[k] === undefined ? '' : r[k]); return o; });
+  },
+  // ---------- Item 93, ticket 03: the KAN cost sender ----------
+  OZON_COST_KAN_HEADERS: context.OZON_COST_KAN_HEADERS,
+  getScriptProperty(key) {
+    return Object.prototype.hasOwnProperty.call(scriptProperties, key) ? scriptProperties[key] : null;
+  },
+  setScriptLockBusy(busy) { scriptLockBusy = !!busy; },
+  waitLockTimeouts() { return waitLockTimeouts.slice(); },
+  fetchesWhileLocked() { return fetchesWhileLocked; },
+  nestedLockTakes() { return nestedLockTakes; },
+  isScriptLockHeld() { return scriptLockHeld; },
+  ozonCostRowsFromValues: (...args) => context.ozonCostRowsFromValues(...args),
+  collectOzonCostKanGroups: (...args) => context.collectOzonCostKanGroups(...args),
+  kanCostReason: (...args) => context.kanCostReason(...args),
+  releaseKanCostLease: (...args) => context.releaseKanCostLease(...args),
+  sendOzonCostToKan: (...args) => context.sendOzonCostToKan(...args),
+  // A real doPost call; the answer is the parsed JSON text the browser would get.
+  callDoPost(payload) {
+    const out = context.doPost({ postData: { contents: JSON.stringify(payload) } });
+    return JSON.parse(out.getContent());
   },
   makeSheet: (headers, name) => {
     const sheet = makeFakeSheet(headers, name);

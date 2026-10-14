@@ -29,3 +29,13 @@ for the toasts and markers; the «Отправлю сам» path is money-adjace
   return `costJournalError` (Russian text, only when non-empty) when the History operation succeeded but the
   cost journal did not follow (incl. a row without OpID). The browser shows it only for «Вся отгрузка» today
   (`useWarehouseStore.ts` ≈:910) — show it as a red toast on these paths too.
+
+- 2026-10-14, from ticket 03: action `sendOzonCostToKan` (no data) answers `{busy, message, accepted: [g], failed: [g],
+  skippedManual, notWritten}`, g = `{cabinet, article, date, action: 'upsert'|'delete', cost (null for a delete), opIds,
+  reason?}` — `reason` is ready Russian text for the red toast (list in ticket 03 «Result»). `busy: true` with `message`
+  «уже отправляется» (another sender — the trigger or another tab) or «таблица занята, отправка позже»: nothing was sent,
+  show it neutrally. A group is in `accepted` only when the journal row really holds «принято». Dev mode throws
+  «Отправка себестоимости в КАН недоступна в режиме разработки». The proxy treats it as a write: no cache, no retry,
+  90 s timeout (a 504 means Apps Script may still finish — re-read the statuses instead of assuming a failure). Any
+  signed-in user may call the action; answer 7 (author + admin) is for the buttons/markers. Journal status values for
+  the marker: «принято» / «ошибка» / «вручную» / «отправляется» / '' (rows before item 93: no status — show nothing).

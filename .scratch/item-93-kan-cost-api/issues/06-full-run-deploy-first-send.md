@@ -35,3 +35,15 @@ Spec: `../spec.md`.
   password goes into the Script Property `auth_newAdminPassword` (Apps Script editor → Project Settings → Script
   Properties); the next login applies it and deletes the property. The assistant never sets, types or reads it.
   If the owner cleared the «Админ» password cell meanwhile, the property restores «Админ».
+
+- 2026-10-14, from ticket 03: the sender does preview → apply in ONE call, it cannot stop to show the owner a preview.
+  For the backlog send, show the owner a chat-connector `preview_product_cost_changes` of exactly the rows the sender
+  will send (no apply), then let the sender send them on his word. ORDER: as soon as Code.gs with 02+03 is live, ANY
+  call of the sender (browser of 05, trigger of 04) sends every pending group — the journal correction rows of
+  `applyOzonCostChainOps` become pending the moment they are written, so write them only right before the controlled
+  send. The two 03.09 dates (Миска_двойная 229.58, Набор_полок_выдв_бел 1647.59) are legacy-stamped with an empty status
+  and will NOT be sent by themselves: on the owner's word set «Статус КАН» of the LAST journal row of each day to
+  «ошибка» (cell edit or a one-off editor function) so the sender picks them up. Unobserved until the first live send:
+  the `apply_product_cost_changes` answer shape (`history_saved` read at the top or in `summary`; a wrong guess only
+  words the reason — acceptance is the read-back) and the `delete` preview without `shop_id`. The first live send makes
+  the three status columns appear at the end of «Себестоимость Озон».
