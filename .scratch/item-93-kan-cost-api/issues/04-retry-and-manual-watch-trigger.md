@@ -31,7 +31,6 @@ owner runs once in the editor (like `kanTurnoverDaily`). Spec: `../spec.md` (ans
   `releaseKanCostLease`) and write through `writeOzonCostKanStatuses` (short script lock, fresh read, identity check, never
   touches columns 1–12); never call `ensureColumns` or `getOzonCostJournal` inside a script-lock section — its own
   `releaseLock` would release ours. The «вручную» status is already skipped by the sender (counted in `skippedManual`).
-- Open question for the owner (from the ticket-03 spec review): the old «Себестоимость КАН» button still stamps rows
-  without any read-back, and a stamped row with an empty status counts as done for the sender — after go-live a row
-  exported through that button is never verified. Options: leave it (the button is the admin's manual path), or make
-  the button also write «вручную» so this ticket's 15-minute check verifies it.
+- OWNER 2026-10-14: the old «Себестоимость КАН» button stays AS IT IS. It stamps rows without any read-back, and a
+  stamped row with an empty status counts as done for the sender — a row exported through that button is never
+  verified; that is accepted (the button is the admin's manual path). Do not change the button in this ticket.

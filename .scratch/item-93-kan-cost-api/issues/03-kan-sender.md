@@ -16,7 +16,7 @@ Decisions). Money-critical.
 
 **Blocked by:** 01 (token scope, KAN's answers on future dates / unknown article), 02 (deletion marks).
 
-**Status:** done 2026-10-14 (planner → coder → tester → two-axis review → orchestrator fixes; result below); committed, not pushed. Not deployed: Code.gs goes live in ticket 06 together with 02, 04, 05.
+**Status:** done 2026-10-14 (planner → coder → tester → two-axis review → orchestrator fixes; result below); commit `2a59a53`, pushed to GitHub 2026-10-14 on the owner's word. Not deployed: Code.gs goes live in ticket 06 together with 02, 04, 05.
 
 - [x] Journal gains the status/answer/time columns at the end; old sheets upgrade in place
 - [x] Stand fake KAN behind `UrlFetchApp.fetch`: accept; refuse (isError); wrong figure written; unknown article (skipped/issues); HTTP 500; missing scope; preview expired
@@ -67,7 +67,7 @@ Code: `Code.gs` (+≈520 lines), `src/lib/gasActions.ts` (+1 action), `src/lib/g
   must never reach the real KAN). Proxy: `sendOzonCostToKan: write()`, parity test green (12/12).
 - **Answer:** `{busy, message, accepted: [g], failed: [g], skippedManual, notWritten}`, g = `{cabinet, article, date,
   action: 'upsert'|'delete', cost (null for a delete), opIds, reason?}`.
-- **Orchestrator decision against the owner's answer 4 wording (to confirm with the owner):** acceptance = the
+- **Acceptance rule (orchestrator's decision, CONFIRMED by the owner 2026-10-14):** acceptance = the
   read-back equal to the kopeck; `history_saved` only words the reason. The live preview of an unchanged row answered
   `created 0 / updated 0 / history_saved false` — a literal «history_saved true AND read-back» would keep a correct
   re-send in «ошибка» forever.
