@@ -11,7 +11,7 @@ owner runs once in the editor (like `kanTurnoverDaily`). Spec: `../spec.md` (ans
 
 **Blocked by:** 03.
 
-**Status:** done 2026-10-15 (coder → tester → two-axis review → review fixes; result below); committed, not pushed. Not deployed: Code.gs goes live in ticket 06 together with 02, 03, 05; the trigger is installed there only AFTER the backlog send.
+**Status:** done 2026-10-15 (coder → tester → two-axis review → review fixes; result below); commit `e67d04d`, pushed to GitHub 2026-10-15 on the owner's word. Not deployed: Code.gs goes live in ticket 06 together with 02, 03, 05; the trigger is installed there only AFTER the backlog send.
 
 - [x] Stand with a fake clock: manual rows checked at 15/30/45/60, accepted as soon as found, back to auto after the 4th miss
 - [x] Stand: error rows retried only after 60 min; accepted rows never touched again
