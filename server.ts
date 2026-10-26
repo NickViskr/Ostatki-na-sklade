@@ -2435,27 +2435,55 @@ async function startServer() {
           const whClusterMap = await loadWarehouseClusterMap(cabKeys);
           const salesMap = new Map<string, { week: string; offerId: string; cluster: string; qty: number }>();
 
+          const seenPostings = new Map<string, { signature: string; windowTo: string }>();
+
           for (const win of windows) {
-            let offset = 0;
-            while (offset <= 19000) {
+            let cursor = '';
+            const seenCursors = new Set<string>();
+            while (true) {
               const body = {
-                dir: 'ASC',
+                sort_dir: 'ASC',
                 filter: {
                   since: win.since,
                   to: win.to
                 },
-                limit: 1000,
-                offset,
+                limit: 100,
+                cursor,
                 with: { analytics_data: true, financial_data: true }
               };
 
-              const apiRes = await fetchOzonApi("/v2/posting/fbo/list", cabKeys, body);
-              const postings = Array.isArray(apiRes?.result) ? apiRes.result : [];
+              const apiRes = await fetchOzonApi("/v3/posting/fbo/list", cabKeys, body);
+              if (!Array.isArray(apiRes?.postings) || typeof apiRes.has_next !== 'boolean' || typeof apiRes.cursor !== 'string') {
+                throw new Error('Ozon: некорректный ответ списка отправлений; продажи кабинета не обновлены');
+              }
+              const postings = apiRes.postings;
 
               for (const posting of postings) {
-                if (!posting || posting.status === 'cancelled') {
-                  continue;
+                if (!posting || typeof posting.posting_number !== 'string' || !posting.posting_number.trim() ||
+                    typeof posting.status !== 'string' || !posting.status.trim() ||
+                    typeof posting.created_at !== 'string' || !Number.isFinite(Date.parse(posting.created_at)) ||
+                    Date.parse(posting.created_at) < Date.parse(win.since) || Date.parse(posting.created_at) > Date.parse(win.to)) {
+                  throw new Error('Ozon: некорректные данные отправления; продажи кабинета не обновлены');
                 }
+                if (posting.status !== 'cancelled' && (!Array.isArray(posting.products) || posting.products.length === 0 ||
+                    posting.products.some((p: any) => typeof p?.offer_id !== 'string' || !p.offer_id.trim() ||
+                      !Number.isSafeInteger(p.quantity) || p.quantity <= 0))) {
+                  throw new Error('Ozon: некорректные товары отправления; продажи кабинета не обновлены');
+                }
+                const signature = JSON.stringify([posting.created_at, posting.status, posting.products,
+                  posting.financial_data?.cluster_to]);
+                const previous = seenPostings.get(posting.posting_number);
+                if (previous) {
+                  // Adjacent inclusive windows may return the same boundary posting.
+                  if (previous.windowTo === win.since && Date.parse(posting.created_at) === Date.parse(win.since) &&
+                      previous.signature === signature) {
+                    previous.windowTo = win.to;
+                    continue;
+                  }
+                  throw new Error('Ozon: повторное или изменившееся отправление; продажи кабинета не обновлены');
+                }
+                seenPostings.set(posting.posting_number, { signature, windowTo: win.to });
+                if (posting.status === 'cancelled') continue;
 
                 const week = getMskWeekMonday(posting.created_at);
                 if (mode === 'recent' && !replacedWeeks.includes(week)) {
@@ -2487,10 +2515,12 @@ async function startServer() {
                 }
               }
 
-              if (postings.length < 1000) {
-                break;
+              if (!apiRes.has_next) break;
+              if (!apiRes.cursor.trim() || seenCursors.has(apiRes.cursor)) {
+                throw new Error('Ozon: некорректный указатель следующей страницы; продажи кабинета не обновлены');
               }
-              offset += 1000;
+              seenCursors.add(apiRes.cursor);
+              cursor = apiRes.cursor;
             }
           }
 
