@@ -12,13 +12,68 @@ Spec: `../spec.md`.
 
 **Blocked by:** 01, 02, 03, 04, 05.
 
-**Status:** ready-for-human
+**Status:** deployed 2026-10-27, backlog sent and verified; open: the first browser send on a real Ozon shipment (owner present) and the closing of item 93 on the owner's word. Result below.
 
-- [ ] Full set green (counts in TEST_LOG)
-- [ ] Code.gs deployed and verified; trigger installed; Cloud Run deployed and verified
-- [ ] First live send accepted and seen in KAN
-- [ ] Backlog send done (or declined) on the owner's word
+- [x] Full set green (counts in TEST_LOG)
+- [x] Code.gs deployed and verified; trigger installed; Cloud Run deployed and verified
+- [ ] First live send accepted and seen in KAN — the sender's first live run (the backlog, from the editor) is accepted and read back; the browser path (toast + ✓ after a real shipment) is not seen yet
+- [x] Backlog send done (or declined) on the owner's word
 - [ ] Item 93 closed on the owner's word
+
+## Result (2026-10-27)
+
+Order changed with the owner's approval (the description above predates ticket 05's constraint): Code.gs → journal
+correction + controlled backlog send from the editor → Cloud Run → trigger → browser check on the next real shipment.
+Item 97 ticket 01 (T0) shipped in the same deploys (owner: «вместе»). «История» row `5258f18d` left without an OpID
+(owner: «нет, оставить»).
+
+- **Full set at `eae52c2`** (tester): stand 1530/0 and 1530/0 under `TZ=Asia/Yekaterinburg`; vitest 69 files, 2655 + 1
+  expected fail under Yekaterinburg; plain vitest the same except ONE timeout — `twinRulesParity.test.ts` «availability:
+  pieces free for a new supply» took 5178 ms against the 5000 ms default under parallel load (no assertion failed; the
+  file alone 10/10 in 4.1 s). Known flake, not fixed here. `tsc --noEmit` clean.
+- **Reconciliation before anything** (export 2026-10-27 ~22:00 Ekb, `get_product_costs` both shops): journal 104 rows, all
+  stamped «Выгружено в КАН» (the owner had uploaded the CSVs of 19.10 and 21.10); 78 journal day groups vs 78 KAN entries,
+  76 equal, the two known 03.09 differences. So after the deploy nothing was pending until the correction.
+- **Backlog grew to 13 dates:** Полка_выдв_27см had shipments on 17.10 and 20.10 blended on the inflated 710.01, so they
+  were re-stated too (710.60 → 710.12, 710.89 → 710.43).
+- **One-off editor file** `ticket06-oneoff.gs` (this folder; never pushed by clasp; coder): `tmp93FixJournal()` — guards
+  first (never twice; sheet row 60 is the OpID-less 12.09 «отгрузка», base 335, 222.66; last rows of the two 03.09 days
+  hold 229.58 / 1647.59), `ensureColumns` before any write, `applyOzonCostChainOps(… {'row:60': {drop: true}}, 'пересчёт:
+  исправление журнала, пункт 93')`, ONE `resyncOzonCostForOps` with both Полка OpIDs, «ошибка» on the two 03.09 rows;
+  `tmp93SendBacklog()` — refuses unless the pending set equals the 13 expected groups to the kopeck, then
+  `sendOzonCostToKan('пункт 93 разовая отправка')`.
+- **Replay** (tester, scratchpad `replay06/`, real Code.gs mirror + the one-off + `fakeKanCost` on the export): 97 checks /
+  0 failed, also under UTC, Los Angeles and Moscow zones; 9 mutations killed. Finding: two separate resync calls (m4) end
+  in the same day figures but leave 5 junk intermediate rows — the one call is right. Journal «Дата» cells are real date
+  cells; the spreadsheet zone is Asia/Yekaterinburg (same as the script); «Себестоимость Озон» has 26 grid columns.
+- **Code.gs @206** (owner ran `clasp push` + `clasp deploy -i … -d "item 93 KAN cost auto-send, item 97 T0, admin password
+  from property"`): `clasp clone-script <id> 206` equal byte for byte to `Code.gs`, `ChinaOrders.gs`, `appsscript.json` of
+  `eae52c2`; /exec pinned to @206; 187 of 200 versions. The owner was told how to set `auth_newAdminPassword`.
+- **Function A** (owner, 22:45 Ekb): log equal to the replay; fresh export — rows 105–117 appended (marker for row 60,
+  6 BowlGrayMini_01 links, 6 Полка links, source «пересчёт: исправление журнала, пункт 93»), 0 of the 103 older rows changed
+  in columns 1–12, rows 48 / 51 «ошибка», the three KAN columns at the end; pending by the sender's rule = exactly the 13.
+- **Chat-connector previews** (owner's «да»; NOT applied): MaxiStore 6 rows and Mercurius 7 rows, all `updated` into the
+  same KAN entry ids, created 0, skipped 0, no issues.
+- **Function B** (owner's «да», 22:48 Ekb): accepted 13, failed 0, notWritten 0. Journal: 32 rows «принято» with «КАН принял
+  …»; stamp «2026-10-27 22:49:04 пункт 93 разовая отправка» only on rows 106–117 (the marker 105 unstamped, older rows keep
+  their stamps); «Время КАН» shows the time just written (text). KAN read back (both shops): 78 of 78 journal day groups
+  equal to the kopeck, no difference left.
+
+  | Article (cabinet) | Dates | KAN before → after |
+  |---|---|---|
+  | BowlGrayMini_01 (MaxiStore) | 12.09 / 19.09 / 21.09 / 28.09 / 09.10 | 222.66 / 222.29 / 222.18 / 221.41 / 241.14 → 225.60 / 224.12 / 223.93 / 222.69 / 241.99 |
+  | Миска_двойная (MaxiStore) | 03.09 | 229.79 → 229.58 |
+  | Полка_выдв_27см (Mercurius) | 23.08 / 25.08 / 03.09 / 13.10 / 17.10 / 20.10 | 690.50 / 682.21 / 677.21 / 710.01 / 710.60 / 710.89 → 667.50 / 659.21 / 656.54 / 709.51 / 710.12 / 710.43 |
+  | Набор_полок_выдв_бел (Mercurius) | 03.09 | 1650.49 → 1647.59 |
+
+- **Cloud Run `sklad-00109-666`** (assistant, clean `git archive eae52c2` export, `npm ci`, `gcloud run deploy … --quiet`):
+  100 % traffic; `/api/version` reports it; scratchpad `deploycheck.cjs` (coder, self-checked) — index.html and all 33 assets
+  equal to the local build of the same export modulo hashes and the build label (served 20:55 МСК, local 20:53 МСК).
+- **Trigger:** the owner ran `setupKanCostWatchTrigger` in the editor after the backlog (queue empty, so its first runs send
+  nothing).
+- **Still open:** the browser path on a real Ozon shipment (green toast, ✓ in «История», the figure in KAN); the ✗ buttons in
+  the 240 px cell are seen only on a failure; the `apply` answer shape is now observed only through the sender's success (the
+  log does not print it); a KAN `delete` (deleted shipment day) has never run live.
 
 ## Comments
 
