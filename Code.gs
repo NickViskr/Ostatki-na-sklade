@@ -282,7 +282,9 @@ function doPost(e) {
       // Item 82: both pure reads of the module's own spreadsheet, same reasoning as
       // getChinaBatches — calcChinaForecast computes but writes nothing either.
       'getChinaForecastData',
-      'calcChinaForecast'
+      'calcChinaForecast',
+      // Item 93 ticket 05: a pure read of the cost journal for the «История» marker; any signed-in user.
+      'getOzonCostKanMarkers'
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();
@@ -509,6 +511,8 @@ function doPost(e) {
       case 'getOzonSupplyRequests': assertAdmin(currentUser); result = getOzonSupplyRequests(); break;
       case 'saveOzonSupplyDocs': assertAdmin(currentUser); result = saveOzonSupplyDocs(data); break;
       case 'getOzonCostExport': assertAdmin(currentUser); result = getOzonCostExport(); break;
+      // Item 93 ticket 05: no admin check — the browser decides whose markers are shown (author + admin).
+      case 'getOzonCostKanMarkers': result = getOzonCostKanMarkers(); break;
       case 'markOzonCostExported': assertAdmin(currentUser); result = markOzonCostExported(data, currentUser.username); break;
       case 'saveSupplyDocsToDrive': assertAdmin(currentUser); result = saveSupplyDocsToDrive(data); break;
       // Item 78a: the manual «Обновить из KAN» button; the nightly trigger does the same.
@@ -6785,6 +6789,43 @@ function collectOzonCostKanGroups(journal, cut) {
     pending.push(g);
   });
   return { pending: pending, skippedManual: skippedManual, unseen: unseen, manual: manual };
+}
+
+/**
+ * Journal rows -> the KAN marker of every shipment, for the «История» marker of item 93 ticket 05. Pure.
+ * Returns [{ opId, article, status, answer, time }]. KAN's status lives on a day group (the sender's own key,
+ * see collectOzonCostKanGroups) and its LAST row decides. A shipment is a pair (opId, article); the LAST journal
+ * row carrying the pair picks its day group, so a re-dated link follows its new day (the old day was closed by
+ * the drop marker). Rows before item 93 have no status, so a group whose last row has none gets no entry and the
+ * history shows nothing for it. Rows without an OpID, a cabinet or an article give no entry either.
+ */
+function ozonCostKanMarkersFromJournal(journal) {
+  const lastRowOfDay = {};
+  const dayOfPair = {};
+  const pairs = [];
+  (journal || []).forEach(function(r) {
+    if (!r.cabinet || !r.article) return;
+    const dayKey = r.cabinet + '|' + r.article + '|' + String(r.date || '').slice(0, 10);
+    lastRowOfDay[dayKey] = r;
+    if (!r.opId) return;
+    const pairKey = r.opId + '|' + r.article;
+    if (!dayOfPair[pairKey]) pairs.push({ opId: r.opId, article: r.article, pairKey: pairKey });
+    dayOfPair[pairKey] = dayKey;
+  });
+
+  const markers = [];
+  pairs.forEach(function(p) {
+    const last = lastRowOfDay[dayOfPair[p.pairKey]];
+    const status = String(last.kanStatus || '').trim().toLowerCase();
+    if (status === '') return;
+    markers.push({ opId: p.opId, article: p.article, status: status, answer: String(last.kanAnswer || ''), time: String(last.kanTime || '') });
+  });
+  return markers;
+}
+
+/** A pure read of the cost journal for the «История» marker; the browser decides who sees which marker. */
+function getOzonCostKanMarkers() {
+  return { markers: ozonCostKanMarkersFromJournal(getOzonCostJournal()) };
 }
 
 /**

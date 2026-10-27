@@ -10,6 +10,7 @@ import { OzonSupplyRequestRow } from '../lib/ozonPending';
 import { OzonCoverageSettings, OzonClusterRef } from '../lib/ozonCoverage';
 import { BatchWriteOffGroup } from '../lib/ozonBatchWriteOff';
 import { buildKanCostCsv, collapseKanCostRows, KanCostRow, kanCostFileName } from '../lib/kanCostExport';
+import { indexKanMarkers, isOzonShipmentRow, kanManualCsv, kanManualToast, kanSendToast, KanManualAnswer, KanMarkerInfo, KanToast } from '../lib/kanCostSend';
 import { toast } from 'sonner';
 import { formatCurrency, newOperationId } from '../lib/utils';
 
@@ -23,6 +24,19 @@ import { formatCurrency, newOperationId } from '../lib/utils';
 // ушли бы два одинаковых запроса, и оба мимо кэша, потому что первый ещё не успел его наполнить.
 // Повторный вызов ПОСЛЕ завершения запускает новое чтение — этим пользуется сохранение настроек.
 let ozonInitialInFlight: Promise<boolean> | null = null;
+
+// Item 93 ticket 05: the automatic KAN cost send runs one request at a time. A call that arrives
+// while one is running starts no parallel request: it makes the running one repeat once when it
+// ends, so rows saved in the meantime (not in the running request's answer) still go out.
+let kanSendRunning = false;
+let kanSendRepeat = false;
+
+// One KAN toast at a time: every toast of the send and of «Отправлю сам» carries this id, so sonner
+// replaces the previous one instead of stacking them.
+const KAN_TOAST_ID = 'kan-cost';
+// Apps Script may still finish a send after the proxy's 90 s timeout and write the statuses, so a send
+// without an answer re-reads them once more after this delay.
+const KAN_LATE_REREAD_MS = 120_000;
 
 /**
  * Item 56, stage 3. Extras a single commit needs when it is one order of a batch write-off.
@@ -50,6 +64,49 @@ const isAdminUser = (user: { role?: string; username?: string } | null | undefin
   const name = String(user.username || '').trim().toLowerCase();
   return role === 'admin' || ['admin', 'админ', 'администратор'].includes(name);
 };
+
+// The test fetchGas applies before it puts devMode on a request. The server refuses both KAN actions
+// for such a request, so the browser says so up front instead of sending.
+const isDevModeAdmin = (devMode: boolean, user: User | null): boolean => {
+  const role = user?.role?.toLowerCase() || '';
+  return devMode && (role === 'admin' || role === 'администратор');
+};
+
+// A toast built by kanSendToast / kanManualToast; lines go to the description, one per line.
+const showKanToast = (view: KanToast, errorOptions: Record<string, unknown> = {}): void => {
+  if (view.kind === 'none') return;
+  const withLines = view.lines && view.lines.length > 0
+    ? { description: view.lines.join('\n'), style: { whiteSpace: 'pre-line' as const } }
+    : null;
+  if (view.kind === 'error') toast.error(view.title, { id: KAN_TOAST_ID, ...withLines, ...errorOptions });
+  else toast[view.kind](view.title, { id: KAN_TOAST_ID, ...withLines });
+};
+
+// The server could not follow the cost journal for KAN (answer field costJournalError): say so loudly.
+const showCostJournalError = (data: any): void => {
+  if (typeof data?.costJournalError === 'string' && data.costJournalError) toast.error(data.costJournalError);
+};
+
+// Rows among `ids` that are shipments to an Ozon cabinet (the ones whose cost goes to KAN).
+const hasOzonShipmentRow = (ids: string[], transactions: Transaction[]): boolean =>
+  transactions.some(t => ids.includes(t.id) && isOzonShipmentRow(t));
+
+// The same for rows in the archive: the deleted row is a JSON text in dataJSON, and a flag saved as text
+// reads as true just like in Code.gs. Text that cannot be parsed is not an Ozon shipment.
+const hasArchivedOzonShipment = (archiveIds: string[], archivedItems: ArchivedItem[]): boolean =>
+  archivedItems.some(item => {
+    if (!archiveIds.includes(item.archiveId) || item.type !== 'Transaction') return false;
+    try {
+      const row = JSON.parse(item.dataJSON);
+      return isOzonShipmentRow({
+        type: row?.type,
+        destination: row?.destination,
+        isComponent: row?.isComponent === true || String(row?.isComponent).toLowerCase() === 'true',
+      });
+    } catch {
+      return false;
+    }
+  });
 
 const normalizeStock = (items: StockItem[]): StockItem[] =>
   items.map(item =>
@@ -199,6 +256,14 @@ interface WarehouseState {
   runOzonStocksSync: () => Promise<void>;
   /** Пункт 47, этап 3: собрать файл себестоимости для КАН и отметить выгруженные строки. */
   exportKanCost: () => Promise<void>;
+  /** Item 93 ticket 05: KAN status of every cost row group, by order id and article (see indexKanMarkers). */
+  kanCostMarkers: Record<string, KanMarkerInfo>;
+  /** Re-reads the statuses; keeps the old ones and says nothing when the read fails. */
+  fetchKanCostMarkers: () => Promise<void>;
+  /** The automatic send of the pending cost rows to KAN. Never throws, never waits for the caller's save. */
+  sendKanCost: () => Promise<void>;
+  /** «Отправлю сам»: switches the pending rows to a manual upload and downloads the file for KAN. */
+  sendKanCostManually: () => Promise<void>;
   ozonSales: OzonSalesRow[];
   fetchOzonSales: () => Promise<void>;
   /** Item 86, step D: daily in-stock marks from «История остатков Ozon», used to tell a
@@ -256,6 +321,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   ozonStocksSyncIssues: [],
   ozonSales: [],
   ozonStockHistory: [],
+  kanCostMarkers: {},
   turnoverData: null,
   ozonSupplyRequests: [],
   factoryOrders: [],
@@ -774,7 +840,13 @@ export const useWarehouseStore = create<WarehouseState>()(
             toast.success('Операция успешно записана в Google Таблицу!');
           }
         }
-        
+        showCostJournalError(payloadData);
+
+        // Item 93 ticket 05: the save never waits for KAN (owner's answer 1). The send starts without
+        // await, after the rows are saved and shown; its own toast arrives whenever KAN answers.
+        // A silent member of a batch write-off sends nothing: ConfirmModal starts ONE step after the loop.
+        if (!options?.silent && isOzonShipmentRow({ type, destination })) void get().sendKanCost();
+
         // Пункт 28, этап C: привязку поставок выполнил сервер внутри той же операции.
         // Здесь только разбираем результат и предупреждаем, если связь сохранилась не полностью.
         if (postingIds.length > 0) {
@@ -835,6 +907,8 @@ export const useWarehouseStore = create<WarehouseState>()(
         });
         
         toast.success('Операция удалена');
+        showCostJournalError(result.data);
+        if (hasOzonShipmentRow([id], transactions)) void get().sendKanCost();
         await get().returnLinkedOzonSupplies([id]);
         return true;
       } else {
@@ -877,6 +951,8 @@ export const useWarehouseStore = create<WarehouseState>()(
         } else {
            toast.success(`Удалено операций: ${expandedIds.length}`);
         }
+        showCostJournalError(payloadData);
+        if (hasOzonShipmentRow(expandedIds, transactions)) void get().sendKanCost();
         await get().returnLinkedOzonSupplies(expandedIds);
         return true;
       } else {
@@ -918,6 +994,7 @@ export const useWarehouseStore = create<WarehouseState>()(
       } else if (Number(d.costRowsAppended) > 0) {
         toast.success('Исправленная себестоимость дописана в журнал для КАН');
       }
+      if (Number(d.costRowsAppended) > 0) void get().sendKanCost();
       return true;
     } catch (e: any) {
       console.error(e);
@@ -971,6 +1048,8 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   handleUpdateTransaction: async (id, data) => {
+    // Read before the call: the edit may move the row away from Ozon, and its cost still has to follow.
+    const wasOzonShipment = hasOzonShipmentRow([id], get().transactions);
     set({ isProcessing: true });
     try {
       const result = await get().fetchGas('updateTransaction', { id, data });
@@ -1009,10 +1088,12 @@ export const useWarehouseStore = create<WarehouseState>()(
           const forKan = recalculated.appended || 0;
           toast.info(
             forKan > 0
-              ? `Пересчитано отгрузок: ${shipments}. Для КАН готово строк: ${forKan} — нажмите «Себестоимость КАН».`
+              ? `Пересчитано отгрузок: ${shipments}. Для КАН готово строк: ${forKan}.`
               : `Пересчитано отгрузок: ${shipments}. На Озон этот товар не уезжал, в КАН ничего не уходит.`
           );
         }
+        showCostJournalError(payloadData);
+        if (wasOzonShipment || Number(recalculated?.appended) > 0) void get().sendKanCost();
 
         return true;
       } else {
@@ -1340,11 +1421,15 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   handleRestoreArchivedItem: async (archiveId: string) => {
+    // Read before the call: a restored row leaves the archive list.
+    const restoresOzonShipment = hasArchivedOzonShipment([archiveId], get().archivedItems);
     set({ isProcessing: true });
     try {
       const result = await get().fetchGas('restoreArchivedItem', { archiveId });
       if (result.status === 'success') {
         toast.success('Элемент успешно восстановлен');
+        showCostJournalError(result.data);
+        if (restoresOzonShipment) void get().sendKanCost();
         set({ archivedItems: get().archivedItems.filter(i => i.archiveId !== archiveId) });
         
         const isAdmin = get().currentUser?.role?.toLowerCase() === 'admin' || 
@@ -1378,6 +1463,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   handleRestoreMultipleArchivedItems: async (archiveIds) => {
+    const restoresOzonShipment = hasArchivedOzonShipment(archiveIds, get().archivedItems);
     set({ isProcessing: true });
     try {
       const result = await get().fetchGas('restoreMultipleArchivedItems', { archiveIds });
@@ -1389,6 +1475,8 @@ export const useWarehouseStore = create<WarehouseState>()(
         } else {
           toast.success(`Успешно восстановлено: ${archiveIds.length}`);
         }
+        showCostJournalError(payloadData);
+        if (restoresOzonShipment) void get().sendKanCost();
         set({ archivedItems: get().archivedItems.filter(i => !archiveIds.includes(i.archiveId)) });
         
         const isAdmin = get().currentUser?.role?.toLowerCase() === 'admin' || 
@@ -1611,6 +1699,8 @@ export const useWarehouseStore = create<WarehouseState>()(
         }));
         await get().fetchExternalShipments();
         toast.success('Пересорт проведён: остатки склада обновлены');
+        showCostJournalError(res.data);
+        void get().sendKanCost();
         return true;
       } else {
         toast.error('Ошибка сервера: ' + res.message);
@@ -2211,6 +2301,100 @@ export const useWarehouseStore = create<WarehouseState>()(
     } finally {
       set({ isProcessing: false });
     }
+  },
+
+  fetchKanCostMarkers: async () => {
+    try {
+      const result = await get().fetchGas('getOzonCostKanMarkers');
+      if (result.status === 'success') set({ kanCostMarkers: indexKanMarkers(result.data?.markers) });
+    } catch (e) {
+      // A background read: the old statuses stay on screen.
+      console.error(e);
+    }
+  },
+
+  // Item 93 ticket 05. Never touches isProcessing: KAN is slow and must not freeze the screen.
+  sendKanCost: async () => {
+    if (isDevModeAdmin(get().devMode, get().currentUser)) {
+      toast.info('Режим разработки: себестоимость в КАН не отправляется', { id: KAN_TOAST_ID });
+      return;
+    }
+    if (kanSendRunning) {
+      kanSendRepeat = true;
+      return;
+    }
+    kanSendRunning = true;
+    const noAnswer = (reason: unknown) => {
+      toast.info(`КАН: ответ не получен (${String(reason || 'причина не указана')}). Статус появится в «Истории».`, { id: KAN_TOAST_ID });
+      // Not awaited: the send returns at once, the statuses are read again in the background.
+      setTimeout(() => { void get().fetchKanCostMarkers(); }, KAN_LATE_REREAD_MS);
+    };
+    try {
+      do {
+        kanSendRepeat = false;
+        try {
+          const result = await get().fetchGas('sendOzonCostToKan');
+          if (result.status === 'success') {
+            showKanToast(kanSendToast(result.data), {
+              duration: Infinity,
+              action: { label: 'Отправить снова', onClick: () => { void get().sendKanCost(); } },
+              cancel: { label: 'Отправлю сам', onClick: () => { void get().sendKanCostManually(); } },
+            });
+          } else {
+            // HTTP 504, network, a thrown Apps Script error: KAN may well have taken the rows, so no red toast.
+            noAnswer(result.message);
+          }
+        } catch (e: any) {
+          console.error(e);
+          noAnswer(e?.message || String(e));
+        }
+        await get().fetchKanCostMarkers();
+      } while (kanSendRepeat);
+    } finally {
+      kanSendRunning = false;
+    }
+  },
+
+  sendKanCostManually: async () => {
+    if (isDevModeAdmin(get().devMode, get().currentUser)) {
+      toast.info('Режим разработки: ручная загрузка в КАН недоступна', { id: KAN_TOAST_ID });
+      return;
+    }
+    try {
+      // Switch FIRST, download second: a lost download only costs an hour (the watch gives up and the
+      // hourly API retry takes over), the reverse order could leave a file uploaded to KAN while the
+      // rows still retry automatically. The rows are never marked as exported here.
+      const result = await get().fetchGas('switchOzonCostToManual');
+      if (result.status !== 'success') {
+        // The retry runs the whole manual flow again. Safe either way: after a 504 the rows may already be
+        // «вручную», and switching them again only restarts their hour and hands their rows back for the file.
+        toast.error('Не удалось переключить на ручную загрузку: ' + (result.message || 'ошибка') + '. Повтор безопасен.', {
+          id: KAN_TOAST_ID,
+          duration: Infinity,
+          action: { label: 'Отправлю сам', onClick: () => { void get().sendKanCostManually(); } },
+        });
+      } else {
+        const answer: KanManualAnswer | undefined = result.data;
+        const rows = answer?.rows ?? [];
+        if (!answer?.busy && rows.length > 0) {
+          const blob = new Blob([kanManualCsv(rows)], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = kanCostFileName(new Date());
+          link.style.visibility = 'hidden';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+        }
+        showKanToast(kanManualToast(answer));
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при переключении на ручную загрузку: ' + (e?.message || String(e)), { id: KAN_TOAST_ID });
+    }
+    await get().fetchKanCostMarkers();
   }
     })
     ,

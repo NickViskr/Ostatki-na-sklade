@@ -99,6 +99,9 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   // Item 47, stage 3: a pure read of the cost journal. Deliberately NOT cached — the button
   // stamps the rows it exported, so a cached answer would offer the same rows twice.
   getOzonCostExport: read(),
+  // Item 93 ticket 05: the «История» marker. Deliberately NOT cached — the watch trigger writes the
+  // statuses inside Apps Script, outside the proxy, so a cached answer would never see them.
+  getOzonCostKanMarkers: read(),
   // Item 81: pure reads of the module's own spreadsheet. Deliberately not cached — every write
   // of the module answers with the whole state anyway. Item 82: calcChinaForecast computes a
   // forecast but writes nothing.

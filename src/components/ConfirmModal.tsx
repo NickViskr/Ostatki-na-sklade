@@ -17,6 +17,7 @@ import { useWarehouseStore } from "../store/useWarehouseStore";
 import { useUIStore } from "../store/useUIStore";
 import { formatCurrency, newOperationId } from "../lib/utils";
 import { batchDestinationNote, buildBatchWriteOffPlan } from "../lib/ozonBatchWriteOff";
+import { isOzonShipmentRow } from "../lib/kanCostSend";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { toast } from "sonner";
 import { countShipmentBoxes } from '../lib/shipmentBoxes';
@@ -525,6 +526,9 @@ export const ConfirmModal: React.FC = () => {
     if (isMultiOrderBatch && pendingOzonBatch) {
       const plan = buildBatchWriteOffPlan(pendingOzonBatch, extraCostsTotal);
       const written: string[] = [];
+      // Item 93 ticket 05: the orders are committed silently, so none of them starts the KAN send;
+      // ONE step starts after the loop (or after an interruption, if any order was written).
+      const sendsKanCost = isOzonShipmentRow({ type: opType, destination: finalDestination });
 
       for (let i = 0; i < plan.groups.length; i++) {
         const group = plan.groups[i];
@@ -555,12 +559,14 @@ export const ConfirmModal: React.FC = () => {
               ? "Ответ не получен, операция могла быть записана"
               : `Записаны заявки ${written.join(", ")}. На заявке № ${group.label} запись прервалась — оставшиеся заявки НЕ записаны.`,
           );
+          if (sendsKanCost && written.length > 0) void useWarehouseStore.getState().sendKanCost();
           await useWarehouseStore.getState().fetchExternalShipments();
           return;
         }
         written.push(`№ ${group.label}`);
       }
 
+      if (sendsKanCost) void useWarehouseStore.getState().sendKanCost();
       await useWarehouseStore.getState().fetchExternalShipments();
       toast.success(`Записано расходов: ${plan.groups.length} — заявки ${written.join(", ")}`);
       setShowConfirmModal(false);

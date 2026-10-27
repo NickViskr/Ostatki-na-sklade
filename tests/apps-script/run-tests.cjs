@@ -11954,6 +11954,136 @@ const T04_LOOKUP = 'list_shops,get_product_costs';
     timeCell(t, 2) === T03_TIME && timeCell(t, 4) === T03_TIME, JSON.stringify([timeCell(t, 2), timeCell(t, 4)]));
 })();
 
+// ================= Item 93 ticket 05, step A: the KAN markers of the history =================
+// The history shows, next to a shipment, what KAN said about its cost. The server side is one pure read:
+// ozonCostKanMarkersFromJournal(journal) -> [{ opId, article, status, answer, time }]. KAN's status lives on a
+// DAY group (cabinet|article|day, the sender's own key) and its LAST row decides; a shipment (opId + article)
+// follows the day group of the LAST journal row that carries it (a re-dated link: the drop marker of the old
+// day is written first, the new link later). Rows with no status (written before item 93), without an opId,
+// cabinet or article give no entry. getOzonCostKanMarkers() wraps it over the real journal and is a lock-free
+// read that any signed-in user may call (the browser decides who sees what).
+// A missing function is reported as failed checks, never as a throw that would kill the blocks after this one.
+
+const T05_FN = 'ozonCostKanMarkersFromJournal';
+const t05Journal = (h, rows) => { h.setOzonCostSheet(rows, h.OZON_COST_HEADERS.concat(h.OZON_COST_KAN_HEADERS)); return h.getOzonCostJournal(); };
+const t05Entry = (opId, article, status, answer, time) => ({ opId: opId, article: article, status: status, answer: answer, time: time });
+const t05Sorted = (list) => Array.prototype.slice.call(list).sort((a, b) => (a.opId + '|' + a.article).localeCompare(b.opId + '|' + b.article));
+function t05Scenario(name, body) {
+  const h = freshHarness();
+  if (typeof h.context[T05_FN] !== 'function') { check(name, false, T05_FN + ' is missing in Code.gs'); return; }
+  try {
+    const r = body(h, h.context[T05_FN]);
+    check(name, r.ok, r.details);
+  } catch (e) {
+    check(name, false, 'threw: ' + String((e && e.message) || e));
+  }
+}
+
+(function test93s05Markers() {
+  const probe = freshHarness();
+  check('93/05 markers: ozonCostKanMarkersFromJournal and getOzonCostKanMarkers exist in Code.gs',
+    typeof probe.context[T05_FN] === 'function' && typeof probe.context.getOzonCostKanMarkers === 'function',
+    T05_FN + ': ' + typeof probe.context[T05_FN] + ', getOzonCostKanMarkers: ' + typeof probe.context.getOzonCostKanMarkers);
+
+  t05Scenario('93/05 A: one accepted shipment gives one entry with its status, answer and time; the status is compared trimmed and lower-cased', (h, fn) => {
+    const journal = t05Journal(h, [t03One({ status: 'Принято', answer: 'КАН принял 233,67', time: T03_TIME, exported: T03_OLD_STAMP })]);
+    const out = fn(journal);
+    const spaced = fn([Object.assign({}, journal[0], { kanStatus: '  ПРИНЯТО  ' })]);
+    const want = [t05Entry('op-1', 'ART-C', 'принято', 'КАН принял 233,67', T03_TIME)];
+    return { ok: t03Canon(out) === t03Canon(want) && t03Canon(spaced) === t03Canon(want), details: JSON.stringify([out, spaced]) };
+  });
+
+  t05Scenario('93/05 B: a shipment accepted earlier and a newer unsent one on the SAME cabinet, article and day (the day key cuts a time part off the date): the day reads unsent, so neither has an entry; another accepted day still does',
+    (h, fn) => {
+      const journal = t05Journal(h, [
+        t03Row(T03_DAY, 'MaxiStore', 'ART-C', 231, 'op-x', { status: T03_OK, answer: 'КАН принял 231,00', time: T03_TIME }),
+        t03Row(T03_DAY + 'T00:00:00', 'MaxiStore', 'ART-C', 233.67, 'op-y'),
+        t03Row(T03_DAY, 'MaxiStore', 'ART-D', 70, 'op-z', { status: T03_OK, answer: 'КАН принял 70,00', time: T03_TIME })
+      ]);
+      const out = fn(journal);
+      return { ok: t03Canon(out) === t03Canon([t05Entry('op-z', 'ART-D', 'принято', 'КАН принял 70,00', T03_TIME)]), details: JSON.stringify(out) };
+    });
+
+  t05Scenario('93/05 C: a re-dated shipment follows its NEW day — the old day is closed by the drop marker (accepted as a deletion), the new day failed: the entry is «ошибка» with the new day\'s answer, one entry only',
+    (h, fn) => {
+      const journal = t05Journal(h, [
+        t03Row('2026-10-12', 'MaxiStore', 'ART-C', 100, 'op-x', { status: T03_OK, answer: 'КАН принял 100,00', time: '2026-10-13 09:00:00' }),
+        t03Marker('2026-10-12', 'ART-C', 'op-x').concat([T03_OK, 'КАН: запись удалена', '2026-10-14 12:00:00']),
+        t03Row(T03_DAY, 'MaxiStore', 'ART-C', 100, 'op-x', { status: T03_ERR, answer: 'КАН недоступен', time: T03_TIME })
+      ]);
+      const out = fn(journal);
+      return { ok: t03Canon(out) === t03Canon([t05Entry('op-x', 'ART-C', 'ошибка', 'КАН недоступен', T03_TIME)]), details: JSON.stringify(out) };
+    });
+
+  t05Scenario('93/05 D: «вручную» (with the wait text) and «отправляется» groups come through as they are',
+    (h, fn) => {
+      const journal = t05Journal(h, [
+        t03Row(T03_DAY, 'MaxiStore', 'ART-C', 233.67, 'op-1', { status: 'вручную', answer: 'ждём файл в КАН', time: T03_TIME }),
+        t03Row(T03_DAY, 'MaxiStore', 'ART-E', 80, 'op-2', { status: T03_SENDING, time: T03_TIME })
+      ]);
+      const out = t05Sorted(fn(journal));
+      return {
+        ok: t03Canon(out) === t03Canon([t05Entry('op-1', 'ART-C', 'вручную', 'ждём файл в КАН', T03_TIME), t05Entry('op-2', 'ART-E', 'отправляется', '', T03_TIME)]),
+        details: JSON.stringify(out)
+      };
+    });
+
+  t05Scenario('93/05 E: one order with two articles gives two entries, one per article, each with its own day group\'s status',
+    (h, fn) => {
+      const journal = t05Journal(h, [
+        t03Row(T03_DAY, 'MaxiStore', 'ART-A', 10, 'op-x', { status: T03_OK, answer: 'КАН принял 10,00', time: T03_TIME }),
+        t03Row(T03_DAY, 'MaxiStore', 'ART-B', 20, 'op-x', { status: T03_ERR, answer: 'КАН недоступен', time: T03_TIME })
+      ]);
+      const out = t05Sorted(fn(journal));
+      return {
+        ok: t03Canon(out) === t03Canon([t05Entry('op-x', 'ART-A', 'принято', 'КАН принял 10,00', T03_TIME), t05Entry('op-x', 'ART-B', 'ошибка', 'КАН недоступен', T03_TIME)]),
+        details: JSON.stringify(out)
+      };
+    });
+
+  t05Scenario('93/05 F: no entry for a row without an OpID, a row written before item 93 (12 columns, or empty status), or a row with no cabinet or no article; an empty journal gives an empty list',
+    (h, fn) => {
+      const journal = t05Journal(h, [
+        t03Row(T03_DAY, 'MaxiStore', 'ART-1', 5, '', { status: T03_OK, answer: 'КАН принял 5,00', time: T03_TIME }),
+        t03Row(T03_DAY, 'MaxiStore', 'ART-2', 5, 'op-2'),
+        t03Row(T03_DAY, 'MaxiStore', 'ART-3', 5, 'op-3', { status: '', answer: '', time: '' }),
+        t03Row(T03_DAY, '', 'ART-4', 5, 'op-4', { status: T03_OK, answer: 'КАН принял 5,00', time: T03_TIME }),
+        t03Row(T03_DAY, 'MaxiStore', '', 5, 'op-5', { status: T03_OK, answer: 'КАН принял 5,00', time: T03_TIME })
+      ]);
+      const out = fn(journal);
+      const none = fn([]);
+      return { ok: Array.isArray(out) && out.length === 0 && Array.isArray(none) && none.length === 0, details: JSON.stringify([out, none]) };
+    });
+})();
+
+(function test93s05DoPost() {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+  const list = (src.match(/const LOCK_FREE_ACTIONS = \[([\s\S]*?)\];/) || [])[1] || '';
+  const inList = /['"]getOzonCostKanMarkers['"]/.test(list);
+  const hasCase = /case 'getOzonCostKanMarkers':/.test(src);
+  check('93/05 H: doPost lists getOzonCostKanMarkers in LOCK_FREE_ACTIONS and dispatches it by its own `case`',
+    inList && hasCase, 'listed: ' + inList + ', case: ' + hasCase);
+
+  const t = t03Setup([t03One({ status: T03_OK, answer: 'КАН принял 233,67', time: T03_TIME, exported: T03_OLD_STAMP })]);
+  t.h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+    ['tok-user', 'Кладовщик', 'user', String(Date.parse('2030-01-01T00:00:00Z'))]]);
+  const frozen = t04Sheet(t);
+  const want = [t05Entry('op-1', 'ART-C', 'принято', 'КАН принял 233,67', T03_TIME)];
+  let out = null;
+  let direct = null;
+  let thrown = '';
+  try {
+    out = t.h.callDoPost({ action: 'getOzonCostKanMarkers', sessionToken: 'tok-user' });
+    if (typeof t.h.context.getOzonCostKanMarkers === 'function') direct = t.h.context.getOzonCostKanMarkers();
+  } catch (e) { thrown = String((e && e.message) || e); }
+  check('93/05 H: a signed-in non-admin user gets success and data.markers (the list for the real journal; the call itself returns {markers}), outside the global lock, with no request to KAN and the sheet untouched',
+    out !== null && out.status === 'success' && !!out.data && Array.isArray(out.data.markers) && t03Canon(out.data.markers) === t03Canon(want)
+      && !!direct && t03Canon(direct) === t03Canon({ markers: want })
+      && t.h.waitLockTimeouts().length === 0 && t.h.fetchesWhileLocked() === 0 && t.h.nestedLockTakes() === 0
+      && t.h.fetchLog.length === 0 && t04Sheet(t) === frozen,
+    thrown || JSON.stringify([out, direct, t.h.waitLockTimeouts(), t.h.fetchLog.length]));
+})();
+
 // ================= Bulk restore writes columns 11–13 like the single restore (2026-10-14) =================
 // restoreMultipleArchivedItems used to stop at column 10, so «Пользователь», «groupId» and «isComponent»
 // came back empty and a kit component row read as a plain expense row.

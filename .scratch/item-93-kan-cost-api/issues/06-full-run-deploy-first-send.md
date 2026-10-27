@@ -56,3 +56,10 @@ Spec: `../spec.md`.
   exists. The watch never throws (errors go to the execution log, «Executions»), so no failure mails are expected.
   Also: «Время КАН» cells are written as plain text (format '@') — the script zone is Asia/Yekaterinburg and the
   spreadsheet's own zone may differ; after the first live send check that the cell shows the time just written.
+
+- 2026-10-27, from ticket 05: the browser half is built (result in `05-…md`). Code.gs now also has the lock-free read
+  `getOzonCostKanMarkers` — it ships in the same `clasp push`; until then the «История» marker read answers «Unknown
+  action» and shows nothing. ORDER reminder: with Cloud Run of 05 live, EVERY Ozon save calls the sender, which sends ALL
+  pending groups (the backlog too) — deploy Cloud Run only when the backlog send is settled, or right after it. First
+  live check in a browser: after a real Ozon shipment one green toast «КАН принял себестоимость:», ✓ on its «История» row
+  (hover shows the text), the ✗ buttons fit the 240 px destination cell (never seen in a browser yet).

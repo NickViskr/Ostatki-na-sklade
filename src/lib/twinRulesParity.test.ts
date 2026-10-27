@@ -17,6 +17,7 @@ import {
   wholeShipmentOrders, wholeShipmentRows
 } from './wholeShipment';
 import { factoryOnOrderByArticle, resolveOzonArticle } from './ozonCoverage';
+import { isOzonShipmentRow } from './kanCostSend';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import type { FactoryOrder, SKUItem } from '../types';
 
@@ -537,7 +538,39 @@ const combinedTwin: Twin<CombinedInput> = {
   }
 };
 
-const TWINS: Twin<any>[] = [...destinationTwins, rebuildTwin, pipelineTwin, articleTwin, availabilityTwin, editTwin, combinedTwin];
+// ── Item 93 ticket 05: which history rows are shipments to an Ozon cabinet (the ones whose cost goes to KAN) ──
+
+interface ShipmentRowInput { type: string; destination: string; isComponent?: boolean }
+const OZON_HEADS = [
+  'Ozon (MaxiStore)', 'Ozon(Mercurius)', 'Ozon  ( Магазин )', 'Ozon ( )', 'Ozon ()', 'Ozon ФБО Хоругвино',
+  'ozon (Магазин)', 'Клиент Ozon (Магазин)', 'Wildberries FBS', 'Яндекс', 'Клиент Иванов', '', ' '
+];
+const shipmentRowTwin: Twin<ShipmentRowInput> = {
+  name: 'Ozon shipment row: the screen and Code.gs agree which history rows go to the cost journal',
+  cases: [
+    { type: 'Расход', destination: 'Ozon (MaxiStore) [расходы]' },
+    { type: 'Расход', destination: 'Ozon (MaxiStore) [Упаковка: 500₽ | Услуги: Маркировка x2 (40₽)]', isComponent: false },
+    { type: 'Расход', destination: 'Ozon ( )' },
+    { type: 'Расход', destination: 'Ozon(Mercurius)' },
+    { type: 'Приход', destination: 'Ozon (MaxiStore)' },
+    { type: 'Расход', destination: 'Ozon (MaxiStore)', isComponent: true },
+    { type: 'Расход', destination: 'Wildberries FBS' },
+    { type: 'Расход', destination: '' }
+  ],
+  generated: 300,
+  generate: (r) => {
+    const head = r.pick(OZON_HEADS);
+    return {
+      type: r.pick(['Расход', 'Расход', 'Расход', 'Приход', 'расход', ' Расход', 'Корректировка', '']),
+      destination: r.chance(0.5) ? head : [head, destination(r)].filter(Boolean).join(' '),
+      isComponent: r.pick([undefined, false, true])
+    };
+  },
+  ts: (row) => isOzonShipmentRow(row),
+  gs: (row) => pure.isOzonShipmentHistoryRow(row.type, row.destination, row.isComponent)
+};
+
+const TWINS: Twin<any>[] = [...destinationTwins, rebuildTwin, pipelineTwin, articleTwin, availabilityTwin, editTwin, combinedTwin, shipmentRowTwin];
 
 describe('item 89 B: every twin rule gives the same answer in TS and in Code.gs', () => {
   for (const twin of TWINS) {

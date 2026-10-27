@@ -21,10 +21,14 @@ import {
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useUIStore } from '../store/useUIStore';
 import { commentMatches, hasComment } from '../lib/operationComment';
+import { historyKanMarker } from '../lib/kanCostSend';
 import { downloadHistoryXlsx } from '../lib/historyExport';
 import { buildDestinationOptions, destinationMain, formatCurrency, historyTypeLabel, parseAppDate, parseDestination } from '../lib/utils';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { ConfirmDialog } from './ConfirmDialog';
+
+// Item 93 ticket 05: text colour of the KAN marker per tone.
+const KAN_TONE_CLASS = { ok: 'text-emerald-600', error: 'text-red-600', wait: 'text-amber-600' } as const;
 
 const DestinationCell: React.FC<{ destination: string }> = ({ destination }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -86,6 +90,10 @@ export const HistoryTab: React.FC = React.memo(() => {
   const handleDeleteTransaction = useWarehouseStore((state) => state.handleDeleteTransaction);
   const handleDeleteMultipleTransactions = useWarehouseStore((state) => state.handleDeleteMultipleTransactions);
   const currentUser = useWarehouseStore((state) => state.currentUser);
+  const kanCostMarkers = useWarehouseStore((state) => state.kanCostMarkers);
+  const fetchKanCostMarkers = useWarehouseStore((state) => state.fetchKanCostMarkers);
+  const sendKanCost = useWarehouseStore((state) => state.sendKanCost);
+  const sendKanCostManually = useWarehouseStore((state) => state.sendKanCostManually);
   
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || 
     ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
@@ -102,6 +110,9 @@ export const HistoryTab: React.FC = React.memo(() => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Re-read the KAN statuses on every opening of the tab: the watch trigger changes them outside the browser.
+  useEffect(() => { fetchKanCostMarkers(); }, [fetchKanCostMarkers]);
 
   const histSelectedSkus = useUIStore((state) => state.histSelectedSkus);
   const setHistSelectedSkus = useUIStore((state) => state.setHistSelectedSkus);
@@ -622,6 +633,10 @@ export const HistoryTab: React.FC = React.memo(() => {
                 ? (t.total ?? t.writeOffCost ?? 0) / t.quantity
                 : t.price;
 
+              // Item 93 ticket 05: marker from the journal status, visible to the shipment's author and the admin
+              // (owner's answer 7); rows made before item 93 have no journal entry and show nothing.
+              const kan = historyKanMarker(t, kanCostMarkers, currentUser);
+
               return (
                 <React.Fragment key={`${t.id}-${index}`}>
                   {showDateHeader && (
@@ -698,7 +713,34 @@ export const HistoryTab: React.FC = React.memo(() => {
                             </span>
                           </span>
                         )}
+                        {kan && (
+                          <span className={`group relative shrink-0 cursor-help font-bold ${KAN_TONE_CLASS[kan.tone]}`} aria-label={kan.text} data-testid="history-kan-marker">
+                            {kan.glyph}
+                            {/* Same app tooltip as the 💬 above. */}
+                            <span className={`pointer-events-none absolute right-0 ${index > 1 ? 'bottom-full mb-1.5' : 'top-full mt-1.5'} z-30 hidden group-hover:block w-64 bg-slate-800 text-white text-[11px] font-normal text-left rounded-xl px-3 py-2 shadow-lg leading-snug whitespace-pre-wrap break-words`}>
+                              {kan.text}
+                            </span>
+                          </span>
+                        )}
                       </div>
+                      {kan?.buttons && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          <button
+                            onClick={() => sendKanCost()}
+                            data-testid="history-kan-retry"
+                            className="text-[10px] font-bold px-1.5 py-0.5 bg-red-50 text-red-600 rounded hover:bg-red-100 transition-colors"
+                          >
+                            Отправить снова
+                          </button>
+                          <button
+                            onClick={() => sendKanCostManually()}
+                            data-testid="history-kan-manual"
+                            className="text-[10px] font-bold px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded hover:bg-slate-200 transition-colors"
+                          >
+                            Отправлю сам
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-3 text-xs font-medium text-slate-500 whitespace-nowrap">
                       {t.deliveryDate ? formatDate(t.deliveryDate) : '-'}
