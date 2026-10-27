@@ -1,6 +1,4 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import ReactDOM from 'react-dom';
-import { parseStoredServiceEntries } from '../lib/serviceRates';
 import { useWarehouseStore } from "../store/useWarehouseStore";
 import { useUIStore } from "../store/useUIStore";
 import {
@@ -15,14 +13,9 @@ import {
   ChevronRight,
   ChevronDown,
   Download,
-  Settings,
-  Save,
-  Loader2,
-  X,
 } from "lucide-react";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { formatCurrency, parseAppDate } from "../lib/utils";
-import { toast } from "sonner";
 
 const extractDestinationName = (destination: string): string => {
   if (!destination) return '';
@@ -38,162 +31,21 @@ const isNonShipmentDestination = (destination: string): boolean => {
   return extractDestinationName(destination).toLowerCase() === "склад";
 };
 
-// Helper to parse costs from destination string
-const parseExtraCostsFromDestination = (destination: string) => {
-  if (!destination) return { destinationName: '', packagingCost: 0, packagingDist: 'batch' as 'unit' | 'batch', otherCost: 0, otherDist: 'batch' as 'unit' | 'batch', totalServicesCost: 0 };
-
-  const bracketMatch = destination.match(/(.*?)\[(.*?)\]$/);
-  if (!bracketMatch) {
-    return { destinationName: destination.trim(), packagingCost: 0, packagingDist: 'batch' as 'unit' | 'batch', otherCost: 0, otherDist: 'batch' as 'unit' | 'batch', totalServicesCost: 0 };
-  }
-
-  const destinationName = bracketMatch[1].trim();
-  const tagsStr = bracketMatch[2];
-  const tags = tagsStr.split('|').map(s => s.trim());
-
-  let packagingCost = 0;
-  let packagingDist: 'unit' | 'batch' = 'batch';
-  let otherCost = 0;
-  let otherDist: 'unit' | 'batch' = 'batch';
-  let totalServicesCost = 0;
-
-  tags.forEach(tag => {
-    // Check packaging
-    if (tag.startsWith('Упаковка:')) {
-      const details = tag.replace('Упаковка:', '').trim();
-      const unitMatch = details.match(/ шт\.\s*x\s*(\d+(?:\.\d+)?)₽/);
-      if (unitMatch) {
-        packagingCost = parseFloat(unitMatch[1]);
-        packagingDist = 'unit';
-      } else {
-        const flatMatch = details.match(/(\d+(?:\.\d+)?)₽/);
-        if (flatMatch) {
-          packagingCost = parseFloat(flatMatch[1]);
-          packagingDist = 'batch';
-        }
-      }
-    }
-    // Check other
-    else if (tag.startsWith('Прочее:')) {
-      const details = tag.replace('Прочее:', '').trim();
-      const unitMatch = details.match(/ шт\.\s*x\s*(\d+(?:\.\d+)?)₽/);
-      if (unitMatch) {
-        otherCost = parseFloat(unitMatch[1]);
-        otherDist = 'unit';
-      } else {
-        const flatMatch = details.match(/(\d+(?:\.\d+)?)₽/);
-        if (flatMatch) {
-          otherCost = parseFloat(flatMatch[1]);
-          otherDist = 'batch';
-        }
-      }
-    }
-    // Check services
-    else if (tag.startsWith('Услуги:')) {
-      const details = tag.replace('Услуги:', '').trim();
-      const costMatches = details.matchAll(/\((\d+(?:\.\d+)?)₽\)/g);
-      for (const match of costMatches) {
-        totalServicesCost += parseFloat(match[1]);
-      }
-    }
-  });
-
-  return {
-    destinationName,
-    packagingCost,
-    packagingDist,
-    otherCost,
-    otherDist,
-    totalServicesCost
-  };
-};
-
-const resolveRedistributedTransactions = (
-  originalItems: any[],
-  deletedItemId: string
-) => {
-  const deletedItem = originalItems.find(t => t.id === deletedItemId);
-  if (!deletedItem) return [];
-
-  const remainingItems = originalItems.filter(t => t.id !== deletedItemId);
-  if (remainingItems.length === 0) return [];
-
-  const {
-    destinationName,
-    packagingCost,
-    packagingDist,
-    otherCost,
-    otherDist,
-    totalServicesCost
-  } = parseExtraCostsFromDestination(deletedItem.destination);
-
-  const totalStoredValue = originalItems.reduce((sum, item) => sum + (item.quantity * item.price), 0);
-  const totalQuantity = originalItems.reduce((sum, item) => sum + item.quantity, 0);
-
-  const packPerUnit = packagingDist === 'unit' ? packagingCost : (totalQuantity > 0 ? packagingCost / totalQuantity : 0);
-  const otherPerUnit = otherDist === 'unit' ? otherCost : (totalQuantity > 0 ? otherCost / totalQuantity : 0);
-  const K = packPerUnit + otherPerUnit;
-
-  const totalBaseValue = Math.max(0, totalStoredValue - (totalQuantity * K) - totalServicesCost);
-  const R = totalBaseValue > 0 ? (1 + totalServicesCost / totalBaseValue) : 1;
-
-  const basePricesById: Record<string, number> = {};
-  originalItems.forEach(item => {
-    const basePrice = Math.max(0, (item.price - K) / R);
-    basePricesById[item.id] = basePrice;
-  });
-
-  const newTotalQuantity = remainingItems.reduce((sum, item) => sum + item.quantity, 0);
-  const newTotalBaseValue = remainingItems.reduce((sum, item) => sum + (item.quantity * basePricesById[item.id]), 0);
-
-  const newPackPerUnit = packagingDist === 'unit' ? packagingCost : (newTotalQuantity > 0 ? packagingCost / newTotalQuantity : 0);
-  const newOtherPerUnit = otherDist === 'unit' ? otherCost : (newTotalQuantity > 0 ? otherCost / newTotalQuantity : 0);
-
-  const extraParts: string[] = [];
-  if (packagingCost > 0) {
-    if (packagingDist === 'unit') {
-      extraParts.push(`Упаковка: ${newTotalQuantity} шт. x ${packagingCost}₽ = ${packagingCost * newTotalQuantity}₽`);
-    } else {
-      extraParts.push(`Упаковка: ${packagingCost}₽`);
-    }
-  }
-  if (otherCost > 0) {
-    if (otherDist === 'unit') {
-      extraParts.push(`Прочее: ${newTotalQuantity} шт. x ${otherCost}₽ = ${otherCost * newTotalQuantity}₽`);
-    } else {
-      extraParts.push(`Прочее: ${otherCost}₽`);
-    }
-  }
-  
-  const bracketMatch = deletedItem.destination.match(/(.*?)\[(.*?)\]$/);
-  if (bracketMatch) {
-    const tagsStr = bracketMatch[2];
-    const servicesTag = tagsStr.split('|').map((s: string) => s.trim()).find((tag: string) => tag.startsWith('Услуги:'));
-    if (servicesTag) {
-      extraParts.push(servicesTag);
-    }
-  }
-
-  const newDestination = extraParts.length > 0
-    ? `${destinationName} [${extraParts.join(' | ')}]`
-    : destinationName;
-
-  return remainingItems.map(item => {
-    const basePrice = basePricesById[item.id];
-    const servicesExtraPerUnit = newTotalBaseValue > 0 
-      ? (totalServicesCost * basePrice) / newTotalBaseValue
-      : 0;
-
-    const newPrice = Math.round((basePrice + newPackPerUnit + newOtherPerUnit + servicesExtraPerUnit) * 100) / 100;
-    const newTotal = Math.round((newPrice * item.quantity) * 100) / 100;
-
-    return {
-      ...item,
-      price: newPrice,
-      total: newTotal,
-      destination: newDestination
-    };
-  });
+/**
+ * Item 97 ticket 01, 96.1 (owner 2026-10-22): a product leaves a shipment the way it leaves «История» —
+ * its row and the component rows of its kit, carrying their own share of the extras; the other rows
+ * are not touched. The old re-spread re-committed every remaining row with a price spread by value
+ * and the server added the extras from the text on top of it.
+ */
+export const shipmentRowDeleteIds = (
+  rowId: string,
+  groupItems: { id: string; groupId?: string; isComponent?: boolean }[]
+): string[] => {
+  const row = groupItems.find(t => t.id === rowId);
+  const componentIds = row?.groupId
+    ? groupItems.filter(t => t.isComponent && t.groupId === row.groupId).map(t => t.id)
+    : [];
+  return [rowId, ...componentIds];
 };
 
 const getMonthKey = (dateRaw: string): string => {
@@ -209,72 +61,6 @@ const formatMonthLabel = (monthKey: string): string => {
   return `${months[parseInt(month) - 1]} ${year}`;
 };
 
-const recalculateGroupWithNewServices = (
-  mainItems: any[],
-  newPackagingCost: number,
-  newPackagingDist: 'unit' | 'batch',
-  newOtherCost: number,
-  newOtherDist: 'unit' | 'batch',
-  newServicesList: { name: string; unitCost: number; quantity: number }[],
-  destinationName: string
-): any[] => {
-  const totalQty = mainItems.reduce((sum, item) => sum + item.quantity, 0);
-
-  const {
-    packagingCost: oldPackCost,
-    packagingDist: oldPackDist,
-    otherCost: oldOtherCost,
-    otherDist: oldOtherDist,
-    totalServicesCost: oldServicesCost,
-  } = parseExtraCostsFromDestination(mainItems[0]?.destination || '');
-
-  const oldPackPerUnit = oldPackDist === 'unit' ? oldPackCost : (totalQty > 0 ? oldPackCost / totalQty : 0);
-  const oldOtherPerUnit = oldOtherDist === 'unit' ? oldOtherCost : (totalQty > 0 ? oldOtherCost / totalQty : 0);
-  const oldK = oldPackPerUnit + oldOtherPerUnit;
-  const totalStoredValue = mainItems.reduce((sum, i) => sum + i.quantity * i.price, 0);
-  const oldTotalBaseValue = Math.max(0, totalStoredValue - totalQty * oldK - oldServicesCost);
-  const oldR = oldTotalBaseValue > 0 ? (1 + oldServicesCost / oldTotalBaseValue) : 1;
-
-  const itemsWithBase = mainItems.map(item => ({
-    ...item,
-    basePrice: Math.max(0, (item.price - oldK) / oldR),
-  }));
-
-  const newTotalServicesCost = newServicesList.reduce((sum, s) => sum + s.unitCost * s.quantity, 0);
-  const newPackPerUnit = newPackagingDist === 'unit' ? newPackagingCost : (totalQty > 0 ? newPackagingCost / totalQty : 0);
-  const newOtherPerUnit = newOtherDist === 'unit' ? newOtherCost : (totalQty > 0 ? newOtherCost / totalQty : 0);
-  const newK = newPackPerUnit + newOtherPerUnit;
-  const newTotalBaseValue = itemsWithBase.reduce((sum, i) => sum + i.quantity * i.basePrice, 0);
-  const newR = newTotalBaseValue > 0 ? (1 + newTotalServicesCost / newTotalBaseValue) : 1;
-
-  const extraParts: string[] = [];
-  if (newPackagingCost > 0) {
-    extraParts.push(newPackagingDist === 'unit'
-      ? `Упаковка: ${totalQty} шт. x ${newPackagingCost}₽ = ${newPackagingCost * totalQty}₽`
-      : `Упаковка: ${newPackagingCost}₽`);
-  }
-  if (newOtherCost > 0) {
-    extraParts.push(newOtherDist === 'unit'
-      ? `Прочее: ${totalQty} шт. x ${newOtherCost}₽ = ${newOtherCost * totalQty}₽`
-      : `Прочее: ${newOtherCost}₽`);
-  }
-  if (newServicesList.length > 0) {
-    const serviceDetails = newServicesList.map(s => `${s.name} x${s.quantity} (${Math.round(s.unitCost * s.quantity)}₽)`).join(', ');
-    extraParts.push(`Услуги: ${serviceDetails}`);
-  }
-  const newDestination = extraParts.length > 0
-    ? `${destinationName} [${extraParts.join(' | ')}]`
-    : destinationName;
-
-  return itemsWithBase.map(item => {
-    const servicesExtra = newTotalBaseValue > 0
-      ? (newTotalServicesCost * item.basePrice) / newTotalBaseValue
-      : 0;
-    const newPrice = Math.round((item.basePrice + newK + servicesExtra) * 100) / 100;
-    const newTotal = Math.round(newPrice * item.quantity * 100) / 100;
-    return { ...item, price: newPrice, total: newTotal, destination: newDestination };
-  });
-};
 
 export const ShipmentCostTab: React.FC = React.memo(() => {
   const transactions = useWarehouseStore((state) => state.transactions);
@@ -284,10 +70,6 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
   const handleDeleteMultipleTransactions = useWarehouseStore(
     (state) => state.handleDeleteMultipleTransactions,
   );
-  const handleUpdateTransaction = useWarehouseStore(
-    (state) => state.handleUpdateTransaction,
-  );
-  const services = useWarehouseStore((state) => state.services);
 
   const setEditingTrans = useUIStore((state) => state.setEditingTrans);
   const setShowEditTransModal = useUIStore(
@@ -448,62 +230,6 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
   const [selectedMonth, setSelectedMonth] = useState<string>('');
   const [expandedMonthlyKits, setExpandedMonthlyKits] = useState<Set<string>>(new Set());
 
-  type ServiceEditData = {
-    packagingCost: number;
-    packagingDist: 'unit' | 'batch';
-    otherCost: number;
-    otherDist: 'unit' | 'batch';
-    servicesList: { name: string; unitCost: number; quantity: number }[];
-    destinationName: string;
-  };
-  const [editingServicesGroup, setEditingServicesGroup] = useState<typeof groupedShipments[0] | null>(null);
-  const [serviceEditData, setServiceEditData] = useState<ServiceEditData | null>(null);
-  const [isSavingServices, setIsSavingServices] = useState(false);
-
-  const openServicesModal = useCallback((group: typeof groupedShipments[0]) => {
-    const { destinationName, packagingCost, packagingDist, otherCost, otherDist } =
-      parseExtraCostsFromDestination(group.destination);
-    const servicesList: { name: string; unitCost: number; quantity: number }[] = [];
-    const bracketMatch = group.destination.match(/(.*?)\[(.*?)\]$/);
-    if (bracketMatch) {
-      const servicesTag = bracketMatch[2].split('|').map((s: string) => s.trim()).find((tag: string) => tag.startsWith('Услуги:'));
-      if (servicesTag) {
-        // Item 43. Parsing is shared with the rest of the app, see src/lib/serviceRates.ts.
-        // A past shipment's rate is read from the shipment itself: it was billed at the
-        // tariff in force on the delivery date, and a later tariff must not change it.
-        servicesList.push(...parseStoredServiceEntries(servicesTag, services));
-      }
-    }
-    setServiceEditData({ packagingCost, packagingDist, otherCost, otherDist, servicesList, destinationName });
-    setEditingServicesGroup(group);
-  }, [groupedShipments, services]);
-
-  const handleSaveServices = useCallback(async () => {
-    if (!editingServicesGroup || !serviceEditData) return;
-    setIsSavingServices(true);
-    try {
-      const mainItems = editingServicesGroup.items.filter(t => !t.isComponent);
-      const updated = recalculateGroupWithNewServices(
-        mainItems,
-        serviceEditData.packagingCost,
-        serviceEditData.packagingDist,
-        serviceEditData.otherCost,
-        serviceEditData.otherDist,
-        serviceEditData.servicesList,
-        serviceEditData.destinationName
-      );
-      for (const item of updated) {
-        await handleUpdateTransaction(item.id, item);
-      }
-      toast.success('Услуги поставки обновлены, себестоимость пересчитана!');
-      setEditingServicesGroup(null);
-      setServiceEditData(null);
-    } catch (e) {
-      toast.error('Ошибка при обновлении услуг');
-    } finally {
-      setIsSavingServices(false);
-    }
-  }, [editingServicesGroup, serviceEditData, handleUpdateTransaction]);
   const toggleMonthlyKit = (article: string) => {
     setExpandedMonthlyKits(prev => {
       const next = new Set(prev);
@@ -654,56 +380,15 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
     return uniqueShipments.size;
   }, [shipmentTransactions, viewMode, selectedMonth, destinationFilter, getTxMonthKey]);
 
-  const handleDeleteWithRedistribution = useCallback(async (idOfItemToDelete: string) => {
-    let matchedGroupItems: typeof transactions = [];
-    for (const group of groupedShipments) {
-      if (group.items.some(it => it.id === idOfItemToDelete)) {
-        matchedGroupItems = group.items;
-        break;
-      }
-    }
-
-    if (matchedGroupItems.length === 0) {
+  const handleDeleteFromShipment = useCallback(async (idOfItemToDelete: string) => {
+    const group = groupedShipments.find(g => g.items.some(it => it.id === idOfItemToDelete));
+    const ids = shipmentRowDeleteIds(idOfItemToDelete, group ? group.items : []);
+    if (ids.length > 1) {
+      await handleDeleteMultipleTransactions(ids);
+    } else {
       await handleDeleteTransaction(idOfItemToDelete);
-      return;
     }
-
-    // Find the deleted item and its kit component IDs
-    const deletedItem = matchedGroupItems.find(t => t.id === idOfItemToDelete);
-    const kitComponentIds: string[] = deletedItem?.groupId
-      ? matchedGroupItems
-          .filter(t => t.isComponent && t.groupId === deletedItem.groupId)
-          .map(t => t.id)
-      : [];
-    const allIdsToDelete = [idOfItemToDelete, ...kitComponentIds];
-
-    // Only main (non-component) items for redistribution
-    const mainItems = matchedGroupItems.filter(t => !t.isComponent);
-
-    if (mainItems.length <= 1) {
-      // This is the only kit/item in the batch — delete everything including components
-      if (allIdsToDelete.length > 1) {
-        await handleDeleteMultipleTransactions(allIdsToDelete);
-      } else {
-        await handleDeleteTransaction(idOfItemToDelete);
-      }
-      return;
-    }
-
-    // Multiple main items remain — redistribute costs over them
-    const updatedRemainingItems = resolveRedistributedTransactions(mainItems, idOfItemToDelete);
-
-    const isDeleted = allIdsToDelete.length > 1
-      ? await handleDeleteMultipleTransactions(allIdsToDelete)
-      : await handleDeleteTransaction(idOfItemToDelete);
-
-    if (isDeleted) {
-      for (const updatedItem of updatedRemainingItems) {
-        await handleUpdateTransaction(updatedItem.id, updatedItem);
-      }
-      toast.success("Внутренние расходы поставки перераспределены на оставшиеся артикулы!");
-    }
-  }, [groupedShipments, handleDeleteTransaction, handleDeleteMultipleTransactions, handleUpdateTransaction]);
+  }, [groupedShipments, handleDeleteTransaction, handleDeleteMultipleTransactions]);
 
   const exportToCSV = () => {
     if (shipmentTransactions.length === 0) return;
@@ -1095,13 +780,6 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => openServicesModal(group)}
-                      className="p-2 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-all border border-slate-200 hover:border-indigo-200"
-                      title="Редактировать доп. услуги поставки"
-                    >
-                      <Settings size={18} />
-                    </button>
                     <div className="text-right">
                       <div className="text-2xl font-bold text-slate-900 whitespace-nowrap">
                         {formatCurrency(group.totalCost)} ₽
@@ -1402,11 +1080,11 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
         message={
           isLastItem
             ? "Это последний товар в данной поставке. Удаление этой позиции приведет к ПОЛНОМУ удалению всей поставки. Вы действительно хотите удалить всю поставку полностью?"
-            : "При удалении этого товара из поставки все дополнительные расходы будут автоматически перераспределены на оставшиеся в этой поставке товары. Продолжить?"
+            : "Товар будет удалён из отгрузки вместе со своей долей дополнительных расходов, остальные товары отгрузки не изменятся. Строка переместится в раздел «Удаленное», откуда её можно восстановить. Остатки товара изменятся. Продолжить?"
         }
         onConfirm={async () => {
           if (transToDelete) {
-            await handleDeleteWithRedistribution(transToDelete);
+            await handleDeleteFromShipment(transToDelete);
             setTransToDelete(null);
             setIsLastItem(false);
           }
@@ -1424,163 +1102,6 @@ export const ShipmentCostTab: React.FC = React.memo(() => {
         onConfirm={handleBulkDelete}
         onCancel={() => setBulkDeleteConfirm(false)}
       />
-
-      {editingServicesGroup && serviceEditData && ReactDOM.createPortal(
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg overflow-hidden">
-            <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-              <div>
-                <h3 className="text-2xl font-bold">Редактировать услуги</h3>
-                <p className="text-sm text-slate-500 mt-1">
-                  {serviceEditData.destinationName} · {editingServicesGroup.dateStr.replace(/-/g, '.')}
-                </p>
-              </div>
-              <button
-                onClick={() => { setEditingServicesGroup(null); setServiceEditData(null); }}
-                className="p-3 hover:bg-white rounded-2xl transition-all shadow-sm border border-transparent hover:border-slate-200"
-              >
-                <X size={24} />
-              </button>
-            </div>
-
-            <div className="p-8 space-y-6 max-h-[55vh] overflow-y-auto">
-              <div className="space-y-3">
-                <label className="text-sm font-bold text-slate-500 uppercase tracking-wider">Упаковка (₽)</label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="number" min="0" step="0.01"
-                    value={serviceEditData.packagingCost}
-                    onChange={(e) => setServiceEditData(prev => prev ? { ...prev, packagingCost: parseFloat(e.target.value) || 0 } : prev)}
-                    className="flex-1 px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="0"
-                  />
-                  <div className="flex bg-slate-100 rounded-xl p-1 gap-1">
-                    <button
-                      onClick={() => setServiceEditData(prev => prev ? { ...prev, packagingDist: 'batch' } : prev)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${serviceEditData.packagingDist === 'batch' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
-                    >Партия</button>
-                    <button
-                      onClick={() => setServiceEditData(prev => prev ? { ...prev, packagingDist: 'unit' } : prev)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${serviceEditData.packagingDist === 'unit' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
-                    >За шт.</button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <label className="text-sm font-bold text-slate-500 uppercase tracking-wider">Прочее (₽)</label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="number" min="0" step="0.01"
-                    value={serviceEditData.otherCost}
-                    onChange={(e) => setServiceEditData(prev => prev ? { ...prev, otherCost: parseFloat(e.target.value) || 0 } : prev)}
-                    className="flex-1 px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="0"
-                  />
-                  <div className="flex bg-slate-100 rounded-xl p-1 gap-1">
-                    <button
-                      onClick={() => setServiceEditData(prev => prev ? { ...prev, otherDist: 'batch' } : prev)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${serviceEditData.otherDist === 'batch' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
-                    >Партия</button>
-                    <button
-                      onClick={() => setServiceEditData(prev => prev ? { ...prev, otherDist: 'unit' } : prev)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${serviceEditData.otherDist === 'unit' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
-                    >За шт.</button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-bold text-slate-500 uppercase tracking-wider">Услуги</label>
-                  <button
-                    onClick={() => setServiceEditData(prev => prev ? { ...prev, servicesList: [...prev.servicesList, { name: 'Новая услуга', unitCost: 0, quantity: 1 }] } : prev)}
-                    className="text-xs font-bold text-indigo-600 hover:text-indigo-700 px-2 py-1 rounded-lg hover:bg-indigo-50 transition-colors"
-                  >+ Добавить</button>
-                </div>
-                {serviceEditData.servicesList.length === 0 && (
-                  <p className="text-sm text-slate-400 italic">Нет услуг. Нажмите «+ Добавить»</p>
-                )}
-                {serviceEditData.servicesList.map((svc, idx) => (
-                  <div key={idx} className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={svc.name}
-                        onChange={(e) => setServiceEditData(prev => {
-                          if (!prev) return prev;
-                          const list = [...prev.servicesList];
-                          list[idx] = { ...list[idx], name: e.target.value };
-                          return { ...prev, servicesList: list };
-                        })}
-                        className="flex-1 px-3 py-2 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
-                        placeholder="Название услуги"
-                      />
-                      <button
-                        onClick={() => setServiceEditData(prev => {
-                          if (!prev) return prev;
-                          return { ...prev, servicesList: prev.servicesList.filter((_, i) => i !== idx) };
-                        })}
-                        className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-100 rounded-lg transition-colors flex-shrink-0"
-                      >
-                        <X size={15} />
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number" min="1" step="1"
-                        value={svc.quantity}
-                        onChange={(e) => setServiceEditData(prev => {
-                          if (!prev) return prev;
-                          const list = [...prev.servicesList];
-                          list[idx] = { ...list[idx], quantity: Math.max(1, parseInt(e.target.value) || 1) };
-                          return { ...prev, servicesList: list };
-                        })}
-                        className="w-20 px-3 py-2 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-indigo-500 text-sm text-center"
-                        placeholder="Кол-во"
-                        title="Количество"
-                      />
-                      <span className="text-slate-400 text-sm font-medium">×</span>
-                      <input
-                        type="number" min="0" step="0.01"
-                        value={svc.unitCost}
-                        onChange={(e) => setServiceEditData(prev => {
-                          if (!prev) return prev;
-                          const list = [...prev.servicesList];
-                          list[idx] = { ...list[idx], unitCost: parseFloat(e.target.value) || 0 };
-                          return { ...prev, servicesList: list };
-                        })}
-                        className="w-28 px-3 py-2 rounded-xl border border-slate-200 bg-white outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                        placeholder="Цена ₽"
-                        title="Единичная расценка"
-                      />
-                      <span className="text-slate-400 text-sm font-medium">=</span>
-                      <span className="text-sm font-bold text-slate-800 whitespace-nowrap">
-                        {formatCurrency(svc.quantity * svc.unitCost)} ₽
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="p-8 bg-slate-50 border-t border-slate-100 flex gap-4">
-              <button
-                onClick={() => { setEditingServicesGroup(null); setServiceEditData(null); }}
-                className="flex-1 py-4 rounded-2xl font-bold text-slate-500 hover:bg-white transition-all border border-transparent hover:border-slate-200"
-              >Отмена</button>
-              <button
-                onClick={handleSaveServices}
-                disabled={isSavingServices}
-                className="flex-1 bg-slate-900 text-white py-4 rounded-2xl font-bold hover:bg-slate-800 disabled:opacity-50 transition-all shadow-xl flex items-center justify-center gap-2"
-              >
-                {isSavingServices ? <Loader2 className="animate-spin" size={20} /> : <Save size={20} />}
-                Сохранить
-              </button>
-            </div>
-          </div>
-        </div>
-      , document.body)}
     </div>
   );
 });

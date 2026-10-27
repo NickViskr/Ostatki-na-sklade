@@ -36,6 +36,7 @@ import { KitModal } from './components/KitModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { MarketplaceMismatchModal } from './components/MarketplaceMismatchModal';
 import { OzonNewSuppliesModal } from './components/OzonNewSuppliesModal';
+import { PendingOperationsModal } from './components/PendingOperationsModal';
 
 // Stores
 import { useUIStore } from './store/useUIStore';
@@ -137,6 +138,8 @@ export default function App() {
       <>
         {isAdmin && <OzonNewSuppliesModal key="ozonNewSuppliesModal" />}
         <MarketplaceMismatchModal key="mismatchModal" />
+        {/* Item 97 / 96.10: an interrupted operation, shown to every user at every app start */}
+        <PendingOperationsModal key="pendingOperationsModal" />
         {showConfirmModal && <ConfirmModal key="confirmModal" />}
         {showEditTransModal && <EditTransModal key="editTransModal" />}
         {showWholeShipmentModal && <WholeShipmentModal key="wholeShipmentModal" />}

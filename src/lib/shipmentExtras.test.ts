@@ -237,3 +237,101 @@ describe('подключение правки доп. расходов пост�
     expect(code).toMatch(/editData\.price = roundToTwo\(\(Number\(data\.price\) \|\| 0\) - Number\(editedAdditional\) \/ oldQty\);/);
   });
 });
+
+// Item 97 ticket 01, part B (96.12, 96.13): kopecks of the shipment extras, browser twin.
+describe('kopecks of the extras (96.12, 96.13)', () => {
+  const sum = (xs: { total: number }[]) => Math.round(xs.reduce((s, x) => s + x.total, 0) * 100) / 100;
+  const rowsOf = (totals: number[]) => totals.map((total, i) => ({ id: 'r' + i, quantity: 1, total, writeOffCost: 100 }));
+
+  it('a service of 100.40 keeps its kopecks in the total and in the text', () => {
+    const e = parseShipmentExtras('Ozon [Услуги: Packing x1 (100.40₽)]');
+    expect(extrasTotal(e)).toBe(100.4);
+    const edited = { ...e, services: [{ name: 'Packing', quantity: 3, unitCost: 100.01 }] };
+    expect(extrasTotal(edited)).toBe(300.03);
+    expect(buildDestination(edited, e)).toBe('Ozon [Услуги: Packing x3 (300.03₽)]');
+    expect(buildDestination(e, e)).toBe('Ozon [Услуги: Packing x1 (100.40₽)]');
+  });
+
+  it('an old whole-rouble text keeps its total and its wording', () => {
+    const old = 'Ozon [Услуги: Packing x3 (100₽)]';
+    const e = parseShipmentExtras(old);
+    expect(extrasTotal(e)).toBe(100);
+    expect(buildDestination(e, e)).toBe(old);
+  });
+
+  it('row shares add up to the new total exactly (largest remainder)', () => {
+    const lr = rowsOf([100.34, 100.33, 100.33]);
+    expect(sum(rowMoneyAfterExtras(lr, 1, 2))).toBe(302);
+    expect(sum(rowMoneyAfterExtras(lr, 1, 1))).toBe(301);
+    expect(rowMoneyAfterExtras(lr, 1, 1).map((m) => m.total)).toEqual([100.34, 100.33, 100.33]);
+  });
+
+  it('rows written by the old per-row rounding lose their real share, not a recomputed one', () => {
+    expect(sum(rowMoneyAfterExtras(rowsOf([100.33, 100.33, 100.33]), 1, 2))).toBe(302);
+  });
+});
+
+// Independent re-check of part B (tester): the evidence of the share a row really carries.
+describe('evidence of the share a row carries (96.12, tester re-check)', () => {
+  const totals = (xs: { total: number }[]) => xs.map((x) => x.total);
+
+  it('a hand-edited row loses its split share, a kit loses the share left after its components, no evidence means the split share', () => {
+    // Hand-edited «Сумма» 130 (neither 0.33 nor 0.34 above the goods): the split share 0.34 of the first row comes off.
+    const edited = [
+      { id: 'a', quantity: 1, total: 130, writeOffCost: 100 },
+      { id: 'b', quantity: 1, total: 100.33, writeOffCost: 100 },
+      { id: 'c', quantity: 1, total: 100.33, writeOffCost: 100 }
+    ];
+    expect(totals(rowMoneyAfterExtras(edited, 1, 2))).toEqual([130.33, 100.67, 100.66]);
+
+    // A virtual kit (write-off cost 0, goods in its component rows with the same groupId) and two plain rows,
+    // written by the OLD per-row rounding (0.33 each). Components ignored → the kit looks hand-edited → 0.34 would come off.
+    const kits = [
+      { id: 'k', quantity: 1, total: 40.33, writeOffCost: 0, groupId: 'g1' },
+      { id: 'k1', quantity: 1, total: 40, writeOffCost: 40, groupId: 'g1', isComponent: true },
+      { id: 'p', quantity: 1, total: 100.33, writeOffCost: 100 },
+      { id: 'q', quantity: 1, total: 100.33, writeOffCost: 100 }
+    ];
+    expect(rowMoneyAfterExtras(kits, 1, 2)).toEqual([
+      { id: 'k', total: 40.67, price: 40.67 },
+      { id: 'p', total: 100.67, price: 100.67 },
+      { id: 'q', total: 100.66, price: 100.66 }
+    ]);
+
+    // Rows without «Себестоимость списания» carry no evidence: the split share comes off, the sum stays exact.
+    const blind = [100.34, 100.33, 100.33].map((total, i) => ({ id: 'r' + i, quantity: 1, total }));
+    expect(totals(rowMoneyAfterExtras(blind, 1, 2))).toEqual([100.67, 100.67, 100.66]);
+  });
+
+  it('the evidence window is floor..ceil of the exact share in kopecks: 33 and 34 are real, 32, 35 and 38 are refused', () => {
+    // 1.00 over three 1-piece rows: the exact share is 33.33 kopecks, the split gives 0.34 / 0.33 / 0.33.
+    const rows = (totals: number[]) => totals.map((total, i) => ({ id: 'r' + i, quantity: 1, total, writeOffCost: 100 }));
+    // 35 (ceil + 1) and 32 (floor - 1) are refused: the split share of the position comes off, the deviation stays.
+    expect(totals(rowMoneyAfterExtras(rows([100.35, 100.32, 100.33]), 1, 2))).toEqual([100.68, 100.66, 100.66]);
+    // 34 and 33 are accepted: the row's own share comes off, wherever it stands in the order.
+    expect(totals(rowMoneyAfterExtras(rows([100.33, 100.34, 100.33]), 1, 2))).toEqual([100.67, 100.67, 100.66]);
+    // 38 (0.05 off the exact share): refused, 0.04 stays on the row, and a repeat save moves nothing.
+    const far = rowMoneyAfterExtras(rows([100.38, 100.33, 100.33]), 1, 2);
+    expect(totals(far)).toEqual([100.71, 100.67, 100.66]);
+    expect(totals(rowMoneyAfterExtras(rows(totals(far)), 2, 2))).toEqual(totals(far));
+  });
+
+  it('a service sum not divisible by its quantity («x3 (100.01₽)») keeps 100.01 through parse, total and rebuild, and through a re-save of the stored entries', () => {
+    const text = 'Ozon (MaxiStore) [Услуги: Packing x3 (100.01₽)]';
+    const e = parseShipmentExtras(text);
+    expect(extrasTotal(e)).toBe(100.01);
+    expect(buildDestination(e, e)).toBe(text);
+    // the window sends the stored entries back (unit = 100.01 / 3, not rounded): the sum and the text must not move
+    const resaved = { ...e, services: e.services.map((s) => ({ ...s })) };
+    expect(extrasTotal(resaved)).toBe(100.01);
+    expect(buildDestination(resaved, e)).toBe(text);
+    // the money of one 1-piece row after the re-save: nothing comes off, nothing goes on
+    expect(rowMoneyAfterExtras([{ id: 'r', quantity: 1, total: 200.01, writeOffCost: 100 }], 100.01, extrasTotal(resaved))).toEqual([{ id: 'r', total: 200.01, price: 200.01 }]);
+  });
+
+  it('the original form writes each service sum through serviceSumText, never rounded to whole roubles', () => {
+    const modal = fs.readFileSync(path.resolve(__dirname, '../components/ConfirmModal.tsx'), 'utf8');
+    expect(modal).toContain('serviceSumText(svcCost, selectedServices[s.id])');
+    expect(modal).not.toMatch(/Math\.round\(svcCost/);
+  });
+});

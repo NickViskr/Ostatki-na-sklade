@@ -20,6 +20,7 @@ import { batchDestinationNote, buildBatchWriteOffPlan } from "../lib/ozonBatchWr
 import { useSettingsStore } from "../store/useSettingsStore";
 import { toast } from "sonner";
 import { countShipmentBoxes } from '../lib/shipmentBoxes';
+import { serviceSumText } from '../lib/shipmentExtras';
 
 export const ConfirmModal: React.FC = () => {
   // Пункт 28, этап B: ключ операции рождается один раз при открытии окна
@@ -493,7 +494,7 @@ export const ConfirmModal: React.FC = () => {
         .map(
           (s) => {
             const svcCost = getServiceCostAt(s.id, deliveryDate);
-            return `${s.name} x${selectedServices[s.id]} (${Math.round(svcCost * selectedServices[s.id])}₽)`;
+            return `${s.name} x${selectedServices[s.id]} (${serviceSumText(svcCost, selectedServices[s.id])}₽)`;
           }
         )
         .join(", ");

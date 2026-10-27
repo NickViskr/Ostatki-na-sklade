@@ -727,3 +727,25 @@ export interface ChinaPostingPreviewLine {
   costRub: number;
   pricePerUnitRub: number;
 }
+
+/**
+ * Item 97 / 96.10: an operation that stopped half-way, as the server's getPendingOperations() returns it.
+ * stage: 'stock' nothing written yet; 'history' the stock is changed, «История» is not written; 'journal'
+ * «История» is written and the «Себестоимость Озон» row is missing; 'done' everything is written and only the memo is left
+ * over; 'conflict' the stock moved on (or the memo is damaged).
+ */
+export interface PendingOperation {
+  opId: string;
+  startedAt: string;
+  user: string;
+  type: string;
+  destination: string;
+  articles: { article: string; quantity: number }[];
+  stage: 'stock' | 'history' | 'journal' | 'done' | 'conflict';
+  canComplete: boolean;
+  canCancel: boolean;
+  /** 'commit' = made by the «Провести» button (the admin can complete it); 'other' = another module's own operation. */
+  origin?: 'commit' | 'other';
+  /** The operation's memo cannot be read; only the admin's «Разобрано, убрать уведомление» applies. */
+  damaged?: boolean;
+}

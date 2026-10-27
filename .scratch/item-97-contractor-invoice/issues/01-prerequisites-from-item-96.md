@@ -9,7 +9,7 @@ Money tier: whole path, 3–5 mutations per part, a separate tester agent.
 
 **Blocked by:** —
 
-**Status:** ready-for-agent
+**Status:** done 2026-10-27 — built and tested, NOT deployed (see «Result»)
 
 ## Part A — 96.1 (P1-04): the services gear on «Отгрузка» double-charges
 
@@ -66,4 +66,66 @@ Deployment: `Code.gs` HEAD already carries item 93 tickets 02–04, not deployed
 06). Decide with the owner when these fixes go live — with item 93 ticket 06, or separately (Part A's browser
 part is Cloud Run only). Do not touch `docs/OZON_PLAN.md` from a code task; push only on «отправляй в гитхаб».
 
+## Result (2026-10-27)
+
+Built, reviewed (/code-review, two axes, findings fixed), NOT deployed: Code.gs and Cloud Run go live together
+with item 93 tickets 02–06 or separately — the owner decides. Pipeline: coder agents wrote the code; the tester
+agent re-checked the tests the orchestrator had written for parts A–B and wrote every test of part C first.
+
+- **Part A (96.1).** The «Отгрузка» services gear and its value-spread re-commit are removed
+  (`recalculateGroupWithNewServices`, `parseExtraCostsFromDestination`, `resolveRedistributedTransactions`, the
+  modal). The trash of a product deletes the row and its kit components through `shipmentRowDeleteIds` like
+  «История»; nothing is re-committed; the dialog no longer promises a re-spread. Orphans removed:
+  `parseStoredServiceEntries` / `StoredServiceEntry` (`src/lib/serviceRates.ts`) and their 7 unit tests.
+- **Part B (96.12 + 96.13).** Commit and «Вся отгрузка» split an order's extras over its rows by largest
+  remainder (`splitByQuantityGs` / `splitByQuantity`); with a stated piece total (the pencil re-commit) the row
+  keeps its own rounded share. A re-spread takes off the share a row really carries: d = «Сумма» − goods
+  (write-off cost + same-groupId components) when d lies in floor..ceil of the exact proportional share in
+  kopecks (position-independent — a no-op pencil re-save moves the row to the end of the sheet), otherwise the
+  split share. Service sums to the kopeck (`serviceSumTextGs` / `serviceSumText`: «100» or «100.40»), parsed unit
+  cost not rounded, the confirmation form writes the same format. Twins: `rowSharesAfterExtrasGs` ↔
+  `rowMoneyAfterExtras`; parity test extended (kopeck sums, old-rounding rows, kits). Live «История» of
+  2026-10-22 (read-only xlsx): 94 distinct «Объект» texts, 72 with services, 0 with a fractional service sum —
+  0 totals and 0 rebuilt texts differ from the old parser.
+- **Part C (96.10).** `commitTransaction` with an opId saves a memo in Script Properties before its first
+  «Остатки» write (`pendingOp:<opId>:0..n`, ≤ 2500 characters per part; dev mode `pendingOpDev:`), sets
+  `…:stockWritten` right after the stock write, deletes everything when all stages succeeded (a
+  costJournalError keeps it). Stages: stock / history (by the flag, then stock = «before» / «after») /
+  journal / done / conflict. A retry with the same opId completes the operation or refuses (conflict) — no
+  second deduction. `getPendingOperations`, `getInitialData.pendingOperations` (busy lock → only readable memos
+  ≥ 7 min old), doPost `resolvePendingOperation` (admin only: complete / cancel / dismiss; complete only for
+  memos of the «Провести» action and it links the Ozon postings too; China posting / unshipped return →
+  cancel, then repeat in the module). Popup `PendingOperationsModal` («Операция не завершена») for every user,
+  buttons for the admin, «Позже» until the next start.
+- **Checks.** Stand 1521/0 (+57 for this ticket: T0-B 26, T0-C 31), vitest 68 files 2539 passed + 1 expected
+  fail, `TZ=Asia/Yekaterinburg` on the six affected files 79/79, tsc clean. Mutations: A 7, B 13 + 5 (window),
+  C 11 + 9 (UI) + 11 (review round) — every survivor got a check.
+- **Found in passing:** the «Отгрузка» trash re-spread (not in the ChatGPT report; stand: 1069.84 instead of
+  1090). The pencil path (`updateTransaction`) still re-derives a row's share on its own (out of scope).
+- **Open for the owner:** when T0 goes live; the ticket's Part A sweep of live «История» for rows damaged by the
+  gear (together with the item-80 tail) is not done.
+
 ## Comments
+
+Owner's decisions, 2026-10-22 (this session):
+- Part A: the services gear on «Отгрузка» is REMOVED (not routed to «Вся отгрузка»). Found in passing: the
+  trash of a product inside a «Отгрузка» card re-spread the extras over the remaining rows by value and
+  re-committed them (stand: A 100 + B 900 + C 100, service 90, delete C → 1069.84 instead of 1090; not in the
+  ChatGPT report). Owner: the trash deletes the way «История» does — the row and its kit components, with its
+  own share of the extras; the other rows are not touched; the dialog no longer promises a re-spread.
+- Process: tests are written by the tester agent, not by the orchestrator (the owner stopped the orchestrator
+  writing them). The tests of parts A and B, already written by the orchestrator, are re-checked independently
+  by the tester (review, gaps, 3–5 mutations per part); in part C the tester writes the failing tests first.
+- Part C design (agreed): before the first stock write the server saves a memo of the operation — its
+  content (items, type, object, dates, extras, comment, shipment number) and, per touched stock row, the
+  values before and after — in HIDDEN storage (Script Properties, split into parts when large); every stage
+  succeeded → the memo is deleted. A retry with the same opId reads the memo first: stock = «before» →
+  the operation runs normally; stock = «after» and no «История» rows → «История» and the journal are
+  written, no second deduction; «История» present but no journal → the journal is completed; stock
+  neither «before» nor «after» → nothing is written, a clear refusal, the memo stays.
+  A stuck memo shows a popup «Операция не завершена» at every app start until resolved: what stuck
+  (opId, when, who, articles, stage), buttons «Довести до конца», «Отменить операцию» (only when no
+  «История» rows exist and the stock still equals «after»; restores «before»), «Разобрано, убрать
+  уведомление» when the stock changed since (with what to check by hand), «Позже». EVERY user sees the
+  popup; the buttons work for the ADMIN only (others see the description and «обратитесь к
+  администратору»).

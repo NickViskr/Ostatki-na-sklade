@@ -12086,6 +12086,1391 @@ const T04_LOOKUP = 'list_shops,get_product_costs';
   }
 })();
 
+// ================= Item 97 ticket 01, part B: kopecks of the shipment extras (96.12, 96.13) =================
+// 96.12: every row's share was rounded on its own — 1.00 over three 1-pc rows gave 0.99, 2.00 gave 2.01.
+// The rows of one order now get the largest-remainder split (splitByQuantityGs), on commit and in
+// «Вся отгрузка»; a re-spread takes off the share a row REALLY carries — rows written by the old
+// per-row rounding exist. 96.13: service sums were rounded to whole roubles (100.40 → 100).
+
+function t0bShipment(destination, extras) {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet(['A', 'B', 'C'].map(a => ({ article: a, quantity: 10, avgCost: 100, capitalization: 1000 })));
+  h.commitTransaction(['A', 'B', 'C'].map(a => ({ article: a, quantity: 1, price: 100 })), 'Расход', destination,
+    '2026-10-19', 'tester', '2026-10-19T07:00:00Z', 't0b-op', extras === undefined ? null : extras);
+  return h;
+}
+const t0bRows = (h) => h.getTransactions().rows.filter(t => t.type === 'Расход' && !t.isComponent)
+  .sort((x, y) => x.article.localeCompare(y.article));
+const t0bExtras = (h) => Math.round(t0bRows(h).reduce((s, t) => s + t.total - 100, 0) * 100) / 100;
+const t0bOther = (value) => ({ packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: value, services: [] });
+
+(function testT0bCommitSplitsExactly() {
+  const one = t0bShipment('Ozon (MaxiStore) [Прочее: 1₽]');
+  check('T0-B: commit spreads 1.00 over three 1-pc rows to the kopeck', t0bExtras(one) === 1,
+    t0bRows(one).map(t => t.total).join(' / '));
+  const two = t0bShipment('Ozon (MaxiStore) [Прочее: 2₽]');
+  check('T0-B: commit spreads 2.00 over three 1-pc rows to the kopeck', t0bExtras(two) === 2,
+    t0bRows(two).map(t => t.total).join(' / '));
+  const stated = t0bShipment('Ozon (MaxiStore) [Общая поставка: доля 3 из 6 шт.]', 1);
+  check('T0-B: a stated order share (combined shipment) is spread to the kopeck too', t0bExtras(stated) === 1,
+    t0bRows(stated).map(t => t.total).join(' / '));
+  check('T0-B: the write-off cost and the stock do not move with the split',
+    t0bRows(two).every(t => t.writeOffCost === 100) && two.stockOf('A').quantity === 9 && two.stockOf('A').capitalization === 900,
+    JSON.stringify(two.stockOf('A')));
+})();
+
+(function testT0bWholeShipmentAndRepeat() {
+  const h = t0bShipment('Ozon (MaxiStore) [Прочее: 1₽]');
+  const res = h.updateShipmentExtras(Object.assign({ id: t0bRows(h)[0].id }, t0bOther(2)), 'tester');
+  check('T0-B: «Вся отгрузка» 1.00 → 2.00 over three rows sums to the kopeck', t0bExtras(h) === 2 && res.newTotal === 2,
+    t0bRows(h).map(t => t.total).join(' / ') + ' newTotal ' + res.newTotal);
+  const before = t0bRows(h).map(t => t.total + '/' + t.price).join(' ');
+  const again = h.updateShipmentExtras(Object.assign({ id: t0bRows(h)[0].id }, t0bOther(2)), 'tester');
+  const after = t0bRows(h).map(t => t.total + '/' + t.price).join(' ');
+  check('T0-B: a repeat save of the same extras moves no kopeck', after === before && again.changedRows === 0,
+    before + ' → ' + after + ' changed ' + again.changedRows);
+  h.updateShipmentExtras(Object.assign({ id: t0bRows(h)[0].id }, t0bOther(1)), 'tester');
+  check('T0-B: back to 1.00 sums to the kopeck', t0bExtras(h) === 1, t0bRows(h).map(t => t.total).join(' / '));
+  check('T0-B: «Вся отгрузка» moves neither stock nor write-off cost',
+    t0bRows(h).every(t => t.writeOffCost === 100 && t.quantity === 1) && h.stockOf('B').capitalization === 900,
+    JSON.stringify(h.stockOf('B')));
+})();
+
+(function testT0bOldRoundingRows() {
+  // Rows written before this fix: each carries its own rounded share, 0.33 + 0.33 + 0.33 of 1.00.
+  const h = t0bShipment('Ozon (MaxiStore) [Прочее: 1₽]');
+  const sheet = h.ensureTransSheet();
+  const data = sheet.__dump();
+  const hdr = data[0].map(x => String(x).trim());
+  for (let r = 1; r < data.length; r++) {
+    if (String(data[r][hdr.indexOf('Тип')]) !== 'Расход') continue;
+    sheet.getRange(r + 1, hdr.indexOf('Сумма') + 1).setValue(100.33);
+    sheet.getRange(r + 1, hdr.indexOf('Цена') + 1).setValue(100.33);
+  }
+  h.updateShipmentExtras(Object.assign({ id: t0bRows(h)[0].id }, t0bOther(2)), 'tester');
+  check('T0-B: an old-rounding shipment re-spread to 2.00 sums to the kopeck (its real shares come off)',
+    t0bExtras(h) === 2, t0bRows(h).map(t => t.total).join(' / '));
+})();
+
+(function testT0bServiceKopecks() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.commitTransaction([{ article: 'A', quantity: 1, price: 100 }], 'Расход', 'Other', '', 'tester',
+    '2026-10-19T07:00:00Z', 't0b-svc', null);
+  const id = h.getTransactions().rows[0].id;
+  const res = h.updateShipmentExtras({ id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0,
+    services: [{ name: 'Packing', quantity: 1, unitCost: 100.40 }] }, 'tester');
+  const row = h.getTransactions().rows[0];
+  check('T0-B: a service of 100.40 keeps its kopecks (total, price, text)',
+    res.newTotal === 100.4 && row.price === 200.4 && row.total === 200.4 && row.destination.indexOf('Packing x1 (100.40₽)') !== -1,
+    res.newTotal + ' ' + row.price + ' ' + row.destination);
+  const res3 = h.updateShipmentExtras({ id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0,
+    services: [{ name: 'Packing', quantity: 3, unitCost: 100.01 }] }, 'tester');
+  const row3 = h.getTransactions().rows[0];
+  check('T0-B: 100.01 × 3 keeps every kopeck', res3.newTotal === 300.03 && row3.total === 400.03
+    && row3.destination.indexOf('Packing x3 (300.03₽)') !== -1, res3.newTotal + ' ' + row3.total + ' ' + row3.destination);
+  // A re-save from the text as parsed (the window sends the stored entries back) keeps the sum.
+  const parsed = h.context.parseShipmentExtrasGs(row3.destination).services;
+  const res3b = h.updateShipmentExtras({ id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0,
+    services: parsed }, 'tester');
+  check('T0-B: re-saving the parsed 300.03 changes nothing', res3b.newTotal === 300.03 && res3b.changedRows === 0,
+    res3b.newTotal + ' changed ' + res3b.changedRows);
+})();
+
+(function testT0bServiceTextCommit() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  // The confirmation window writes the services into the text; the commit reads them from there.
+  h.commitTransaction([{ article: 'A', quantity: 1, price: 100 }], 'Расход', 'Ozon (MaxiStore) [Услуги: Packing x1 (100.40₽)]',
+    '2026-10-19', 'tester', '2026-10-19T07:00:00Z', 't0b-txt', null);
+  const row = h.getTransactions().rows[0];
+  check('T0-B: a commit with a 100.40 service in the text prices the piece at 200.40', row.price === 200.4 && row.total === 200.4,
+    row.price + '/' + row.total);
+})();
+
+(function testT0bOldWholeRoubleTexts() {
+  const h = freshHarness();
+  const total = (d) => h.context.parseAdditionalCostsFromDestination(d);
+  const cases = [
+    ['Яндекс [Упаковка: 40 шт. x 6₽ = 240₽ | Услуги: Доставка по городу 1 короб x4 (636₽)]', 876],
+    ['Клиент [Доп. услуги: Маркировка x2 (40₽)]', 40],
+    // Written by Math.round(33.33 × 3): the old parser rounded the sum back to 100, the new one must too.
+    ['Ozon [Услуги: Packing x3 (100₽)]', 100],
+    ['Ozon [Услуги: Pallet x7 (1300₽), Box x3 (50₽)]', 1350]
+  ];
+  const bad = cases.filter(c => total(c[0]) !== c[1]).map(c => c[0] + ' → ' + total(c[0]));
+  check('T0-B: old whole-rouble texts give the same totals as before', bad.length === 0, bad.join('; '));
+  const e = h.context.parseShipmentExtrasGs('Ozon [Услуги: Packing x3 (100₽)]');
+  const rebuilt = h.context.buildDestinationGs(e, e, 3);
+  check('T0-B: an old whole-rouble service text is rebuilt unchanged', rebuilt === 'Ozon [Услуги: Packing x3 (100₽)]', rebuilt);
+})();
+
+(function testT0bParsedServiceResaveAndKits() {
+  // (1) The window sends the parsed entries back: 100 / 3 is not rounded to 33.33, so the sum stays 100.
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.commitTransaction([{ article: 'A', quantity: 1, price: 100 }], 'Расход', 'Ozon [Услуги: Packing x3 (100₽)]', '', 'tester',
+    '2026-10-19T07:00:00Z', 't0b-resave', null);
+  const row = h.getTransactions().rows[0];
+  const parsed = h.context.parseShipmentExtrasGs(row.destination).services;
+  const res = h.updateShipmentExtras({ id: row.id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0,
+    services: parsed }, 'tester');
+  const after = h.getTransactions().rows[0];
+  check('T0-B: re-saving an old «x3 (100₽)» keeps 100 (the parsed unit cost is not rounded)',
+    res.newTotal === 100 && res.changedRows === 0 && after.total === 200 && after.destination === 'Ozon [Услуги: Packing x3 (100₽)]',
+    res.newTotal + ' changed ' + res.changedRows + ' ' + after.total + ' ' + after.destination);
+
+  // (2) Two virtual kits and a plain row carrying the OLD per-row shares: each kit row's evidence is
+  // its own components (same groupId), so every real share 0.33 comes off and 2.00 lands exactly.
+  const k = freshHarness();
+  k.ensureTransSheet();
+  k.ensureArchiveSheet();
+  k.setOzonCostSheet([]);
+  k.setStockSheet([
+    { article: 'P1', quantity: 100, avgCost: 40, capitalization: 4000 },
+    { article: 'P2', quantity: 100, avgCost: 30, capitalization: 3000 },
+    { article: 'C', quantity: 100, avgCost: 100, capitalization: 10000 }
+  ]);
+  k.setKitSheet([
+    { kitSku: 'K1', componentSku: 'P1', quantity: 1, kitType: 'virtual' },
+    { kitSku: 'K2', componentSku: 'P2', quantity: 2, kitType: 'virtual' }
+  ]);
+  k.commitTransaction([{ article: 'K1', quantity: 1, price: 0 }, { article: 'K2', quantity: 1, price: 0 }, { article: 'C', quantity: 1, price: 100 }],
+    'Расход', 'Ozon (MaxiStore) [Прочее: 1₽]', '2026-10-19', 'tester', '2026-10-19T07:00:00Z', 't0b-kits', null);
+  const sheet = k.ensureTransSheet();
+  const data = sheet.__dump();
+  const hdr = data[0].map(x => String(x).trim());
+  const col = (name) => hdr.indexOf(name);
+  const isComp = (r) => String(data[r][col('isComponent')]).toLowerCase() === 'true';
+  const expenseRows = [];
+  for (let r = 1; r < data.length; r++) if (String(data[r][col('Тип')]) === 'Расход') expenseRows.push(r);
+  const goodsOf = (r) => expenseRows.reduce((sum, c) => (isComp(c) && data[r][col('groupId')] && data[c][col('groupId')] === data[r][col('groupId')]
+    ? sum + Number(data[c][col('Сумма')]) : sum), Number(data[r][col('Себестоимость списания')]));
+  expenseRows.forEach(r => {
+    if (isComp(r)) return;
+    const goods = goodsOf(r);
+    sheet.getRange(r + 1, col('Сумма') + 1).setValue(Math.round((goods + 0.33) * 100) / 100);
+    sheet.getRange(r + 1, col('Цена') + 1).setValue(Math.round((goods + 0.33) * 100) / 100);
+  });
+  const kitRow = k.getTransactions().rows.find(t => t.type === 'Расход' && t.article === 'K1');
+  k.updateShipmentExtras({ id: kitRow.id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 2, services: [] }, 'tester');
+  const rowsAfter = k.getTransactions().rows.filter(t => t.type === 'Расход');
+  const mainSum = rowsAfter.filter(t => !t.isComponent).reduce((s, t) => s + t.total, 0);
+  const compSum = rowsAfter.filter(t => t.isComponent).reduce((s, t) => s + t.total, 0);
+  const plainGoods = rowsAfter.filter(t => !t.isComponent && t.article === 'C').reduce((s, t) => s + t.writeOffCost, 0);
+  const extrasLeft = Math.round((mainSum - compSum - plainGoods) * 100) / 100;
+  check('T0-B: kits and a plain row with old per-row shares re-spread to 2.00 sum to the kopeck (evidence by groupId)',
+    extrasLeft === 2, 'extras ' + extrasLeft + ' / ' + rowsAfter.filter(t => !t.isComponent).map(t => t.article + ':' + t.total).join(' '));
+})();
+
+// Independent re-check of part B (tester). The extras of an order are the part of «Сумма» above the goods.
+const t0bExtrasOf = (rows) => Math.round(rows.filter(t => !t.isComponent).reduce((s, t) => {
+  const comps = rows.filter(c => c.isComponent && t.groupId && c.groupId === t.groupId).reduce((x, c) => x + c.total, 0);
+  return s + t.total - t.writeOffCost - comps;
+}, 0) * 100) / 100;
+
+(function testT0bCombinedShipmentOrdersAndCostJournal() {
+  // A combined shipment as ConfirmModal writes it: one commit per order with the order's share of the batch
+  // total. 1.00 over orders of 3 / 2 / 1 pieces = 0.50 / 0.33 / 0.17 (kopecks 50 / 33 / 17 by largest remainder);
+  // 2.00 = 1.00 / 0.67 / 0.33. Inside order 1 that is 0.34 / 0.33 / 0.33 (the leftover kopeck to the earlier row).
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet(['A', 'B', 'C'].map(a => ({ article: a, quantity: 500, avgCost: 100, capitalization: 50000 })));
+  h.setOzonStocksSheet(['A', 'B', 'C'].map((a, i) => ({ cabinet: 'MaxiStore', article: a, available: 900, sku: String(111 * (i + 1)) })));
+  const labels = ['1-1', '2-1', '3-1'];
+  const orders = [['A', 'B', 'C'], ['A', 'B'], ['C']];
+  const shares = [0.5, 0.33, 0.17];
+  orders.forEach((arts, i) => {
+    const note = `[Общая поставка: заявки ${labels.map(l => '№ ' + l).join(', ')}; доля этой заявки ${arts.length} из 6 шт., ${shares[i].toFixed(2)} руб. из 1.00 руб.]`;
+    h.commitTransaction(arts.map(a => ({ article: a, quantity: 1, price: 100 })), 'Расход',
+      'Ozon (MaxiStore) [Прочее: 1₽] ' + note, '2026-10-19', 'tester', '2026-10-19T07:00:00Z', `t0b-comb-${i + 1}`, shares[i], undefined, '', 't0b-comb');
+  });
+  const rows = () => h.getTransactions().rows.filter(t => t.type === 'Расход');
+  const perOrder = () => orders.map((_, i) => t0bExtrasOf(rows().filter(t => t.opId === `t0b-comb-${i + 1}`)));
+  const createdPerOrder = JSON.stringify(perOrder());
+
+  const journalBefore = h.dumpOzonCost().length;
+  const res = h.updateShipmentExtras(Object.assign({ id: rows()[0].id }, t0bOther(2)), 'tester');
+  check('T0-B: a combined shipment — every order sums to its share on create and to its new share after «Вся отгрузка»',
+    createdPerOrder === '[0.5,0.33,0.17]' && JSON.stringify(perOrder()) === '[1,0.67,0.33]' && res.newTotal === 2
+      && JSON.stringify(res.orders.map(o => o.newShare)) === '[1,0.67,0.33]'
+      && rows().filter(t => t.opId === 't0b-comb-1').map(t => t.total).sort().join(' ') === '100.33 100.33 100.34',
+    createdPerOrder + ' -> ' + JSON.stringify(perOrder()) + ' ' + JSON.stringify(res.orders.map(o => o.newShare)));
+
+  // The journal «Себестоимость Озон» is corrected with the per-row price of each order, not a stale one.
+  const lastCost = (article, opId) => {
+    const entries = h.dumpOzonCost().filter(j => j['Артикул'] === article && j['OpID'] === opId);
+    return entries.length ? entries[entries.length - 1]['Себестоимость отгрузки'] : null;
+  };
+  const stale = rows().filter(t => lastCost(t.article, t.opId) !== t.price).map(t => t.opId + '/' + t.article + ' row ' + t.price + ' journal ' + lastCost(t.article, t.opId));
+  check('T0-B: the Ozon cost journal gets the corrected per-row price of every row after «Вся отгрузка»',
+    res.costRowsAppended === 6 && h.dumpOzonCost().length === journalBefore + 6 && stale.length === 0,
+    'appended ' + res.costRowsAppended + ' journal ' + journalBefore + ' -> ' + h.dumpOzonCost().length + ' stale: ' + stale.join('; '));
+})();
+
+(function testT0bCommitKitsAndSkippedItemInSplit() {
+  // Two virtual kits and a plain row share 1.00 as 0.34 / 0.33 / 0.33 by the ITEM index, with a skipped
+  // item (status not ok) between them: the shares must stay with their own items. Components carry none.
+  const k = freshHarness();
+  k.ensureTransSheet();
+  k.ensureArchiveSheet();
+  k.setOzonCostSheet([]);
+  k.setStockSheet([
+    { article: 'P1', quantity: 100, avgCost: 40, capitalization: 4000 },
+    { article: 'P2', quantity: 100, avgCost: 30, capitalization: 3000 },
+    { article: 'C', quantity: 100, avgCost: 100, capitalization: 10000 }
+  ]);
+  k.setKitSheet([
+    { kitSku: 'K1', componentSku: 'P1', quantity: 1, kitType: 'virtual' },
+    { kitSku: 'K2', componentSku: 'P2', quantity: 2, kitType: 'virtual' }
+  ]);
+  k.commitTransaction([{ article: 'K1', quantity: 1, price: 0 }, { article: 'ZZ', quantity: 5, price: 1, status: 'error' },
+    { article: 'K2', quantity: 1, price: 0 }, { article: 'C', quantity: 1, price: 100 }],
+  'Расход', 'Ozon (MaxiStore) [Прочее: 1₽]', '2026-10-19', 'tester', '2026-10-19T07:00:00Z', 't0b-kitsplit', null);
+  const rows = k.getTransactions().rows.filter(t => t.type === 'Расход');
+  const by = (a) => rows.find(t => t.article === a);
+  check('T0-B: kits and a plain row share 1.00 as 0.34 / 0.33 / 0.33 on commit, a skipped item in between keeps its place',
+    by('K1').total === 40.34 && by('K2').total === 60.33 && by('C').total === 100.33
+      && by('P1').total === 40 && by('P2').total === 60 && t0bExtrasOf(rows) === 1
+      && rows.filter(t => !t.isComponent).every(t => t.additionalCosts === 1),
+    rows.map(t => t.article + ':' + t.total).join(' '));
+})();
+
+(function testT0bPencilResaveThenWholeShipment() {
+  // A pencil re-save that changes no amount deletes the row and writes it again at the END of the sheet,
+  // so its place in the largest-remainder split changes. «Вся отгрузка» after it must still sum to the kopeck.
+  const h = t0bShipment('Ozon (MaxiStore) [Прочее: 1₽]');
+  const a = t0bRows(h)[0];
+  const totalsBefore = t0bRows(h).map(t => t.article + ':' + t.total).join(' ');
+  h.updateTransaction(a.id, { article: 'A', quantity: 1, price: a.price, writeOffCost: a.writeOffCost, type: 'Расход',
+    destination: a.destination, deliveryDate: '2026-10-19', date: a.date }, 'tester');
+  const totalsAfterPencil = t0bRows(h).map(t => t.article + ':' + t.total).join(' ');
+  h.updateShipmentExtras(Object.assign({ id: t0bRows(h)[0].id }, t0bOther(2)), 'tester');
+  // The first part is the premise: the pencil itself moved no amount, only the row's place in the sheet.
+  check('T0-B: «Вся отгрузка» after a no-op pencil re-save (the row moves to the end of the sheet) still sums to 2.00',
+    totalsAfterPencil === totalsBefore && t0bExtras(h) === 2,
+    totalsBefore + ' -> ' + totalsAfterPencil + ' -> ' + t0bRows(h).map(t => t.article + ':' + t.total).join(' ') + ' extras ' + t0bExtras(h));
+})();
+
+(function testT0bHandEditedRowTakesOffTheSplitShare() {
+  // A row whose share is neither the old per-row rounding (0.33) nor its split share (0.34): hand-edited
+  // «Сумма» 130. The evidence is no use, so the split share b = 0.34 comes off; a repeat save moves nothing.
+  const h = t0bShipment('Ozon (MaxiStore) [Прочее: 1₽]');
+  const sheet = h.ensureTransSheet();
+  const data = sheet.__dump();
+  const hdr = data[0].map(x => String(x).trim());
+  for (let r = 1; r < data.length; r++) {
+    if (String(data[r][hdr.indexOf('Артикул')]) !== 'A') continue;
+    sheet.getRange(r + 1, hdr.indexOf('Сумма') + 1).setValue(130);
+    sheet.getRange(r + 1, hdr.indexOf('Цена') + 1).setValue(130);
+  }
+  h.updateShipmentExtras(Object.assign({ id: t0bRows(h)[0].id }, t0bOther(2)), 'tester');
+  const totals = t0bRows(h).map(t => t.article + ':' + t.total).join(' ');
+  const again = h.updateShipmentExtras(Object.assign({ id: t0bRows(h)[0].id }, t0bOther(2)), 'tester');
+  check('T0-B: a hand-edited row loses its split share (not the per-row one); a repeat save then moves no kopeck',
+    totals === 'A:130.33 B:100.67 C:100.66' && again.changedRows === 0
+      && t0bRows(h).map(t => t.article + ':' + t.total).join(' ') === totals,
+    totals + ' repeat changed ' + again.changedRows);
+})();
+
+(function testT0bEvidenceWindowIsOneKopeckEachWay() {
+  // 1.00 over three 1-pc rows: the exact share is 33.33 kopecks, so a carried share of 33 or 34 kopecks is taken as
+  // real (any share either rule could give); 32 (floor - 1) and 35 (ceil + 1) are not, nor is 38 (+0.05): there the split
+  // share b of the row's position (0.34 / 0.33 / 0.33) comes off and the deviation stays on the row.
+  const setTotal = (h, article, total) => {
+    const sheet = h.ensureTransSheet();
+    const data = sheet.__dump();
+    const hdr = data[0].map(x => String(x).trim());
+    for (let r = 1; r < data.length; r++) {
+      if (String(data[r][hdr.indexOf('Артикул')]) !== article) continue;
+      sheet.getRange(r + 1, hdr.indexOf('Сумма') + 1).setValue(total);
+      sheet.getRange(r + 1, hdr.indexOf('Цена') + 1).setValue(total);
+    }
+  };
+  const edge = t0bShipment('Ozon (MaxiStore) [Прочее: 1₽]');
+  setTotal(edge, 'A', 100.35);
+  setTotal(edge, 'B', 100.32);
+  setTotal(edge, 'C', 100.33);
+  edge.updateShipmentExtras(Object.assign({ id: t0bRows(edge)[0].id }, t0bOther(2)), 'tester');
+  const edgeTotals = t0bRows(edge).map(t => t.article + ':' + t.total).join(' ');
+  check('T0-B: the evidence window is floor..ceil of the exact share: 35 and 32 kopecks are refused, 33 accepted',
+    edgeTotals === 'A:100.68 B:100.66 C:100.66', edgeTotals);
+
+  const far = t0bShipment('Ozon (MaxiStore) [Прочее: 1₽]');
+  setTotal(far, 'A', 100.38);
+  far.updateShipmentExtras(Object.assign({ id: t0bRows(far)[0].id }, t0bOther(2)), 'tester');
+  const farTotals = t0bRows(far).map(t => t.article + ':' + t.total).join(' ');
+  const farAgain = far.updateShipmentExtras(Object.assign({ id: t0bRows(far)[0].id }, t0bOther(2)), 'tester');
+  check('T0-B: a row 0.05 off its exact share keeps its deviation (0.04) through «Вся отгрузка»; b comes off, not d',
+    farTotals === 'A:100.71 B:100.67 C:100.66' && t0bExtras(far) === 2.04 && farAgain.changedRows === 0,
+    farTotals + ' extras ' + t0bExtras(far) + ' repeat changed ' + farAgain.changedRows);
+})();
+
+// ================= Item 97 ticket 01, part C1: a retry after a partial failure deducts nothing twice (96.10), server side =================
+// Written TEST-FIRST against the agreed interface (owner-approved design, ticket 01 «Comments»):
+//  - commitTransaction with an opId saves a memo in Script Properties (keys `pendingOp:<opId>…`, every value <= 9000
+//    characters, split into several properties when long) BEFORE its first stock write: the call's content and, per
+//    touched «Остатки» row, the values before and after. Stages: s1 «Остатки» write, s2 «История» append, s3 the
+//    «Себестоимость Озон» journal append. Every stage done -> the memo is deleted; a journal failure (returned as
+//    costJournalError) leaves it.
+//  - A retry with the same opId reads the memo first: stock = before -> runs normally; = after and no «История» rows ->
+//    writes «История» and the journal, no second deduction; «История» rows but no journal row -> completes the journal;
+//    neither before nor after -> a Russian error, nothing written, the memo stays. No memo -> idempotentHit as before.
+//  - getPendingOperations() -> [{ opId, startedAt, user, type, destination, articles: [{ article, quantity }],
+//    stage: 'stock' | 'history' | 'journal' | 'conflict', canComplete, canCancel }]; getInitialData gains
+//    `pendingOperations` for every user; doPost 'resolvePendingOperation' { opId, action: complete | cancel | dismiss },
+//    ADMIN only. The numbers are the ticket's: 10 pcs @ 100, expense 2 to an Ozon destination -> 8 pcs / 800.
+// Failures are injected on the sheet write itself (the review's probe A5): the first setValues of the stage throws.
+
+const T0C_DEST = 'Ozon (MaxiStore)';
+function t0cStand() {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'A', available: 500, sku: '111' }]);
+  const far = String(Date.parse('2030-01-01T00:00:00Z'));
+  h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+    ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+  return h;
+}
+const t0cCommit = (h, opId, items, dest) => h.commitTransaction(items || [{ article: 'A', quantity: 2, price: 100 }], 'Расход',
+  dest || T0C_DEST, '2026-10-19', 'tester', '2026-10-19T07:00:00Z', opId, null);
+function t0cFailOnce(sheet, matches) {
+  const original = sheet.getRange.bind(sheet);
+  let armed = true;
+  sheet.getRange = (...args) => {
+    const range = original(...args);
+    const setValues = range.setValues.bind(range);
+    range.setValues = (rows) => {
+      if (armed && matches(args)) { armed = false; throw new Error('Injected write failure'); }
+      return setValues(rows);
+    };
+    return range;
+  };
+}
+const t0cFailStock = (h) => t0cFailOnce(h.getRegistrySheet('Остатки'), (a) => a[0] > 1);
+const t0cFailHistory = (h) => t0cFailOnce(h.ensureTransSheet(), (a) => a[0] > 1 && a[1] === 1);
+const t0cFailJournal = (h) => t0cFailOnce(h.getRegistrySheet('Себестоимость Озон'), (a) => a[0] > 1);
+const t0cThrows = (fn) => { try { fn(); return ''; } catch (e) { return String((e && e.message) || e) || 'threw'; } };
+const t0cMemo = (h) => h.context.PropertiesService.getScriptProperties().getProperties();
+const t0cMemoKeys = (h) => Object.keys(t0cMemo(h)).filter(k => k.indexOf('pendingOp:') === 0);
+const t0cRows = (h, opId) => h.getTransactions().rows.filter(t => t.type === 'Расход' && t.opId === opId);
+const t0cJournal = (h, opId) => h.dumpOzonCost().filter(r => r['OpID'] === opId);
+// null when getPendingOperations is missing or broken, so the conditions that do not need it still report on their own.
+const t0cPending = (h) => { try { return JSON.parse(JSON.stringify(h.context.getPendingOperations())); } catch (e) { return null; } };
+const t0cNoPending = (h) => { const p = t0cPending(h); return Array.isArray(p) && p.length === 0; };
+const t0cStock = (h, article) => { const s = h.stockOf(article || 'A'); return s.quantity + '/' + s.capitalization; };
+const t0cResolve = (h, token, opId, action) => h.callDoPost({ action: 'resolvePendingOperation', sessionToken: token, data: { opId: opId, action: action } });
+const t0cPendingIs = (p, opId, stage, canComplete, canCancel, user) => Array.isArray(p) && p.length === 1 && p[0].opId === opId && p[0].stage === stage
+  && p[0].canComplete === canComplete && p[0].canCancel === canCancel && p[0].user === (user || 'tester') && p[0].type === 'Расход'
+  && p[0].destination === T0C_DEST && JSON.stringify(p[0].articles) === '[{"article":"A","quantity":2}]' && !!p[0].startedAt;
+// The commit as the BROWSER sends it: the doPost 'commit' action, user «Кладовщик» (token tok-user). Since the caller
+// bookkeeping refinement only a memo saved under this action can be completed by the admin; a direct call of
+// commitTransaction (the other helpers here) is "any other caller".
+const T0C_BROWSER_USER = 'Кладовщик';
+const t0cBrowserCommit = (h, opId, extra) => h.callDoPost(Object.assign({ action: 'commit', sessionToken: 'tok-user', type: 'Расход',
+  destination: T0C_DEST, deliveryDate: '2026-10-19', opId: opId, data: [{ article: 'A', quantity: 2, price: 100 }] }, extra || {}));
+// Runs `build` (returns { conds: { description: boolean }, note }); an exception fails the check with its text instead of
+// aborting the whole stand run. The details line names every failed condition.
+function t0cCheck(name, build) {
+  let conds = {};
+  let note = '';
+  try { const r = build(); conds = r.conds; note = r.note || ''; }
+  catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+  const failed = Object.keys(conds).filter(k => !conds[k]);
+  check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+}
+// The three states used more than once.
+function t0cAfterHistoryFailure(opId) {
+  const h = t0cStand();
+  t0cFailHistory(h);
+  const err = t0cThrows(() => t0cCommit(h, opId));
+  return { h, err };
+}
+function t0cConflict(opId) {
+  const s = t0cAfterHistoryFailure(opId);
+  t0cCommit(s.h, 'op-other', [{ article: 'A', quantity: 1, price: 100 }]);
+  return s;
+}
+
+t0cCheck('T0-C: s1 — the stock write fails: a memo is saved first, nothing else moved (stage «stock»); the retry makes ONE operation: 8 / 800, one history row, one journal row, no memo', () => {
+  const h = t0cStand();
+  t0cFailStock(h);
+  const failed = t0cBrowserCommit(h, 'op-s1');
+  const err = failed.status === 'error' ? String(failed.message || 'error') : '';
+  const memoAfterFailure = t0cMemoKeys(h);
+  const stateAfterFailure = t0cStock(h) + ' rows ' + t0cRows(h, 'op-s1').length;
+  const pending = t0cPending(h);
+  const retried = t0cBrowserCommit(h, 'op-s1');
+  const retryErr = retried.status === 'error' ? String(retried.message || 'error') : '';
+  return {
+    conds: {
+      'the commit failed (doPost answered an error)': err !== '',
+      'a memo with keys pendingOp:op-s1… exists after the failure': memoAfterFailure.length > 0 && memoAfterFailure.every(k => k.indexOf('pendingOp:op-s1') === 0),
+      'stock still 10/1000, no history': stateAfterFailure === '10/1000 rows 0',
+      'pending: one entry, stage stock, canComplete true, canCancel true': t0cPendingIs(pending, 'op-s1', 'stock', true, true, T0C_BROWSER_USER),
+      'the retry did not throw': retryErr === '',
+      'after the retry stock 8/800': t0cStock(h) === '8/800',
+      'exactly one history row for the opId': t0cRows(h, 'op-s1').length === 1,
+      'exactly one journal row for the opId': t0cJournal(h, 'op-s1').length === 1,
+      'no memo left': t0cMemoKeys(h).length === 0
+    },
+    note: 'failure: ' + err + ' | memo keys ' + memoAfterFailure.length + ' | ' + stateAfterFailure + ' | pending ' + JSON.stringify(pending)
+      + ' | retry: ' + (retryErr || 'ok') + ' ' + t0cStock(h) + ' rows ' + t0cRows(h, 'op-s1').length + ' journal ' + t0cJournal(h, 'op-s1').length + ' memo ' + t0cMemoKeys(h).length
+  };
+});
+
+t0cCheck('T0-C: s2 — the «История» write fails after the stock was written: the memo holds the call and the values before / after, stage «history»', () => {
+  const h = t0cStand();
+  h.setNow('2026-10-19T07:00:00Z');
+  t0cFailHistory(h);
+  const failed = t0cBrowserCommit(h, 'op-s2');
+  const err = failed.status === 'error' ? String(failed.message || 'error') : '';
+  const keys = t0cMemoKeys(h);
+  const values = keys.map(k => String(t0cMemo(h)[k]));
+  const text = values.join('');
+  const pending = t0cPending(h);
+  return {
+    conds: {
+      'the commit failed (doPost answered an error)': err !== '',
+      'a memo with keys pendingOp:op-s2… exists': keys.length > 0 && keys.every(k => k.indexOf('pendingOp:op-s2') === 0),
+      'every memo value is at most 9000 characters': values.every(v => v.length <= 9000),
+      'the memo holds the content: destination, user, the date of the start, article': text.indexOf(T0C_DEST) !== -1 && text.indexOf(T0C_BROWSER_USER) !== -1
+        && text.indexOf('2026-10-19T07:00:00') !== -1 && text.indexOf('"A"') !== -1,
+      'the memo holds the capitalization before (1000) and after (800)': text.indexOf('1000') !== -1 && text.indexOf('800') !== -1,
+      'stock is 8/800 (written), no history row, no journal row': t0cStock(h) === '8/800' && t0cRows(h, 'op-s2').length === 0 && t0cJournal(h, 'op-s2').length === 0,
+      'pending: one entry, stage history, canComplete true, canCancel true': t0cPendingIs(pending, 'op-s2', 'history', true, true, T0C_BROWSER_USER)
+    },
+    note: 'failure: ' + err + ' | memo keys ' + keys.length + ' | ' + t0cStock(h) + ' | pending ' + JSON.stringify(pending)
+  };
+});
+
+t0cCheck('T0-C: s2 retry with the same opId — stock 8 / 800 (not 6 / 600), exactly one operation in «История», one journal row, no memo', () => {
+  const { h } = t0cAfterHistoryFailure('op-s2r');
+  const retryErr = t0cThrows(() => t0cCommit(h, 'op-s2r'));
+  return {
+    conds: {
+      'the retry did not throw': retryErr === '',
+      'stock 8/800 (no second deduction)': t0cStock(h) === '8/800',
+      'exactly one history row for the opId': t0cRows(h, 'op-s2r').length === 1,
+      'exactly one journal row for the opId': t0cJournal(h, 'op-s2r').length === 1,
+      'no memo left': t0cMemoKeys(h).length === 0,
+      'nothing pending (getPendingOperations returns [])': t0cNoPending(h)
+    },
+    note: 'retry: ' + (retryErr || 'ok') + ' | ' + t0cStock(h) + ' rows ' + t0cRows(h, 'op-s2r').length + ' journal ' + t0cJournal(h, 'op-s2r').length + ' memo ' + t0cMemoKeys(h).length
+  };
+});
+
+t0cCheck('T0-C: s3 — the journal write fails (costJournalError): the operation stands, the memo STAYS, stage «journal», canComplete true, canCancel false', () => {
+  const h = t0cStand();
+  t0cFailJournal(h);
+  const answer = t0cBrowserCommit(h, 'op-s3');
+  const result = answer.status === 'success' ? answer.data : null;
+  const pending = t0cPending(h);
+  return {
+    conds: {
+      'the commit answered success with a costJournalError': !!(result && result.costJournalError),
+      'stock 8/800 and one history row': t0cStock(h) === '8/800' && t0cRows(h, 'op-s3').length === 1,
+      'no journal row yet': t0cJournal(h, 'op-s3').length === 0,
+      'the memo stays': t0cMemoKeys(h).length > 0,
+      'pending: one entry, stage journal, canComplete true, canCancel false': t0cPendingIs(pending, 'op-s3', 'journal', true, false, T0C_BROWSER_USER)
+    },
+    note: 'result error: ' + (result && result.costJournalError) + ' | ' + t0cStock(h) + ' | memo keys ' + t0cMemoKeys(h).length + ' | pending ' + JSON.stringify(pending)
+  };
+});
+
+t0cCheck('T0-C: s3 retry — the missing journal row is written (priced 100, 2 pcs), «История» is not duplicated, stock stays 8 / 800, the memo goes', () => {
+  const h = t0cStand();
+  t0cFailJournal(h);
+  t0cCommit(h, 'op-s3r');
+  const retryErr = t0cThrows(() => t0cCommit(h, 'op-s3r'));
+  const journal = t0cJournal(h, 'op-s3r');
+  return {
+    conds: {
+      'the retry did not throw': retryErr === '',
+      'exactly one journal row for the opId, shipped 2 at 100': journal.length === 1 && journal[0]['Отгружено'] === 2 && journal[0]['Себестоимость отгрузки'] === 100,
+      'exactly one history row for the opId': t0cRows(h, 'op-s3r').length === 1,
+      'stock 8/800': t0cStock(h) === '8/800',
+      'no memo left, nothing pending': t0cMemoKeys(h).length === 0 && t0cNoPending(h)
+    },
+    note: 'retry: ' + (retryErr || 'ok') + ' | journal ' + JSON.stringify(journal) + ' | ' + t0cStock(h) + ' rows ' + t0cRows(h, 'op-s3r').length
+  };
+});
+
+t0cCheck('T0-C: conflict — stock changed by another operation since the failure: the retry is refused in Russian, nothing is written, the memo stays', () => {
+  const { h } = t0cConflict('op-c');
+  const before = t0cStock(h) + ' other rows ' + t0cRows(h, 'op-other').length + ' journal ' + h.dumpOzonCost().length;
+  const retryErr = t0cThrows(() => t0cCommit(h, 'op-c'));
+  const after = t0cStock(h) + ' other rows ' + t0cRows(h, 'op-other').length + ' journal ' + h.dumpOzonCost().length;
+  return {
+    conds: {
+      'the retry threw': retryErr !== '',
+      'the error is in Russian': /[А-Яа-яЁё]/.test(retryErr),
+      'stock is the other operation\'s result, 7/700 (neither before nor after)': t0cStock(h) === '7/700',
+      'no history row and no journal row for the refused opId': t0cRows(h, 'op-c').length === 0 && t0cJournal(h, 'op-c').length === 0,
+      'nothing at all changed by the refused retry': before === after,
+      'the memo of the refused opId stays': t0cMemoKeys(h).some(k => k.indexOf('pendingOp:op-c') === 0)
+    },
+    note: 'retry error: ' + retryErr + ' | ' + before + ' -> ' + after
+  };
+});
+
+t0cCheck('T0-C: conflict — getPendingOperations shows stage «conflict», canComplete false, canCancel false (before and after the refused retry)', () => {
+  const { h } = t0cConflict('op-cp');
+  const first = t0cPending(h);
+  t0cThrows(() => t0cCommit(h, 'op-cp'));
+  const second = t0cPending(h);
+  return {
+    conds: {
+      'one pending entry, stage conflict, both buttons off': t0cPendingIs(first, 'op-cp', 'conflict', false, false),
+      'the same after the refused retry': t0cPendingIs(second, 'op-cp', 'conflict', false, false)
+    },
+    note: JSON.stringify(first)
+  };
+});
+
+t0cCheck('T0-C: resolve «complete» as admin does what a retry does — 8 / 800, one history row, one journal row, no memo', () => {
+  const h = t0cStand();
+  t0cFailHistory(h);
+  t0cBrowserCommit(h, 'op-rc');
+  const out = t0cResolve(h, 'tok-admin', 'op-rc', 'complete');
+  return {
+    conds: {
+      'doPost answered success': out.status === 'success',
+      'stock 8/800': t0cStock(h) === '8/800',
+      'exactly one history row and one journal row': t0cRows(h, 'op-rc').length === 1 && t0cJournal(h, 'op-rc').length === 1,
+      'no memo, nothing pending': t0cMemoKeys(h).length === 0 && t0cNoPending(h)
+    },
+    note: JSON.stringify(out).slice(0, 200) + ' | ' + t0cStock(h)
+  };
+});
+
+t0cCheck('T0-C: resolve «cancel» as admin — stage «stock» drops the memo only, stage «history» puts the stock back to 10 / 1000 (no history, no journal)', () => {
+  const a = t0cStand();
+  t0cFailStock(a);
+  t0cThrows(() => t0cCommit(a, 'op-ca'));
+  const outA = t0cResolve(a, 'tok-admin', 'op-ca', 'cancel');
+  const { h: b } = t0cAfterHistoryFailure('op-cb');
+  const stockBeforeCancelB = t0cStock(b);
+  const outB = t0cResolve(b, 'tok-admin', 'op-cb', 'cancel');
+  return {
+    conds: {
+      'stage stock: success, memo gone, stock 10/1000, nothing written': outA.status === 'success' && t0cMemoKeys(a).length === 0
+        && t0cStock(a) === '10/1000' && t0cRows(a, 'op-ca').length === 0 && t0cJournal(a, 'op-ca').length === 0,
+      'stage history premise: stock was 8/800 before the cancel': stockBeforeCancelB === '8/800',
+      'stage history: success, stock back to 10/1000, memo gone, nothing written': outB.status === 'success' && t0cStock(b) === '10/1000'
+        && t0cMemoKeys(b).length === 0 && t0cRows(b, 'op-cb').length === 0 && t0cJournal(b, 'op-cb').length === 0
+    },
+    note: JSON.stringify(outA).slice(0, 120) + ' | ' + JSON.stringify(outB).slice(0, 120) + ' | ' + t0cStock(b)
+  };
+});
+
+t0cCheck('T0-C: resolve «cancel» is refused when «История» rows exist, and when the stock has moved on since; nothing changes, the memo stays', () => {
+  const h = t0cStand();
+  t0cFailJournal(h);
+  t0cCommit(h, 'op-rj');
+  const outJournal = t0cResolve(h, 'tok-admin', 'op-rj', 'cancel');
+  const afterJournal = t0cStock(h) + ' rows ' + t0cRows(h, 'op-rj').length + ' memo ' + (t0cMemoKeys(h).length > 0);
+  const { h: c } = t0cConflict('op-rx');
+  const outConflict = t0cResolve(c, 'tok-admin', 'op-rx', 'cancel');
+  return {
+    conds: {
+      'history exists: cancel answered with a refusal (not an unknown action)': outJournal.status === 'error' && !/Unknown action/.test(String(outJournal.message)),
+      'history exists: stock 8/800, the history row and the memo untouched': afterJournal === '8/800 rows 1 memo true',
+      'stock moved on: cancel answered with a refusal (not an unknown action)': outConflict.status === 'error' && !/Unknown action/.test(String(outConflict.message)),
+      'stock moved on: stock stays 7/700 and the memo stays': t0cStock(c) === '7/700' && t0cMemoKeys(c).some(k => k.indexOf('pendingOp:op-rx') === 0)
+    },
+    note: JSON.stringify(outJournal).slice(0, 120) + ' | ' + JSON.stringify(outConflict).slice(0, 120) + ' | ' + afterJournal
+  };
+});
+
+t0cCheck('T0-C: resolve «dismiss» as admin on a conflict drops the memo and touches no data', () => {
+  const { h } = t0cConflict('op-rd');
+  const dataBefore = t0cStock(h) + ' other rows ' + t0cRows(h, 'op-other').length + ' journal ' + h.dumpOzonCost().length;
+  const out = t0cResolve(h, 'tok-admin', 'op-rd', 'dismiss');
+  const dataAfter = t0cStock(h) + ' other rows ' + t0cRows(h, 'op-other').length + ' journal ' + h.dumpOzonCost().length;
+  return {
+    conds: {
+      'doPost answered success': out.status === 'success',
+      'the memo is gone, nothing pending': t0cMemoKeys(h).length === 0 && t0cNoPending(h),
+      'stock, history and journal untouched': dataBefore === dataAfter && t0cStock(h) === '7/700' && t0cRows(h, 'op-rd').length === 0
+    },
+    note: JSON.stringify(out).slice(0, 120) + ' | ' + dataBefore + ' -> ' + dataAfter
+  };
+});
+
+t0cCheck('T0-C: resolve complete / cancel / dismiss are refused for a plain user; the memo, the stock and the sheets stay as they were', () => {
+  const { h } = t0cAfterHistoryFailure('op-ru');
+  const keysBefore = t0cMemoKeys(h).length;
+  const outs = ['complete', 'cancel', 'dismiss'].map(a => t0cResolve(h, 'tok-user', 'op-ru', a));
+  return {
+    conds: {
+      'a memo existed to be protected': keysBefore > 0,
+      'all three answered with the rights error': outs.every(o => o.status === 'error' && /Forbidden|администратор/i.test(String(o.message))),
+      'the memo is untouched': t0cMemoKeys(h).length === keysBefore,
+      'stock 8/800, no history, no journal': t0cStock(h) === '8/800' && t0cRows(h, 'op-ru').length === 0 && t0cJournal(h, 'op-ru').length === 0
+    },
+    note: outs.map(o => String(o.message)).join(' | ')
+  };
+});
+
+t0cCheck('T0-C: a commit without a failure leaves no memo, no pending entry and the usual result; a failing commit WITHOUT an opId saves no memo', () => {
+  const h = t0cStand();
+  const result = t0cCommit(h, 'op-ok');
+  const normal = {
+    memo: t0cMemoKeys(h).length,
+    stock: t0cStock(h),
+    rows: t0cRows(h, 'op-ok').length,
+    journal: t0cJournal(h, 'op-ok').length,
+    pending: (t0cNoPending(h) ? 0 : -1)
+  };
+  const g = t0cStand();
+  t0cFailHistory(g);
+  const err = t0cThrows(() => t0cCommit(g, ''));
+  return {
+    conds: {
+      'no memo, nothing pending after a normal commit': normal.memo === 0 && normal.pending === 0,
+      'stock 8/800, one history row, one journal row': normal.stock === '8/800' && normal.rows === 1 && normal.journal === 1,
+      'the result is the usual one: no idempotentHit, no costJournalError': !result.idempotentHit && !result.costJournalError && result.newTransactions.length === 1,
+      'a failing commit without an opId threw and left no memo': err !== '' && t0cMemoKeys(g).length === 0
+    },
+    note: JSON.stringify(normal) + ' | no-opId failure: ' + err
+  };
+});
+
+t0cCheck('T0-C: a 200-article operation interrupted after the stock write keeps every memo value within 9000 characters; the retry completes all 200', () => {
+  const h = t0cStand();
+  const names = Array.from({ length: 200 }, (_, i) => 'Артикул_' + String(i + 1).padStart(3, '0'));
+  h.setStockSheet(names.map(a => ({ article: a, quantity: 10, avgCost: 100, capitalization: 1000 })));
+  const items = names.map(a => ({ article: a, quantity: 2, price: 100 }));
+  t0cFailHistory(h);
+  const err = t0cThrows(() => t0cCommit(h, 'op-200', items, 'Яндекс'));
+  const keys = t0cMemoKeys(h);
+  const values = keys.map(k => String(t0cMemo(h)[k]));
+  const allDeducted = names.every(a => t0cStock(h, a) === '8/800');
+  const pending = t0cPending(h);
+  const retryErr = t0cThrows(() => t0cCommit(h, 'op-200', items, 'Яндекс'));
+  const bytes = values.map(v => Buffer.byteLength(v, 'utf8'));
+  return {
+    conds: {
+      'the commit threw after the stock write': err !== '' && allDeducted,
+      'the memo is split into several properties, all keyed pendingOp:op-200…': keys.length >= 2 && keys.every(k => k.indexOf('pendingOp:op-200') === 0),
+      'every memo value is at most 9000 characters': values.length > 0 && values.every(v => v.length <= 9000),
+      'EXTRA (tester): every memo value is at most 9216 UTF-8 bytes — Cyrillic articles take 2 bytes a character': bytes.length > 0 && bytes.every(b => b <= 9216),
+      'pending lists all 200 articles, stage history': Array.isArray(pending) && pending.length === 1 && pending[0].stage === 'history' && pending[0].articles.length === 200,
+      'the retry did not throw': retryErr === '',
+      '200 history rows for the opId, every article 8/800 (not 6/600)': t0cRows(h, 'op-200').length === 200 && names.every(a => t0cStock(h, a) === '8/800'),
+      'no memo left': t0cMemoKeys(h).length === 0
+    },
+    note: 'memo properties ' + keys.length + ', max chars ' + Math.max(0, ...values.map(v => v.length)) + ', max bytes ' + Math.max(0, ...bytes)
+      + ' | failure: ' + err + ' | retry: ' + (retryErr || 'ok') + ' rows ' + t0cRows(h, 'op-200').length
+  };
+});
+
+t0cCheck('T0-C: getInitialData carries pendingOperations for every user — the stuck operation for a plain user and for the admin, an empty array when none', () => {
+  const { h } = t0cAfterHistoryFailure('op-gi');
+  const asUser = h.callDoPost({ action: 'getInitialData', sessionToken: 'tok-user', data: {} });
+  const asAdmin = h.callDoPost({ action: 'getInitialData', sessionToken: 'tok-admin', data: {} });
+  t0cCommit(h, 'op-gi');
+  const clean = h.callDoPost({ action: 'getInitialData', sessionToken: 'tok-user', data: {} });
+  const listOf = (o) => (o.data && o.data.pendingOperations);
+  return {
+    conds: {
+      'plain user: one pending operation op-gi, stage history': Array.isArray(listOf(asUser)) && listOf(asUser).length === 1 && listOf(asUser)[0].opId === 'op-gi' && listOf(asUser)[0].stage === 'history',
+      'admin: the same list': Array.isArray(listOf(asAdmin)) && listOf(asAdmin).length === 1 && listOf(asAdmin)[0].opId === 'op-gi',
+      'after the retry: an empty array, not a missing field': Array.isArray(listOf(clean)) && listOf(clean).length === 0
+    },
+    note: 'user data keys: ' + Object.keys(asUser.data || {}).join(',')
+  };
+});
+
+
+// ----- Part C1 refinements (written test-first; the coder's first C1 is green, these four are not built yet) -----
+//  1. caller bookkeeping: getPendingOperations() entries gain `origin: 'commit' | 'other'`. A memo saved under the doPost
+//     'commit' action holds its postingIds, and resolve «complete» on it does what the 'commit' case does — the commit
+//     AND linkPostingsToCommit. A memo from any other caller (chinaPostBatch, commitUnshippedReturn, a direct call) has
+//     canComplete false (canCancel per stage as before) and resolve «complete» on it is refused in Russian; the module's own
+//     retry with the same opId keeps working.
+//  2. dev mode: a memo saved by a dev-mode request lives under `pendingOpDev:<opId>…`; every read / retry / resolve sees only
+//     the memos of its own mode.
+//  3. phantom popup: getInitialData tries the script lock with tryLock(0); lock free -> every memo is listed, lock busy ->
+//     only memos whose startedAt is at least 7 minutes old.
+//  4. a damaged memo (part 0 is not JSON, or a part is missing) never makes getPendingOperations / getInitialData throw: it is
+//     listed with stage 'conflict', canComplete false, canCancel false, damaged true; resolve «dismiss» removes all its keys.
+function t0cSessions(h) {
+  const far = String(Date.parse('2030-01-01T00:00:00Z'));
+  h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+    ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+}
+const t0cKeysOf = (h, opId, prefix) => Object.keys(t0cMemo(h)).filter(k => k.indexOf((prefix || 'pendingOp:') + opId + ':') === 0);
+const t0cIsRussianError = (out) => out.status === 'error' && /[А-Яа-яЁё]/.test(String(out.message)) && !/Unknown action/.test(String(out.message));
+
+t0cCheck('T0-C: caller bookkeeping — a commit with postingIds interrupted after the stock write is origin «commit»; resolve «complete» links the posting exactly as an uninterrupted commit does', () => {
+  const posting = { postingId: 'P-100', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 2 }] };
+  // the control: the same commit, nothing interrupted
+  const c = t0cStand();
+  c.setExternalShipmentsSheet([posting]);
+  t0cBrowserCommit(c, 'op-post-c', { postingIds: ['P-100'] });
+  const control = c.dumpExternalShipments()[0];
+  const controlIds = JSON.stringify(t0cRows(c, 'op-post-c').map(r => r.id));
+  // the interrupted one, finished by the admin
+  const h = t0cStand();
+  h.setExternalShipmentsSheet([posting]);
+  t0cFailHistory(h);
+  const failed = t0cBrowserCommit(h, 'op-post', { postingIds: ['P-100'] });
+  const pending = t0cPending(h);
+  const memoText = t0cMemoKeys(h).map(k => String(t0cMemo(h)[k])).join('');
+  const postingBefore = h.dumpExternalShipments()[0]['Статус'];
+  const resolved = t0cResolve(h, 'tok-admin', 'op-post', 'complete');
+  const row = h.dumpExternalShipments()[0];
+  const ids = JSON.stringify(t0cRows(h, 'op-post').map(r => r.id));
+  // the same interruption finished by a retry through the commit action
+  const r = t0cStand();
+  r.setExternalShipmentsSheet([posting]);
+  t0cFailHistory(r);
+  t0cBrowserCommit(r, 'op-post-r', { postingIds: ['P-100'] });
+  const retried = t0cBrowserCommit(r, 'op-post-r', { postingIds: ['P-100'] });
+  const retryRow = r.dumpExternalShipments()[0];
+  return {
+    conds: {
+      'control: an uninterrupted commit marks the posting processed and links its rows': control['Статус'] === 'processed' && control['TransGroupInfo'] === controlIds && controlIds !== '[]',
+      'pending: one entry, origin «commit», stage history, canComplete true': Array.isArray(pending) && pending.length === 1 && pending[0].origin === 'commit' && pending[0].stage === 'history' && pending[0].canComplete === true,
+      'the memo holds the postingIds': memoText.indexOf('P-100') !== -1,
+      'before the resolve the posting is untouched': postingBefore === 'new',
+      'resolve «complete» answered success': resolved.status === 'success',
+      'the posting is linked as after an uninterrupted commit: processed, TransGroupInfo = the rows of the operation': row['Статус'] === 'processed' && row['TransGroupInfo'] === ids && ids !== '[]',
+      'stock 8/800, one history row, one journal row, no memo': t0cStock(h) === '8/800' && t0cRows(h, 'op-post').length === 1 && t0cJournal(h, 'op-post').length === 1 && t0cMemoKeys(h).length === 0,
+      'a retry through the commit action links the posting too, with no second deduction': retried.status === 'success' && retryRow['Статус'] === 'processed' && t0cStock(r) === '8/800' && t0cMemoKeys(r).length === 0
+    },
+    note: 'failure: ' + failed.status + ' | pending ' + JSON.stringify(pending) + ' | posting ' + postingBefore + ' -> ' + row['Статус'] + ' ' + row['TransGroupInfo'] + ' vs rows ' + ids + ' | resolve ' + JSON.stringify(resolved).slice(0, 120)
+  };
+});
+
+t0cCheck('T0-C: caller bookkeeping — a China batch posting interrupted after the stock write is origin «other»: complete is off and refused, cancel restores, the module\'s own retry completes ONE receipt with the batch mark', () => {
+  const stand = () => { const h = withChina(); const batch = china84PostableFixture(h); t0cSessions(h); return { h, batch }; };
+  const post = (h, batch, opId) => h.postChinaBatch({ id: batch.id, opId: opId, lines: [{ article: 'ART-POST-1', qty: 100 }] }, 'Николай');
+  const receipts = (h) => h.dumpTransSheet().filter(r => String(r['Тип']) === 'Приход' && String(r['Объект'] || '').indexOf('NV-POST-1') !== -1);
+  const stateOf = (res, batch) => res.batches.filter(b => b.id === batch.id)[0].postingState;
+
+  const { h, batch } = stand();
+  t0cFailHistory(h);
+  const err = t0cThrows(() => post(h, batch, 'op-ch-1'));
+  const pending = t0cPending(h);
+  const entry = Array.isArray(pending) && pending.length === 1 ? pending[0] : {};
+  const refused = t0cResolve(h, 'tok-admin', 'op-ch-1', 'complete');
+  const afterRefusal = h.stockOf('ART-POST-1').quantity + ' receipts ' + receipts(h).length + ' memo ' + (t0cMemoKeys(h).length > 0);
+  const cancelled = t0cResolve(h, 'tok-admin', 'op-ch-1', 'cancel');
+  const afterCancel = JSON.stringify(h.stockOf('ART-POST-1'));
+  const retried = post(h, batch, 'op-ch-1');
+
+  // the plain retry, without the cancel
+  const { h: g, batch: gb } = stand();
+  t0cFailHistory(g);
+  t0cThrows(() => post(g, gb, 'op-ch-2'));
+  const plain = post(g, gb, 'op-ch-2');
+  return {
+    conds: {
+      'the posting failed at «История»': err !== '',
+      'pending: one entry, origin «other», stage history, canComplete false, canCancel true': entry.origin === 'other' && entry.stage === 'history' && entry.canComplete === false && entry.canCancel === true && entry.type === 'Приход',
+      'resolve «complete» is refused in Russian': t0cIsRussianError(refused),
+      'the refusal changed nothing: 100 pcs written, no receipt, the memo stays': afterRefusal === '100 receipts 0 memo true',
+      'resolve «cancel» succeeded and the memo is gone': cancelled.status === 'success' && t0cMemoKeys(h).length === 0,
+      'cancel restored the stock row (0 pcs, 0 capitalization)': (function () { const s = JSON.parse(afterCancel); return s.quantity === 0 && s.capitalization === 0; })(),
+      'then the module\'s own retry with the SAME opId completes: one receipt, 100 pcs, the batch marked «предварительно»': stateOf(retried, batch) === 'предварительно' && receipts(h).length === 1 && h.stockOf('ART-POST-1').quantity === 100 && t0cMemoKeys(h).length === 0,
+      'a plain retry without the cancel completes the same operation: 100 pcs (not 200), one receipt, batch marked': stateOf(plain, gb) === 'предварительно' && g.stockOf('ART-POST-1').quantity === 100 && receipts(g).length === 1 && t0cMemoKeys(g).length === 0
+    },
+    note: 'pending ' + JSON.stringify(pending) + ' | refusal ' + JSON.stringify(refused).slice(0, 140) + ' | after refusal ' + afterRefusal + ' | after cancel ' + afterCancel
+  };
+});
+
+t0cCheck('T0-C: caller bookkeeping — an unshipped return interrupted after the stock write is origin «other»: complete is off and refused, cancel restores, the module\'s own retry completes ONE receipt with the record', () => {
+  const stand = () => {
+    const h = freshHarness();
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet([{ article: 'ART-PLAIN', quantity: 10, avgCost: 7, capitalization: 70 }]);
+    t0cSessions(h);
+    const writeOff = h.commitTransaction([{ article: 'ART-PLAIN', quantity: 10, price: 7 }], 'Расход', 'Ozon (MaxiStore)', '2026-09-16', 'tester', '2026-09-06T10:00:00Z', '');
+    h.setExternalShipmentsSheet([{ postingId: 'P-RET', cabinet: 'MaxiStore', status: 'processed', ozonStatus: 'REJECTED_AT_SUPPLY_WAREHOUSE',
+      items: [{ offerId: 'ART-PLAIN', barcode: 'OZN2', quantity: 10 }], transGroupInfo: JSON.stringify(writeOff.newTransactions.map(t => String(t.id))), orderNumber: '1368918716' }]);
+    return h;
+  };
+  const giveBack = (h, opId) => h.commitUnshippedReturn('P-RET', [{ offerId: 'ART-PLAIN', article: 'ART-PLAIN', shipped: 6 }], 'tester', opId);
+  const receipts = (h) => h.dumpTransSheet().filter(r => String(r['Тип']) === 'Приход');
+  const recordOf = (h) => String(h.dumpExternalShipments()[0]['ОтгруженоJSON']);
+
+  const h = stand();
+  const stockBefore = JSON.stringify(h.stockOf('ART-PLAIN'));
+  t0cFailHistory(h);
+  const err = t0cThrows(() => giveBack(h, 'op-ret-1'));
+  const pending = t0cPending(h);
+  const entry = Array.isArray(pending) && pending.length === 1 ? pending[0] : {};
+  const refused = t0cResolve(h, 'tok-admin', 'op-ret-1', 'complete');
+  const afterRefusal = h.stockOf('ART-PLAIN').quantity + ' receipts ' + receipts(h).length + ' record ' + (recordOf(h) !== '') + ' memo ' + (t0cMemoKeys(h).length > 0);
+  const cancelled = t0cResolve(h, 'tok-admin', 'op-ret-1', 'cancel');
+  const afterCancel = JSON.stringify(h.stockOf('ART-PLAIN'));
+  giveBack(h, 'op-ret-1');
+  let record = null;
+  try { record = JSON.parse(recordOf(h)); } catch (e) {}
+
+  const g = stand();
+  t0cFailHistory(g);
+  t0cThrows(() => giveBack(g, 'op-ret-2'));
+  const plainErr = t0cThrows(() => giveBack(g, 'op-ret-2'));
+  return {
+    conds: {
+      'the return failed at «История»': err !== '',
+      'pending: one entry, origin «other», stage history, canComplete false, canCancel true': entry.origin === 'other' && entry.stage === 'history' && entry.canComplete === false && entry.canCancel === true && entry.type === 'Приход',
+      'resolve «complete» is refused in Russian': t0cIsRussianError(refused),
+      'the refusal changed nothing: 4 pcs written, no receipt, no record, the memo stays': afterRefusal === '4 receipts 0 record false memo true',
+      'resolve «cancel» succeeded, the memo is gone and the stock is exactly as before the return': cancelled.status === 'success' && t0cMemoKeys(h).length === 0 && afterCancel === stockBefore,
+      'then the module\'s own retry with the SAME opId completes: one receipt, 4 pcs, the record with one return id': receipts(h).length === 1 && h.stockOf('ART-PLAIN').quantity === 4 && !!record && record.returnTxIds.length === 1 && t0cMemoKeys(h).length === 0,
+      'a plain retry without the cancel completes the same operation: 4 pcs (not 8), one receipt, record written': plainErr === '' && g.stockOf('ART-PLAIN').quantity === 4 && receipts(g).length === 1 && recordOf(g) !== '' && t0cMemoKeys(g).length === 0
+    },
+    note: 'pending ' + JSON.stringify(pending) + ' | refusal ' + JSON.stringify(refused).slice(0, 140) + ' | after refusal ' + afterRefusal + ' | before ' + stockBefore + ' after cancel ' + afterCancel + ' | plain retry: ' + (plainErr || 'ok')
+  };
+});
+
+t0cCheck('T0-C: dev mode — a memo saved in dev mode lives under pendingOpDev: and is invisible to live requests; a live resolve cannot touch it (and the other way round); live data untouched', () => {
+  const h = t0cStand();
+  h.setScriptProperty('test_dbSpreadsheetId', h.targetSpreadsheetId);
+  h.setTargetSheet('Остатки', [h.STOCK_HEADERS, ['A', 5, 100, 500, 0, 0]]);
+  h.setTargetSheet('Транзакции', [h.TRANS_HEADERS]);
+  const dev = (payload) => h.callDoPost(Object.assign({ sessionToken: 'tok-admin', devMode: true }, payload));
+  const live = (payload) => h.callDoPost(Object.assign({ sessionToken: 'tok-admin' }, payload));
+  const idsOf = (out) => ((out.data && out.data.pendingOperations) || []).map(p => p.opId);
+  const devCommit = () => dev({ action: 'commit', type: 'Расход', destination: 'Яндекс', deliveryDate: '2026-10-19', opId: 'op-dev', data: [{ article: 'A', quantity: 2, price: 100 }] });
+
+  t0cFailOnce(h.getTargetSheet('Транзакции'), (a) => a[0] > 1 && a[1] === 1);
+  const devFailed = devCommit();
+  t0cFailHistory(h);
+  const liveFailed = t0cBrowserCommit(h, 'op-live');
+  const devKeys = t0cKeysOf(h, 'op-dev', 'pendingOpDev:');
+  const strayDevKeys = t0cKeysOf(h, 'op-dev', 'pendingOp:');
+  const liveKeys = t0cKeysOf(h, 'op-live', 'pendingOp:');
+  const strayLiveKeys = t0cKeysOf(h, 'op-live', 'pendingOpDev:');
+
+  const liveList = idsOf(h.callDoPost({ action: 'getInitialData', sessionToken: 'tok-user', data: {} }));
+  const devList = idsOf(dev({ action: 'getInitialData', data: {} }));
+  const liveDismissDev = live({ action: 'resolvePendingOperation', data: { opId: 'op-dev', action: 'dismiss' } });
+  const liveCompleteDev = live({ action: 'resolvePendingOperation', data: { opId: 'op-dev', action: 'complete' } });
+  const devDismissLive = dev({ action: 'resolvePendingOperation', data: { opId: 'op-live', action: 'dismiss' } });
+  const devKeysAfter = t0cKeysOf(h, 'op-dev', 'pendingOpDev:').length;
+  const liveKeysAfter = t0cKeysOf(h, 'op-live', 'pendingOp:').length;
+  const liveStock = h.dumpStockSheet().rows.map(r => r[0] + ':' + r[1]).join();
+  const liveRows = h.dumpTransSheet().filter(r => String(r['OpID']) === 'op-dev').length;
+  const retried = devCommit();
+  const devStock = h.dumpTargetSheet('Остатки').slice(1).map(r => r[0] + ':' + r[1]).join();
+  const devRows = h.dumpTargetSheet('Транзакции').slice(1).filter(r => r.some(v => String(v) === 'op-dev')).length;
+  return {
+    conds: {
+      'both interrupted commits answered an error': devFailed.status === 'error' && liveFailed.status === 'error',
+      'the dev memo is under pendingOpDev:op-dev… and not under pendingOp:': devKeys.length > 0 && strayDevKeys.length === 0,
+      'the live memo is under pendingOp:op-live… and not under pendingOpDev:': liveKeys.length > 0 && strayLiveKeys.length === 0,
+      'a live getInitialData lists only the live operation': JSON.stringify(liveList) === '["op-live"]',
+      'a dev-mode getInitialData lists only the dev operation': JSON.stringify(devList) === '["op-dev"]',
+      'a live resolve (dismiss, complete) of the dev opId finds nothing and leaves the dev memo': liveDismissDev.status === 'error' && liveCompleteDev.status === 'error' && devKeysAfter === devKeys.length,
+      'a dev-mode resolve of the live opId finds nothing and leaves the live memo': devDismissLive.status === 'error' && liveKeysAfter === liveKeys.length,
+      'live data untouched by the dev operation: live stock is the live operation\'s 8, no live row with the dev opId': liveStock === 'A:8' && liveRows === 0,
+      'a dev-mode retry finishes the dev operation on the dev sheets: dev stock 3, one dev row, no dev memo, the live memo stays': retried.status === 'success' && devStock === 'A:3' && devRows === 1 && t0cKeysOf(h, 'op-dev', 'pendingOpDev:').length === 0 && t0cKeysOf(h, 'op-live', 'pendingOp:').length === liveKeys.length
+    },
+    note: 'dev keys ' + devKeys.length + ' (stray ' + strayDevKeys.length + '), live keys ' + liveKeys.length + ' (stray ' + strayLiveKeys.length + ') | live list ' + JSON.stringify(liveList) + ' dev list ' + JSON.stringify(devList)
+      + ' | live resolve of dev: ' + liveDismissDev.status + '/' + liveCompleteDev.status + ' | dev resolve of live: ' + devDismissLive.status + ' | live stock ' + liveStock + ' dev stock ' + devStock
+  };
+});
+
+t0cCheck('T0-C: phantom popup — while another request holds the script lock getInitialData lists only memos at least 7 minutes old; with the lock free it lists every memo', () => {
+  const h = t0cStand();
+  h.setNow('2026-10-22T10:00:00Z');
+  t0cFailHistory(h);
+  const failed = t0cBrowserCommit(h, 'op-ph');
+  const listed = (at, busy) => {
+    h.setNow(at);
+    h.setScriptLockBusy(busy);
+    const out = h.callDoPost({ action: 'getInitialData', sessionToken: 'tok-user', data: {} });
+    h.setScriptLockBusy(false);
+    return out.status === 'success' ? out.data.pendingOperations.map(p => p.opId) : 'error: ' + out.message;
+  };
+  const freeFresh = listed('2026-10-22T10:00:30Z', false);
+  const busyFresh = listed('2026-10-22T10:00:30Z', true);
+  const busySixFiftyNine = listed('2026-10-22T10:06:59Z', true);
+  const busySeven = listed('2026-10-22T10:07:00Z', true);
+  const busyEight = listed('2026-10-22T10:08:00Z', true);
+  const freeOld = listed('2026-10-22T10:30:00Z', false);
+  const same = (v, ids) => JSON.stringify(v) === JSON.stringify(ids);
+  return {
+    conds: {
+      'a memo exists to be listed': failed.status === 'error' && t0cMemoKeys(h).length > 0,
+      'lock free, memo 30 seconds old: listed': same(freeFresh, ['op-ph']),
+      'lock busy, memo 30 seconds old: NOT listed (it may be a commit still running)': same(busyFresh, []),
+      'lock busy, memo 6 min 59 s old: NOT listed': same(busySixFiftyNine, []),
+      'lock busy, memo exactly 7 min old: listed': same(busySeven, ['op-ph']),
+      'lock busy, memo 8 min old: listed': same(busyEight, ['op-ph']),
+      'lock free, memo 30 min old: listed': same(freeOld, ['op-ph'])
+    },
+    note: JSON.stringify({ freeFresh, busyFresh, busySixFiftyNine, busySeven, busyEight, freeOld })
+  };
+});
+
+// A healthy operation next to a damaged one: the damaged memo must not hide it, and the dismiss must not touch it.
+function t0cTwoStuckOperations(badNames) {
+  const h = t0cStand();
+  const names = badNames || ['B'];
+  h.setStockSheet(['A'].concat(names).map(a => ({ article: a, quantity: 10, avgCost: 100, capitalization: 1000 })));
+  t0cFailHistory(h);
+  t0cBrowserCommit(h, 'op-good');
+  t0cFailHistory(h);
+  t0cBrowserCommit(h, 'op-bad', { destination: 'Яндекс', data: names.map(a => ({ article: a, quantity: 2, price: 100 })) });
+  return h;
+}
+function t0cDamagedConds(h, label) {
+  const direct = (function () { try { return JSON.parse(JSON.stringify(h.context.getPendingOperations())); } catch (e) { return 'threw: ' + e.message; } })();
+  const initial = h.callDoPost({ action: 'getInitialData', sessionToken: 'tok-user', data: {} });
+  const fromInitial = initial.status === 'success' ? initial.data.pendingOperations : null;
+  const pick = (list, id) => (Array.isArray(list) ? list.filter(p => p.opId === id)[0] : undefined);
+  const bad = pick(direct, 'op-bad');
+  const good = pick(direct, 'op-good');
+  const badKeys = t0cKeysOf(h, 'op-bad').length;
+  const completeTry = t0cResolve(h, 'tok-admin', 'op-bad', 'complete');
+  const keysAfterComplete = t0cKeysOf(h, 'op-bad').length;
+  const goodKeys = t0cKeysOf(h, 'op-good').length;
+  const dismissed = t0cResolve(h, 'tok-admin', 'op-bad', 'dismiss');
+  const conds = {};
+  conds[label + ': getPendingOperations does not throw']  = Array.isArray(direct);
+  conds[label + ': getInitialData answers success and carries the list'] = Array.isArray(fromInitial) && !!pick(fromInitial, 'op-bad');
+  conds[label + ': the damaged memo is listed: stage conflict, canComplete false, canCancel false, damaged true, articles an array'] = !!bad && bad.stage === 'conflict'
+    && bad.canComplete === false && bad.canCancel === false && bad.damaged === true && Array.isArray(bad.articles);
+  conds[label + ': the healthy operation is still listed, not damaged'] = !!good && good.stage === 'history' && good.canComplete === true && good.damaged !== true;
+  conds[label + ': resolve «complete» on the damaged memo is refused and keeps its keys'] = completeTry.status === 'error' && keysAfterComplete === badKeys && badKeys > 0;
+  conds[label + ': resolve «dismiss» succeeds and removes every key of the damaged memo, the healthy one keeps its own'] = dismissed.status === 'success'
+    && t0cKeysOf(h, 'op-bad').length === 0 && t0cKeysOf(h, 'op-good').length === goodKeys && goodKeys > 0;
+  return { conds, note: label + ': ' + JSON.stringify(direct).slice(0, 300) + ' | complete: ' + JSON.stringify(completeTry).slice(0, 100) + ' | dismiss: ' + JSON.stringify(dismissed).slice(0, 100) };
+}
+
+t0cCheck('T0-C: a damaged memo (part 0 is not JSON) never makes the list throw: listed «conflict» + damaged, nothing can be pressed but dismiss, which removes all its keys', () => {
+  const h = t0cTwoStuckOperations();
+  h.context.PropertiesService.getScriptProperties().setProperty('pendingOp:op-bad:0', '{"opId":"op-bad","items":[{"article":"B"');
+  return t0cDamagedConds(h, 'part 0 broken');
+});
+
+t0cCheck('T0-C: a damaged memo (a middle part is missing) never makes the list throw: listed «conflict» + damaged, dismiss removes all its remaining keys', () => {
+  // a long memo has several parts: op-bad is a 200-article operation
+  const names = Array.from({ length: 200 }, (_, i) => 'Артикул_' + String(i + 1).padStart(3, '0'));
+  const h = t0cTwoStuckOperations(names);
+  const parts = t0cKeysOf(h, 'op-bad');
+  h.context.PropertiesService.getScriptProperties().deleteProperty('pendingOp:op-bad:1');
+  const result = t0cDamagedConds(h, 'part 1 missing');
+  result.conds['the memo really had several parts before the damage'] = parts.length >= 3;
+  return result;
+});
+
+
+// ----- Final pass: checks added for mutants that survived on the real C1 code -----
+t0cCheck('T0-C: a stock that changed only in COST since the failure (same quantity as «after») is a conflict: the retry and «cancel» are refused and the correction is not overwritten', () => {
+  const { h } = t0cAfterHistoryFailure('op-cost');
+  // 8 / 800 after the interrupted expense; a cost correction (+50 ₽, no quantity change) then moves the capitalization to 850
+  h.context.commitCostCorrection('A', 50, 'Корректировка: тест', '', 'tester');
+  const stockAfterCorrection = t0cStock(h);
+  const pending = t0cPending(h);
+  const retryErr = t0cThrows(() => t0cCommit(h, 'op-cost'));
+  const cancelled = t0cResolve(h, 'tok-admin', 'op-cost', 'cancel');
+  // a correction of one kopeck: quantity AND average cost (to two decimals) stay, only the capitalization differs
+  const { h: g } = t0cAfterHistoryFailure('op-kop');
+  g.context.commitCostCorrection('A', 0.01, 'Корректировка: тест', '', 'tester');
+  const kopeckStock = t0cStock(g);
+  const kopeckPending = t0cPending(g);
+  const kopeckCancel = t0cResolve(g, 'tok-admin', 'op-kop', 'cancel');
+  return {
+    conds: {
+      'a one-kopeck correction is a conflict too (8/800.01: same quantity, same average, other capitalization), cancel is refused and leaves it': kopeckStock === '8/800.01'
+        && Array.isArray(kopeckPending) && kopeckPending.length === 1 && kopeckPending[0].stage === 'conflict'
+        && kopeckCancel.status === 'error' && t0cStock(g) === '8/800.01',
+      'premise: the correction moved the capitalization, not the quantity': stockAfterCorrection === '8/850',
+      'pending: stage conflict, canComplete false, canCancel false': Array.isArray(pending) && pending.length === 1 && pending[0].stage === 'conflict' && pending[0].canComplete === false && pending[0].canCancel === false,
+      'the retry is refused in Russian and writes no history row': retryErr !== '' && /[А-Яа-яЁё]/.test(retryErr) && t0cRows(h, 'op-cost').length === 0,
+      '«cancel» is refused and does NOT put the stock back over the correction (still 8/850)': cancelled.status === 'error' && t0cStock(h) === '8/850',
+      'the memo stays': t0cMemoKeys(h).some(k => k.indexOf('pendingOp:op-cost') === 0)
+    },
+    note: 'stock ' + stockAfterCorrection + ' -> ' + t0cStock(h) + ' | pending ' + JSON.stringify(pending) + ' | retry: ' + retryErr + ' | cancel ' + JSON.stringify(cancelled).slice(0, 120)
+  };
+});
+
+t0cCheck('T0-C: the origin and the postingIds survive a resolve «complete» that stops at the journal: the second «complete» finishes it and the posting stays linked', () => {
+  const h = t0cStand();
+  h.setExternalShipmentsSheet([{ postingId: 'P-100', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 2 }] }]);
+  t0cFailStock(h);
+  const failed = t0cBrowserCommit(h, 'op-keep', { postingIds: ['P-100'] });   // stage «stock»: nothing was written
+  t0cFailJournal(h);
+  const first = t0cResolve(h, 'tok-admin', 'op-keep', 'complete');            // stock + history written, the journal fails
+  const pending = t0cPending(h);
+  const memoText = t0cMemoKeys(h).map(k => String(t0cMemo(h)[k])).join('');
+  const second = t0cResolve(h, 'tok-admin', 'op-keep', 'complete');           // completes the journal
+  return {
+    conds: {
+      'the commit action failed at the stock write': failed.status === 'error',
+      'the first complete answered success with a costJournalError': first.status === 'success' && !!(first.data && first.data.costJournalError),
+      'the posting is linked by the first complete': h.dumpExternalShipments()[0]['Статус'] === 'processed',
+      'the memo is still the commit action\'s: origin «commit», stage journal, canComplete true, postingIds kept': Array.isArray(pending) && pending.length === 1 && pending[0].origin === 'commit'
+        && pending[0].stage === 'journal' && pending[0].canComplete === true && memoText.indexOf('P-100') !== -1,
+      'the second complete answered success, one journal row, one history row, 8/800, memo gone': second.status === 'success' && t0cJournal(h, 'op-keep').length === 1
+        && t0cRows(h, 'op-keep').length === 1 && t0cStock(h) === '8/800' && t0cMemoKeys(h).length === 0
+    },
+    note: 'first ' + JSON.stringify(first).slice(0, 160) + ' | pending ' + JSON.stringify(pending) + ' | second ' + JSON.stringify(second).slice(0, 100)
+  };
+});
+
+t0cCheck('T0-C: a memo save cut short (a Script Property write fails part-way) leaves no memo at all: nothing listed, the stock untouched, the retry runs normally and leaves no orphan keys', () => {
+  const h = t0cStand();
+  const names = Array.from({ length: 200 }, (_, i) => 'Артикул_' + String(i + 1).padStart(3, '0'));
+  h.setStockSheet(names.map(a => ({ article: a, quantity: 10, avgCost: 100, capitalization: 1000 })));
+  const items = names.map(a => ({ article: a, quantity: 2, price: 100 }));
+  const service = h.context.PropertiesService;
+  const realGet = service.getScriptProperties;
+  let memoWrites = 0;
+  service.getScriptProperties = () => {
+    const props = realGet();
+    const setProperty = props.setProperty;
+    return Object.assign({}, props, { setProperty: (key, value) => {
+      if (String(key).indexOf('pendingOp:') === 0 && ++memoWrites === 2) throw new Error('Injected property failure');
+      return setProperty(key, value);
+    } });
+  };
+  const err = t0cThrows(() => t0cCommit(h, 'op-cut', items, 'Яндекс'));
+  service.getScriptProperties = realGet;
+  const untouched = names.every(a => t0cStock(h, a) === '10/1000');
+  const listed = t0cPending(h);
+  const retryErr = t0cThrows(() => t0cCommit(h, 'op-cut', items, 'Яндекс'));
+  return {
+    conds: {
+      'the commit failed on the second memo write': err !== '' && memoWrites >= 2,
+      'no stock row was touched': untouched,
+      'no operation is listed (an unfinished save is no memo, and no damaged one either)': Array.isArray(listed) && listed.length === 0,
+      'the retry did not throw': retryErr === '',
+      '200 history rows, every article 8/800': t0cRows(h, 'op-cut').length === 200 && names.every(a => t0cStock(h, a) === '8/800'),
+      'no memo key left, orphans included': t0cMemoKeys(h).length === 0
+    },
+    note: 'failure: ' + err + ' | listed ' + JSON.stringify(listed) + ' | retry: ' + (retryErr || 'ok')
+  };
+});
+
+
+// ----- Code-review findings on C1 (written test-first; the coder builds the fixes next) -----
+//  1. The stage was inferred from stock values alone. The memo now records that the stock write actually happened (a flag
+//     written right after flushStockRows succeeds). Without the flag the stage is 'stock' only when the stock equals «before»,
+//     otherwise 'conflict'; with the flag it is 'history' only when the stock equals «after», otherwise 'conflict'.
+//  2. «История» rows present but no journal applies (a «Приход», a «Расход» to a non-Ozon destination, skipOzonCost) is stage
+//     'done', not 'journal': origin 'commit' -> canComplete true (the idempotent commit path + the posting link, then the memo
+//     goes); origin 'other' -> canComplete false, canCancel false (dismiss only). 'journal' only when the journal applies and
+//     its row of the opId is missing.
+//  3. A damaged memo is not listed by getInitialData while the script lock is busy (it has no age), only with the lock free.
+function t0cFailOnceAfterWrite(sheet, matches) {
+  const original = sheet.getRange.bind(sheet);
+  let armed = true;
+  sheet.getRange = (...args) => {
+    const range = original(...args);
+    const setValues = range.setValues.bind(range);
+    range.setValues = (rows) => {
+      if (armed && matches(args)) { armed = false; setValues(rows); throw new Error('Injected failure after the write'); }
+      return setValues(rows);
+    };
+    return range;
+  };
+}
+// The first deleteProperty of a memo key AFTER the operation's «История» rows exist throws: the commit has written everything
+// and dies on its very last step. (An earlier delete — a memo rewritten to set a flag, say — is let through, so the injection
+// does not depend on how the memo is maintained.)
+function t0cFailMemoDeleteOnce(h) {
+  const service = h.context.PropertiesService;
+  const realGet = service.getScriptProperties;
+  let armed = true;
+  service.getScriptProperties = () => {
+    const props = realGet();
+    const deleteProperty = props.deleteProperty;
+    return Object.assign({}, props, { deleteProperty: (key) => {
+      const text = String(key);
+      if (armed && text.indexOf('pendingOp:') === 0) {
+        const opId = text.slice('pendingOp:'.length).replace(/:\d+$/, '');
+        if (h.dumpTransSheet().some(r => String(r['OpID']) === opId)) { armed = false; throw new Error('Injected memo delete failure'); }
+      }
+      return deleteProperty(key);
+    } });
+  };
+}
+const t0cStageOf = (h, opId) => { const p = t0cPending(h); const e = Array.isArray(p) ? p.filter(x => x.opId === opId)[0] : undefined; return e ? e.stage + (e.canComplete ? '+complete' : '') + (e.canCancel ? '+cancel' : '') : 'not listed'; };
+const t0cAllExpenseRows = (h) => h.getTransactions().rows.filter(t => t.type === 'Расход');
+
+t0cCheck('T0-C: review 1 — the same expense entered again under a NEW opId after a failed stock write: the first memo is a conflict (never «history»); retry, complete and cancel are refused and the legitimate deduction stays', () => {
+  // op-A: the stock write failed (10/1000, memo stage «stock»); the user enters the same expense again as op-B: 8/800.
+  const scenario = () => {
+    const h = t0cStand();
+    t0cFailStock(h);
+    const first = t0cBrowserCommit(h, 'op-A');
+    const premise = t0cStageOf(h, 'op-A') + ' ' + t0cStock(h);
+    const second = t0cBrowserCommit(h, 'op-B');
+    return { h, first, second, premise };
+  };
+  const base = scenario();
+  const pending = t0cPending(base.h);
+  const entry = Array.isArray(pending) ? pending.filter(p => p.opId === 'op-A')[0] : undefined;
+  const untouched = (h) => t0cStock(h) === '8/800' && t0cAllExpenseRows(h).length === 1 && t0cAllExpenseRows(h)[0].opId === 'op-B'
+    && h.dumpOzonCost().length === 1 && h.dumpOzonCost()[0]['OpID'] === 'op-B' && t0cMemoKeys(h).some(k => k.indexOf('pendingOp:op-A') === 0);
+
+  const r = scenario();
+  const retry = t0cBrowserCommit(r.h, 'op-A');
+  const c = scenario();
+  const complete = t0cResolve(c.h, 'tok-admin', 'op-A', 'complete');
+  const d = scenario();
+  const cancel = t0cResolve(d.h, 'tok-admin', 'op-A', 'cancel');
+  const notUnknown = (out) => out.status === 'error' && !/Unknown action/.test(String(out.message));
+  return {
+    conds: {
+      'premise: after the failed stock write the first memo is stage «stock» and the stock is 10/1000': base.premise === 'stock+complete+cancel 10/1000',
+      'premise: the second entry succeeded, stock 8/800': base.second.status === 'success' && t0cStock(base.h) === '8/800',
+      'op-A is listed as stage «conflict», canComplete false, canCancel false': !!entry && entry.stage === 'conflict' && entry.canComplete === false && entry.canCancel === false,
+      'only op-A is listed (the new operation left no memo)': Array.isArray(pending) && pending.length === 1,
+      'a retry of op-A through the commit action is refused, and nothing changed': notUnknown(retry) && untouched(r.h),
+      'resolve «complete» is refused, and nothing changed (no second «История» row, no second journal row)': notUnknown(complete) && untouched(c.h),
+      'resolve «cancel» is refused and does NOT put 10/1000 back over the new operation': notUnknown(cancel) && untouched(d.h)
+    },
+    note: 'op-A: ' + t0cStageOf(base.h, 'op-A') + ' | retry ' + retry.status + ' stock ' + t0cStock(r.h) + ' rows ' + t0cAllExpenseRows(r.h).length
+      + ' | complete ' + complete.status + ' stock ' + t0cStock(c.h) + ' rows ' + t0cAllExpenseRows(c.h).length + ' journal ' + c.h.dumpOzonCost().length
+      + ' | cancel ' + cancel.status + ' stock ' + t0cStock(d.h) + ' rows ' + t0cAllExpenseRows(d.h).length
+  };
+});
+
+t0cCheck('T0-C: review 1 — the stock-written flag decides the stage: without it only «before» is «stock» (a write that persisted and then failed is a conflict), with it only «after» is «history» (a stock put back to «before» is a conflict)', () => {
+  // (i) the stock write persisted and the request died before the flag could be written
+  const a = t0cStand();
+  t0cFailOnceAfterWrite(a.getRegistrySheet('Остатки'), (args) => args[0] > 1);
+  const aFailed = t0cBrowserCommit(a, 'op-flag-a');
+  const aStage = t0cStageOf(a, 'op-flag-a');
+  const aRetry = t0cBrowserCommit(a, 'op-flag-a');
+  // (ii) the flag is there (the «История» write failed) and the stock was then put back to «before» by hand
+  const b = t0cStand();
+  t0cFailHistory(b);
+  const bFailed = t0cBrowserCommit(b, 'op-flag-b');
+  const bStageBefore = t0cStageOf(b, 'op-flag-b');
+  b.getRegistrySheet('Остатки').getRange(2, 2, 1, 3).setValues([[10, 100, 1000]]);
+  const bStage = t0cStageOf(b, 'op-flag-b');
+  const bCancel = t0cResolve(b, 'tok-admin', 'op-flag-b', 'cancel');
+  return {
+    conds: {
+      '(i) the commit failed with the stock already written (8/800)': aFailed.status === 'error' && t0cStock(a) === '8/800',
+      '(i) no flag, stock = «after»: stage conflict, nothing can be pressed': aStage === 'conflict',
+      '(i) the retry is refused and writes nothing (stock stays 8/800, no history row)': aRetry.status === 'error' && t0cStock(a) === '8/800' && t0cAllExpenseRows(a).length === 0,
+      '(ii) premise: the flag is there, stock = «after»: stage history, both buttons': bFailed.status === 'error' && bStageBefore === 'history+complete+cancel',
+      '(ii) flag set, stock put back to «before»: stage conflict (not «stock»)': bStage === 'conflict',
+      '(ii) cancel is refused': bCancel.status === 'error' && !/Unknown action/.test(String(bCancel.message))
+    },
+    note: '(i) ' + aStage + ' retry ' + aRetry.status + ' ' + t0cStock(a) + ' | (ii) ' + bStageBefore + ' -> ' + bStage + ' | cancel ' + JSON.stringify(bCancel).slice(0, 100)
+  };
+});
+
+t0cCheck('T0-C: review 2 — origin «commit», rows in «История» and nothing missing (memo delete failed once): stage «done», complete finishes it with the posting link and nothing duplicated (non-Ozon and Ozon with its journal row)', () => {
+  const posting = { postingId: 'P-100', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 2 }] };
+  // (a) a shipment to a non-Ozon destination: no journal applies
+  const a = t0cStand();
+  a.setExternalShipmentsSheet([posting]);
+  t0cFailMemoDeleteOnce(a);
+  const aFailed = t0cBrowserCommit(a, 'op-done-a', { destination: 'Яндекс', postingIds: ['P-100'] });
+  const aPending = t0cPending(a);
+  const aEntry = Array.isArray(aPending) ? aPending.filter(p => p.opId === 'op-done-a')[0] : undefined;
+  const aPostingBefore = a.dumpExternalShipments()[0]['Статус'];
+  const aComplete = t0cResolve(a, 'tok-admin', 'op-done-a', 'complete');
+  // (b) a shipment to Ozon whose journal row was written: the journal is NOT missing
+  const b = t0cStand();
+  t0cFailMemoDeleteOnce(b);
+  const bFailed = t0cBrowserCommit(b, 'op-done-b');
+  const bPending = t0cPending(b);
+  const bEntry = Array.isArray(bPending) ? bPending.filter(p => p.opId === 'op-done-b')[0] : undefined;
+  const bComplete = t0cResolve(b, 'tok-admin', 'op-done-b', 'complete');
+  return {
+    conds: {
+      '(a) the commit died on the memo delete, after every write': aFailed.status === 'error' && t0cRows(a, 'op-done-a').length === 1 && t0cStock(a) === '8/800' && aPostingBefore === 'new',
+      '(a) stage «done», origin commit, canComplete true, canCancel false': !!aEntry && aEntry.stage === 'done' && aEntry.origin === 'commit' && aEntry.canComplete === true && aEntry.canCancel === false,
+      '(a) complete answered success, linked the posting, left one row, 8/800, no journal row, no memo': aComplete.status === 'success' && a.dumpExternalShipments()[0]['Статус'] === 'processed'
+        && t0cRows(a, 'op-done-a').length === 1 && t0cStock(a) === '8/800' && a.dumpOzonCost().length === 0 && t0cMemoKeys(a).length === 0 && t0cNoPending(a),
+      '(b) the commit died on the memo delete, the journal row is there': bFailed.status === 'error' && t0cRows(b, 'op-done-b').length === 1 && t0cJournal(b, 'op-done-b').length === 1,
+      '(b) stage «done» (not «journal»), origin commit, canComplete true, canCancel false': !!bEntry && bEntry.stage === 'done' && bEntry.origin === 'commit' && bEntry.canComplete === true && bEntry.canCancel === false,
+      '(b) complete answered success, still one history row and one journal row, 8/800, no memo': bComplete.status === 'success' && t0cRows(b, 'op-done-b').length === 1
+        && t0cJournal(b, 'op-done-b').length === 1 && t0cStock(b) === '8/800' && t0cMemoKeys(b).length === 0
+    },
+    note: '(a) pending ' + JSON.stringify(aPending) + ' | (b) pending ' + JSON.stringify(bPending)
+  };
+});
+
+t0cCheck('T0-C: review 2 — origin «other», a «Приход» fully written (memo delete failed once): stage «done», no button but «dismiss»; complete is refused; the module\'s own retry and the dismiss both leave one receipt', () => {
+  const receipt = (h) => h.commitTransaction([{ article: 'A', quantity: 3, price: 100 }], 'Приход', 'Поставка', '', 'tester', '2026-10-19T07:00:00Z', 'op-rcpt', null);
+  const receipts = (h) => h.dumpTransSheet().filter(r => String(r['Тип']) === 'Приход' && String(r['OpID']) === 'op-rcpt');
+  const a = t0cStand();
+  t0cFailMemoDeleteOnce(a);
+  const err = t0cThrows(() => receipt(a));
+  const pending = t0cPending(a);
+  const entry = Array.isArray(pending) ? pending.filter(p => p.opId === 'op-rcpt')[0] : undefined;
+  const complete = t0cResolve(a, 'tok-admin', 'op-rcpt', 'complete');
+  const afterRefusal = t0cStock(a) + ' receipts ' + receipts(a).length + ' memo ' + (t0cMemoKeys(a).length > 0);
+  const retryErr = t0cThrows(() => receipt(a));
+  // the other way out: the admin dismisses it
+  const b = t0cStand();
+  t0cFailMemoDeleteOnce(b);
+  t0cThrows(() => receipt(b));
+  const dismissed = t0cResolve(b, 'tok-admin', 'op-rcpt', 'dismiss');
+  return {
+    conds: {
+      'the receipt died on the memo delete, after every write (13/1300, one row)': err !== '' && afterRefusal === '13/1300 receipts 1 memo true',
+      'stage «done», origin other, canComplete false, canCancel false': !!entry && entry.stage === 'done' && entry.origin === 'other' && entry.canComplete === false && entry.canCancel === false,
+      'resolve «complete» is refused (not an unknown action)': complete.status === 'error' && !/Unknown action/.test(String(complete.message)),
+      'the module\'s own retry with the same opId completes without a second receipt: 13/1300, one row, memo gone': retryErr === '' && t0cStock(a) === '13/1300' && receipts(a).length === 1 && t0cMemoKeys(a).length === 0,
+      'dismiss succeeds, removes the memo and leaves the receipt (13/1300, one row)': dismissed.status === 'success' && t0cMemoKeys(b).length === 0 && t0cStock(b) === '13/1300' && receipts(b).length === 1
+    },
+    note: 'pending ' + JSON.stringify(pending) + ' | after refusal ' + afterRefusal + ' | complete ' + JSON.stringify(complete).slice(0, 120) + ' | retry ' + (retryErr || 'ok')
+  };
+});
+
+t0cCheck('T0-C: review 3 — a damaged memo is listed by getInitialData only while the script lock is free (it has no age to judge by); a healthy old memo is listed either way, getPendingOperations() lists both', () => {
+  const h = t0cStand();
+  h.setNow('2026-10-22T10:00:00Z');
+  t0cFailHistory(h);
+  t0cBrowserCommit(h, 'op-old');
+  h.context.PropertiesService.getScriptProperties().setProperty('pendingOp:op-dmg:0', 'not a memo {');
+  const listed = (at, busy) => {
+    h.setNow(at);
+    h.setScriptLockBusy(busy);
+    const out = h.callDoPost({ action: 'getInitialData', sessionToken: 'tok-user', data: {} });
+    h.setScriptLockBusy(false);
+    return out.status === 'success' ? out.data.pendingOperations.map(p => p.opId).sort() : 'error: ' + out.message;
+  };
+  const same = (v, ids) => JSON.stringify(v) === JSON.stringify(ids);
+  const freeFresh = listed('2026-10-22T10:00:30Z', false);
+  const busyFresh = listed('2026-10-22T10:00:30Z', true);
+  const busyOld = listed('2026-10-22T10:08:00Z', true);
+  const freeOld = listed('2026-10-22T10:08:00Z', false);
+  const direct = t0cPending(h);
+  return {
+    conds: {
+      'lock free: both are listed': same(freeFresh, ['op-dmg', 'op-old']) && same(freeOld, ['op-dmg', 'op-old']),
+      'lock busy, everything fresh: nothing is listed, the damaged memo included': same(busyFresh, []),
+      'lock busy, the healthy memo 8 minutes old: only it is listed, the damaged one is not': same(busyOld, ['op-old']),
+      'getPendingOperations() without an age lists both': Array.isArray(direct) && direct.map(p => p.opId).sort().join() === 'op-dmg,op-old'
+    },
+    note: JSON.stringify({ freeFresh, busyFresh, busyOld, freeOld })
+  };
+});
+
+// Found by a mutation of the review fix: finishing stage «done» must not run the cost-journal code at all (the append
+// would only find its row and "revive" it in place, a rewrite nobody asked for).
+t0cCheck('T0-C: stage «done» is finished without touching the cost journal — neither the append nor the resync runs (resolve «complete» and the commit retry), the journal sheet stays as it was; stage «journal» does run it', () => {
+  const spy = (h) => {
+    const calls = [];
+    ['appendOzonCostForShipment', 'resyncOzonCostForOps', 'reissueOzonCostRows'].forEach(name => {
+      const real = h.context[name];
+      h.context[name] = function () { calls.push(name); return real.apply(this, arguments); };
+    });
+    return calls;
+  };
+  const doneStand = (opId) => {
+    const h = t0cStand();
+    t0cFailMemoDeleteOnce(h);
+    t0cBrowserCommit(h, opId);                       // every write done, the memo delete died: stage «done»
+    return h;
+  };
+  const a = doneStand('op-nj-a');
+  const aStage = t0cStageOf(a, 'op-nj-a');
+  const aJournalBefore = JSON.stringify(a.dumpOzonCostFull());
+  const aCalls = spy(a);
+  const aResolve = t0cResolve(a, 'tok-admin', 'op-nj-a', 'complete');
+  const b = doneStand('op-nj-b');
+  const bJournalBefore = JSON.stringify(b.dumpOzonCostFull());
+  const bCalls = spy(b);
+  const bRetry = t0cBrowserCommit(b, 'op-nj-b');
+  // the control: a real stage «journal» does run the journal code
+  const c = t0cStand();
+  t0cFailJournal(c);
+  t0cBrowserCommit(c, 'op-nj-c');
+  const cCalls = spy(c);
+  const cResolve = t0cResolve(c, 'tok-admin', 'op-nj-c', 'complete');
+  return {
+    conds: {
+      'premise: the stand is at stage «done» (Ozon, journal row present)': aStage.indexOf('done') === 0 && a.dumpOzonCost().length === 1,
+      'resolve «complete» on «done»: success, no journal function called, journal sheet unchanged, memo gone': aResolve.status === 'success' && aCalls.length === 0
+        && JSON.stringify(a.dumpOzonCostFull()) === aJournalBefore && t0cMemoKeys(a).length === 0,
+      'the commit retry on «done»: no journal function called, journal sheet unchanged, memo gone': bRetry.status === 'success' && bCalls.length === 0
+        && JSON.stringify(b.dumpOzonCostFull()) === bJournalBefore && t0cMemoKeys(b).length === 0,
+      'control: completing a real stage «journal» does call the journal append and writes its row': cResolve.status === 'success' && cCalls.indexOf('appendOzonCostForShipment') !== -1 && t0cJournal(c, 'op-nj-c').length === 1
+    },
+    note: 'done calls: resolve [' + aCalls.join() + '] retry [' + bCalls.join() + '] | journal control [' + cCalls.join() + ']'
+  };
+});
+
+// ----- Spec pins the review found missing (guards: they may already pass) -----
+t0cCheck('T0-B: a service sum not divisible by its quantity — «x3 (100.01₽)» keeps 100.01 through parse, total and rebuild, and through a «Вся отгрузка» re-save (newTotal 100.01, text unchanged, nothing changed)', () => {
+  const h = freshHarness();
+  const text = 'Ozon (MaxiStore) [Услуги: Packing x3 (100.01₽)]';
+  const e = h.context.parseShipmentExtrasGs(text);
+  const parsedTotal = h.context.extrasTotalGs(e);
+  const rebuilt = h.context.buildDestinationGs(e, e, 1);
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+  h.commitTransaction([{ article: 'A', quantity: 1, price: 100 }], 'Расход', text, '2026-10-19', 'tester', '2026-10-19T07:00:00Z', 't0b-100-01', null);
+  const row = h.getTransactions().rows[0];
+  const stored = h.context.parseShipmentExtrasGs(row.destination).services;
+  const res = h.updateShipmentExtras({ id: row.id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0, services: stored }, 'tester');
+  const after = h.getTransactions().rows[0];
+  return {
+    conds: {
+      'parse + extrasTotalGs give 100.01': parsedTotal === 100.01,
+      'buildDestinationGs gives the same text back': rebuilt === text,
+      'the commit priced the piece at 200.01': row.price === 200.01 && row.total === 200.01,
+      'the re-save from the stored entries: newTotal 100.01': res.newTotal === 100.01,
+      'the re-save changed nothing: text unchanged, 0 rows changed, total 200.01': after.destination === text && res.changedRows === 0 && after.total === 200.01
+    },
+    note: parsedTotal + ' | ' + rebuilt + ' | newTotal ' + res.newTotal + ' changed ' + res.changedRows + ' ' + after.destination
+  };
+});
+
+t0cCheck('T0-B: the ticket\'s original example on the remaining editor — A 1 @ 100 + B 1 @ 900, «Вся отгрузка» adds one service of 100: rows 150 / 950 (split by pieces), stock and write-off cost unchanged', () => {
+  const h = freshHarness();
+  h.ensureTransSheet();
+  h.ensureArchiveSheet();
+  h.setOzonCostSheet([]);
+  h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }, { article: 'B', quantity: 10, avgCost: 900, capitalization: 9000 }]);
+  h.commitTransaction([{ article: 'A', quantity: 1, price: 100 }, { article: 'B', quantity: 1, price: 900 }], 'Расход', 'Яндекс', '2026-10-19', 'tester', '2026-10-19T07:00:00Z', 'ticket-example', null);
+  const rows = () => h.getTransactions().rows.filter(t => t.type === 'Расход').sort((x, y) => x.article.localeCompare(y.article));
+  const before = rows().map(t => t.article + ':' + t.total).join(' ');
+  const stockBefore = JSON.stringify([h.stockOf('A'), h.stockOf('B')]);
+  const res = h.updateShipmentExtras({ id: rows()[0].id, packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0,
+    services: [{ name: 'Packing', quantity: 1, unitCost: 100 }] }, 'tester');
+  const after = rows();
+  return {
+    conds: {
+      'premise: the rows were 100 / 900': before === 'A:100 B:900',
+      'newTotal 100 and the text carries the service': res.newTotal === 100 && after[0].destination.indexOf('Packing x1 (100₽)') !== -1,
+      'rows are 150 / 950, not 210 / 1090': after.map(t => t.article + ':' + t.total).join(' ') === 'A:150 B:950',
+      'write-off cost and stock unchanged': after.map(t => t.writeOffCost).join() === '100,900' && JSON.stringify([h.stockOf('A'), h.stockOf('B')]) === stockBefore
+    },
+    note: before + ' -> ' + after.map(t => t.article + ':' + t.total).join(' ') + ' newTotal ' + res.newTotal
+  };
+});
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

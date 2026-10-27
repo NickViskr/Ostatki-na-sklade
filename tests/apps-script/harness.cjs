@@ -334,7 +334,10 @@ const sandbox = {
     getScriptProperties: () => ({
       getProperty: (key) => (Object.prototype.hasOwnProperty.call(scriptProperties, key) ? scriptProperties[key] : null),
       setProperty: (key, value) => { scriptProperties[key] = String(value); },
-      deleteProperty: (key) => { delete scriptProperties[key]; }
+      deleteProperty: (key) => { delete scriptProperties[key]; },
+      // Item 97 T0-C: as Apps Script has them — the memo of an interrupted operation is found by its key prefix.
+      getKeys: () => Object.keys(scriptProperties),
+      getProperties: () => Object.assign({}, scriptProperties)
     })
   },
   SpreadsheetApp: {

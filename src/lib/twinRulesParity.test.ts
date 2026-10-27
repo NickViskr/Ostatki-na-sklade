@@ -80,8 +80,13 @@ function servicesTag(r: Rnd, label: string): string {
   const entries = Array.from({ length: r.int(1, 3) }, () => {
     const name = r.pick(names);
     const q = r.int(1, 8);
+    // Item 97 T0-B (96.13): a sum with kopecks («x3 (100.01₽)», «(150.50₽)») as well as whole roubles.
+    const kopecks = r.chance(0.3);
+    const fraction = kopecks ? '.' + String(r.int(1, 99)).padStart(2, '0') : '';
     // A total that does not divide by the quantity («x3 (100₽)» → 33,33 ₽ a piece) as well.
-    return r.chance(0.7) ? `${name} x${q} (${r.chance(0.5) ? q * r.int(10, 300) : r.int(10, 900)}₽)` : `${name} (${r.int(10, 900)}₽)`;
+    return r.chance(0.7)
+      ? `${name} x${q} (${(r.chance(0.5) ? q * r.int(10, 300) : r.int(10, 900)) + fraction}₽)`
+      : `${name} (${r.int(10, 900) + fraction}₽)`;
   });
   return `${label}: ${entries.join(', ')}`;
 }
@@ -107,7 +112,10 @@ const EXTRAS_CASES = [
   'Клиент [прочее: 120₽ | Упаковка: 80₽]',
   'Клиент [Доп. услуги: Маркировка x2 (40₽)]',
   'Без хвоста',
-  ''
+  '',
+  // Item 97 T0-B: sums with kopecks, and an old whole-rouble sum that does not divide by its quantity.
+  'Ozon [Услуги: Packing x3 (100.01₽), Box (150.50₽)]',
+  'Ozon [Услуги: Packing x3 (100₽)]'
 ];
 
 const destinationTwins: Twin<string>[] = [
@@ -262,15 +270,50 @@ interface EditInput {
   packaging: { mode: 'unit' | 'batch'; value: number };
   other: { mode: 'unit' | 'batch'; value: number };
   services: { name: string; quantity: number; unitCost: number }[];
+  /** Item 97 T0-B: rows written by the code before the split — each rounded its own share. */
+  oldRounding: boolean;
 }
+const roundKop = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 function shipmentOnStand(input: EditInput) {
   const h = freshStand();
   h.ensureTransSheet();
   h.ensureArchiveSheet();
   h.setStockSheet(['A', 'B', 'C'].map((a, i) => ({ article: a, quantity: 500, avgCost: 600 + i * 17.35, capitalization: 500 * (600 + i * 17.35) })));
   h.setOzonCostSheet([]);
+  // Two virtual kits for the kit hand cases: their main rows carry the goods of their components.
+  h.setKitSheet([
+    { kitSku: 'KITX', componentSku: 'A', quantity: 2, kitType: 'virtual' },
+    { kitSku: 'KITX', componentSku: 'B', quantity: 1, kitType: 'virtual' },
+    { kitSku: 'KITY', componentSku: 'C', quantity: 3, kitType: 'virtual' }
+  ]);
   // No explicit additional costs: the commit reads them from the text, as a hand-made row does.
   h.commitTransaction(input.lines.map((l) => ({ ...l, price: 0 })), 'Расход', input.dest, '2026-09-22', 'tester', '2026-09-22T11:05:47.756Z', 'op-1', null);
+  if (input.oldRounding) {
+    // Before BOTH sides run: every main row gets goods + roundToTwo(S × qty / pieces), as the old commit wrote it.
+    const sheet = h.ensureTransSheet();
+    const data = sheet.__dump();
+    const hdr = data[0].map((x: unknown) => String(x).trim());
+    const col = (name: string) => hdr.indexOf(name);
+    const isComponent = (row: any[]) => String(row[col('isComponent')]).toLowerCase() === 'true';
+    const expenses = data.map((row: any[], i: number) => ({ row, at: i }))
+      .slice(1)
+      .filter(({ row }: { row: any[] }) => String(row[col('Тип')]) === 'Расход');
+    const mainRows = expenses.filter(({ row }: { row: any[] }) => !isComponent(row));
+    const pieces = mainRows.reduce((s: number, { row }: { row: any[] }) => s + Number(row[col('Количество')]), 0);
+    const extras = extrasTotal(parseShipmentExtras(input.dest));
+    for (const { row, at } of mainRows) {
+      const qty = Number(row[col('Количество')]);
+      // The goods of a kit row sit in its components (same groupId); a plain row's are its write-off cost.
+      const goods = expenses.reduce(
+        (sum: number, c: { row: any[] }) => (isComponent(c.row) && row[col('groupId')] && c.row[col('groupId')] === row[col('groupId')]
+          ? sum + Number(c.row[col('Сумма')]) : sum),
+        Number(row[col('Себестоимость списания')])
+      );
+      const total = roundKop(goods + roundKop(extras * qty / pieces));
+      sheet.getRange(at + 1, col('Сумма') + 1).setValue(total);
+      sheet.getRange(at + 1, col('Цена') + 1).setValue(roundKop(total / qty));
+    }
+  }
   const rows = plain(h.shipmentRowsOfTransaction(h.getTransactions().rows.find((t: any) => t.type === 'Расход').id));
   return { h, rows };
 }
@@ -280,7 +323,40 @@ const editTwin: Twin<EditInput> = {
     lines: [{ article: 'A', quantity: 24 }, { article: 'B', quantity: 16 }],
     dest: 'Яндекс [Упаковка: 40 шт. x 6₽ = 240₽ | Услуги: Доставка по городу 1 короб x4 (636₽)]',
     packaging: { mode: 'unit', value: 6 }, other: { mode: 'unit', value: 0 },
-    services: [{ name: 'Доставка по городу 1 короб', quantity: 6, unitCost: 159 }]
+    services: [{ name: 'Доставка по городу 1 короб', quantity: 6, unitCost: 159 }],
+    oldRounding: false
+  }, {
+    // Item 97 T0-B: three 1-piece rows (1.00 does not split evenly), written by the old per-row rounding.
+    lines: [{ article: 'A', quantity: 1 }, { article: 'B', quantity: 1 }, { article: 'C', quantity: 1 }],
+    dest: 'Ozon (MaxiStore) [Прочее: 1₽]',
+    packaging: { mode: 'batch', value: 0 }, other: { mode: 'batch', value: 2 }, services: [],
+    oldRounding: true
+  }, {
+    // The same rows as the new commit writes them, with a service that has kopecks.
+    lines: [{ article: 'A', quantity: 1 }, { article: 'B', quantity: 1 }, { article: 'C', quantity: 1 }],
+    dest: 'Ozon (MaxiStore) [Прочее: 1₽]',
+    packaging: { mode: 'batch', value: 0 }, other: { mode: 'batch', value: 0 },
+    services: [{ name: 'Packing', quantity: 3, unitCost: 100.01 }],
+    oldRounding: false
+  }, {
+    // A unit cost that does not divide (100 / 3): the window sends the parsed entry back, the sum must stay 100.
+    lines: [{ article: 'A', quantity: 2 }, { article: 'B', quantity: 3 }],
+    dest: 'Ozon [Услуги: Packing x3 (100₽)]',
+    packaging: { mode: 'batch', value: 0 }, other: { mode: 'batch', value: 0 },
+    services: [{ name: 'Packing', quantity: 3, unitCost: 100 / 3 }],
+    oldRounding: false
+  }, {
+    // Two kits and a plain row: the goods of a kit are its own components' (by groupId), old per-row rounding.
+    lines: [{ article: 'KITX', quantity: 1 }, { article: 'KITY', quantity: 1 }, { article: 'C', quantity: 1 }],
+    dest: 'Ozon (MaxiStore) [Прочее: 1₽]',
+    packaging: { mode: 'batch', value: 0 }, other: { mode: 'batch', value: 2 }, services: [],
+    oldRounding: true
+  }, {
+    // The same kits written by the new split, then re-spread.
+    lines: [{ article: 'KITX', quantity: 1 }, { article: 'KITY', quantity: 1 }, { article: 'C', quantity: 1 }],
+    dest: 'Ozon (MaxiStore) [Прочее: 1₽]',
+    packaging: { mode: 'batch', value: 0 }, other: { mode: 'batch', value: 2 }, services: [],
+    oldRounding: false
   }],
   generated: 40,
   generate: (r) => ({
@@ -289,7 +365,9 @@ const editTwin: Twin<EditInput> = {
     dest: destination(r),
     packaging: { mode: r.pick(['unit', 'batch'] as const), value: r.chance(0.3) ? 0 : r.int(1, 30) },
     other: { mode: r.pick(['unit', 'batch'] as const), value: r.chance(0.5) ? 0 : r.int(1, 900) },
-    services: Array.from({ length: r.int(0, 2) }, () => ({ name: r.pick(['Маркировка', 'Паллета']), quantity: r.int(1, 5), unitCost: r.chance(0.5) ? r.int(5, 300) : r.int(500, 30000) / 100 }))
+    services: Array.from({ length: r.int(0, 2) }, () => ({ name: r.pick(['Маркировка', 'Паллета']), quantity: r.int(1, 5), unitCost: r.chance(0.5) ? r.int(5, 300) : r.int(500, 30000) / 100 })),
+    // Drawn last, so the draws above keep their order.
+    oldRounding: r.chance(0.3)
   }),
   // The screen: EditTransModal's own functions on the rows the server reports before the edit.
   ts: (input) => {
@@ -384,6 +462,12 @@ const combinedTwin: Twin<CombinedInput> = {
     oldTotal: 2419, after: { kind: 'none' },
     packaging: { mode: 'unit', value: 6 }, other: { mode: 'batch', value: 100 },
     services: [{ name: 'Доставка 1 пал', quantity: 1, unitCost: 2333.33 }]
+  }, {
+    // Item 97 T0-B: a stored service whose unit cost does not divide (100 / 3) sent back by the window keeps its 100.
+    orders: [[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 20 }]],
+    oldTotal: 100, after: { kind: 'none' },
+    packaging: { mode: 'batch', value: 0 }, other: { mode: 'batch', value: 0 },
+    services: [{ name: 'Паллета', quantity: 3, unitCost: 100 / 3 }]
   }, {
     // Hand case: a row without OpID inside a shipment — both sides refuse.
     orders: [[{ article: 'A', quantity: 10 }], [{ article: 'B', quantity: 20 }]],

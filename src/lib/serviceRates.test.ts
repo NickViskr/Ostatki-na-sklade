@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseStoredServiceEntries, resolveServiceCostAt, resolveServiceRateAt, todayLocalDateString } from './serviceRates';
+import { resolveServiceCostAt, resolveServiceRateAt, todayLocalDateString } from './serviceRates';
 import type { ServiceItem, ServiceRate } from '../types';
 import { formatDateRu } from './utils';
 
@@ -57,59 +57,6 @@ describe('Item 43. Дата отсечки решает, какая расцен
     // начавшийся 1 марта, не применился бы первые три часа рабочего дня.
     const mskEarlyMorning = new Date(2026, 2, 1, 1, 30, 0);
     expect(todayLocalDateString(mskEarlyMorning)).toBe('2026-03-01');
-  });
-});
-
-describe('Item 43. Старая отгрузка остаётся по старым расценкам', () => {
-  it('цена и количество берутся из записи, а не из справочника', () => {
-    // Отгрузка записана, когда услуга стоила 15 ₽: 2 шт на 30 ₽.
-    // Сегодня в справочнике 10 ₽ базовой и 22 ₽ действующей — на разбор это не влияет.
-    const parsed = parseStoredServiceEntries('Услуги: Упаковка в пакет x2 (30₽)', services);
-    expect(parsed).toEqual([{ name: 'Упаковка в пакет', unitCost: 15, quantity: 2 }]);
-  });
-
-  it('количество не пересчитывается по текущей цене', () => {
-    // Прежде количество считалось как round(сумма / цена справочника) = round(30 / 10) = 3,
-    // и при сохранении окна отгрузка переписывалась тремя штуками вместо двух.
-    const parsed = parseStoredServiceEntries('Услуги: Упаковка в пакет x2 (30₽)', services);
-    expect(parsed[0].quantity).toBe(2);
-    expect(parsed[0].unitCost * parsed[0].quantity).toBe(30);
-  });
-
-  it('несколько услуг в одной строке разбираются по отдельности', () => {
-    const parsed = parseStoredServiceEntries('Услуги: Упаковка в пакет x2 (30₽), Без тарифов x3 (21₽)', services);
-    expect(parsed).toEqual([
-      { name: 'Упаковка в пакет', unitCost: 15, quantity: 2 },
-      { name: 'Без тарифов', unitCost: 7, quantity: 3 }
-    ]);
-  });
-
-  it('услуга, которой больше нет в справочнике, разбирается по записи', () => {
-    const parsed = parseStoredServiceEntries('Услуги: Удалённая услуга x4 (100₽)', services);
-    expect(parsed).toEqual([{ name: 'Удалённая услуга', unitCost: 25, quantity: 4 }]);
-  });
-
-  it('старый формат без количества: делится нацело — количество восстанавливается', () => {
-    const parsed = parseStoredServiceEntries('Доп. услуги: Упаковка в пакет (30₽)', services);
-    expect(parsed).toEqual([{ name: 'Упаковка в пакет', unitCost: 10, quantity: 3 }]);
-  });
-
-  it('старый формат без количества: не делится нацело — услуга разовая на всю сумму', () => {
-    const parsed = parseStoredServiceEntries('Доп. услуги: Упаковка в пакет (35₽)', services);
-    expect(parsed).toEqual([{ name: 'Упаковка в пакет', unitCost: 35, quantity: 1 }]);
-  });
-
-  it('сумма отгрузки не меняется ни в одном разобранном случае', () => {
-    for (const [tag, total] of [
-      ['Услуги: Упаковка в пакет x2 (30₽)', 30],
-      ['Услуги: Удалённая услуга x4 (100₽)', 100],
-      ['Доп. услуги: Упаковка в пакет (30₽)', 30],
-      ['Доп. услуги: Упаковка в пакет (35₽)', 35]
-    ] as [string, number][]) {
-      const parsed = parseStoredServiceEntries(tag, services);
-      const sum = parsed.reduce((s, e) => s + e.unitCost * e.quantity, 0);
-      expect(sum).toBeCloseTo(total, 2);
-    }
   });
 });
 

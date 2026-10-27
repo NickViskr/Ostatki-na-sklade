@@ -1,7 +1,7 @@
 import { commentPayload } from '../lib/operationComment';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation } from '../types';
 import { TurnoverData } from '../lib/turnoverData';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
@@ -83,6 +83,8 @@ interface WarehouseState {
   usersList: User[];
   archivedItems: ArchivedItem[];
   kits: KitItem[];
+  /** Item 97 / 96.10: operations an earlier failure left half-done (getInitialData); the popup shows them. */
+  pendingOperations: PendingOperation[];
   currentUser: User | null;
   sessionToken: string | null;
   isSyncing: boolean;
@@ -123,6 +125,8 @@ interface WarehouseState {
   handleDeleteTransaction: (id: string) => Promise<boolean>;
   handleDeleteMultipleTransactions: (ids: string[]) => Promise<boolean>;
   handleUpdateTransaction: (id: string, data: Transaction) => Promise<boolean>;
+  /** Item 97 / 96.10 (admin): finish, cancel or just forget an interrupted operation, then reload the data. */
+  resolvePendingOperation: (opId: string, action: 'complete' | 'cancel' | 'dismiss') => Promise<boolean>;
   /** Item 90: rewrites only the comment of a History row (any age); no money, no stock. */
   setTransactionComment: (id: string, comment: string) => Promise<boolean>;
   /** Item 80. Additional costs (packaging, «Прочее», services) of the whole shipment of a row. */
@@ -234,6 +238,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   usersList: [],
   archivedItems: [],
   kits: [],
+  pendingOperations: [],
   currentUser: null,
   sessionToken: null,
   isSyncing: false,
@@ -431,6 +436,7 @@ export const useWarehouseStore = create<WarehouseState>()(
           services: data.services || [],
           serviceRates: loadedRates,
           kits: parsedKits,
+          pendingOperations: Array.isArray(data.pendingOperations) ? data.pendingOperations : [],
           transactions: Array.isArray(data.transactions) ? data.transactions : (data.transactions?.rows || []),
           hasMoreTransactions: !Array.isArray(data.transactions) && typeof data.transactions?.hasMore === 'boolean' ? data.transactions.hasMore : false,
           lastSyncTime: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
@@ -912,6 +918,27 @@ export const useWarehouseStore = create<WarehouseState>()(
       } else if (Number(d.costRowsAppended) > 0) {
         toast.success('Исправленная себестоимость дописана в журнал для КАН');
       }
+      return true;
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети: ' + (e?.message || ''));
+      return false;
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  resolvePendingOperation: async (opId, action) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('resolvePendingOperation', { data: { opId, action } });
+      if (result.status !== 'success') {
+        toast.error(result.message || 'Не удалось разобрать операцию');
+        return false;
+      }
+      toast.success(action === 'complete' ? 'Операция доведена до конца' : action === 'cancel' ? 'Операция отменена' : 'Уведомление убрано');
+      if (result.data?.costJournalError) toast.error(result.data.costJournalError);
+      await get().fetchStock();
       return true;
     } catch (e: any) {
       console.error(e);

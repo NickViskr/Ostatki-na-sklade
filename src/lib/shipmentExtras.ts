@@ -11,6 +11,8 @@
 // Pure: no store, no network. Code.gs mirrors `rowMoneyAfterExtras` on the server side, and
 // the numbers of the two are pinned by the same production example in both test suites.
 
+import { splitByQuantity } from './ozonBatchWriteOff';
+
 export interface ExtrasServiceEntry {
   name: string;
   quantity: number;
@@ -92,7 +94,8 @@ export function parseServicesTag(tag: string): ExtrasServiceEntry[] {
     const qtyMatch = rawName.match(/^(.*?)\s+x(\d+)\s*$/i);
     if (qtyMatch) {
       const quantity = parseInt(qtyMatch[2], 10) || 1;
-      out.push({ name: qtyMatch[1].trim(), quantity, unitCost: quantity > 0 ? round2(total / quantity) : total });
+      // Item 97 T0-B (96.13): NOT rounded — the written sum must come back exactly (unit × quantity).
+      out.push({ name: qtyMatch[1].trim(), quantity, unitCost: quantity > 0 ? total / quantity : total });
     } else {
       out.push({ name: rawName, quantity: 1, unitCost: total });
     }
@@ -155,10 +158,23 @@ export function parseShipmentExtras(destination?: string | null): ShipmentExtras
   return extras;
 }
 
-/** What the column «ДопРасходы» of the shipment must hold for these extras. */
+/**
+ * What the column «ДопРасходы» of the shipment must hold for these extras. Item 97 T0-B (96.13):
+ * the sum of a service is unit × quantity to the kopeck, not to the rouble.
+ */
 export function extrasTotal(extras: ShipmentExtras): number {
-  const services = extras.services.reduce((sum, s) => sum + Math.round(s.unitCost * s.quantity), 0);
+  const services = extras.services.reduce((sum, s) => sum + round2(s.unitCost * s.quantity), 0);
   return round2(extras.packaging + extras.other + services);
+}
+
+/**
+ * The sum of one service line as written into «Объект»: a whole number as is («100»), otherwise
+ * two decimals («100.40»). The confirmation window and the editor write the same format. Twin of
+ * `serviceSumTextGs` in Code.gs (ADR 0001).
+ */
+export function serviceSumText(unitCost: number, quantity: number): string {
+  const sum = round2((Number(unitCost) || 0) * (Number(quantity) || 0));
+  return sum === Math.round(sum) ? String(Math.round(sum)) : sum.toFixed(2);
 }
 
 /**
@@ -186,7 +202,7 @@ export function buildDestination(extras: ShipmentExtras, original?: ShipmentExtr
   const services = extras.services.filter((s) => s.quantity > 0);
   if (services.length > 0) {
     tags.push('Услуги: ' + services
-      .map((s) => s.name + ' x' + s.quantity + ' (' + Math.round(s.unitCost * s.quantity) + '₽)')
+      .map((s) => s.name + ' x' + s.quantity + ' (' + serviceSumText(s.unitCost, s.quantity) + '₽)')
       .join(', '));
   }
 
@@ -205,6 +221,10 @@ export interface ExtrasRow {
   /** «Сумма» of the row as stored now. */
   total: number;
   isComponent?: boolean;
+  /** «Себестоимость списания» — with `groupId` the evidence of the share the row really carries. */
+  writeOffCost?: number;
+  /** The kit of a main row; the components with the same value hold its goods cost. */
+  groupId?: string;
 }
 
 export interface ExtrasRowMoney {
@@ -214,22 +234,47 @@ export interface ExtrasRowMoney {
 }
 
 /**
- * New money of the rows of one shipment after its additional costs changed. The share of a
- * row is the same formula the commit uses — `additional * qty / totalQty` over the pieces of
- * the operation — so the old share comes off and the new one goes on, and everything else in
+ * New money of the rows of one shipment after its additional costs changed. The new shares are
+ * ONE largest-remainder split of the total over the pieces of the operation (item 97 T0-B,
+ * 96.12), so the rows add up to the total to the kopeck. The share that comes off is the one the
+ * row REALLY carries: rows written before the split (and by the pencil) hold the old per-row
+ * rounding, newer ones the split; the row itself tells — its «Сумма» less the goods (the
+ * write-off cost plus the components of its kit) is the share `d` it carries. `d` is accepted
+ * when, in kopecks, it is one of the two neighbours of the exact proportional share —
+ * floor(oldTotalKop × qty / pieces) ≤ dKop ≤ ceil(...): any share either rule could have given
+ * the row. It is NOT compared with the split at the row's current position: the leftover kopeck
+ * of a largest-remainder split follows position and ties, and a row that moved (a no-op pencil
+ * re-save appends it at the end of «История») would be rejected although it really carries that
+ * kopeck. Otherwise the split's figure at this position is taken off (a repeat save never
+ * drifts); without `writeOffCost` there is no evidence, so the same fallback. Everything else in
  * the row (the write-off cost, the components of a kit) stays where it was. Rows of kit
- * components carry no share and are left out.
+ * components carry no share and are left out. Browser twin of `rowSharesAfterExtrasGs` in
+ * Code.gs (ADR 0001).
  */
 export function rowMoneyAfterExtras(rows: ExtrasRow[], oldTotal: number, newTotal: number): ExtrasRowMoney[] {
   const main = rows.filter((r) => r.isComponent !== true && (Number(r.quantity) || 0) > 0);
-  const totalQty = main.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
+  const quantities = main.map((r) => Number(r.quantity) || 0);
+  const totalQty = quantities.reduce((sum, q) => sum + q, 0);
   if (totalQty <= 0) return [];
 
-  return main.map((r) => {
-    const qty = Number(r.quantity) || 0;
-    const oldShare = oldTotal > 0 ? round2(oldTotal * qty / totalQty) : 0;
-    const newShare = newTotal > 0 ? round2(newTotal * qty / totalQty) : 0;
-    const total = round2((Number(r.total) || 0) - oldShare + newShare);
+  const newSplit = splitByQuantity(newTotal > 0 ? newTotal : 0, quantities);
+  const oldSplit = splitByQuantity(oldTotal > 0 ? oldTotal : 0, quantities);
+  const oldTotalKop = oldTotal > 0 ? Math.round(oldTotal * 100) : 0;
+
+  return main.map((r, i) => {
+    const qty = quantities[i];
+    const exactKop = oldTotalKop * qty / totalQty;
+    let oldShare = oldSplit[i];
+    if (typeof r.writeOffCost === 'number') {
+      const goods = rows.reduce(
+        (sum, c) => (c.isComponent === true && r.groupId && c.groupId === r.groupId ? sum + (Number(c.total) || 0) : sum),
+        Number(r.writeOffCost) || 0
+      );
+      const carried = round2((Number(r.total) || 0) - goods);
+      const carriedKop = Math.round(carried * 100);
+      if (carriedKop >= Math.floor(exactKop) && carriedKop <= Math.ceil(exactKop)) oldShare = carried;
+    }
+    const total = round2((Number(r.total) || 0) - oldShare + newSplit[i]);
     return { id: r.id, total, price: round2(total / qty) };
   });
 }

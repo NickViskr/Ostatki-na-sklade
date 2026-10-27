@@ -142,6 +142,9 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   switchOzonCostToManual: write(),
   // Item 68 stage 2: a return moves stock, adds history rows and marks the supply row.
   commitUnshippedReturn: write('getInitialData', 'getStock', 'getTransactions', 'getExternalShipments'),
+  // Item 97 T0-C (96.10): `resolvePendingOperation` is described nowhere on purpose, like `commit`: completing an
+  // interrupted commit does everything a commit does (stock, history, SKUs, postings, the Ozon cost journal), and
+  // getInitialData carries the list of interrupted operations — so it wipes the whole cache.
   // Item 79b: the documents record lands in the journal from /api/ozon/supply/docs, which
   // calls Apps Script directly and must clear the journal read itself (see that route).
   saveOzonSupplyDocs: write('getOzonSupplyRequests'),

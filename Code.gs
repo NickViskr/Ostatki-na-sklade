@@ -29,6 +29,7 @@ function doGet(e) {
 function doPost(e) {
   _transHeadersCache = null;
   _devModeSpreadsheet = null;
+  _commitAction = null;
   let lock;
   try {
     const payload = JSON.parse(e.postData.contents);
@@ -335,7 +336,9 @@ function doPost(e) {
           skus: getSkus(),
           transactions: getTransactions(payload.data),
           kits: getKits(),
-          services: getServices()
+          services: getServices(),
+          // Item 97 T0-C: operations an earlier failure left half-done; every user sees them.
+          pendingOperations: getPendingOperationsForStartup()
         };
         break;
       case 'getStock':
@@ -396,16 +399,17 @@ function doPost(e) {
         result = deleteSku(payload.sku, currentUser.username);
         break;
       case 'commit':
+        // Item 97 T0-C: marks the next commitTransaction as made by this action; the memo of an interrupted one keeps the postingIds.
+        _commitAction = { postingIds: payload.postingIds || [] };
         result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId, payload.additionalCosts, undefined, payload.comment, payload.shipmentId);
         // Пункт 28, этап C: привязка поставок Ozon выполняется здесь же, внутри замка.
         // Ошибка привязки не отменяет уже записанный расход — она возвращается клиенту как предупреждение.
-        if (result && payload.postingIds && payload.postingIds.length > 0) {
-          try {
-            result.postingsLink = linkPostingsToCommit(payload.postingIds, result.newTransactions);
-          } catch (linkErr) {
-            result.postingsLink = { linked: 0, error: String(linkErr) };
-          }
-        }
+        linkPostingsAfterCommit(result, payload.postingIds);
+        break;
+      // Item 97 T0-C: the admin finishes, cancels or dismisses an operation an earlier failure left half-done.
+      case 'resolvePendingOperation':
+        assertAdmin(currentUser);
+        result = resolvePendingOperation(data);
         break;
       case 'getGlobalSettings':
         if (sessionToken && !currentUser) {
@@ -3048,11 +3052,298 @@ function findTransactionsByOpId(transSheet, opIdStr) {
   return found;
 }
 
+// ---- Item 97 T0-C (96.10): the memo of a commit that may stop half-way ----
+// A commit with an opId writes three things one after another: «Остатки» (s1), «История» (s2) and, for a
+// shipment to Ozon, the «Себестоимость Озон» journal (s3). The opId guard looks only in «История», so a failure
+// after s1 followed by a retry deducted the stock a second time. Right before s1 the commit therefore saves a
+// MEMO in Script Properties: the call itself and, per touched «Остатки» row, the values before and after.
+// It is deleted when every stage has succeeded. A retry (or resolvePendingOperation) reads it first and
+// finishes the SAME operation. Right after s1 succeeds the commit writes one more property, the STOCK-WRITTEN FLAG
+// (pendingOp:<opId>:stockWritten): the stock values alone cannot tell "this operation wrote them" from "the same
+// expense was entered again under a new opId". Stage of an interrupted operation (pendingOpStage):
+//   no «История» rows of the opId:
+//     'stock'    no flag, stock = before                   'history'  flag, stock = after (s1 done, s2 not)
+//     'conflict' anything else (no flag and stock != before, or flag and stock != after): someone moved the stock
+//   «История» rows of the opId present:
+//     'journal'  the cost journal applies and lacks a row   'done'     nothing is missing, only the memo is left over
+// A memo whose parts cannot be read back is DAMAGED: listed as a 'conflict' that only the admin's «dismiss» clears.
+// Who may finish an operation: only one started by the doPost 'commit' action (origin 'commit'; its memo holds the
+// postingIds, so the finish links the postings too). One started by another caller (origin 'other': the China posting,
+// an unshipped return …) is finished by that caller's own retry with the same opId — it does bookkeeping of its own.
+// A Script Property holds 9 KB; 2500 characters are at most 7.5 KB in UTF-8 whatever the text is.
+const PENDING_OP_PART_CHARS = 2500;
+// Set by the doPost 'commit' action right before commitTransaction (see there); a global of this execution, like _devModeSpreadsheet.
+let _commitAction = null;
+// getInitialData takes no lock, so a commit may be running while it lists the memos. While the script lock is busy only
+// memos older than this are listed (the script is killed after 6 minutes, so a younger memo may still be alive).
+const PENDING_OP_QUIET_MS = 7 * 60 * 1000;
+
+/** Memos of a dev-mode request (the test database) live apart from the live ones: each mode sees only its own. */
+function pendingOpPrefix() {
+  return _devModeSpreadsheet ? 'pendingOpDev:' : 'pendingOp:';
+}
+
+/** Keys of one memo's parts in part order: pendingOp:<opId>:0, pendingOp:<opId>:1, … */
+function pendingOpPartKeys(opId) {
+  const prefix = pendingOpPrefix() + opId + ':';
+  return PropertiesService.getScriptProperties().getKeys()
+    .filter(function(key) { return key.indexOf(prefix) === 0 && /^\d+$/.test(key.slice(prefix.length)); })
+    .sort(function(a, b) { return Number(a.slice(prefix.length)) - Number(b.slice(prefix.length)); });
+}
+
+/**
+ * The memo of an operation, or null. A memo exists only while its part 0 does (see pendingOpSave).
+ * A memo that cannot be read back (a part is missing, the text is not a memo) is returned as { opId, damaged: true }.
+ */
+function pendingOpRead(opId) {
+  const keys = pendingOpPartKeys(opId);
+  const prefix = pendingOpPrefix() + opId + ':';
+  if (keys.length === 0 || keys[0] !== prefix + '0') return null;
+  const props = PropertiesService.getScriptProperties();
+  try {
+    const consecutive = keys.every(function(key, n) { return key === prefix + n; });
+    const memo = consecutive ? JSON.parse(keys.map(function(key) { return props.getProperty(key); }).join('')) : null;
+    if (memo && memo.opId === opId && Array.isArray(memo.items) && Array.isArray(memo.stock)) {
+      memo.stockWritten = props.getProperty(prefix + 'stockWritten') !== null;
+      return memo;
+    }
+  } catch (parseError) {
+    // falls through to the damaged memo
+  }
+  return { opId: opId, damaged: true };
+}
+
+/** Part 0 goes first, so a delete cut short leaves only tails that no read looks at; the flag goes last. */
+function pendingOpDelete(opId) {
+  const props = PropertiesService.getScriptProperties();
+  pendingOpPartKeys(opId).forEach(function(key) { props.deleteProperty(key); });
+  props.deleteProperty(pendingOpPrefix() + opId + ':stockWritten');
+}
+
+function pendingOpSave(memo) {
+  pendingOpDelete(memo.opId);
+  const text = JSON.stringify(memo);
+  const parts = [];
+  for (let from = 0; from < text.length;) {
+    let to = Math.min(from + PENDING_OP_PART_CHARS, text.length);
+    // Never cut a surrogate pair (an emoji in a comment) between two properties.
+    if (to < text.length && text.charCodeAt(to - 1) >= 0xD800 && text.charCodeAt(to - 1) <= 0xDBFF) to--;
+    parts.push(text.slice(from, to));
+    from = to;
+  }
+  // Last part first: the memo exists once part 0 is there, so a save cut short is no memo at all
+  // (and the stock has not been touched yet — the memo is saved before the first stock write).
+  const props = PropertiesService.getScriptProperties();
+  for (let n = parts.length - 1; n >= 0; n--) props.setProperty(pendingOpPrefix() + memo.opId + ':' + n, parts[n]);
+}
+
+/** [quantity, avgCost, capitalization] triples; null = the article has no «Остатки» row. */
+function pendingOpSameValues(a, b) {
+  if (!a || !b) return !a && !b;
+  return Math.abs(a[0] - b[0]) < 0.000001 && Math.abs(a[1] - b[1]) < 0.000001 && Math.abs(a[2] - b[2]) < 0.000001;
+}
+
+/** True when the Ozon cost journal applies to the operation (the same test appendOzonCostForShipment uses) and a shipped article has no row of the opId yet. */
+function pendingOpJournalMissing(memo, historyRows) {
+  const cabinet = (memo.type === 'Расход' && memo.skipOzonCost !== true) ? ozonCabinetFromDestination(memo.destination) : '';
+  if (!cabinet) return false;
+  const journal = getOzonCostJournal();
+  return historyRows.some(function(t) {
+    return t.isComponent !== true && Number(t.quantity) > 0 && !isOzonCostCounted(journal, memo.opId, cabinet, t.article);
+  });
+}
+
+function pendingOpStage(memo) {
+  if (memo.damaged) return 'conflict';
+  const ss = getSpreadsheet();
+  const historyRows = findTransactionsByOpId(getTransactionSheet(ss), memo.opId);
+  if (historyRows.length > 0) return pendingOpJournalMissing(memo, historyRows) ? 'journal' : 'done';
+  const stockRows = getSheetByNameRobust(ss, 'Остатки').getDataRange().getValues();
+  const current = {};
+  for (let i = 1; i < stockRows.length; i++) {
+    current[String(stockRows[i][0])] = [Number(stockRows[i][1]), Number(stockRows[i][2]), Number(stockRows[i][3])];
+  }
+  const stockIs = function(which) {
+    return memo.stock.every(function(m) { return pendingOpSameValues(current[m.article], m[which]); });
+  };
+  // Without the flag this operation never finished its stock write, so stock = «after» means ANOTHER operation made it.
+  if (!memo.stockWritten) return stockIs('before') ? 'stock' : 'conflict';
+  return stockIs('after') ? 'history' : 'conflict';
+}
+
+function pendingOpRefusal(memo) {
+  if (memo.damaged) {
+    return 'Памятка этой операции повреждена, прочитать её нельзя. Ничего не записано. Проверьте остатки вручную '
+      + 'и попросите администратора убрать уведомление.';
+  }
+  const articles = memo.stock.map(function(m) { return m.article; });
+  const shown = articles.slice(0, 10).join(', ') + (articles.length > 10 ? ' и ещё ' + (articles.length - 10) : '');
+  return 'Предыдущая попытка этой операции прервалась на середине, а остаток по её артикулам (' + shown
+    + ') с тех пор изменился или не совпал с записанным. Повторное проведение могло бы списать товар дважды, '
+    + 'поэтому ничего не записано. Обратитесь к администратору.';
+}
+
+/**
+ * Stages «journal» and «done»: «История» holds the rows. «journal» completes the cost journal (its append skips what it
+ * already has); «done» has nothing left to write. Either way the answer is an idempotent hit and the memo goes.
+ */
+function pendingOpFinish(memo, stage) {
+  const rows = findTransactionsByOpId(getTransactionSheet(getSpreadsheet()), memo.opId);
+  const costJournalError = stage === 'journal'
+    ? appendCommitToOzonCost(rows, memo.destination, memo.originalDate, memo.opId, memo.username, memo.deliveryDate)
+    : '';
+  if (!costJournalError) pendingOpDelete(memo.opId);
+  const result = { stock: getStock(), newTransactions: rows, skus: getSkus(), idempotentHit: true };
+  if (costJournalError) result.costJournalError = costJournalError;
+  return result;
+}
+
+/** Item 47 stage 2 / item 93: the cost-journal step of a «Расход». Returns the warning text, '' when done. */
+function appendCommitToOzonCost(committedRows, destination, dateStr, opIdStr, username, deliveryDate) {
+  try {
+    // IMPORTANT: the rows are the ones ALREADY COMMITTED, not the client's items. The client sends base prices; the
+    // share of packaging and services is added by the server in commitTransaction (mainPrice). The goods leave for
+    // Ozon at their full cost, and that is what the journal must carry — otherwise KAN would get a price without the
+    // expenses this whole mechanism exists to account for. Kit component rows are left out: the kit has its own row
+    // and they are already inside it.
+    const shippedRows = committedRows
+      .filter(function(t) { return t.isComponent !== true; })
+      .map(function(t) {
+        return { article: t.article, quantity: t.quantity, price: t.price, status: 'ok' };
+      });
+    const costResult = appendOzonCostForShipment(shippedRows, destination, dateStr, opIdStr, username, deliveryDate);
+    // Item 93: the journal already counts this OpID — a retry of a shipment that a deletion took
+    // out of the chain. The link is revived in place (and brought to the figures just written).
+    if (costResult.skipped > 0 && opIdStr) {
+      resyncOzonCostForOps([opIdStr], OZON_COST_SOURCE_RESTORE, { username: username });
+    }
+    return '';
+  } catch (costErr) {
+    Logger.log('Себестоимость Озон не обновлена: ' + costErr);
+    return 'Операция проведена, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ' + errorMessage(costErr);
+  }
+}
+
+/**
+ * Every interrupted operation, for the start-up popup (all users) and the admin's buttons. With `minAgeMs` the
+ * memos younger than that are left out (they may belong to a commit that is still running), and so is a damaged
+ * memo (it has no age to judge by).
+ */
+function getPendingOperations(minAgeMs) {
+  const operations = [];
+  const prefix = pendingOpPrefix();
+  const now = new Date().getTime();
+  PropertiesService.getScriptProperties().getKeys().forEach(function(key) {
+    if (key.indexOf(prefix) !== 0 || key.slice(-2) !== ':0' || key.length <= prefix.length + 2) return;
+    const memo = pendingOpRead(key.slice(prefix.length, -2));
+    if (memo.damaged) {
+      if (minAgeMs) return; // no age to judge by: it may be a memo being saved right now
+      operations.push({
+        opId: memo.opId, startedAt: '', user: '', type: '', destination: '', articles: [],
+        stage: 'conflict', canComplete: false, canCancel: false, origin: 'other', damaged: true
+      });
+      return;
+    }
+    if (minAgeMs && now - new Date(memo.startedAt).getTime() < minAgeMs) return;
+    const stage = pendingOpStage(memo);
+    const origin = memo.origin === 'commit' ? 'commit' : 'other';
+    operations.push({
+      opId: memo.opId,
+      startedAt: memo.startedAt,
+      user: memo.username,
+      type: memo.type,
+      destination: memo.destination,
+      articles: memo.items
+        .filter(function(it) { return !(it.status && it.status !== 'ok'); })
+        .map(function(it) { return { article: String(it.article), quantity: Number(it.quantity) }; }),
+      stage: stage,
+      origin: origin,
+      canComplete: stage !== 'conflict' && origin === 'commit',
+      canCancel: stage === 'stock' || stage === 'history'
+    });
+  });
+  return operations;
+}
+
+/** The list getInitialData carries. While another request holds the script lock, memos that may be a running commit are left out. */
+function getPendingOperationsForStartup() {
+  const lock = LockService.getScriptLock();
+  const lockFree = lock.tryLock(0);
+  if (lockFree) lock.releaseLock();
+  return getPendingOperations(lockFree ? 0 : PENDING_OP_QUIET_MS);
+}
+
+/** Stage «history» cancel: puts the «before» values back in ONE write (a new article's row goes to 0 / 0 / 0). */
+function pendingOpRestoreStock(memo) {
+  const sheet = getSheetByNameRobust(getSpreadsheet(), 'Остатки');
+  const rows = sheet.getDataRange().getValues();
+  const rowOf = {};
+  for (let i = 1; i < rows.length; i++) rowOf[String(rows[i][0])] = i;
+  const restored = {};
+  memo.stock.forEach(function(m) { restored[rowOf[m.article]] = m.before || [0, 0, 0]; });
+  const indexes = Object.keys(restored).map(Number);
+  const first = Math.min.apply(null, indexes);
+  const last = Math.max.apply(null, indexes);
+  const block = [];
+  for (let i = first; i <= last; i++) block.push(restored[i] || [rows[i][1], rows[i][2], rows[i][3]]);
+  sheet.getRange(first + 1, 2, block.length, 3).setValues(block);
+  SpreadsheetApp.flush();
+}
+
+/** The posting link of the 'commit' action; also used when the admin completes an interrupted commit. A failure is a warning, not an error. */
+function linkPostingsAfterCommit(result, postingIds) {
+  if (!result || !postingIds || postingIds.length === 0) return;
+  try {
+    result.postingsLink = linkPostingsToCommit(postingIds, result.newTransactions);
+  } catch (linkErr) {
+    result.postingsLink = { linked: 0, error: String(linkErr) };
+  }
+}
+
+/** Admin only (doPost). action: 'complete' = what a retry does; 'cancel' = undo an operation that has no «История» rows; 'dismiss' = just forget the memo. */
+function resolvePendingOperation(data) {
+  const opId = String((data && data.opId) || '').trim();
+  const action = String((data && data.action) || '');
+  const memo = opId ? pendingOpRead(opId) : null;
+  if (!memo) throw new Error('Прерванная операция ' + opId + ' не найдена — возможно, её уже разобрали.');
+  if (action === 'dismiss') {
+    pendingOpDelete(opId);
+    return { opId: opId, action: action };
+  }
+  if (memo.damaged) throw new Error(pendingOpRefusal(memo));
+  if (action === 'complete') {
+    if (memo.origin !== 'commit') {
+      throw new Error('Эту операцию нельзя довести отсюда: она проведена не кнопкой «Провести» (например, из модуля '
+        + '«Заказы в Китае» или возвратом неотгруженного). Отмените её и повторите действие там.');
+    }
+    // What the 'commit' action does: the stage is judged inside, exactly as for a retry (a conflict is refused there),
+    // and the postings of the operation are linked afterwards.
+    _commitAction = { postingIds: memo.postingIds || [] };
+    const result = commitTransaction(memo.items, memo.type, memo.destination, memo.deliveryDate, memo.username, memo.originalDate,
+      opId, memo.explicitAdditionalCosts, memo.totalQtyOverride, memo.comment, memo.shipmentId, memo.skipOzonCost);
+    linkPostingsAfterCommit(result, memo.postingIds);
+    return result;
+  }
+  if (action === 'cancel') {
+    const stage = pendingOpStage(memo);
+    if (stage === 'journal' || stage === 'done') throw new Error('Операцию нельзя отменить: она уже записана в «Историю».');
+    if (stage === 'conflict') throw new Error('Операцию нельзя отменить: остаток по её артикулам изменился с тех пор. Проверьте остатки вручную и нажмите «Разобрано, убрать уведомление».');
+    if (stage === 'history') pendingOpRestoreStock(memo);
+    pendingOpDelete(opId);
+    return { opId: opId, action: action };
+  }
+  throw new Error('Неизвестное действие: ' + action);
+}
+
 // Item 93: `skipOzonCost` is set by the callers that delete and re-write rows of an Ozon shipment
 // (a pencil edit, a re-sort): they follow «История» in the journal themselves, afterwards, by the
 // OpID of the rows — a commit with no OpID would write an OpID-less «отгрузка» row as if the
 // re-written rows were another shipment.
 function commitTransaction(data, type, destination, deliveryDate, username, originalDate, opId, explicitAdditionalCosts, totalQtyOverride, comment, shipmentId, skipOzonCost) {
+  // Item 97 T0-C: set right before this call by the doPost 'commit' action (and by the admin completing such an
+  // operation); taken once, so no other caller can inherit it. Null = any other caller.
+  const commitAction = _commitAction;
+  _commitAction = null;
   const items = Array.isArray(data) ? data : [data];
   // Item 90: optional operation note, written to «Комментарий» on every row of the operation
   const operationComment = String(comment || '').trim();
@@ -3069,15 +3360,27 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     && explicitAdditionalCosts !== undefined
     && String(explicitAdditionalCosts).trim() !== '';
   const explicitAdditional = hasExplicitAdditional ? roundToTwo(parseNumber(explicitAdditionalCosts)) : 0;
-  const dateStr = originalDate || new Date().toISOString();
   const ss = getSpreadsheet();
   const transSheet = getTransactionSheet(ss);
   const stockSheet = getSheetByNameRobust(ss, 'Остатки');
 
+  const opIdStr = String(opId || '').trim();
+  // Item 97 T0-C (96.10): the memo of an earlier attempt of THIS operation that stopped half-way is read
+  // first. It says how far that attempt got, and the retry finishes the same operation instead of repeating it.
+  const memo = opIdStr ? pendingOpRead(opIdStr) : null;
+  let stockAlreadyWritten = false;
+  if (memo) {
+    const stage = pendingOpStage(memo);
+    if (stage === 'conflict') throw new Error(pendingOpRefusal(memo));
+    if (stage === 'journal' || stage === 'done') return pendingOpFinish(memo, stage);
+    stockAlreadyWritten = stage === 'history';
+  }
+  // A retry keeps the date of the first attempt, so a finished operation carries the date it was started with.
+  const dateStr = originalDate || (memo && memo.originalDate) || new Date().toISOString();
+
   // Пункт 28, этап A: защита от двойного проведения одной и той же операции.
   // Выполняется внутри замка, который doPost захватывает до switch.
-  const opIdStr = String(opId || '').trim();
-  if (opIdStr) {
+  if (opIdStr && !memo) {
     const alreadyWritten = findTransactionsByOpId(transSheet, opIdStr);
     if (alreadyWritten.length > 0) {
       return {
@@ -3099,6 +3402,16 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       avgCost: Number(row[2]),
       capitalization: Number(row[3])
     };
+  }
+  if (stockAlreadyWritten) {
+    // The sheet already holds the «after» values. The rows are recomputed from the memo's «before»
+    // ones, never from the sheet, so the stock is neither read twice nor deducted twice.
+    memo.stock.forEach(function(m) {
+      if (!m.before) { delete stockMap[m.article]; return; }
+      stockMap[m.article].quantity = m.before[0];
+      stockMap[m.article].avgCost = m.before[1];
+      stockMap[m.article].capitalization = m.before[2];
+    });
   }
 
   // 27.08.2026. Writes to the «Остатки» sheet are collected here and leave in ONE request at
@@ -3172,6 +3485,22 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     }
   }
 
+  // Item 97 T0-C: every «Остатки» row this call changes, as the memo records it. `before` is read from
+  // stockData, so it is right only while the sheet has not been written yet (not in a «history» retry).
+  function plannedStockChanges() {
+    const changes = Object.keys(pendingStockRows).map(function(rowIdx) {
+      const source = stockData[Number(rowIdx) - 1];
+      return {
+        article: String(source[0]),
+        before: [Number(source[1]), Number(source[2]), Number(source[3])],
+        after: pendingStockRows[rowIdx]
+      };
+    });
+    return changes.concat(newStockRows.map(function(fresh) {
+      return { article: String(fresh[0]), before: null, after: [fresh[1], fresh[2], fresh[3]] };
+    }));
+  }
+
   if (type === 'Расход') {
     const requestedQty = {};
     items.forEach(item => {
@@ -3226,6 +3555,19 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
   const shipmentTotalQty = overrideQty > 0
     ? overrideQty
     : items.reduce(function(s, it){ if (it.status && it.status !== 'ok') return s; return s + (Number(it.quantity) || 0); }, 0);
+  // Item 97 T0-B (96.12). The additional costs do not depend on the item, so they are worked out
+  // once, here. Without a stated total of pieces the rows of this call share them by ONE
+  // largest-remainder split (taken by item index) and add up to the figure to the kopeck; rounding
+  // each row on its own gave 0.99 or 2.01 for 1.00 or 2.00 over three rows. With a stated total
+  // (updateTransaction re-commits one row of a bigger shipment) the row keeps its own rounded share.
+  const shipmentAdditional = (type !== 'Расход')
+    ? 0
+    : (hasExplicitAdditional ? explicitAdditional : parseAdditionalCostsFromDestination(destination));
+  const itemShares = (overrideQty > 0 || !(shipmentAdditional > 0))
+    ? null
+    : splitByQuantityGs(shipmentAdditional, items.map(function(it) {
+        return (it.status && it.status !== 'ok') ? 0 : (Number(it.quantity) || 0);
+      }));
   
   // 27.08.2026: the missing articles are created BEFORE the loop, in one pass over the SKU
   // sheet, instead of once per position from inside it.
@@ -3237,7 +3579,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
   }
 
   const rowsToAppend = [];
-  items.forEach(item => {
+  items.forEach((item, itemIndex) => {
     if (item.status && item.status !== 'ok') return;
     
     const article = item.article;
@@ -3390,10 +3732,9 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       }
     }
     
-    const shipmentAdditional = (type !== 'Расход')
-      ? 0
-      : (hasExplicitAdditional ? explicitAdditional : parseAdditionalCostsFromDestination(destination));
-    const additionalCosts = (shipmentAdditional > 0 && shipmentTotalQty > 0) ? roundToTwo(shipmentAdditional * qty / shipmentTotalQty) : 0;
+    const additionalCosts = (shipmentAdditional > 0 && shipmentTotalQty > 0)
+      ? (itemShares ? itemShares[itemIndex] : roundToTwo(shipmentAdditional * qty / shipmentTotalQty))
+      : 0;
     const mainTotal = (type === 'Расход')
       ? (kitGroupId ? roundToTwo(writeOffCost + componentsTotal + additionalCosts) : roundToTwo(total + additionalCosts))
       : total;
@@ -3441,7 +3782,32 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     });
   });
 
-  flushStockRows();
+  const plannedChanges = opIdStr ? plannedStockChanges() : null;
+  if (stockAlreadyWritten) {
+    // The recomputation must reproduce exactly what the first attempt wrote; if it does not (the call
+    // differs, a rule changed), nothing is appended and the memo stays for the admin.
+    const reproduced = plannedChanges.length === memo.stock.length && memo.stock.every(function(m) {
+      return plannedChanges.some(function(c) { return c.article === m.article && pendingOpSameValues(c.after, m.after); });
+    });
+    if (!reproduced) throw new Error(pendingOpRefusal(memo));
+  } else {
+    // Right before the FIRST «Остатки» write: from here on a failure leaves the memo behind.
+    const keepMemo = opIdStr && rowsToAppend.length > 0;
+    if (keepMemo) {
+      pendingOpSave({
+        opId: opIdStr, startedAt: new Date().toISOString(), items: items, type: type, destination: destination,
+        deliveryDate: deliveryDate, originalDate: dateStr, explicitAdditionalCosts: explicitAdditionalCosts,
+        totalQtyOverride: totalQtyOverride, comment: comment, shipmentId: shipmentId, username: username,
+        skipOzonCost: skipOzonCost, stock: plannedChanges,
+        // Only a call made by the doPost 'commit' action carries `commitAction`; its postings are linked when the admin completes it.
+        origin: commitAction ? 'commit' : 'other', postingIds: commitAction ? commitAction.postingIds : undefined
+      });
+    }
+    flushStockRows();
+    // The stock write is known to have happened only now; the flag is what lets the stage tell this operation's
+    // «after» values from another operation's identical result (see pendingOpStage).
+    if (keepMemo) PropertiesService.getScriptProperties().setProperty(pendingOpPrefix() + opIdStr + ':stockWritten', '1');
+  }
 
   if (rowsToAppend.length > 0) {
     if (opIdStr) {
@@ -3462,28 +3828,11 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
   // Never at the price of the expense itself — that is the operation the user asked for.
   let costJournalError = '';
   if (type === 'Расход' && skipOzonCost !== true) {
-    try {
-      // ВАЖНО: берём УЖЕ ПРОВЕДЁННЫЕ строки, а не позиции клиента. Клиент присылает базовые
-      // цены, а долю упаковки и услуг сервер добавляет сам чуть выше (mainPrice). На Ozon
-      // товар уезжает с полной себестоимостью, и именно она должна попасть в журнал —
-      // иначе в КАН уйдёт цена без расходов, ради учёта которых всё и затевалось.
-      // Строки комплектующих исключены: у комплекта своя строка, и в ней они уже сидят.
-      const shippedRows = newTransactions
-        .filter(function(t) { return t.isComponent !== true; })
-        .map(function(t) {
-          return { article: t.article, quantity: t.quantity, price: t.price, status: 'ok' };
-        });
-      const costResult = appendOzonCostForShipment(shippedRows, destination, dateStr, opIdStr, username, deliveryDate);
-      // Item 93: the journal already counts this OpID — a retry of a shipment that a deletion took
-      // out of the chain. The link is revived in place (and brought to the figures just written).
-      if (costResult.skipped > 0 && opIdStr) {
-        resyncOzonCostForOps([opIdStr], OZON_COST_SOURCE_RESTORE, { username: username });
-      }
-    } catch (costErr) {
-      Logger.log('Себестоимость Озон не обновлена: ' + costErr);
-      costJournalError = 'Операция проведена, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ' + errorMessage(costErr);
-    }
+    costJournalError = appendCommitToOzonCost(newTransactions, destination, dateStr, opIdStr, username, deliveryDate);
   }
+  // Item 97 T0-C: every stage succeeded, so the memo has done its job. A journal failure keeps it:
+  // the retry (or the admin) completes the journal from it.
+  if (opIdStr && !costJournalError) pendingOpDelete(opIdStr);
 
   const commitResult = {
     stock: getStock(),
@@ -11158,6 +11507,9 @@ function shipmentRowsOfTransaction(id, wholeShipment) {
       destination: String(sheetCellText(row, headers, 'Объект')),
       date: sheetCellText(row, headers, 'Дата'),
       deliveryDate: sheetCellText(row, headers, 'Дата поставки'),
+      // Item 97 T0-B: the goods part of «Сумма», the evidence of the share a row really carries
+      writeOffCost: parseNumber(sheetCellText(row, headers, 'Себестоимость списания')),
+      groupId: String(sheetCellText(row, headers, 'groupId')).trim(),
       additionalCosts: parseNumber(sheetCellText(row, headers, 'ДопРасходы')),
       // Item 90: null when the cell is empty (an old row) — a stored 0 and «nothing stored» differ
       storedAdditional: String(sheetCellText(row, headers, 'ДопРасходы')).trim() === '' ? null : parseNumber(sheetCellText(row, headers, 'ДопРасходы')),
@@ -11199,7 +11551,8 @@ function parseServicesTagGs(tag) {
     const qtyMatch = rawName.match(/^(.*?)\s+x(\d+)\s*$/i);
     if (qtyMatch) {
       const quantity = parseInt(qtyMatch[2], 10) || 1;
-      out.push({ name: qtyMatch[1].trim(), quantity: quantity, unitCost: quantity > 0 ? roundToTwo(total / quantity) : total });
+      // Item 97 T0-B (96.13): NOT rounded — the written sum must come back exactly (unit × quantity).
+      out.push({ name: qtyMatch[1].trim(), quantity: quantity, unitCost: quantity > 0 ? total / quantity : total });
     } else {
       out.push({ name: rawName, quantity: 1, unitCost: total });
     }
@@ -11263,10 +11616,21 @@ function parseShipmentExtrasGs(destination) {
 }
 
 function extrasTotalGs(extras) {
+  // Item 97 T0-B (96.13): the sum of a service is unit × quantity to the kopeck, not to the rouble.
   const services = (extras.services || []).reduce(function(sum, s) {
-    return sum + Math.round((Number(s.unitCost) || 0) * (Number(s.quantity) || 0));
+    return sum + roundToTwo((Number(s.unitCost) || 0) * (Number(s.quantity) || 0));
   }, 0);
   return roundToTwo((Number(extras.packaging) || 0) + (Number(extras.other) || 0) + services);
+}
+
+/**
+ * Item 97 T0-B (96.13). The sum of one service line as written into «Объект»: a whole number as
+ * is («100»), otherwise two decimals («100.40»). Twin of `serviceSumText` in
+ * `src/lib/shipmentExtras.ts` (ADR 0001); the confirmation window uses the browser one.
+ */
+function serviceSumTextGs(unitCost, quantity) {
+  const sum = roundToTwo((Number(unitCost) || 0) * (Number(quantity) || 0));
+  return sum === Math.round(sum) ? String(Math.round(sum)) : sum.toFixed(2);
 }
 
 /** «Объект» put back together. An amount nobody changed keeps the wording it was written with. */
@@ -11289,7 +11653,7 @@ function buildDestinationGs(extras, original, totalQty) {
   const services = (extras.services || []).filter(function(s) { return (Number(s.quantity) || 0) > 0; });
   if (services.length > 0) {
     tags.push('Услуги: ' + services.map(function(s) {
-      return s.name + ' x' + s.quantity + ' (' + Math.round((Number(s.unitCost) || 0) * (Number(s.quantity) || 0)) + '₽)';
+      return s.name + ' x' + s.quantity + ' (' + serviceSumTextGs(s.unitCost, s.quantity) + '₽)';
     }).join(', '));
   }
 
@@ -11328,6 +11692,46 @@ function splitByQuantityGs(total, quantities) {
     leftover -= 1;
   }
   return result.map(function(kop) { return Math.round(kop) / 100; });
+}
+
+/**
+ * Item 97 T0-B (96.12). The shares of the additional costs that the main rows of ONE order
+ * (kit components carry none; quantity > 0) lose and take on when the order's share changes from
+ * `oldShare` to `newShare`; keyed by sheet row. Twin of the share part of `rowMoneyAfterExtras`
+ * in `src/lib/shipmentExtras.ts` (ADR 0001) — keep the arithmetic identical.
+ *
+ * New shares: ONE largest-remainder split over the rows, so they add up to `newShare` to the
+ * kopeck (rounding each row on its own gave 0.99 or 2.01 for 1.00 / 2.00 over three rows).
+ * Old share: the one the row REALLY carries. Rows written before this fix, and by the pencil,
+ * hold the old per-row rounding; newer ones the largest-remainder split. The row tells: its
+ * «Сумма» less the goods (the write-off cost plus the components of a kit with the same groupId)
+ * is the share it carries, `d`. It is accepted when, in kopecks, it is one of the two neighbours
+ * of the exact proportional share — floor(oldShareKop × qty / pieces) ≤ dKop ≤ ceil(...): any
+ * share either rule could have given the row. The test must NOT compare `d` with the split at the
+ * row's current position: the leftover kopeck of a largest-remainder split follows position and
+ * ties, and a row that moved (a no-op pencil re-save appends it at the end of «История») would be
+ * rejected although it really carries that kopeck. Otherwise (hand-edited «Сумма», no evidence)
+ * the split's figure `b` at this position is taken off, so a repeat save never drifts.
+ */
+function rowSharesAfterExtrasGs(orderRows, oldShare, newShare, orderPieces) {
+  const mainRows = orderRows.filter(function(r) { return r.isComponent !== true && (Number(r.quantity) || 0) > 0; });
+  const quantities = mainRows.map(function(r) { return Number(r.quantity) || 0; });
+  const newSplit = splitByQuantityGs(newShare > 0 ? newShare : 0, quantities);
+  const oldSplit = splitByQuantityGs(oldShare > 0 ? oldShare : 0, quantities);
+  const oldShareKop = oldShare > 0 ? Math.round(oldShare * 100) : 0;
+
+  const shares = {};
+  mainRows.forEach(function(r, i) {
+    const exactKop = oldShareKop * quantities[i] / orderPieces;
+    const goods = orderRows.reduce(function(sum, c) {
+      return (c.isComponent === true && r.groupId && c.groupId === r.groupId) ? sum + (Number(c.total) || 0) : sum;
+    }, Number(r.writeOffCost) || 0);
+    const carried = roundToTwo((Number(r.total) || 0) - goods);
+    const carriedKop = Math.round(carried * 100);
+    const oldRowShare = (carriedKop >= Math.floor(exactKop) && carriedKop <= Math.ceil(exactKop)) ? carried : oldSplit[i];
+    shares[r.sheetRow] = { oldShare: oldRowShare, newShare: newSplit[i] };
+  });
+  return shares;
 }
 
 /** Twin of `batchDestinationNote` in `src/lib/ozonBatchWriteOff.ts`. Never a «₽» in it. */
@@ -11477,7 +11881,8 @@ function updateShipmentExtras(data, username) {
       return {
         name: String((s && s.name) || '').trim(),
         quantity: Math.max(0, Math.round(Number((s && s.quantity) || 0))),
-        unitCost: roundToTwo(Number((s && s.unitCost) || 0))
+        // Item 97 T0-B (96.13): not rounded — the window sends the stored entries (sum / quantity) back
+        unitCost: Number(s && s.unitCost) || 0
       };
     }).filter(function(s) { return s.name !== '' && s.quantity > 0; }),
     keptGroups: original.keptGroups
@@ -11531,6 +11936,8 @@ function updateShipmentExtras(data, username) {
     if (oi === 0) anchorDestination = destination;
     if (o.rows.some(function(r) { return r.id === anchor.id; })) anchorDestination = destination;
 
+    // Item 97 T0-B (96.12): the rows of the order share its figure by one split, not one by one
+    const rowShares = rowSharesAfterExtrasGs(o.rows, oldShares[oi], newShares[oi], orderPieces[oi]);
     o.rows.forEach(function(r) {
       const step = { sheetRow: r.sheetRow, destination: destination };
       plan.push(step);
@@ -11538,9 +11945,7 @@ function updateShipmentExtras(data, username) {
 
       const qty = Number(r.quantity) || 0;
       if (qty <= 0) return;
-      const oldRowShare = oldShares[oi] > 0 ? roundToTwo(oldShares[oi] * qty / orderPieces[oi]) : 0;
-      const newRowShare = newShares[oi] > 0 ? roundToTwo(newShares[oi] * qty / orderPieces[oi]) : 0;
-      const rowTotal = roundToTwo((Number(r.total) || 0) - oldRowShare + newRowShare);
+      const rowTotal = roundToTwo((Number(r.total) || 0) - rowShares[r.sheetRow].oldShare + rowShares[r.sheetRow].newShare);
       const rowPrice = roundToTwo(rowTotal / qty);
       step.price = rowPrice;
       step.total = rowTotal;

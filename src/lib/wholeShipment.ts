@@ -199,7 +199,8 @@ export function wholeShipmentNewExtras(
       .map((e) => ({
         name: String(e.name || '').trim(),
         quantity: Math.max(0, Math.round(Number(e.quantity) || 0)),
-        unitCost: round2(Number(e.unitCost) || 0)
+        // Item 97 T0-B (96.13): not rounded — the window sends the stored entries (sum / quantity) back
+        unitCost: Number(e.unitCost) || 0
       }))
       .filter((e) => e.name !== '' && e.quantity > 0)
   };
