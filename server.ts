@@ -366,7 +366,8 @@ async function startServer() {
       const action = req.body?.action;
       const token = req.body?.sessionToken;
       const { sessionToken, ...cacheableBody } = req.body;
-      const cacheKey = JSON.stringify(cacheableBody);
+      // Per-session key: cached reads must never be served across users (R-063)
+      const cacheKey = `${token ?? ''}\u0000${JSON.stringify(cacheableBody)}`;
       
       const cacheTtlMs = action ? gasCacheTtlMs(action) : 0;
       if (cacheTtlMs > 0 && token && isTokenCached(token)) {
@@ -461,7 +462,12 @@ async function startServer() {
           // Пункт 29: если ответ пришёл с ошибочным кодом или подозрительно
           // короткий, показываем его начало — иначе причина остаётся неизвестной.
           if (gasResponse.status !== 200 || rawText.length < 300) {
-            const preview = rawText.replace(/\s+/g, " ").slice(0, 300);
+            // R-066: mask secrets before logging
+            const redacted = rawText.replace(
+              /("(?:sessionToken|token|[^"]*password[^"]*)"\s*:\s*)"(?:[^"\\]|\\.)*"/gi,
+              '$1"<скрыт>"'
+            );
+            const preview = redacted.replace(/\s+/g, " ").slice(0, 300);
             console.log(`GASBODY action=${action} http=${gasResponse.status} len=${rawText.length} body=${preview}`);
           }
 
@@ -527,7 +533,11 @@ async function startServer() {
               gasCache.set(cacheKey, { data, cachedAt: Date.now(), action });
             }
 
-            if (token) cacheToken(token);
+            if (action === "logout") {
+              // R-064: a logged-out token must not stay valid in the proxy caches
+              // (its per-session gasCache entries are unreachable once the token is gone)
+              if (token) sessionCache.delete(token);
+            } else if (token) cacheToken(token);
             if (isPublic && data.data?.sessionToken) cacheToken(data.data.sessionToken);
 
             // Инвалидируем кэш ключа, если настройки были сохранены
