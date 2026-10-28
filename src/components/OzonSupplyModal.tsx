@@ -48,7 +48,7 @@ interface OzonSupplyModalProps {
 }
 
 const REQUEST_TIMEOUT_SEC = 60;
-const FINALIZE_TIMEOUT_SEC = 180; // достройка идёт по каждому кластеру, минуты не хватает
+const FINALIZE_TIMEOUT_SEC = 300; // достройка идёт по каждому кластеру, минуты не хватает; item 101: the Cloud Run request limit
 
 export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
   isOpen, onClose, rows, stockOptions, cabinet, clusterSalesShare, dropOffWarehouseId, dropOffWarehouseName, dropOffWarehouseType, onCreated

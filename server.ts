@@ -643,6 +643,8 @@ async function startServer() {
 
       res = await callOzonApi(endpoint, keys, body);
       if (res.status === 429) {
+        // Item 101: every rate-limit answer is logged, so an incident is measurable (no keys, no body)
+        console.log(`OZON429 endpoint=${endpoint} attempt=${attempt}/5`);
         if (attempt < 5) {
           await sleep(1000 * attempt);
           continue;
@@ -2217,7 +2219,11 @@ async function startServer() {
   // SKU base, the folder goes to Drive from here, and the outcome lands in the journal column
   // «Документы». Re-running recreates the cargoes: their ids change and labels printed
   // earlier stop matching — the caller warns the user before firing this.
+  // Item 101: one build per order at a time. The browser gives up before the server is done,
+  // and a second press would recreate the same cargoes in parallel.
+  const supplyDocsInFlight = new Set<string>();
   app.post("/api/ozon/supply/docs", async (req, res) => {
+    let claimedOrderId = '';
     try {
       const token = req.body?.sessionToken;
       if (!token || !(await verifyGasSession(token))) {
@@ -2229,6 +2235,11 @@ async function startServer() {
       if (!orderId) {
         return res.status(400).json({ status: "error", message: "Не передан orderId" });
       }
+      if (supplyDocsInFlight.has(orderId)) {
+        return res.status(409).json({ status: "error", stage: "in_progress", message: "Документы этой заявки уже собираются — дождитесь окончания и обновите вкладку" });
+      }
+      supplyDocsInFlight.add(orderId);
+      claimedOrderId = orderId;
 
       const keys = await fetchOzonKeys();
       if (!keys || !keys.cabinets || keys.cabinets.length === 0) {
@@ -2335,6 +2346,8 @@ async function startServer() {
         httpStatus: error.httpStatus || 500,
         message: error.message || String(error)
       });
+    } finally {
+      if (claimedOrderId) supplyDocsInFlight.delete(claimedOrderId);
     }
   });
 

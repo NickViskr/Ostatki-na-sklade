@@ -1365,7 +1365,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     fetchOzonSupplyRequests();
   }, [fetchOzonSupplyRequests]);
 
-  const DOCS_BUILD_TIMEOUT_SEC = 180;
+  const DOCS_BUILD_TIMEOUT_SEC = 300; // item 101: the Cloud Run request limit; a 13-cluster build took up to 198 s
 
   // Item 74b. Rebuild cargoes, labels, composition files and the Drive folder of an order
   // that already exists in Ozon. Recreating the cargoes gives them new numbers, so the user
