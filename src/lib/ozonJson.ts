@@ -108,3 +108,23 @@ export function quoteLossyIntegers(text: string): string {
 export function parseOzonJson(text: string): any {
   return JSON.parse(quoteLossyIntegers(text));
 }
+
+// ===== Writing Ozon request bodies without losing long integers (plan item 100.5, R-067) =====
+//
+// The outgoing side of the same defect: `Number('9007199254740993')` is already 9007199254740992,
+// so an int64 id (draft_id, supply_id, warehouse id) must never pass through a double.
+// JSON.stringify cannot print a raw number from a string, so the id travels inside the body as a
+// marker string and stringifyOzonBody turns exactly those markers into bare JSON numbers.
+
+const INT64_MARKER = '__OZON_INT64__';
+
+/** A validated digit string that stringifyOzonBody writes as a bare number; null for anything else. */
+export function ozonInt64(value: unknown): string | null {
+  const digits = String(value ?? '').trim();
+  return /^\d+$/.test(digits) && /[1-9]/.test(digits) ? INT64_MARKER + digits.replace(/^0+/, '') : null;
+}
+
+/** JSON.stringify, except that ozonInt64 markers become exact bare numbers (never quoted). */
+export function stringifyOzonBody(body: any): string {
+  return JSON.stringify(body).replace(new RegExp('"' + INT64_MARKER + '(\\d+)"', 'g'), '$1');
+}

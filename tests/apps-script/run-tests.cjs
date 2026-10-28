@@ -14227,6 +14227,25 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 100.5 / R-060: saveOzonSupplyRequest writes by header name =================
+{
+  const readBack = (hdr) => {
+    const H = freshHarness();
+    H.setNow('2026-10-28T10:00:00Z');
+    H.setRegistrySheet('Заявки Ozon', [hdr]);
+    H.context.saveOzonSupplyRequest({ cabinet: 'MaxiStore', draftId: '11', orderId: 'order-123', dropOffName: 'Drop X', clusters: '1,2', itemsJSON: '[{"a":1}]', status: 'Создана' }, 'admin');
+    return H.context.getOzonSupplyRequests()[0] || {};
+  };
+  const okAll = (r) => String(r.cabinet) === 'MaxiStore' && String(r.orderId) === 'order-123' && String(r.draftId) === '11' &&
+    r.dropOffName === 'Drop X' && r.clusters === '1,2' && r.itemsJSON === '[{"a":1}]' && r.who === 'admin' && r.status === 'Создана';
+  const r1 = readBack(['ID', 'Дата', 'OrderID', 'DraftID', 'Кабинет', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус', 'Документы']);
+  check('Item 100.5 / R-060: a journal with OrderID and Кабинет columns swapped reads back the right cabinet, order id and every other field',
+    okAll(r1), JSON.stringify(r1));
+  const r2 = readBack(['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус', 'Документы']);
+  check('Item 100.5 / R-060: control - the standard header order still reads back every field correctly',
+    okAll(r2), JSON.stringify(r2));
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

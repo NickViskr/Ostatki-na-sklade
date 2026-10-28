@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as XLSX from 'xlsx';
-import { parseOzonJson, quoteLossyIntegers } from './ozonJson';
+import { parseOzonJson, quoteLossyIntegers, ozonInt64, stringifyOzonBody } from './ozonJson';
 import { buildCompositionXlsxBase64, readCargoIds } from './ozonComposition';
 
 // ============================================================================================
@@ -200,5 +200,16 @@ describe('прокси разбирает ответы Ozon только чер�
     expect(server).toMatch(/import \{ buildCompositionXlsxBase64, readCargoIds \} from "\.\/src\/lib\/ozonComposition"/);
     expect(server).not.toContain('XLSX.utils.aoa_to_sheet');
     expect(server).not.toContain("String(c?.value?.cargo_id");
+  });
+});
+
+describe('ozonInt64 / stringifyOzonBody (R-067)', () => {
+  it('stringifyOzonBody writes an int64 marker as an exact bare number and leaves other values alone', () => {
+    expect(stringifyOzonBody({ a: ozonInt64('9007199254740993'), b: 'x' })).toBe('{"a":9007199254740993,"b":"x"}');
+  });
+
+  it('ozonInt64 returns null for empty, zero, garbage and negative input, and strips leading zeros', () => {
+    for (const bad of ['', '0', '000', '12a', -5, null, undefined]) expect(ozonInt64(bad)).toBeNull();
+    expect(stringifyOzonBody({ a: ozonInt64('00123') })).toBe('{"a":123}');
   });
 });

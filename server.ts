@@ -7,7 +7,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { buildCompositionXlsxBase64, readCargoIds } from "./src/lib/ozonComposition";
 import { compositionFileName, decideSupplyDocs, layoutFromBundle, parseSupplyDocs, SupplyDocsAction, SupplyDocsEntry } from "./src/lib/ozonSupplyDocs";
-import { parseOzonJson } from "./src/lib/ozonJson";
+import { parseOzonJson, ozonInt64, stringifyOzonBody } from "./src/lib/ozonJson";
 import { gasCacheTtlMs, gasReadsInvalidatedBy, isGasRead } from "./src/lib/gasActions";
 import { analyticsItemToStockRow } from "./src/lib/ozonStockRow";
 import { chooseDirectWarehouse, directWarehouseMessage, readDraftWarehouses } from "./src/lib/ozonDirectDraft";
@@ -627,7 +627,7 @@ async function startServer() {
         "Api-Key": keys.ozonApiKey,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(body)
+      body: stringifyOzonBody(body)
     });
   }
 
@@ -1714,7 +1714,7 @@ async function startServer() {
               clusters_info: clustersInfo,
               delivery_info: {
                 type: "DROPOFF",
-                drop_off_warehouse: { warehouse_id: Number(dropOffId), warehouse_type: dropOffType }
+                drop_off_warehouse: { warehouse_id: ozonInt64(dropOffId) ?? Number(dropOffId), warehouse_type: dropOffType }
               },
               deletion_sku_mode: "PARTIAL"
             });
@@ -1742,7 +1742,7 @@ async function startServer() {
       for (let attempt = 0; attempt < 15; attempt++) {
         info = await fetchOzonApi("/v2/draft/create/info",
           { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
-          { draft_id: draftId });
+          { draft_id: ozonInt64(draftId) ?? draftId });
         const st = String(info?.status || '');
         if (st === 'SUCCESS' || st === 'FAILED') break;
         await sleep(2000);
@@ -1881,7 +1881,8 @@ async function startServer() {
       }
 
       const devMode = req.body?.devMode === true;
-      const draftId = Number(req.body?.draftId);
+      // int64: kept as a digit string (null when empty/0/garbage) so no digit is lost above 2^53
+      const draftId = ozonInt64(req.body?.draftId) ? String(req.body.draftId).trim().replace(/^0+/, "") : "";
       const clusterIds = Array.isArray(req.body?.clusterIds) ? req.body.clusterIds : [];
       const availabilityCheck = Array.isArray(req.body?.availabilityCheck) ? req.body.availabilityCheck : [];
 
@@ -1953,7 +1954,7 @@ async function startServer() {
             message: "Прямой поставкой едет один кластер за заявку, а передано: " + clusterIds.length
           });
         }
-        if (!createStorageWarehouseId) {
+        if (!ozonInt64(createStorageWarehouseId)) {
           return res.status(400).json({
             status: "error",
             message: "Не указан склад прямой поставки — заявка в Ozon не отправлена"
@@ -1965,10 +1966,10 @@ async function startServer() {
       await fetchOzonApi("/v2/draft/supply/create",
         { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
         {
-          draft_id: draftId,
+          draft_id: ozonInt64(draftId),
           supply_type: createSupplyType,
           selected_cluster_warehouses: createSupplyType === 'DIRECT'
-            ? [{ macrolocal_cluster_id: Number(clusterIds[0]), storage_warehouse_id: Number(createStorageWarehouseId) }]
+            ? [{ macrolocal_cluster_id: Number(clusterIds[0]), storage_warehouse_id: ozonInt64(createStorageWarehouseId) }]
             : clusterIds.map((id: any) => ({ macrolocal_cluster_id: Number(id) }))
         });
 
@@ -1977,7 +1978,7 @@ async function startServer() {
       for (let attempt = 0; attempt < 20; attempt++) {
         statusData = await fetchOzonApi("/v2/draft/supply/create/status",
           { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey },
-          { draft_id: draftId });
+          { draft_id: ozonInt64(draftId) });
         const st = String(statusData?.status || '');
         if (st === 'SUCCESS') {
           orderId = String(statusData?.order_id ?? '');
@@ -2014,7 +2015,7 @@ async function startServer() {
         journalError = 'Заявка создана в Ozon, но не записана в журнал «Заявки Ozon» — сообщите администратору: остаток под неё не зарезервирован';
       }
 
-      return res.json({ status: "success", data: { orderId, draftId: String(draftId), ...(journalError ? { journalError } : {}) } });
+      return res.json({ status: "success", data: { orderId, draftId, ...(journalError ? { journalError } : {}) } });
 
     } catch (error: any) {
       console.error("Ozon supply create failed:", error);
@@ -2039,7 +2040,7 @@ async function startServer() {
   // Создание грузомест одной поставки с полной перезаписью прежней раскладки
   async function createCargoesForSupply(cab: any, supplyId: string, boxes: any[]): Promise<Record<string, string>> {
     const payload = {
-      supply_id: Number(supplyId),
+      supply_id: ozonInt64(supplyId) ?? Number(supplyId),
       delete_current_version: true,
       cargoes: boxes.map((b: any) => ({
         key: String(b?.key || ''),
@@ -2083,7 +2084,7 @@ async function startServer() {
   // Этикетки грузомест генерируются только покластерно: один вызов на один supply_id
   async function createCargoLabelUrl(cab: any, supplyId: string): Promise<string> {
     const created: any = await fetchOzonApi("/v1/cargoes-label/create",
-      { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { supply_id: Number(supplyId) });
+      { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey }, { supply_id: ozonInt64(supplyId) ?? Number(supplyId) });
 
     const operationId = String(created?.operation_id || '');
     if (!operationId) {

@@ -219,11 +219,11 @@ describe('подключение прямого черновика к прокс
   });
 
   it('storage_warehouse_id уходит ТОЛЬКО у прямой заявки', () => {
-    expect(server).toMatch(/createSupplyType === 'DIRECT'\s*\?\s*\[\{ macrolocal_cluster_id: Number\(clusterIds\[0\]\), storage_warehouse_id: Number\(createStorageWarehouseId\) \}\]/);
+    expect(server).toMatch(/createSupplyType === 'DIRECT'\s*\?\s*\[\{ macrolocal_cluster_id: Number\(clusterIds\[0\]\), storage_warehouse_id: ozonInt64\(createStorageWarehouseId\) \}\]/);
   });
 
   it('прямая заявка не создаётся без склада и не более чем на один кластер', () => {
     expect(server).toMatch(/createSupplyType === 'DIRECT'[\s\S]{0,400}clusterIds\.length !== 1/);
-    expect(server).toMatch(/!createStorageWarehouseId[\s\S]{0,200}Не указан склад прямой поставки/);
+    expect(server).toMatch(/!ozonInt64\(createStorageWarehouseId\)[\s\S]{0,200}Не указан склад прямой поставки/);
   });
 });

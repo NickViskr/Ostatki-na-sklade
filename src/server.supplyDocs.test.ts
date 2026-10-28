@@ -43,6 +43,7 @@ let stateCalls = 0;
 let driveLabelSaveFail: string[] = [];
 let ozonHeld: Record<string, string[]> = {};
 let ozonCalls: string[] = [];
+let ozonRawBodies: Array<{ p: string; text: string }> = []; // item 100.5 R-067: raw request body text per Ozon call
 let cargoesGetFail = false; // ticket 04: /v1/cargoes/get answers 500
 let cargoesGetOmit: string[] = []; // ticket 04: supply ids left out of the /v1/cargoes/get answer
 
@@ -91,7 +92,8 @@ let bundleHook: null | ((sup: FakeSupply, body: any) => Response | null) = null;
 
 function ozonScenario(p: string, text: string): Response | null {
   const sc = scenario!;
-  const body = text ? JSON.parse(text) : {};
+  // item 100.5 R-067: int64 ids above 2^53 arrive as bare numbers; read them as exact strings like Ozon's own ids
+  const body = text ? JSON.parse(text.replace(/([:\[,]\s*)(\d{16,})(?=[,\]}\s])/g, '$1"$2"')) : {};
   ozonCalls.push(p + (body.supply_id ? ' ' + body.supply_id : '') + (body.supply_ids ? ' ' + body.supply_ids.join(',') : ''));
   switch (p) {
     case '/v1/cargoes/get':
@@ -126,6 +128,7 @@ function ozonScenario(p: string, text: string): Response | null {
 }
 
 function ozon(p: string, text: string): Response | Promise<Response> {
+  ozonRawBodies.push({ p, text });
   if (scenario) return ozonScenario(p, text)!;
   if (p === '/v3/supply-order/get') {
     orderGetCalls.push(text);
@@ -610,6 +613,20 @@ describe('server.ts /api/ozon/supply/docs R-048: incomplete composition of any c
   it('page 1 of one cluster bundle answers 503: nothing is written for either cluster, error names the cluster', async () => {
     const r = await run('r048-page1', (sup) => (sup.id === B.id ? j({ message: 'bundle boom' }, 503) : null));
     expectStopped('r048-page1', r, 'Казань');
+  }, 60000);
+});
+
+describe('server.ts /api/ozon/supply/docs R-067: int64 supply ids keep every digit in outgoing bodies', () => {
+  const BIG: FakeSupply = { id: '9007199254740993', cluster: 'Новосибирск', offer: 'ART-A' };
+  it('/v1/cargoes/create body carries supply_id 9007199254740993 as an exact bare number', async () => {
+    ozonHeld = {}; ozonCalls = []; ozonRawBodies = []; driveCalls = []; driveRemoved = [];
+    delete storedByOrder['r067-big'];
+    stateMode = 'chain'; driveLabelSaveFail = [];
+    scenario = { orderId: 'r067-big', supplies: [BIG], failCreate: [], failLabel: [] };
+    try { await docs('r067-big'); } finally { scenario = null; }
+    const bodies = ozonRawBodies.filter((c) => c.p === '/v1/cargoes/create').map((c) => c.text);
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(bodies[0]).toContain('"supply_id":9007199254740993');
   }, 60000);
 });
 });

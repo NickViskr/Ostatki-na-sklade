@@ -5974,18 +5974,24 @@ function saveOzonSupplyRequest(data, username) {
   const ss = getSpreadsheet();
   const sheet = getOrCreateSheet(ss, 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
   const id = 'SUP-' + new Date().getTime();
-  sheet.appendRow([
-    id,
-    new Date(),
-    String((data && data.cabinet) || ''),
-    String((data && data.draftId) || ''),
-    String((data && data.orderId) || ''),
-    String((data && data.dropOffName) || ''),
-    String((data && data.clusters) || ''),
-    String((data && data.itemsJSON) || ''),
-    String(username || ''),
-    String((data && data.status) || 'Создана')
-  ]);
+  // R-060: written by the sheet's actual header names, so a reordered journal keeps its meaning;
+  // a column missing from the sheet is skipped, an extra one stays blank.
+  const valuesByHeader = {
+    'ID': id,
+    'Дата': new Date(),
+    'Кабинет': String((data && data.cabinet) || ''),
+    'DraftID': String((data && data.draftId) || ''),
+    'OrderID': String((data && data.orderId) || ''),
+    'Точка отгрузки': String((data && data.dropOffName) || ''),
+    'Кластеры': String((data && data.clusters) || ''),
+    'Состав': String((data && data.itemsJSON) || ''),
+    'Кто': String(username || ''),
+    'Статус': String((data && data.status) || 'Создана')
+  };
+  const sheetHeaders = readHeaderRow(sheet);
+  sheet.appendRow(sheetHeaders.map(function(h) {
+    return OZON_SUPPLY_REQUESTS_HEADERS.indexOf(h) !== -1 && Object.prototype.hasOwnProperty.call(valuesByHeader, h) ? valuesByHeader[h] : '';
+  }));
   return { id: id };
 }
 

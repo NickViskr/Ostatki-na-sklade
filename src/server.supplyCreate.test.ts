@@ -23,6 +23,7 @@ const st = {
   ozonCreateHttpError: false,
   ozonStatus: 'SUCCESS' as string,
   events: [] as string[],
+  rawOzon: [] as Array<{ p: string; text: string }>,
 };
 const j = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status });
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -85,14 +86,14 @@ function post(p: string, body: unknown): Promise<{ status: number; json: any }> 
   });
 }
 const ITEMS = [{ article: 'A', clusterId: 1, qty: 10 }];
-const create = (draftId: number, extra: Record<string, unknown> = {}) =>
+const create = (draftId: number | string, extra: Record<string, unknown> = {}) =>
   post('/api/ozon/supply/create', {
     sessionToken: 'admin-c', cabinet: 'MaxiStore', draftId, clusterIds: [1, 2],
     availabilityCheck: [{ article: 'A', quantity: 10 }],
     dropOffName: 'Склад Тест', itemsJSON: JSON.stringify(ITEMS), ...extra,
   });
 const reset = () => {
-  st.journal = []; st.journalFail = false; st.ozonCreates = []; st.ozonCreateHttpError = false; st.ozonStatus = 'SUCCESS'; st.events = [];
+  st.journal = []; st.journalFail = false; st.ozonCreates = []; st.ozonCreateHttpError = false; st.ozonStatus = 'SUCCESS'; st.events = []; st.rawOzon = [];
 };
 
 describe('server.ts /api/ozon/supply/create serialization and server-side journal (R-049)', () => {
@@ -105,6 +106,7 @@ describe('server.ts /api/ozon/supply/create serialization and server-side journa
     vi.stubGlobal('fetch', async (input: any, init?: any) => {
       const url = String(typeof input === 'string' ? input : input.url);
       if (url.startsWith('http://gas.invalid')) return gas(JSON.parse(init.body));
+      if (url.startsWith('https://api-seller.ozon.ru')) st.rawOzon.push({ p: url.replace('https://api-seller.ozon.ru', ''), text: String(init?.body || '') });
       if (url.startsWith('https://api-seller.ozon.ru')) return ozon(url.replace('https://api-seller.ozon.ru', ''), JSON.parse(init.body || '{}'));
       return realFetch(input, init);
     });
@@ -215,5 +217,38 @@ describe('server.ts /api/ozon/supply/create serialization and server-side journa
     expect(r.status).toBe(200);
     const after = await g();
     expect(after.json.data.length).toBe(1);
+  }, 20000);
+
+  // Plan item 100.5 part 3, finding R-067: outgoing int64 ids must keep every digit in the request body text.
+  const rawBodies = (p: string) => st.rawOzon.filter((c) => c.p === p).map((c) => c.text);
+
+  it('R-067: a draft id and a storage warehouse id above 2^53 go to Ozon as exact bare JSON numbers (create and status poll)', async () => {
+    reset();
+    const r = await create('9007199254740993', { supplyType: 'DIRECT', clusterIds: [1], storageWarehouseId: '9007199254740993' });
+    expect(r.status).toBe(200);
+    const createBody = rawBodies('/v2/draft/supply/create')[0];
+    expect(createBody.split('9007199254740993').length - 1).toBe(2);
+    expect(createBody).toContain('"draft_id":9007199254740993');
+    expect(createBody).toContain('"storage_warehouse_id":9007199254740993');
+    expect(createBody).not.toContain('"9007199254740993"');
+    expect(rawBodies('/v2/draft/supply/create/status')[0]).toContain('"draft_id":9007199254740993');
+  }, 20000);
+
+  it('R-067: a draft id of 0 or non-digits is refused with 400 and no Ozon call is made', async () => {
+    for (const bad of ['0', '000', 'abc', '12a']) {
+      reset();
+      const r = await create(bad);
+      expect(r.status).toBe(400);
+      expect(st.rawOzon.length).toBe(0);
+    }
+  }, 20000);
+
+  it('R-067 control: a small draft id still goes to Ozon as a plain number, not a quoted string', async () => {
+    reset();
+    const r = await create(201);
+    expect(r.status).toBe(200);
+    expect(rawBodies('/v2/draft/supply/create')[0]).toContain('"draft_id":201');
+    expect(rawBodies('/v2/draft/supply/create/status')[0]).toContain('"draft_id":201');
+    expect(rawBodies('/v2/draft/supply/create')[0]).not.toContain('"201"');
   }, 20000);
 });
