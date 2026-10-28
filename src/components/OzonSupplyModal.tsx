@@ -722,7 +722,10 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
         clusterIds,
         supplyType: isDirect ? 'DIRECT' : 'CROSSDOCK',
         storageWarehouseId: isDirect ? activeWarehouseId : '',
-        availabilityCheck: buildAvailabilityCheck()
+        availabilityCheck: buildAvailabilityCheck(),
+        // The proxy writes the journal row «Заявки Ozon» itself (item 100.5, R-049)
+        dropOffName: isDirect ? (activeWarehouseName + ' (привезу сам)') : dropOffWarehouseName,
+        itemsJSON: JSON.stringify(activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) })))
       }));
     } catch (e: any) {
       if (e?.name === 'AbortError') {
@@ -750,25 +753,13 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
     const orderId = String(result.data?.orderId || '');
 
-    try {
-      await fetchGas('saveOzonSupplyRequest', {
-        data: {
-          cabinet,
-          draftId: useDraftId,
-          orderId,
-          dropOffName: isDirect ? (activeWarehouseName + ' (привезу сам)') : dropOffWarehouseName,
-          clusters: clusterIds.join(','),
-          itemsJSON: JSON.stringify(activeRows.map((r) => ({ article: r.article, clusterId: r.clusterId, qty: getQty(r) }))),
-          status: 'Создана'
-        }
-      });
-    } catch (e) {
-      console.error('Не удалось записать заявку в журнал:', e);
+    if (result.data?.journalError) {
+      toast.error(String(result.data.journalError), { duration: 15000 });
     }
 
     toast.success('Заявка создана в Ozon. Номер: ' + orderId);
     // The recommendations net off the journal «Заявки Ozon», which the tab reads once on
-    // entry. The row was just appended above, so the journal is re-read HERE — before the
+    // entry. The proxy has just appended the row, so the journal is re-read HERE — before the
     // cargo/labels/Drive stage — and the coverage recomputes under the open window while
     // the supply is being finished. Not awaited: finishing must not wait for the reading.
     fetchOzonSupplyRequests();

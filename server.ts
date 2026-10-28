@@ -1860,8 +1860,20 @@ async function startServer() {
     }
   });
 
+  // Item 100.5 / R-049. Creates are serialized in-process (Cloud Run maxScale 1): the next create starts its
+  // availability check only after the previous one has written its journal row «Заявки Ozon».
+  let supplyCreateTail: Promise<void> = Promise.resolve();
+  async function acquireSupplyCreateLock(): Promise<() => void> {
+    const previous = supplyCreateTail;
+    let release!: () => void;
+    supplyCreateTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    return release;
+  }
+
   // Создание заявки из черновика. Необратимо: заявка появляется в кабинете Ozon.
   app.post("/api/ozon/supply/create", async (req, res) => {
+    let releaseCreateLock: (() => void) | null = null;
     try {
       const token = req.body?.sessionToken;
       if (!token || !(await verifyGasSession(token))) {
@@ -1876,6 +1888,9 @@ async function startServer() {
       if (!draftId || clusterIds.length === 0) {
         return res.status(400).json({ status: "error", message: "Не передан draftId или список кластеров" });
       }
+
+      // Held until the journal row is written; released in the outer finally, so any error frees it
+      releaseCreateLock = await acquireSupplyCreateLock();
 
       // Повторная проверка наличия на Моём складе — последний рубеж перед необратимым действием
       if (availabilityCheck.length > 0) {
@@ -1981,7 +1996,25 @@ async function startServer() {
         });
       }
 
-      return res.json({ status: "success", data: { orderId, draftId: String(draftId) } });
+      // The proxy (not the browser) writes the reserving journal row, before the lock is released.
+      // A failed write must not hide the order that now exists in Ozon: still success, plus journalError.
+      let journalError: string | undefined;
+      try {
+        await callGasAction('saveOzonSupplyRequest', token, devMode, {
+          cabinet: cab.name,
+          draftId: req.body?.draftId,
+          orderId,
+          dropOffName: String(req.body?.dropOffName ?? ''),
+          clusters: clusterIds.join(','),
+          itemsJSON: String(req.body?.itemsJSON ?? '[]'),
+          status: 'Создана'
+        });
+      } catch (journalEx: any) {
+        console.error("Ozon supply journal write failed:", journalEx);
+        journalError = 'Заявка создана в Ozon, но не записана в журнал «Заявки Ozon» — сообщите администратору: остаток под неё не зарезервирован';
+      }
+
+      return res.json({ status: "success", data: { orderId, draftId: String(draftId), ...(journalError ? { journalError } : {}) } });
 
     } catch (error: any) {
       console.error("Ozon supply create failed:", error);
@@ -1991,6 +2024,8 @@ async function startServer() {
         httpStatus: error.httpStatus || 500,
         message: error.message || String(error)
       });
+    } finally {
+      if (releaseCreateLock) releaseCreateLock();
     }
   });
 
