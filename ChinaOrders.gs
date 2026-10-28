@@ -2069,6 +2069,10 @@ function chinaWithPaymentRate(ss, batch) {
     out.goodsRateSource === '' && out.freightRateSource === '');
 
   out.orderInfo = orderInfo;
+  // Plan item 100.1 (R-016): the order's debt in the NEWEST report (same source as
+  // chinaRemainingOf) — an unpaid order keeps the batch 'предварительно'.
+  const remaining = chinaRemainingOf(ledger, batch);
+  out.goodsUnpaidCny = remaining.remainingGoodsKnown ? remaining.remainingGoodsCny : 0;
   out.billInfo = bill;
   // Item B: > 1 only when the batch's own code prefix-matches several bills in the report and
   // none of them could be picked — chinaMissingListOf reports the ambiguity by name instead of
@@ -2221,6 +2225,7 @@ function chinaMissingListOf(rated, calc) {
       chinaLotsMissingMessages(order.lots, receiptsById, 'goodsCny', 'на этот заказ', order.historyCny));
   }
   if (order.unknownCny > 0.004) missing.push(order.unknownCny + ' ¥ товара без курса (не хватает поступлений)');
+  if (rated.goodsUnpaidCny > 0.004) missing.push('товар не оплачен полностью (' + rated.goodsUnpaidCny + ' ¥)');
   if (bill && bill.unpaidUsd > 0.004) missing.push('перевозка не оплачена полностью (' + bill.unpaidUsd + ' $)');
   if (bill && (bill.pendingCny > 0.004 || bill.historyCny > 0.004)) {
     missing.push.apply(missing,

@@ -9019,6 +9019,61 @@ function item91DateCellBatch(h) {
     JSON.stringify({ before: { closed: finalBatch.closed, total: totalBefore }, after: { closed: afterFinal.closed, total: afterFinal.totalRub, missing: afterFinal.missing } }));
 })();
 
+// ---- R-016 (plan item 100.1): a posted batch whose goods order still has debt in the report is NOT closed ----
+function china100R016Scenario(h, unpaid1) {
+  h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10]]); h.setStockSheet([]); h.ensureTransSheet();
+  const frt = { code: 'NV-R16', orderNo: '1', amountUsd: 10, cargoRate: 7 };
+  h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт',
+    orders: [{ orderNo: '1', date: '2026-08-20', receivedCny: 100, totalCny: 1000, unpaidCny: unpaid1 }],
+    receipts: [{ date: '2026-09-01', goodsCny: 100, freightCny: 70, freightUsd: 10 }], freights: [frt] }, 'Николай');
+  h.saveChinaPayment({ date: '2026-09-01', amountRub: 1700, rate: 10, comment: 'P1' }, 'Николай');
+  const pl = function (id) {
+    return Object.assign(id ? { id: id } : {}, { orderNo: '1', code: 'NV-R16', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+      weightKg: 100, ratePerKgUsd: 1, cargoRate: 7,
+      lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 100, article: 'ART-POST-1' }],
+      costs: [{ type: 'Прочее', amountRub: 100, comment: 'разгрузка' }] });
+  };
+  const b = h.saveChinaBatch(pl(), 'Николай').batches[0];
+  h.postChinaBatch({ id: b.id, opId: 'op-r16', lines: [{ article: 'ART-POST-1', qty: 10 }] }, 'Николай');
+  const saved = h.saveChinaBatch(pl(b.id), 'Николай').batches.filter(function (x) { return x.id === b.id; })[0];
+  return { id: b.id, saved: saved, frt: frt };
+}
+(function () {
+  const h = withChina();
+  const s = china100R016Scenario(h, 900);
+  check('100.1 R-016: a posted batch with goods debt 900 ¥ in the report stays «предварительно», not closed, missing = «товар не оплачен полностью (900 ¥)»',
+    s.saved.postingState === 'предварительно' && s.saved.closed === false
+    && s.saved.missing.length === 1 && s.saved.missing[0] === 'товар не оплачен полностью (900 ¥)',
+    JSON.stringify({ state: s.saved.postingState, closed: s.saved.closed, missing: s.saved.missing }));
+  h.saveChinaPayment({ date: '2026-09-10', amountRub: 18000, rate: 20, comment: 'P2' }, 'Николай');
+  h.saveChinaReport({ reportDate: '2026-09-10', source: 'скрипт',
+    orders: [{ orderNo: '1', date: '2026-08-20', receivedCny: 1000, totalCny: 1000, unpaidCny: 0 }],
+    receipts: [{ date: '2026-09-01', goodsCny: 100, freightCny: 70, freightUsd: 10 }, { date: '2026-09-10', goodsCny: 900 }], freights: [s.frt] }, 'Николай');
+  const fin = h.getChinaBatches().batches.filter(function (x) { return x.id === s.id; })[0];
+  const cap = h.stockOf('ART-POST-1').capitalization;
+  check('100.1 R-016: after P2 (18000 ₽ at 20) and a zero-debt report the paid remainder reaches stock: capitalization 19800 and «окончательно»',
+    cap === 19800 && fin.postingState === 'окончательно',
+    JSON.stringify({ cap: cap, state: fin.postingState, total: fin.totalRub }));
+})();
+(function () {
+  const h = withChina();
+  const s = china100R016Scenario(h, 0);
+  check('100.1 R-016 control: with report debt 0 there is no «товар не оплачен» message',
+    !s.saved.missing.some(function (m) { return m.indexOf('товар не оплачен') !== -1; }),
+    JSON.stringify(s.saved.missing));
+})();
+(function () {
+  const h = withChina();
+  const s = china100R016Scenario(h, 900);
+  h.saveChinaReport({ reportDate: '2026-09-10', source: 'скрипт',
+    orders: [{ orderNo: '2', date: '2026-09-05', receivedCny: 0, totalCny: 500, unpaidCny: 500 }],
+    receipts: [{ date: '2026-09-01', goodsCny: 100, freightCny: 70, freightUsd: 10 }], freights: [s.frt] }, 'Николай');
+  const after = h.getChinaBatches().batches.filter(function (x) { return x.id === s.id; })[0];
+  check('100.1 R-016 control: an order absent from the newest report keeps the old behaviour (no «товар не оплачен» message)',
+    !after.missing.some(function (m) { return m.indexOf('товар не оплачен') !== -1; }),
+    JSON.stringify(after.missing));
+})();
+
 // ---- migration (decision 8): marks only current «Прибыла» batches, once, a later arrival stays untouched ----
 (function () {
   const h = freshHarness();
