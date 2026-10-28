@@ -161,6 +161,9 @@ export const useChinaStore = create<ChinaState>()((set, get) => ({
     // server may have changed it) — the owner watches the modal close right after the save
     // answers, not after another request.
     if (!result.data.money) void get().fetchChinaMoney().catch(() => {});
+    // Item 100.3 (R-059): saving a posted batch re-costs it on the server, so the stock moved too.
+    const savedBatch = (result.data.batches || []).find((b: { id?: string }) => b.id === payload.id);
+    if (savedBatch?.postingState) void useWarehouseStore.getState().fetchStock().catch(() => {});
     void useWarehouseStore.getState().fetchFactoryOrders().catch(() => {});
     return true;
   },

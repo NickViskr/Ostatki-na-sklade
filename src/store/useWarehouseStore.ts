@@ -31,6 +31,10 @@ let ozonInitialInFlight: Promise<boolean> | null = null;
 let kanSendRunning = false;
 let kanSendRepeat = false;
 
+// Item 100.3 (R-057): bumped by every fetchStock start and every write answer that sets stock;
+// a fetchStock whose number is no longer current answers late and is dropped.
+let stockEpoch = 0;
+
 // One KAN toast at a time: every toast of the send and of «Отправлю сам» carries this id, so sonner
 // replaces the previous one instead of stacking them.
 const KAN_TOAST_ID = 'kan-cost';
@@ -471,6 +475,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   fetchStock: async () => {
+    const epoch = ++stockEpoch;
     set({ isSyncing: true });
     try {
       const result = await get().fetchGas('getInitialData');
@@ -498,6 +503,8 @@ export const useWarehouseStore = create<WarehouseState>()(
           console.error("Failed to load service rates:", e);
         }
 
+        // A newer fetch or a write answer has applied since this one started: drop the old answer.
+        if (epoch !== stockEpoch) return;
         set({
           stock: normalizeStock(data.stock || []),
           skus: data.skus || [],
@@ -571,6 +578,7 @@ export const useWarehouseStore = create<WarehouseState>()(
       });
       if (result.status === 'success') {
         if (editingSku) {
+          stockEpoch++;
           set({ skus: result.data.skus, stock: result.data.stock });
           toast.success('SKU успешно обновлен');
         } else {
@@ -829,6 +837,7 @@ export const useWarehouseStore = create<WarehouseState>()(
           if (payloadData.newTransactions) {
             payloadData.newTransactions.forEach((tx: Transaction) => uniqueMap.set(tx.id, tx));
           }
+          stockEpoch++;
           return {
             stock: normalizeStock(Array.isArray(newStock) ? newStock : []),
             transactions: Array.from(uniqueMap.values()),
@@ -903,6 +912,7 @@ export const useWarehouseStore = create<WarehouseState>()(
           const uniqueMap = new Map<string, Transaction>();
           state.transactions.filter(t => t.id !== id).forEach(t => uniqueMap.set(t.id, t));
           txRows.filter((t: Transaction) => t.id !== id).forEach((t: Transaction) => uniqueMap.set(t.id, t));
+          stockEpoch++;
           return {
             stock: normalizeStock(result.data?.stock || state.stock),
             transactions: Array.from(uniqueMap.values())
@@ -943,6 +953,7 @@ export const useWarehouseStore = create<WarehouseState>()(
           const uniqueMap = new Map<string, Transaction>();
           state.transactions.filter(t => !expandedIds.includes(t.id)).forEach(t => uniqueMap.set(t.id, t));
           txRows.filter((t: Transaction) => !expandedIds.includes(t.id)).forEach((t: Transaction) => uniqueMap.set(t.id, t));
+          stockEpoch++;
           return {
             stock: normalizeStock(payloadData.stock || state.stock),
             transactions: Array.from(uniqueMap.values())
@@ -981,7 +992,7 @@ export const useWarehouseStore = create<WarehouseState>()(
       }
       const d = result.data || {};
       if (Array.isArray(d.newTransactions)) set({ transactions: d.newTransactions });
-      if (Array.isArray(d.stock)) set({ stock: normalizeStock(d.stock) });
+      if (Array.isArray(d.stock)) { stockEpoch++; set({ stock: normalizeStock(d.stock) }); }
       const money = `${formatCurrency(Number(d.oldTotal) || 0)} → ${formatCurrency(Number(d.newTotal) || 0)} ₽`;
       const orders: { label?: string; oldShare?: number; newShare?: number }[] = Array.isArray(d.orders) ? d.orders : [];
       if (orders.length > 1) {
@@ -1074,6 +1085,7 @@ export const useWarehouseStore = create<WarehouseState>()(
             }
             updatedTransactions = Array.from(uniqueMap.values());
           }
+          stockEpoch++;
           return {
             stock: newStock,
             transactions: updatedTransactions,
@@ -1439,6 +1451,7 @@ export const useWarehouseStore = create<WarehouseState>()(
           ['admin', 'админ', 'администратор'].includes(get().currentUser?.username?.toLowerCase() || '');
           
         if (result.data && result.data.stock) {
+           stockEpoch++;
            set({ stock: normalizeStock(result.data.stock) });
            if (result.data.transactions) {
              const txs = Array.isArray(result.data.transactions) ? result.data.transactions : (result.data.transactions.rows || []);
@@ -1486,6 +1499,7 @@ export const useWarehouseStore = create<WarehouseState>()(
           ['admin', 'админ', 'администратор'].includes(get().currentUser?.username?.toLowerCase() || '');
           
         if (payloadData.stock) {
+           stockEpoch++;
            set({ stock: normalizeStock(payloadData.stock) });
            if (payloadData.transactions) {
              const txs = Array.isArray(payloadData.transactions) ? payloadData.transactions : (payloadData.transactions.rows || []);
@@ -1696,6 +1710,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     try {
       const res = await get().fetchGas('commitShipmentPeresort', { data: { postingId } });
       if (res.status === 'success') {
+        stockEpoch++;
         set(state => ({
           stock: normalizeStock(res.data.stock || []),
           transactions: res.data.transactions || state.transactions
@@ -1732,6 +1747,7 @@ export const useWarehouseStore = create<WarehouseState>()(
           const uniqueMap = new Map<string, Transaction>();
           state.transactions.forEach((tx) => uniqueMap.set(tx.id, tx));
           (Array.isArray(data.newTransactions) ? data.newTransactions : []).forEach((tx: Transaction) => uniqueMap.set(tx.id, tx));
+          if (Array.isArray(data.stock)) stockEpoch++;
           return {
             stock: Array.isArray(data.stock) ? normalizeStock(data.stock) : state.stock,
             transactions: Array.from(uniqueMap.values()),
