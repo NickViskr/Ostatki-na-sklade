@@ -169,7 +169,7 @@ describe('подключение серверной сборки докумен�
 
   it('кнопка «Собрать документы» спрашивает подтверждение о пересоздании грузомест и зовёт прокси', () => {
     expect(tab).toContain('Собрать документы');
-    expect(tab).toMatch(/askConfirmation\(\s*'Собрать документы заявки\?'[\s\S]{0,400}заново созданы грузоместа/);
+    expect(tab).toMatch(/askConfirmation\(\s*'Собрать документы заявки\?'[\s\S]{0,400}заново создаются только грузоместа/);
     expect(tab).toContain("fetch('/api/ozon/supply/docs'");
   });
 
@@ -234,14 +234,14 @@ describe('decideSupplyDocs', () => {
   it('skips when everything matches: fresh record, same ids, rules pass, both files present', () => {
     expect(decideSupplyDocs(input())).toBe('skip');
   });
-  it('recreates when there is no previous entry', () => {
-    expect(decideSupplyDocs(input({ previous: null }))).toBe('recreate');
+  it('is foreign when there is no previous entry', () => {
+    expect(decideSupplyDocs(input({ previous: null }))).toBe('foreign');
   });
-  it('recreates when the previous entry belongs to another supply', () => {
-    expect(decideSupplyDocs(input({ previous: entry({ supplyId: '2000000000009' }) }))).toBe('recreate');
+  it('is foreign when the previous entry belongs to another supply', () => {
+    expect(decideSupplyDocs(input({ previous: entry({ supplyId: '2000000000009' }) }))).toBe('foreign');
   });
-  it('recreates when Ozon holds different cargo ids than the record', () => {
-    expect(decideSupplyDocs(input({ currentCargoIds: ['901', '903'] }))).toBe('recreate');
+  it('is foreign when Ozon holds different cargo ids than the record', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: ['901', '903'] }))).toBe('foreign');
   });
   it('treats the same ids in another order as equal (both sides sorted)', () => {
     expect(decideSupplyDocs(input({ currentCargoIds: ['902', '901'], previous: entry({ cargoIds: ['901', '902'] }) }))).toBe('skip');
@@ -249,11 +249,28 @@ describe('decideSupplyDocs', () => {
   it('recreates when Ozon returns no cargoes', () => {
     expect(decideSupplyDocs(input({ currentCargoIds: [], previous: entry({ cargoIds: [] }), plannedBoxes: 0 }))).toBe('recreate');
   });
+  it('recreates when Ozon holds nothing even though the record is older than 20 days', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: [], recordAt: new Date(NOW - 30 * DAY).toISOString() }))).toBe('recreate');
+  });
+  it('recreates when Ozon holds nothing and there is no previous entry', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: [], previous: null }))).toBe('recreate');
+  });
+  it('is foreign when the stored cargo ids are empty but Ozon holds cargoes', () => {
+    expect(decideSupplyDocs(input({ previous: entry({ cargoIds: [] }) }))).toBe('foreign');
+  });
+  it('is foreign, not recreate, when the ids differ AND a content rule fails AND the count mismatches the plan', () => {
+    const bad = { ...okCheckList(), cargoes_presents_rule: rule(false) };
+    expect(decideSupplyDocs(input({ currentCargoIds: ['901', '903'], checkList: bad, plannedBoxes: 5 }))).toBe('foreign');
+  });
+  it('recreates (not foreign) when the ids match the record and a content rule fails', () => {
+    const bad = { ...okCheckList(), package_units_with_distribution_rule: rule(false) };
+    expect(decideSupplyDocs(input({ checkList: bad }))).toBe('recreate');
+  });
   it('recreates when the cargo count differs from the planned box count', () => {
     expect(decideSupplyDocs(input({ plannedBoxes: 3 }))).toBe('recreate');
   });
-  it('recreates when Ozon has more ids than the record', () => {
-    expect(decideSupplyDocs(input({ currentCargoIds: ['901', '902', '903'], plannedBoxes: 3 }))).toBe('recreate');
+  it('is foreign when Ozon has more ids than the record', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: ['901', '902', '903'], plannedBoxes: 3 }))).toBe('foreign');
   });
   it('recreates when the check-list is missing', () => {
     expect(decideSupplyDocs(input({ checkList: null }))).toBe('recreate');
@@ -272,14 +289,14 @@ describe('decideSupplyDocs', () => {
     const cl = { ...okCheckList(), placement_zones_rule: rule(false), expiration_dates_rule: rule(false), edit_deadline_rule: rule(false) };
     expect(decideSupplyDocs(input({ checkList: cl }))).toBe('skip');
   });
-  it('a record 19.9 days old still counts, a record exactly 20 days old does not', () => {
+  it('a record 19.9 days old still counts, a record exactly 20 days old is foreign', () => {
     expect(decideSupplyDocs(input({ recordAt: new Date(NOW - 19.9 * DAY).toISOString() }))).toBe('skip');
-    expect(decideSupplyDocs(input({ recordAt: new Date(NOW - 20 * DAY).toISOString() }))).toBe('recreate');
+    expect(decideSupplyDocs(input({ recordAt: new Date(NOW - 20 * DAY).toISOString() }))).toBe('foreign');
   });
-  it('recreates when the record time is in the future or unparsable', () => {
-    expect(decideSupplyDocs(input({ recordAt: new Date(NOW + 1000).toISOString() }))).toBe('recreate');
-    expect(decideSupplyDocs(input({ recordAt: 'garbage' }))).toBe('recreate');
-    expect(decideSupplyDocs(input({ recordAt: '' }))).toBe('recreate');
+  it('is foreign when the record time is in the future or unparsable', () => {
+    expect(decideSupplyDocs(input({ recordAt: new Date(NOW + 1000).toISOString() }))).toBe('foreign');
+    expect(decideSupplyDocs(input({ recordAt: 'garbage' }))).toBe('foreign');
+    expect(decideSupplyDocs(input({ recordAt: '' }))).toBe('foreign');
   });
   it('recreates when the composition flag is false even though the file is in the folder', () => {
     expect(decideSupplyDocs(input({ previous: entry({ composition: false }) }))).toBe('recreate');

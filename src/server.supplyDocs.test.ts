@@ -43,6 +43,8 @@ let stateCalls = 0;
 let driveLabelSaveFail: string[] = [];
 let ozonHeld: Record<string, string[]> = {};
 let ozonCalls: string[] = [];
+let cargoesGetFail = false; // ticket 04: /v1/cargoes/get answers 500
+let cargoesGetOmit: string[] = []; // ticket 04: supply ids left out of the /v1/cargoes/get answer
 
 async function gas(body: any): Promise<Response> {
   switch (body.action) {
@@ -91,7 +93,8 @@ function ozonScenario(p: string, text: string): Response | null {
   ozonCalls.push(p + (body.supply_id ? ' ' + body.supply_id : '') + (body.supply_ids ? ' ' + body.supply_ids.join(',') : ''));
   switch (p) {
     case '/v1/cargoes/get':
-      return j({ supply: body.supply_ids.map((id: string) => ({ supply_id: id, cargoes: (ozonHeld[id] || ['9' + id]).map((c) => ({ cargo_id: c })) })) });
+      if (cargoesGetFail) return j({ message: 'cargoes get boom' }, 500);
+      return j({ supply: body.supply_ids.filter((id: string) => !cargoesGetOmit.includes(id)).map((id: string) => ({ supply_id: id, cargoes: (ozonHeld[id] || []).map((c) => ({ cargo_id: c })) })) });
     case '/v1/cargoes/rules/get': {
       const ok = { satisfied: true, is_applicable: true, is_required: true };
       return j({ supply_check_lists: body.supply_ids.map((id: string) => ({ supply_id: id, cargoes_presents_rule: ok, package_units_with_distribution_rule: ok, is_valid_distribution_rule: ok })) });
@@ -105,7 +108,7 @@ function ozonScenario(p: string, text: string): Response | null {
     case '/v1/cargoes/create':
       if (sc.failCreate.includes(String(body.supply_id))) return j({ message: 'create boom' }, 500);
       boxKeyOfSupply[String(body.supply_id)] = body.cargoes[0].key;
-      delete ozonHeld[String(body.supply_id)]; // recreated: Ozon holds the new cargoes now
+      ozonHeld[String(body.supply_id)] = ['9' + body.supply_id]; // recreated: Ozon holds the new cargoes now
       return j({ operation_id: 'create:' + body.supply_id });
     case '/v2/cargoes/create/info':
       return j({ status: 'SUCCESS', result: { cargoes: [{ key: boxKeyOfSupply[supplyOfOp(body.operation_id)], value: { cargo_id: '9' + supplyOfOp(body.operation_id) } }] } });
@@ -255,6 +258,7 @@ describe('server.ts /api/ozon/supply/docs safety and Ozon 429 visibility', () =>
   const SUP_NONORM: FakeSupply = { id: '2000000000003', cluster: 'Самара', offer: 'ART-NONORM' };
   const NOTE = 'прежний файл этикеток грузомест убран из папки — он недействителен';
   async function runScenario(orderId: string, supplies: FakeSupply[], failCreate: string[], failLabel: string[], removed: string[]) {
+    ozonHeld = {}; // ticket 04: cargoes left by an earlier test would make the supply foreign
     driveCalls = [];
     driveRemoved = removed;
     scenario = { orderId, supplies, failCreate, failLabel };
@@ -388,12 +392,13 @@ describe('server.ts /api/ozon/supply/docs resume: only the missing pieces are re
     expect(record().supplies).toEqual(before);
   }, 40000);
 
-  it('ids changed in Ozon for B: B is recreated (create + label), A and C are skipped', async () => {
+  it('ids changed in Ozon for B (ticket 04): B is foreign, no Ozon write at all, its entry is kept', async () => {
     ozonHeld[B.id] = ['777'];
     await run(order, [A, B, C]);
-    expect(callsOf('/v1/cargoes/create')).toEqual([B.id]);
-    expect(callsOf('/v1/cargoes-label/create')).toEqual([B.id]);
+    expect(count('/v1/cargoes/create')).toBe(0);
+    expect(count('/v1/cargoes-label/create')).toBe(0);
     expect(entryOf(B.id)).toMatchObject({ cargoIds: ['9' + B.id], composition: true, label: true });
+    ozonHeld[B.id] = ['9' + B.id]; // back to the app's own cargoes for the next tests
   }, 40000);
 
   it('a label file that was not saved on Drive (savedBySupply label false) is redone on the next run even though Ozon gave a URL', async () => {
@@ -401,7 +406,7 @@ describe('server.ts /api/ozon/supply/docs resume: only the missing pieces are re
     await run(order, [A, B, C]); // nothing to redo: A skipped, nothing is saved
     expect(count('/v1/cargoes-label/create')).toBe(0);
     // lose A's label from the folder and the flag by recreating A
-    ozonHeld[A.id] = ['555'];
+    ozonHeld[A.id] = []; // Ozon holds nothing for A: it is recreated
     await run(order, [A, B, C]);
     expect(callsOf('/v1/cargoes/create')).toEqual([A.id]);
     expect(entryOf(A.id)).toMatchObject({ composition: true, label: false });
@@ -412,23 +417,123 @@ describe('server.ts /api/ozon/supply/docs resume: only the missing pieces are re
     expect(entryOf(A.id)).toMatchObject({ label: true });
   }, 60000);
 
-  it('no record in the journal: every supply is recreated and Ozon is not asked what it holds', async () => {
+  it('no record in the journal and Ozon holds nothing: every supply is created (Ozon is asked what it holds)', async () => {
     stateMode = 'none';
+    ozonHeld = {};
     try {
       await run('resume-none', [A, B]);
     } finally { stateMode = 'chain'; }
     expect(callsOf('/v1/cargoes/create').sort()).toEqual([A.id, B.id]);
-    expect(count('/v1/cargoes/get')).toBe(0);
+    expect(count('/v1/cargoes/get')).toBeGreaterThan(0);
   }, 40000);
 
-  it('GAS getSupplyDocsState fails: every supply is recreated and the build still succeeds', async () => {
+  // Ticket 04: a blocked run must leave Ozon, Drive and the journal exactly as they were.
+  const expectBlocked = (r: { status: number; json: any }) => {
+    expect(r.status).toBe(503);
+    expect(r.json.status).toBe('error');
+    expect(r.json.stage).toBe('cargo_check');
+    expect(r.json.message).toContain('Не удалось проверить грузоместа в Ozon');
+    expect(count('/v1/cargoes/create')).toBe(0);
+    expect(count('/v1/cargoes-label/create')).toBe(0);
+    expect(driveCalls.length).toBe(0); // saveSupplyDocsToDrive not called: the folder is untouched
+  };
+
+  it('GAS getSupplyDocsState fails (ticket 04): 503 cargo_check, no Ozon write, no Drive save, journal record unchanged', async () => {
+    storedByOrder['resume-gas-error'] = 'FAKE-RECORD';
     stateMode = 'error';
     let res;
     try {
       res = await run('resume-gas-error', [A, B]);
     } finally { stateMode = 'chain'; }
-    expect(res.r.status).toBe(200);
-    expect(callsOf('/v1/cargoes/create').sort()).toEqual([A.id, B.id]);
+    expectBlocked(res.r);
+    expect(storedByOrder['resume-gas-error']).toBe('FAKE-RECORD'); // saveOzonSupplyDocs not called
   }, 40000);
+
+  it('cargoes/get answers 500 (ticket 04): 503 cargo_check, nothing written anywhere, journal record unchanged', async () => {
+    const before = storedByOrder[order];
+    cargoesGetFail = true;
+    let res;
+    try {
+      res = await run(order, [A, B, C]);
+    } finally { cargoesGetFail = false; }
+    expectBlocked(res.r);
+    expect(storedByOrder[order]).toBe(before);
+  }, 40000);
+
+  it('cargoes/get answer omits one requested supply (ticket 04): blocked, nothing written, journal unchanged', async () => {
+    const before = storedByOrder[order];
+    cargoesGetOmit = [B.id];
+    let res;
+    try {
+      res = await run(order, [A, B, C]);
+    } finally { cargoesGetOmit = []; }
+    expectBlocked(res.r);
+    expect(storedByOrder[order]).toBe(before);
+  }, 40000);
+
+  it('no record and Ozon holds cargoes for a supply (pre-101 order, ticket 04): foreign, zero creates, warning, no entry', async () => {
+    stateMode = 'none';
+    ozonHeld = { [A.id]: ['555'] };
+    let res;
+    try {
+      res = await run('resume-pre101', [A, B]);
+    } finally { stateMode = 'chain'; }
+    expect(res.r.status).toBe(200);
+    expect(callsOf('/v1/cargoes/create')).toEqual([B.id]); // A untouched, B (Ozon empty) is created
+    expect(callsOf('/v1/cargoes-label/create')).toEqual([B.id]);
+    expect(res.r.json.data.warnings).toContain('Кластер Новосибирск: грузоместа изменены в Ozon вручную — документы этого кластера возьмите из Ozon Seller');
+    expect(res.r.json.data.staleLabelSupplyIds ?? []).not.toContain(A.id);
+    expect(res.drive.staleLabelSupplyIds).not.toContain(A.id);
+    const rec = JSON.parse(storedByOrder['resume-pre101']);
+    expect(rec.supplies.map((e: any) => e.supplyId)).toEqual([B.id]); // foreign without a previous entry: nothing remembered
+    ozonHeld = {};
+  }, 40000);
+
+  it('no record and Ozon empty (wizard first run, ticket 04): every supply is created and remembered', async () => {
+    stateMode = 'none';
+    ozonHeld = {};
+    try {
+      await run('resume-first', [A, B]);
+    } finally { stateMode = 'chain'; }
+    expect(callsOf('/v1/cargoes/create').sort()).toEqual([A.id, B.id]);
+    expect(JSON.parse(storedByOrder['resume-first']).supplies.map((e: any) => e.supplyId).sort()).toEqual([A.id, B.id]);
+  }, 40000);
+
+  const order2 = 'manual-order';
+  it('manual cargoes on B while A is remembered (ticket 04): A skipped, B has zero creates/labels, not stale, warning, B entry kept', async () => {
+    ozonHeld = {}; // a fresh Ozon, otherwise leftovers of earlier tests make the first run foreign
+    await run(order2, [A, B]); // remember both
+    const beforeB = JSON.parse(storedByOrder[order2]).supplies.find((e: any) => e.supplyId === B.id);
+    expect(beforeB).toBeTruthy();
+    ozonHeld[B.id] = ['manual-1', 'manual-2']; // the owner re-laid B by hand in Ozon Seller
+    const { r, drive } = await run(order2, [A, B]);
+    expect(r.status).toBe(200);
+    expect(count('/v1/cargoes/create')).toBe(0);
+    expect(count('/v1/cargoes-label/create')).toBe(0);
+    expect(callsOf('/v1/cargoes/create')).not.toContain(B.id);
+    expect(drive.staleLabelSupplyIds).not.toContain(B.id);
+    expect(r.json.data.warnings).toContain('Кластер Казань: грузоместа изменены в Ozon вручную — документы этого кластера возьмите из Ozon Seller');
+    const rec = JSON.parse(storedByOrder[order2]);
+    expect(rec.supplies.find((e: any) => e.supplyId === B.id)).toEqual(beforeB);
+    expect(rec.supplies.find((e: any) => e.supplyId === A.id)).toBeTruthy();
+    ozonHeld = {};
+  }, 60000);
+
+  it('a create failure on a remembered supply keeps its previous entry in the merged record (ticket 04)', async () => {
+    const orderF = 'create-fail-order';
+    ozonHeld = {};
+    await run(orderF, [A, B]);
+    const beforeA = JSON.parse(storedByOrder[orderF]).supplies.find((e: any) => e.supplyId === A.id);
+    ozonHeld[A.id] = []; // Ozon says no cargoes -> recreate -> the create fails
+    await run(orderF, [A, B], [], [A.id]);
+    const afterA = JSON.parse(storedByOrder[orderF]).supplies.find((e: any) => e.supplyId === A.id);
+    expect(afterA).toEqual(beforeA);
+    ozonHeld = {};
+  }, 60000);
+
+  it('the button confirmation says that clusters edited by hand in Ozon are not touched (ticket 04)', () => {
+    const tabSrc = fs.readFileSync(path.resolve(__dirname, 'components/OzonSuppliesTab.tsx'), 'utf8');
+    expect(tabSrc).toMatch(/askConfirmation\(\s*'Собрать документы заявки\?'[\s\S]{0,900}Кластеры, где грузоместа изменены вручную в Ozon Seller, не затрагиваются/);
+  });
 });
 });

@@ -83,7 +83,7 @@ export function compositionFileName(clusterName: string): string {
   return (cleaned || 'Без названия') + '.xlsx';
 }
 
-export type SupplyDocsAction = 'skip' | 'label' | 'recreate';
+export type SupplyDocsAction = 'skip' | 'label' | 'recreate' | 'foreign';
 
 export interface SupplyDocsDecisionInput {
   supplyId: string;
@@ -103,28 +103,37 @@ export interface SupplyDocsDecisionInput {
 }
 
 /**
- * Item 101. What a repeat «Собрать документы» does with one supply. Money-critical: a wrong
- * 'skip' leaves labels that do not match the boxes, so every doubt answers 'recreate'.
- * skip: the record is fresh, Ozon holds exactly the cargoes it remembers (as many as planned),
- *   Ozon's content rules pass (cargoes present, every box filled, distribution valid), and both
- *   files were saved and are still in the folder.
- * label: the same, except the label file is missing (flag false or file absent).
+ * Item 101 (ticket 04). What a repeat «Собрать документы» does with one supply. Money-critical:
+ * a wrong 'skip' leaves labels that do not match the boxes, and a wrong 'recreate' wipes cargoes
+ * somebody laid out by hand in Ozon Seller. Order of checks:
+ * recreate: Ozon holds NO cargoes (also the wizard's first run).
+ * foreign: Ozon holds cargoes the app does not remember as its own: no stored entry, a record
+ *   older than 20 days, empty stored ids, or ids that differ from Ozon's. Nothing is written.
+ * Ozon's ids equal the stored ones (the boxes are the app's own):
+ *   recreate: box count differs from the plan, Ozon's content rules fail, check-list missing,
+ *     or the composition flag/file is missing.
+ *   skip: the same, with both files saved and still in the folder.
+ *   label: the same, except the label file is missing (flag false or file absent).
  */
 const CONTENT_RULES = ['cargoes_presents_rule', 'package_units_with_distribution_rule', 'is_valid_distribution_rule'];
 
 export function decideSupplyDocs(input: SupplyDocsDecisionInput): SupplyDocsAction {
+  const current = input.currentCargoIds.map(String).sort();
+  if (current.length === 0) return 'recreate';
+
   const prev = input.previous;
-  if (!prev || prev.supplyId !== input.supplyId) return 'recreate';
+  if (!prev || prev.supplyId !== input.supplyId) return 'foreign';
 
   const recordMs = Date.parse(input.recordAt);
-  if (!Number.isFinite(recordMs)) return 'recreate';
+  if (!Number.isFinite(recordMs)) return 'foreign';
   const ageMs = input.nowMs - recordMs;
-  if (ageMs < 0 || ageMs >= SUPPLY_DOCS_IDS_KEEP_DAYS * 24 * 60 * 60 * 1000) return 'recreate';
+  if (ageMs < 0 || ageMs >= SUPPLY_DOCS_IDS_KEEP_DAYS * 24 * 60 * 60 * 1000) return 'foreign';
 
-  const current = input.currentCargoIds.map(String).sort();
   const stored = prev.cargoIds.map(String).sort();
-  if (current.length === 0 || current.length !== stored.length) return 'recreate';
-  if (current.some((id, i) => id !== stored[i])) return 'recreate';
+  if (stored.length === 0 || current.length !== stored.length) return 'foreign';
+  if (current.some((id, i) => id !== stored[i])) return 'foreign';
+
+  // From here the cargoes are the app's own: any failed check means rebuilding them.
   if (current.length !== input.plannedBoxes) return 'recreate';
 
   // Only the rules that say «Ozon's cargoes still hold the supply's composition». Expiry dates,
