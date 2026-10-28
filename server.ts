@@ -1536,8 +1536,10 @@ async function startServer() {
    * Товарный состав по bundle_id. Метод читающий, несмотря на POST.
    * Ozon отдаёт не больше 100 позиций за страницу и сигналит о продолжении через has_next + last_id.
    * По документации за один вызов передаётся ровно один bundle_id.
+   * Ошибка страницы глотается и отдаёт частичный список; если передан `incomplete`, причина неполноты
+   * (ошибка страницы / потолок в 10 страниц при has_next) записывается в incomplete.reason.
    */
-  async function loadBundleItems(bundleId: string, cab: OzonCabinetKeys): Promise<any[]> {
+  async function loadBundleItems(bundleId: string, cab: OzonCabinetKeys, incomplete?: { reason?: string }): Promise<any[]> {
     if (!bundleId) return [];
     const out: any[] = [];
     let lastId = '';
@@ -1571,9 +1573,11 @@ async function startServer() {
         if (data?.has_next !== true) break;
         lastId = String(data?.last_id || '');
         if (!lastId) break;
+        if (page === 9 && incomplete) incomplete.reason = 'состав не помещается в 10 страниц Ozon';
       }
     } catch (e: any) {
       console.error("loadBundleItems failed for bundle " + bundleId + ":", e?.message || e);
+      if (incomplete) incomplete.reason = 'Ozon вернул ошибку при чтении состава поставки';
     }
     return out;
   }
@@ -2411,25 +2415,43 @@ async function startServer() {
       const targets: SupplyDocsTarget[] = [];
       const zones: Record<string, string> = {};
       const articles: string[] = [];
+      // Item 100.5 R-048: any cluster with an incomplete composition stops the whole order.
+      const incompleteClusters: string[] = [];
 
       for (const supply of supplies) {
         const clusterId = String(supply?.macrolocal_cluster_id ?? '').trim();
         const clusterName = String(supply?.storage_warehouse?.name || '').trim()
           || (clusterId && clusterMap.get(clusterId)) || ('Кластер ' + clusterId);
 
-        const items = await loadBundleItems(String(supply?.bundle_id || ''), cab);
+        const bundleState: { reason?: string } = {};
+        const items = await loadBundleItems(String(supply?.bundle_id || ''), cab, bundleState);
+        if (bundleState.reason) {
+          incompleteClusters.push('Кластер ' + clusterName + ': ' + bundleState.reason);
+          continue;
+        }
         if (items.length === 0) {
-          warnings.push('Кластер ' + clusterName + ': Ozon не отдал состав поставки');
+          incompleteClusters.push('Кластер ' + clusterName + ': Ozon не отдал состав поставки');
           continue;
         }
 
         const layout = layoutFromBundle(items, Array.isArray(skus) ? skus : []);
         if (layout.noNormArticles.length > 0) {
-          warnings.push('Кластер ' + clusterName + ': нет нормы «ШТ/КОР» в SKU Базе для ' + layout.noNormArticles.join(', '));
+          incompleteClusters.push('Кластер ' + clusterName + ': нет нормы «ШТ/КОР» в SKU Базе для ' + layout.noNormArticles.join(', '));
+          continue;
         }
         Object.assign(zones, layout.zones);
         for (const a of layout.articles) if (articles.indexOf(a) < 0) articles.push(a);
         targets.push({ supply, clusterName, boxes: layout.boxes });
+      }
+
+      if (incompleteClusters.length > 0) {
+        // Nothing was written to Ozon, Drive or the journal.
+        return res.status(409).json({
+          status: "error",
+          stage: "incomplete_composition",
+          message: "Состав заявки неполный, в Ozon ничего не изменено. " + incompleteClusters.join('; ')
+            + ". Исправьте и нажмите «Собрать документы» ещё раз"
+        });
       }
 
       const folderName = 'Озон ' + (orderNumber || orderId);

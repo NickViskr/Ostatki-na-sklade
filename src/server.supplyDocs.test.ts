@@ -86,6 +86,8 @@ type FakeSupply = { id: string; cluster: string; offer: string };
 let scenario: { orderId: string; supplies: FakeSupply[]; failCreate: string[]; failLabel: string[] } | null = null;
 const supplyOfOp = (op: string) => op.split(':')[1];
 const boxKeyOfSupply: Record<string, string> = {};
+// Item 100.5 R-048: optional per-call override of the fake /v1/supply-order/bundle answer (null = default one-page answer).
+let bundleHook: null | ((sup: FakeSupply, body: any) => Response | null) = null;
 
 function ozonScenario(p: string, text: string): Response | null {
   const sc = scenario!;
@@ -103,6 +105,7 @@ function ozonScenario(p: string, text: string): Response | null {
       return j({ orders: [{ order_id: sc.orderId, order_number: 'N-' + sc.orderId, supplies: sc.supplies.map((s) => ({ supply_id: s.id, bundle_id: 'bundle:' + s.id, storage_warehouse: { name: s.cluster } })) }] });
     case '/v1/supply-order/bundle': {
       const sup = sc.supplies.find((s) => 'bundle:' + s.id === body.bundle_ids[0])!;
+      if (bundleHook) { const hooked = bundleHook(sup, body); if (hooked) return hooked; } // item 100.5: scripted bundle answers
       return j({ items: [{ sku: 1, offer_id: sup.offer, barcode: 'BC-' + sup.offer, quantity: 10 }], has_next: false });
     }
     case '/v1/cargoes/create':
@@ -300,11 +303,14 @@ describe('server.ts /api/ozon/supply/docs safety and Ozon 429 visibility', () =>
     expect(r.json.data.warnings.join('\n')).not.toContain(NOTE); // Drive removed nothing: no note
   }, 30000);
 
-  it('stale labels: a supply with an empty layout (cargoes never called) is excluded from the cleanup list', async () => {
+  it('stale labels: a supply with a no-norm article now stops the whole order (409), nothing is saved or created', async () => {
+    ozonCalls = []; // runScenario does not reset it
     const { r, drive } = await runScenario('stale-empty-layout', [SUP_NONORM, SUP_B], [], [], []);
-    expect(r.status).toBe(200);
-    expect(r.json.data.warnings.join('\n')).toContain('Кластер Самара');
-    expect(drive.staleLabelSupplyIds).toEqual([]);
+    expect(r.status).toBe(409);
+    expect(r.json.stage).toBe('incomplete_composition');
+    expect(r.json.message).toContain('Кластер Самара');
+    expect(drive).toBeUndefined(); // no Drive save
+    expect(ozonCalls.filter((c) => c.startsWith('/v1/cargoes/create'))).toEqual([]);
   }, 30000);
 
   it('stale labels: a removed id with no warning on its cluster adds a warning of its own', async () => {
@@ -535,5 +541,75 @@ describe('server.ts /api/ozon/supply/docs resume: only the missing pieces are re
     const tabSrc = fs.readFileSync(path.resolve(__dirname, 'components/OzonSuppliesTab.tsx'), 'utf8');
     expect(tabSrc).toMatch(/askConfirmation\(\s*'Собрать документы заявки\?'[\s\S]{0,900}Кластеры, где грузоместа изменены вручную в Ozon Seller, не затрагиваются/);
   });
+});
+
+// ---- Item 100.5 R-048: an incomplete composition of ANY cluster stops the WHOLE order (owner, 2026-10-28) ----
+// Contract: HTTP 409, stage 'incomplete_composition', message in Russian naming each bad cluster and the reason;
+// zero Ozon writes for every cluster, no Drive save, journal record untouched.
+describe('server.ts /api/ozon/supply/docs R-048: incomplete composition of any cluster stops the whole order', () => {
+  const A: FakeSupply = { id: '2000000000021', cluster: 'Новосибирск', offer: 'ART-A' };
+  const B: FakeSupply = { id: '2000000000022', cluster: 'Казань', offer: 'ART-A' };
+  const item = (offer: string) => ({ sku: 1, offer_id: offer, barcode: 'BC-' + offer, quantity: 10 });
+  const writes = () => ozonCalls.filter((c) => c.startsWith('/v1/cargoes/create') || c.startsWith('/v1/cargoes-label/create'));
+  async function run(orderId: string, hook: typeof bundleHook) {
+    ozonHeld = {}; ozonCalls = []; driveCalls = []; driveRemoved = [];
+    delete storedByOrder[orderId];
+    bundleHook = hook;
+    scenario = { orderId, supplies: [A, B], failCreate: [], failLabel: [] };
+    try { return await docs(orderId); } finally { scenario = null; bundleHook = null; }
+  }
+  function expectStopped(orderId: string, r: { status: number; json: any }, cluster: string) {
+    expect(r.status).toBe(409);
+    expect(r.json.stage).toBe('incomplete_composition');
+    expect(r.json.message).toContain(cluster);
+    expect(r.json.message).not.toContain('Новосибирск'); // the complete cluster is not blamed
+    expect(writes()).toEqual([]); // no cargoes/create or cargoes-label/create for either cluster
+    expect(driveCalls.length).toBe(0); // no Drive save
+    expect(storedByOrder[orderId]).toBeUndefined(); // journal docs record unchanged
+  }
+
+  beforeAll(() => { stateMode = 'chain'; driveLabelSaveFail = []; });
+
+  it('control: complete composition on both clusters creates cargoes exactly once per cluster', async () => {
+    const r = await run('r048-control', null);
+    expect(r.status).toBe(200);
+    expect(ozonCalls.filter((c) => c.startsWith('/v1/cargoes/create ')).sort()).toEqual(['/v1/cargoes/create ' + A.id, '/v1/cargoes/create ' + B.id]);
+  }, 60000);
+
+  it('page 2 of one cluster bundle answers 503: nothing is written for either cluster, error names the cluster', async () => {
+    const r = await run('r048-page2', (sup, body) => {
+      if (sup.id !== B.id) return null;
+      if (!body.last_id) return j({ items: [item('ART-A')], has_next: true, last_id: 'p2' });
+      return j({ message: 'bundle boom' }, 503);
+    });
+    expectStopped('r048-page2', r, 'Казань');
+  }, 60000);
+
+  it('an article without the «ШТ/КОР» norm on one cluster: nothing is written for either cluster, error names the cluster', async () => {
+    const r = await run('r048-nonorm', (sup) => (sup.id === B.id ? j({ items: [item('ART-A'), item('ART-NONORM')], has_next: false }) : null));
+    expectStopped('r048-nonorm', r, 'Казань');
+    expect(r.json.message).toContain('ART-NONORM');
+  }, 60000);
+
+  it('has_next stays true past the 10-page cap on one cluster: nothing is written for either cluster, error names the cluster', async () => {
+    let pagesOfB = 0;
+    const r = await run('r048-cap', (sup) => {
+      if (sup.id !== B.id) return null;
+      pagesOfB++;
+      return j({ items: [item('ART-A')], has_next: true, last_id: 'p' + pagesOfB });
+    });
+    expect(pagesOfB).toBeGreaterThanOrEqual(10); // the cap was really reached
+    expectStopped('r048-cap', r, 'Казань');
+  }, 60000);
+
+  it('empty composition on one cluster: nothing is written for either cluster, error names the cluster', async () => {
+    const r = await run('r048-empty', (sup) => (sup.id === B.id ? j({ items: [], has_next: false }) : null));
+    expectStopped('r048-empty', r, 'Казань');
+  }, 60000);
+
+  it('page 1 of one cluster bundle answers 503: nothing is written for either cluster, error names the cluster', async () => {
+    const r = await run('r048-page1', (sup) => (sup.id === B.id ? j({ message: 'bundle boom' }, 503) : null));
+    expectStopped('r048-page1', r, 'Казань');
+  }, 60000);
 });
 });
