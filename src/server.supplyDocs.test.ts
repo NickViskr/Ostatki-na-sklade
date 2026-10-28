@@ -18,8 +18,17 @@ const orderGetCalls: string[] = [];
 let orderGetSteps: Array<() => Response | Promise<Response>> = [];
 const fail500 = () => j({ message: 'boom' }, 500);
 
+// Item 101 ticket 02: what the last saveSupplyDocsToDrive call received, and what the fake GAS answers to it.
+let driveCalls: any[] = [];
+let driveRemoved: string[] = [];
+const FAKE_SKUS = [{ sku: 'ART-A', pcsPerBox: 10, price: 1, minStock: 0, boxesPerPallet: 1, volumeLiters: 1, leadTimeDays: 1 }];
+
 async function gas(body: any): Promise<Response> {
   switch (body.action) {
+    case 'getSkus': return j({ status: 'success', data: FAKE_SKUS });
+    case 'saveSupplyDocsToDrive':
+      driveCalls.push(body.data);
+      return j({ status: 'success', data: { folderUrl: 'https://drive.fake/f', saved: [], problems: [], missingLabels: [], removedStaleLabels: driveRemoved } });
     case 'getOzonKeys': return j({ status: 'success', data: { ozonClientId: '1', ozonApiKey: 'k', cabinets: [{ name: 'MaxiStore', clientId: '1', apiKey: 'k' }] } });
     case 'getGeminiKey': return j({ status: 'error', message: 'none' });
     case 'verifySession': return j({ status: 'success', data: { user: { username: 'admin', role: 'admin' } } });
@@ -27,7 +36,40 @@ async function gas(body: any): Promise<Response> {
   }
 }
 
+// Item 101 ticket 02: a scripted order for the stale-label scenarios; null = the old behaviour above.
+type FakeSupply = { id: string; cluster: string; offer: string };
+let scenario: { orderId: string; supplies: FakeSupply[]; failCreate: string[]; failLabel: string[] } | null = null;
+const supplyOfOp = (op: string) => op.split(':')[1];
+const boxKeyOfSupply: Record<string, string> = {};
+
+function ozonScenario(p: string, text: string): Response | null {
+  const sc = scenario!;
+  const body = text ? JSON.parse(text) : {};
+  switch (p) {
+    case '/v3/supply-order/get':
+      return j({ orders: [{ order_id: sc.orderId, order_number: 'N-' + sc.orderId, supplies: sc.supplies.map((s) => ({ supply_id: s.id, bundle_id: 'bundle:' + s.id, storage_warehouse: { name: s.cluster } })) }] });
+    case '/v1/supply-order/bundle': {
+      const sup = sc.supplies.find((s) => 'bundle:' + s.id === body.bundle_ids[0])!;
+      return j({ items: [{ sku: 1, offer_id: sup.offer, barcode: 'BC-' + sup.offer, quantity: 10 }], has_next: false });
+    }
+    case '/v1/cargoes/create':
+      if (sc.failCreate.includes(String(body.supply_id))) return j({ message: 'create boom' }, 500);
+      boxKeyOfSupply[String(body.supply_id)] = body.cargoes[0].key;
+      return j({ operation_id: 'create:' + body.supply_id });
+    case '/v2/cargoes/create/info':
+      return j({ status: 'SUCCESS', result: { cargoes: [{ key: boxKeyOfSupply[supplyOfOp(body.operation_id)], value: { cargo_id: '9' + supplyOfOp(body.operation_id) } }] } });
+    case '/v1/cargoes-label/create':
+      if (sc.failLabel.includes(String(body.supply_id))) return j({ message: 'label boom' }, 500);
+      return j({ operation_id: 'label:' + body.supply_id });
+    case '/v1/cargoes-label/get':
+      return j({ status: 'SUCCESS', result: { file_url: 'https://ozon.fake/label-' + supplyOfOp(body.operation_id) + '.pdf' } });
+    default:
+      return j({});
+  }
+}
+
 function ozon(p: string, text: string): Response | Promise<Response> {
+  if (scenario) return ozonScenario(p, text)!;
   if (p === '/v3/supply-order/get') {
     orderGetCalls.push(text);
     return (orderGetSteps.shift() || fail500)();
@@ -154,4 +196,66 @@ describe('server.ts /api/ozon/supply/docs safety and Ozon 429 visibility', () =>
     expect(read('OzonSuppliesTab.tsx')).toMatch(/const DOCS_BUILD_TIMEOUT_SEC = 300;/);
     expect(read('OzonSupplyModal.tsx')).toMatch(/const FINALIZE_TIMEOUT_SEC = 300;/);
   });
+
+  // ---- Item 101 ticket 02: stale cargo-label cleanup, whole path through the in-process server ----
+  // Each scenario is one real docs build (about 12 throttled Ozon calls), shared by the checks that read it.
+  const SUP_A: FakeSupply = { id: '2000000000001', cluster: 'Новосибирск', offer: 'ART-A' };
+  const SUP_B: FakeSupply = { id: '2000000000002', cluster: 'Казань', offer: 'ART-A' };
+  const SUP_NONORM: FakeSupply = { id: '2000000000003', cluster: 'Самара', offer: 'ART-NONORM' };
+  const NOTE = 'прежний файл этикеток грузомест убран из папки — он недействителен';
+  async function runScenario(orderId: string, supplies: FakeSupply[], failCreate: string[], failLabel: string[], removed: string[]) {
+    driveCalls = [];
+    driveRemoved = removed;
+    scenario = { orderId, supplies, failCreate, failLabel };
+    try {
+      const r = await docs(orderId);
+      return { r, drive: driveCalls[0] };
+    } finally {
+      scenario = null;
+    }
+  }
+  const labelFailRun = { p: null as null | ReturnType<typeof runScenario> };
+  const labelFail = () => (labelFailRun.p ||= runScenario('stale-label-fail', [SUP_A, SUP_B], [], [SUP_B.id], [SUP_B.id]));
+
+  it('stale labels: only the supply whose label failed is sent to Drive cleanup (the supply with a fresh label is not)', async () => {
+    const { r, drive } = await labelFail();
+    expect(r.status).toBe(200);
+    expect(drive.staleLabelSupplyIds).toEqual([SUP_B.id]);
+    // the fresh label of A did go to Drive as a file; B's did not
+    const urls = drive.files.filter((f: any) => f.kind === 'url').map((f: any) => f.fallbackName);
+    expect(urls).toEqual(['tags-cargoes-by-supply-' + SUP_A.id]);
+  }, 30000);
+
+  it('stale labels: when Drive reports the old file removed, that cluster warning carries the note and the response lists the id', async () => {
+    const { r } = await labelFail();
+    const warnings: string[] = r.json.data.warnings;
+    const b = warnings.filter((w) => w.startsWith('Кластер Казань:'));
+    expect(b.length).toBe(1);
+    expect(b[0]).toContain('этикетки грузомест не получены');
+    expect(b[0]).toContain(NOTE);
+    expect(warnings.filter((w) => w.startsWith('Кластер Новосибирск:')).join('')).not.toContain(NOTE);
+    expect(r.json.data.removedStaleLabels).toEqual([SUP_B.id]);
+  }, 30000);
+
+  it('stale labels: a supply whose cargo creation failed is included in the cleanup list', async () => {
+    const { r, drive } = await runScenario('stale-create-fail', [SUP_A, SUP_B], [SUP_A.id], [], []);
+    expect(r.status).toBe(200);
+    expect(drive.staleLabelSupplyIds).toEqual([SUP_A.id]);
+    expect(r.json.data.removedStaleLabels).toEqual([]);
+    expect(r.json.data.warnings.join('\n')).not.toContain(NOTE); // Drive removed nothing: no note
+  }, 30000);
+
+  it('stale labels: a supply with an empty layout (cargoes never called) is excluded from the cleanup list', async () => {
+    const { r, drive } = await runScenario('stale-empty-layout', [SUP_NONORM, SUP_B], [], [], []);
+    expect(r.status).toBe(200);
+    expect(r.json.data.warnings.join('\n')).toContain('Кластер Самара');
+    expect(drive.staleLabelSupplyIds).toEqual([]);
+  }, 30000);
+
+  it('stale labels: a removed id with no warning on its cluster adds a warning of its own', async () => {
+    // A succeeded in full (label fresh) but GAS still reports an old file removed: the user must still be told
+    const { r } = await runScenario('stale-extra-note', [SUP_A], [], [], [SUP_A.id]);
+    const own = (r.json.data.warnings as string[]).filter((w) => w.startsWith('Кластер Новосибирск:'));
+    expect(own).toEqual(['Кластер Новосибирск: ' + NOTE]);
+  }, 30000);
 });

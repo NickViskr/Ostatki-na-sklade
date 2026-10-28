@@ -6063,8 +6063,10 @@ function extFromContentType(contentType) {
  * Папка-библиотека лежит в РОДИТЕЛЬСКОЙ папке, а не внутри папки заявки.
  * Ссылки Ozon действуют 24 часа и открываются без ключей — в журналы их не писать.
  *
- * @param {Object} data { folderName, files, articles }
- * @returns {Object} { folderName, folderUrl, saved, missingLabels, problems }
+ * @param {Object} data { folderName, files, articles, staleLabelSupplyIds? }
+ *   staleLabelSupplyIds: supplies whose cargoes were recreated without a new label file (item 101);
+ *   their old label files in the folder are trashed before anything new is written.
+ * @returns {Object} { folderName, folderUrl, saved, missingLabels, problems, removedStaleLabels }
  */
 function saveSupplyDocsToDrive(data) {
   if (!data || typeof data !== 'object') {
@@ -6095,6 +6097,29 @@ function saveSupplyDocsToDrive(data) {
   const targetFolder = getOrCreateChildFolder(rootFolder, folderName);
   const saved = [];
   const problems = [];
+
+  // Item 101: a label file of an earlier run names cargo ids that no longer exist. Trash (recoverable)
+  // only files directly in this folder named "<id>." or "tags-cargoes-by-supply-<id>." (dot included,
+  // so 2000072172420 never matches 20000721724201).
+  const removedStaleLabels = [];
+  const staleIds = (Array.isArray(data.staleLabelSupplyIds) ? data.staleLabelSupplyIds : [])
+    .map(String).filter(function (id) { return /^\d+$/.test(id); });
+  if (staleIds.length > 0) {
+    const existing = targetFolder.getFiles();
+    while (existing.hasNext()) {
+      const file = existing.next();
+      if (file.isTrashed()) continue;
+      const name = file.getName();
+      for (let k = 0; k < staleIds.length; k++) {
+        const id = staleIds[k];
+        if (name.indexOf(id + '.') === 0 || name.indexOf('tags-cargoes-by-supply-' + id + '.') === 0) {
+          file.setTrashed(true);
+          if (removedStaleLabels.indexOf(id) < 0) removedStaleLabels.push(id);
+          break;
+        }
+      }
+    }
+  }
 
   for (let i = 0; i < files.length; i++) {
     const f = files[i] || {};
@@ -6178,7 +6203,8 @@ function saveSupplyDocsToDrive(data) {
     folderUrl: targetFolder.getUrl(),
     saved: saved,
     missingLabels: missingLabels,
-    problems: problems
+    problems: problems,
+    removedStaleLabels: removedStaleLabels
   };
 }
 

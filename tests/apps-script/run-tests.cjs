@@ -13754,6 +13754,89 @@ t0cCheck('R-026: s7 — quantity cell is the TEXT "1 000" (screen shows 1000), e
   };
 });
 
+// ================= Item 101 ticket 02: stale cargo-label cleanup in saveSupplyDocsToDrive =================
+const harness = require('./harness.cjs');
+function staleStand(extraNames) {
+  const root = harness.resetFakeDrive();
+  const order = root.createFolder('Order-1');
+  const files = {};
+  (extraNames || []).forEach(n => { files[n] = order.__addFile(n); });
+  return { root, order, files };
+}
+function staleRun(st, data) {
+  return harness.saveSupplyDocsToDrive(Object.assign({ folderName: 'Order-1', files: [], articles: [] }, data));
+}
+const STALE_NAMES = [
+  '2000072172420.pdf', 'tags-cargoes-by-supply-2000072172420.zip', '20000721724201.pdf',
+  'Новосибирск.xlsx', 'ART-1.pdf', '2000099999999.pdf'
+];
+t0cCheck('Item 101 stale labels: <id>.pdf of the stale supply is trashed and reported in removedStaleLabels', () => {
+  const st = staleStand(STALE_NAMES);
+  const out = staleRun(st, { staleLabelSupplyIds: ['2000072172420'] });
+  return {
+    conds: { 'file trashed': st.files['2000072172420.pdf'].isTrashed(), 'reported': JSON.stringify(out.removedStaleLabels) === '["2000072172420"]' },
+    note: 'removed ' + JSON.stringify(out.removedStaleLabels)
+  };
+});
+t0cCheck('Item 101 stale labels: tags-cargoes-by-supply-<id>.zip of the stale supply is trashed', () => {
+  const st = staleStand(STALE_NAMES);
+  staleRun(st, { staleLabelSupplyIds: ['2000072172420'] });
+  return { conds: { 'zip trashed': st.files['tags-cargoes-by-supply-2000072172420.zip'].isTrashed() } };
+});
+t0cCheck('Item 101 stale labels: longer id with the same prefix, composition xlsx, product label and another supply label are untouched', () => {
+  const st = staleStand(STALE_NAMES);
+  staleRun(st, { staleLabelSupplyIds: ['2000072172420'] });
+  const untouched = ['20000721724201.pdf', 'Новосибирск.xlsx', 'ART-1.pdf', '2000099999999.pdf'];
+  const conds = {};
+  untouched.forEach(n => { conds[n + ' not trashed'] = !st.files[n].isTrashed(); });
+  return { conds };
+});
+t0cCheck('Item 101 stale labels: a non-digit id is ignored and trashes nothing', () => {
+  const st = staleStand(STALE_NAMES.concat(['abc.pdf']));
+  const out = staleRun(st, { staleLabelSupplyIds: ['abc', '', '12.*', '../x'] });
+  const any = Object.keys(st.files).some(n => st.files[n].isTrashed());
+  return { conds: { 'nothing trashed': !any, 'nothing reported': out.removedStaleLabels.length === 0 }, note: JSON.stringify(out.removedStaleLabels) };
+});
+t0cCheck('Item 101 stale labels: no staleLabelSupplyIds -> nothing trashed and removedStaleLabels is an empty array', () => {
+  const st = staleStand(STALE_NAMES);
+  const out = staleRun(st, {});
+  const any = Object.keys(st.files).some(n => st.files[n].isTrashed());
+  return { conds: { 'nothing trashed': !any, 'empty array': Array.isArray(out.removedStaleLabels) && out.removedStaleLabels.length === 0 } };
+});
+t0cCheck('Item 101 stale labels: of two ids only the one with a live file is reported, the id whose file was already trashed is not', () => {
+  const st = staleStand(['2000072172420.pdf', '2000099999999.pdf']);
+  st.files['2000072172420.pdf'].setTrashed(true);
+  const out = staleRun(st, { staleLabelSupplyIds: ['2000072172420', '2000099999999'] });
+  return { conds: { 'only the live one reported': JSON.stringify(out.removedStaleLabels) === '["2000099999999"]' }, note: JSON.stringify(out.removedStaleLabels) };
+});
+t0cCheck('Item 101 stale labels: only an already trashed match -> removedStaleLabels is empty', () => {
+  const st = staleStand(['2000072172420.pdf']);
+  st.files['2000072172420.pdf'].setTrashed(true);
+  const out = staleRun(st, { staleLabelSupplyIds: ['2000072172420'] });
+  return { conds: { 'empty': out.removedStaleLabels.length === 0 }, note: JSON.stringify(out.removedStaleLabels) };
+});
+t0cCheck('Item 101 stale labels: a fresh label of another supply in the same call is still written and the stale one trashed', () => {
+  const st = staleStand(STALE_NAMES);
+  const realFetch = harness.context.UrlFetchApp.fetch;
+  harness.context.UrlFetchApp.fetch = () => ({
+    getResponseCode: () => 200,
+    getBlob: () => harness.makeFakeDriveBlob('x'),
+    getAllHeaders: () => ({ 'Content-Type': 'application/pdf' })
+  });
+  let out;
+  try {
+    out = staleRun(st, {
+      staleLabelSupplyIds: ['2000072172420'],
+      files: [{ kind: 'url', url: 'https://ozon.fake/label', fallbackName: 'tags-cargoes-by-supply-2000099999999' }]
+    });
+  } finally { harness.context.UrlFetchApp.fetch = realFetch; }
+  const written = st.order.__files.filter(f => f.getName() === 'tags-cargoes-by-supply-2000099999999.pdf' && !f.isTrashed());
+  return {
+    conds: { 'new label written': written.length === 1, 'stale trashed': st.files['2000072172420.pdf'].isTrashed(), 'saved lists it': out.saved.indexOf('tags-cargoes-by-supply-2000099999999.pdf') >= 0 },
+    note: 'saved ' + JSON.stringify(out.saved) + ' problems ' + JSON.stringify(out.problems)
+  };
+});
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

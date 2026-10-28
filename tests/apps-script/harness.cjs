@@ -439,6 +439,50 @@ context.getOzonSettings = function () {
   return Object.assign({}, ozonSettingsStore);
 };
 
+// ---------- Item 101 ticket 02: minimal fake DriveApp (folders, files, trash flag) ----------
+// A folder keeps its direct files and sub-folders; getFiles()/getFilesByName() return every
+// direct file INCLUDING trashed ones (real Drive does too for getFiles on a folder that still
+// lists them in tests of this kind), so Code.gs must check isTrashed() itself.
+function makeFakeIterator(items) {
+  let i = 0;
+  return { hasNext: () => i < items.length, next: () => items[i++] };
+}
+function makeFakeDriveFile(name, blob) {
+  const file = {
+    __name: name, __trashed: false, __blob: blob || null,
+    getName: () => file.__name,
+    setTrashed(v) { file.__trashed = !!v; return file; },
+    isTrashed: () => file.__trashed,
+    getBlob: () => file.__blob || makeFakeDriveBlob(file.__name)
+  };
+  return file;
+}
+function makeFakeDriveBlob(name) {
+  const blob = { __name: name || '', setName(n) { blob.__name = n; return blob; }, getContentType: () => 'application/pdf' };
+  return blob;
+}
+function makeFakeDriveFolder(name) {
+  const folder = {
+    __name: name, __files: [], __folders: [],
+    getName: () => folder.__name,
+    getUrl: () => 'https://drive.fake/folders/' + name,
+    getFoldersByName: (n) => makeFakeIterator(folder.__folders.filter(f => f.__name === n)),
+    createFolder(n) { const f = makeFakeDriveFolder(n); folder.__folders.push(f); return f; },
+    getFiles: () => makeFakeIterator(folder.__files.slice()),
+    getFilesByName: (n) => makeFakeIterator(folder.__files.filter(f => f.__name === n)),
+    createFile(blob) { const f = makeFakeDriveFile(blob.__name, blob); folder.__files.push(f); return f; },
+    __addFile(n) { const f = makeFakeDriveFile(n); folder.__files.push(f); return f; }
+  };
+  return folder;
+}
+let fakeDriveRoot = makeFakeDriveFolder('root');
+context.DriveApp = {
+  getFolderById(id) {
+    if (id !== 'ROOT-ID') throw new Error('Стенд: неизвестная папка ' + id);
+    return fakeDriveRoot;
+  }
+};
+
 let historySheet = makeFakeSheet(context.OZON_STOCK_HISTORY_HEADERS);
 context.getOzonStockHistorySheet = function () {
   return historySheet;
@@ -453,6 +497,10 @@ module.exports = {
   FakeDate,
   logs,
   setNow(isoUtc) { FakeDate.__now = Date.parse(isoUtc); },
+  // Item 101 ticket 02: fake Drive. Returns the root folder; the order folder is created by Code.gs.
+  resetFakeDrive() { fakeDriveRoot = makeFakeDriveFolder('root'); ozonSettingsStore.supplyDocsFolderId = 'ROOT-ID'; return fakeDriveRoot; },
+  makeFakeDriveBlob,
+  saveSupplyDocsToDrive: (...args) => context.saveSupplyDocsToDrive(...args),
   setRetentionWeeks(n) { ozonSettingsStore.stockHistoryRetentionWeeks = n; },
   resetHistorySheet() { historySheet = makeFakeSheet(context.OZON_STOCK_HISTORY_HEADERS); },
   getHistorySheet() { return historySheet; },

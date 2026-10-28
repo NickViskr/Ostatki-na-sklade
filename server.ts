@@ -2099,7 +2099,7 @@ async function startServer() {
   }
 
   type SupplyDocsTarget = { supply: any; clusterName: string; boxes: any[] };
-  type SupplyDocsResult = { files: any[]; warnings: string[]; checkLists: any[]; cargoes: number };
+  type SupplyDocsResult = { files: any[]; warnings: string[]; checkLists: any[]; cargoes: number; staleLabelSupplyIds: string[] };
 
   // Item 74a. The per-supply work shared by finalize (right after creation, layout from the
   // wizard) and /api/ozon/supply/docs (any time later, layout from Ozon's own composition):
@@ -2110,6 +2110,9 @@ async function startServer() {
     const files: any[] = [];
     const supplyIds: string[] = [];
     let cargoes = 0;
+    // Item 101: supplies whose cargoes this run recreated (or tried to) without ending with a label
+    // URL. The label file of the previous run in the Drive folder points at cargo ids that no longer exist.
+    const staleLabelSupplyIds = new Set<string>();
 
     for (const t of targets) {
       const clusterName = t.clusterName;
@@ -2128,6 +2131,7 @@ async function startServer() {
       }
 
       let cargoIdByKey: Record<string, string> = {};
+      staleLabelSupplyIds.add(supplyId);
       try {
         cargoIdByKey = await createCargoesForSupply(cab, supplyId, boxes);
       } catch (e: any) {
@@ -2160,6 +2164,7 @@ async function startServer() {
           url: labelUrl,
           fallbackName: 'tags-cargoes-by-supply-' + supplyId
         });
+        staleLabelSupplyIds.delete(supplyId);
       } catch (e: any) {
         warnings.push('Кластер ' + clusterName + ': этикетки грузомест не получены — ' + (e?.message || String(e)));
       }
@@ -2176,7 +2181,7 @@ async function startServer() {
       }
     }
 
-    return { files, warnings, checkLists, cargoes };
+    return { files, warnings, checkLists, cargoes, staleLabelSupplyIds: Array.from(staleLabelSupplyIds) };
   }
 
   // Item 74a. One Apps Script action on behalf of the user's session. Throws on any failure:
@@ -2295,14 +2300,25 @@ async function startServer() {
       let saved: string[] = [];
       let problems: string[] = [];
       let missingLabels: string[] = [];
+      let removedStaleLabels: string[] = [];
       try {
-        const drive: any = await callGasAction('saveSupplyDocsToDrive', token, devMode, { folderName, files: docs.files, articles });
+        const drive: any = await callGasAction('saveSupplyDocsToDrive', token, devMode, { folderName, files: docs.files, articles, staleLabelSupplyIds: docs.staleLabelSupplyIds });
         folderUrl = String(drive?.folderUrl || '');
         saved = Array.isArray(drive?.saved) ? drive.saved.map(String) : [];
         problems = Array.isArray(drive?.problems) ? drive.problems.map(String) : [];
         missingLabels = Array.isArray(drive?.missingLabels) ? drive.missingLabels.map(String) : [];
+        removedStaleLabels = Array.isArray(drive?.removedStaleLabels) ? drive.removedStaleLabels.map(String) : [];
       } catch (e: any) {
         problems.push('Папка на Google Диске не собрана: ' + (e?.message || String(e)));
+      }
+
+      // The old label file is gone from the folder: tell the user, on the cluster's own warning if any.
+      for (const removedId of removedStaleLabels) {
+        const target = targets.find(t => String(t.supply?.supply_id || '') === removedId);
+        const note = 'прежний файл этикеток грузомест убран из папки — он недействителен';
+        const idx = target ? warnings.findIndex(w => w.startsWith('Кластер ' + target.clusterName + ':')) : -1;
+        if (idx >= 0) warnings[idx] += '; ' + note;
+        else warnings.push('Кластер ' + (target?.clusterName || removedId) + ': ' + note);
       }
 
       const record = {
@@ -2335,7 +2351,7 @@ async function startServer() {
 
       return res.json({
         status: "success",
-        data: { orderId, ...record, problems, journalUpdated, checkLists: docs.checkLists }
+        data: { orderId, ...record, problems, journalUpdated, removedStaleLabels, checkLists: docs.checkLists }
       });
 
     } catch (error: any) {
