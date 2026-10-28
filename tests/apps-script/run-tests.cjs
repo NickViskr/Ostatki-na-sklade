@@ -13984,6 +13984,86 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   return { conds: { 'call present': /result\.purgedDocsCargoIds\s*=\s*purgeExpiredSupplyDocsCargoIds\(\)/.test(fn), 'before the final return': fn.indexOf('purgeExpiredSupplyDocsCargoIds()') > fn.lastIndexOf('syncOzonJournalFromShipments') } };
 });
 
+// ================= Item 100.4 / R-014: an unshipped kit returns by the composition of its write-off =================
+// The return must not read today's kit card: the write-off's own component rows decide.
+{
+  const standR014 = (recipeAtWriteOff) => {
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([
+      { article: 'COMP', quantity: 40, avgCost: 100, capitalization: 4000 },
+      { article: 'ART-PLAIN', quantity: 10, avgCost: 7, capitalization: 70 }
+    ]);
+    h.setKitSheet([{ kitSku: 'KIT', componentSku: 'COMP', quantity: recipeAtWriteOff, kitType: 'virtual' }]);
+    const wo = h.commitTransaction([{ article: 'KIT', quantity: 10, price: 0 }, { article: 'ART-PLAIN', quantity: 10, price: 7 }],
+      'Расход', 'Ozon (MaxiStore)', '2026-10-20', 'tester', '2026-10-19T07:00:00Z', 'op-wo');
+    h.setExternalShipmentsSheet([{ postingId: 'P1', cabinet: 'MaxiStore', status: 'processed',
+      items: [{ offerId: 'KIT', quantity: 10 }, { offerId: 'ART-PLAIN', quantity: 10 }],
+      transGroupInfo: JSON.stringify(wo.newTransactions.map(t => String(t.id))), orderNumber: '1' }]);
+    return h;
+  };
+  const retKit = (h) => h.commitUnshippedReturn('P1', [{ offerId: 'KIT', article: 'KIT', shipped: 5 }, { offerId: 'ART-PLAIN', article: 'ART-PLAIN', shipped: 10 }], 'tester', 'op-ret');
+  {
+    const h = standR014(2); // write-off: 10 kits x 2 = 20 COMP, stock 20
+    check('Item 100.4 / R-014: precondition - the write-off took 20 COMP (recipe x2)', h.stockOf('COMP').quantity === 20, String(h.stockOf('COMP').quantity));
+    h.setKitSheet([{ kitSku: 'KIT', componentSku: 'COMP', quantity: 3, kitType: 'virtual' }]); // recipe edited afterwards
+    retKit(h);
+    const s = h.stockOf('COMP');
+    check('Item 100.4 / R-014: recipe edited x2 -> x3 after the write-off, return of 5 kits gives back 10 COMP (write-off composition), capitalization 3000',
+      s.quantity === 30 && s.capitalization === 3000, 'quantity ' + s.quantity + ' capitalization ' + s.capitalization);
+  }
+  {
+    const h = standR014(2);
+    retKit(h);
+    const s = h.stockOf('COMP');
+    check('Item 100.4 / R-014: recipe unchanged, return of 5 kits gives back 10 COMP, capitalization 3000 (regression)',
+      s.quantity === 30 && s.capitalization === 3000, 'quantity ' + s.quantity + ' capitalization ' + s.capitalization);
+  }
+  {
+    const h = standR014(2);
+    h.setKitSheet([]); // the article is no longer a kit
+    retKit(h);
+    const s = h.stockOf('COMP');
+    check('Item 100.4 / R-014: kit recipe removed after the write-off, return of 5 kits still gives back 10 COMP, capitalization 3000',
+      s.quantity === 30 && s.capitalization === 3000, 'quantity ' + s.quantity + ' capitalization ' + s.capitalization);
+  }
+  {
+    // The same kit in two main rows of one write-off (6 + 4 kits, recipe x2 = 20 COMP): per-kit quantity is the SUM of components / SUM of kit rows.
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([{ article: 'COMP', quantity: 40, avgCost: 100, capitalization: 4000 }]);
+    h.setKitSheet([{ kitSku: 'KIT', componentSku: 'COMP', quantity: 2, kitType: 'virtual' }]);
+    const wo = h.commitTransaction([{ article: 'KIT', quantity: 6, price: 0 }, { article: 'KIT', quantity: 4, price: 0 }],
+      'Расход', 'Ozon (MaxiStore)', '2026-10-20', 'tester', '2026-10-19T07:00:00Z', 'op-wo');
+    h.setKitSheet([{ kitSku: 'KIT', componentSku: 'COMP', quantity: 3, kitType: 'virtual' }]);
+    h.setExternalShipmentsSheet([{ postingId: 'P1', cabinet: 'MaxiStore', status: 'processed', items: [{ offerId: 'KIT', quantity: 10 }],
+      transGroupInfo: JSON.stringify(wo.newTransactions.map(t => String(t.id))), orderNumber: '1' }]);
+    h.commitUnshippedReturn('P1', [{ offerId: 'KIT', article: 'KIT', shipped: 5 }], 'tester', 'op-ret');
+    const s = h.stockOf('COMP');
+    check('Item 100.4 / R-014: the same kit in two main rows of one write-off (6 + 4), recipe edited, return of 5 kits gives back 10 COMP, capitalization 3000',
+      s.quantity === 30 && s.capitalization === 3000, 'quantity ' + s.quantity + ' capitalization ' + s.capitalization);
+  }
+  {
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    const wo = h.commitTransaction([{ article: 'A', quantity: 10, price: 100 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-20', 'tester', '2026-10-19T07:00:00Z', 'op-wo', 100, undefined, undefined, undefined, true);
+    h.setExternalShipmentsSheet([{ postingId: 'P1', cabinet: 'MaxiStore', status: 'processed', items: [{ offerId: 'A', quantity: 10 }],
+      transGroupInfo: JSON.stringify(wo.newTransactions.map(t => String(t.id))), orderNumber: '1' }]);
+    h.commitUnshippedReturn('P1', [{ offerId: 'A', article: 'A', shipped: 5 }], 'tester', 'op-ret');
+    const s = h.stockOf('A');
+    const wanted = 5 * (h.context.getTransactions().rows.find(t => t.id === wo.newTransactions[0].id).price);
+    check('Item 100.4 / R-014: plain article return is unaffected - 5 units come back at the write-off row price (services included on purpose, R-013)',
+      s.quantity === 5 && s.capitalization === wanted, 'quantity ' + s.quantity + ' capitalization ' + s.capitalization + ' expected ' + wanted);
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

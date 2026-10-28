@@ -9469,8 +9469,9 @@ function updateExternalShipmentStatus(postingId, status, transGroupInfo) {
 // books no longer knew it. The write-off itself is one operation for all supplies of the
 // order (item 56) and cannot be cut per supply, so the unshipped part comes BACK as a
 // receipt: quantity = declared − shipped, price = the unit price of that very write-off
-// (a virtual kit returns as its components at the components' write-off prices). The
-// average cost therefore stays where it was. The receipt's «Объект» carries the word
+// (a virtual kit returns as its components at the components' write-off prices). A plain
+// article's write-off price includes the write-off's extra services, so its average cost can
+// rise on the return — kept on purpose (owner 2026-10-28, review finding R-013). The receipt's «Объект» carries the word
 // «Корректировка» on purpose: getLastPurchasePrices skips such receipts, otherwise the
 // return would become the «last factory price» of the article (item 35).
 //
@@ -9485,23 +9486,36 @@ function unshippedReturnPricesFromWriteOff(txIds) {
   const rows = getTransactions().rows;
   const mainPrice = {};
   const groupIds = {};
+  const kitQty = {};
   for (let i = 0; i < rows.length; i++) {
     const tx = rows[i];
     if (!wanted[String(tx.id)] || tx.type !== 'Расход' || tx.isComponent === true) continue;
     mainPrice[String(tx.article)] = Number(tx.price) || 0;
-    if (tx.groupId) groupIds[String(tx.groupId)] = String(tx.article);
+    if (tx.groupId) {
+      groupIds[String(tx.groupId)] = String(tx.article);
+      kitQty[String(tx.article)] = (kitQty[String(tx.article)] || 0) + (Number(tx.quantity) || 0);
+    }
   }
   // Component rows carry the kit's groupId and their own write-off price.
   const compPrice = {};
+  const compQty = {};
   for (let i = 0; i < rows.length; i++) {
     const tx = rows[i];
     if (tx.isComponent !== true || tx.type !== 'Расход') continue;
     const kit = groupIds[String(tx.groupId || '')];
     if (!kit) continue;
-    if (!compPrice[kit]) compPrice[kit] = {};
+    if (!compPrice[kit]) { compPrice[kit] = {}; compQty[kit] = {}; }
     compPrice[kit][String(tx.article)] = Number(tx.price) || 0;
+    compQty[kit][String(tx.article)] = (compQty[kit][String(tx.article)] || 0) + (Number(tx.quantity) || 0);
   }
-  return { mainPrice: mainPrice, compPrice: compPrice };
+  // Item 100.4 (R-014): the kit's composition AT THE WRITE-OFF, per kit — the card may have changed since.
+  const compPerKit = {};
+  Object.keys(compQty).forEach(function(kit) {
+    if (!(kitQty[kit] > 0)) return;
+    compPerKit[kit] = {};
+    Object.keys(compQty[kit]).forEach(function(sku) { compPerKit[kit][sku] = compQty[kit][sku] / kitQty[kit]; });
+  });
+  return { mainPrice: mainPrice, compPrice: compPrice, compPerKit: compPerKit };
 }
 
 /**
@@ -9586,6 +9600,15 @@ function commitUnshippedReturn(postingId, shipped, username, opId) {
   for (let i = 0; i < returning.length; i++) {
     const line = returning[i];
     const diff = line.declared - line.shipped;
+    const perKit = prices.compPerKit[line.article];
+    if (perKit) {
+      // Item 100.4 (R-014): the write-off's own component rows decide, not today's kit card
+      const byComp = prices.compPrice[line.article];
+      Object.keys(perKit).forEach(function(sku) {
+        receiptItems.push({ article: sku, quantity: diff * perKit[sku], price: byComp[sku], status: 'ok' });
+      });
+      continue;
+    }
     const kit = getKitComponents(line.article);
     if (kit.type === 'virtual' && kit.components && kit.components.length > 0) {
       const byComp = prices.compPrice[line.article] || {};
