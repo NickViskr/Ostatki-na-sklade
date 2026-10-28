@@ -9528,6 +9528,9 @@ function unshippedReturnPricesFromWriteOff(txIds) {
 function commitUnshippedReturn(postingId, shipped, username, opId) {
   if (!postingId) throw new Error('PostingID is required');
   if (!Array.isArray(shipped) || shipped.length === 0) throw new Error('Не передано, сколько уехало');
+  // Item 100.4 (R-015): one operation per supply, whatever the browser sends — a retry after a failed
+  // marker write (a new click, a reload) finds the receipt already posted instead of posting it again.
+  opId = 'unshipped-return:' + String(postingId).trim().toLowerCase();
 
   const sheet = getExternalShipmentsSheet();
   const data = sheet.getDataRange().getValues();
@@ -9575,12 +9578,16 @@ function commitUnshippedReturn(postingId, shipped, username, opId) {
 
   // Every position of the supply is checked against what Ozon was told, not against the client.
   const lines = [];
+  const seenOffer = {};
   for (let i = 0; i < shipped.length; i++) {
     const it = shipped[i] || {};
     const offer = String(it.offerId || '').trim();
     const article = String(it.article || '').trim();
     const declared = declaredByOffer[offer];
     if (!offer || declared === undefined) throw new Error('Позиции «' + (offer || '?') + '» нет в поставке ' + postingId);
+    // Item 100.4 (R-034): each line is checked against the whole declared quantity, so a repeat would return it twice
+    if (seenOffer[offer]) throw new Error('Позиция «' + offer + '» передана дважды');
+    seenOffer[offer] = true;
     if (!article) throw new Error('Не указан артикул для «' + offer + '»');
     const qty = Number(it.shipped);
     if (!Number.isInteger(qty) || qty < 0 || qty > declared) {

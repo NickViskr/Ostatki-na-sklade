@@ -13107,9 +13107,9 @@ t0cCheck('T0-C: caller bookkeeping — an unshipped return interrupted after the
   const err = t0cThrows(() => giveBack(h, 'op-ret-1'));
   const pending = t0cPending(h);
   const entry = Array.isArray(pending) && pending.length === 1 ? pending[0] : {};
-  const refused = t0cResolve(h, 'tok-admin', 'op-ret-1', 'complete');
+  const refused = t0cResolve(h, 'tok-admin', 'unshipped-return:p-ret', 'complete');
   const afterRefusal = h.stockOf('ART-PLAIN').quantity + ' receipts ' + receipts(h).length + ' record ' + (recordOf(h) !== '') + ' memo ' + (t0cMemoKeys(h).length > 0);
-  const cancelled = t0cResolve(h, 'tok-admin', 'op-ret-1', 'cancel');
+  const cancelled = t0cResolve(h, 'tok-admin', 'unshipped-return:p-ret', 'cancel');
   const afterCancel = JSON.stringify(h.stockOf('ART-PLAIN'));
   giveBack(h, 'op-ret-1');
   let record = null;
@@ -14061,6 +14061,78 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
     const wanted = 5 * (h.context.getTransactions().rows.find(t => t.id === wo.newTransactions[0].id).price);
     check('Item 100.4 / R-014: plain article return is unaffected - 5 units come back at the write-off row price (services included on purpose, R-013)',
       s.quantity === 5 && s.capitalization === wanted, 'quantity ' + s.quantity + ' capitalization ' + s.capitalization + ' expected ' + wanted);
+  }
+}
+
+// ================= Item 100.4 / R-015, R-034: unshipped return retry safety and duplicate input =================
+{
+  const standR015 = () => {
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([{ article: 'A', quantity: 20, avgCost: 100, capitalization: 2000 }]);
+    const wo = h.commitTransaction([{ article: 'A', quantity: 10, price: 100 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-20', 'tester', '2026-10-19T07:00:00Z', 'op-wo', undefined, undefined, undefined, undefined, true);
+    const sheet = h.setExternalShipmentsSheet([{ postingId: 'P1', cabinet: 'MaxiStore', status: 'processed', items: [{ offerId: 'A', quantity: 10 }],
+      transGroupInfo: JSON.stringify(wo.newTransactions.map(t => String(t.id))), orderNumber: '1' }]);
+    return { h, sheet };
+  };
+  // Transient Sheets error on the first write of the shipped marker only.
+  const failMarkerOnce = (h, sheet) => {
+    const origGetRange = sheet.getRange.bind(sheet);
+    const iShipped = h.context.EXTERNAL_SHIPMENTS_HEADERS.indexOf('ОтгруженоJSON') + 1;
+    let failOnce = true;
+    sheet.getRange = (...a) => {
+      const r = origGetRange(...a);
+      if (a[0] > 1 && a[1] === iShipped) {
+        const sv = r.setValue.bind(r);
+        r.setValue = (v) => { if (failOnce) { failOnce = false; throw new Error('Injected marker write failure'); } return sv(v); };
+      }
+      return r;
+    };
+  };
+  const markerOf = (h) => (h.dumpExternalShipments().find(r => r.PostingID === 'P1') || {}).ОтгруженоJSON || '';
+  const receiptsOf = (h) => h.dumpTransSheet().filter(r => r['Тип'] === 'Приход');
+  const ret5 = (h, op) => h.commitUnshippedReturn('P1', [{ offerId: 'A', article: 'A', shipped: 5 }], 'tester', op);
+  {
+    const { h, sheet } = standR015();
+    failMarkerOnce(h, sheet);
+    try { ret5(h, 'attempt-1'); } catch (e) {}
+    try { ret5(h, 'attempt-2'); } catch (e) {}
+    const s = h.stockOf('A');
+    check('Item 100.4 / R-015: retry with a NEW opId after a marker write failure does not return the goods twice (stock 15, capitalization 1500)',
+      s.quantity === 15 && s.capitalization === 1500, 'quantity ' + s.quantity + ' capitalization ' + s.capitalization);
+    check('Item 100.4 / R-015: retry with a NEW opId after a marker write failure leaves exactly one receipt row',
+      receiptsOf(h).length === 1, 'receipt rows ' + receiptsOf(h).length);
+    check('Item 100.4 / R-015: after the retry the shipped marker of the posting is written',
+      markerOf(h) !== '', 'marker "' + markerOf(h) + '"');
+  }
+  {
+    const { h, sheet } = standR015();
+    failMarkerOnce(h, sheet);
+    try { ret5(h, 'same-op'); } catch (e) {}
+    try { ret5(h, 'same-op'); } catch (e) {}
+    const s = h.stockOf('A');
+    check('Item 100.4 / R-015: control - retry with the SAME opId after a marker write failure gives stock 15, one receipt, marker written',
+      s.quantity === 15 && receiptsOf(h).length === 1 && markerOf(h) !== '', 'quantity ' + s.quantity + ' receipts ' + receiptsOf(h).length + ' marker "' + markerOf(h) + '"');
+  }
+  {
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    const wo = h.commitTransaction([{ article: 'A', quantity: 10, price: 100 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-20', 'tester', '2026-10-19T07:00:00Z', 'op-wo', undefined, undefined, undefined, undefined, true);
+    h.setExternalShipmentsSheet([{ postingId: 'P1', cabinet: 'MaxiStore', status: 'processed', items: [{ offerId: 'A', quantity: 10 }],
+      transGroupInfo: JSON.stringify(wo.newTransactions.map(t => String(t.id))), orderNumber: '1' }]);
+    let err = '';
+    try { h.commitUnshippedReturn('P1', [{ offerId: 'A', article: 'A', shipped: 5 }, { offerId: 'A', article: 'A', shipped: 5 }], 'tester', 'op-dup'); } catch (e) { err = String(e.message || e); }
+    const s = h.stockOf('A');
+    check('Item 100.4 / R-034: the same offerId twice in "shipped" is refused with an error',
+      err !== '', 'no error thrown');
+    check('Item 100.4 / R-034: the refused duplicate input changes no stock and writes no receipt row',
+      s.quantity === 0 && s.capitalization === 0 && h.dumpTransSheet().filter(r => r['Тип'] === 'Приход').length === 0,
+      'quantity ' + s.quantity + ' capitalization ' + s.capitalization + ' receipts ' + h.dumpTransSheet().filter(r => r['Тип'] === 'Приход').length);
   }
 }
 
