@@ -13656,6 +13656,104 @@ t0cCheck('T0-B: the ticket\'s original example on the remaining editor — A 1 @
   };
 });
 
+// ================= Item 100.3 / R-026: expectedQuantities on the doPost 'commit' path =================
+// Test-first. Contract: the browser may send `expectedQuantities` (article -> quantity the user saw); the server compares it with the
+// «Остатки» values it reads (missing article = 0) after the opId idempotency hit, before any write; a mismatch throws and writes nothing.
+const r026Rows = (h) => h.getTransactions().rows.length;
+const r026Commit = (h, opId, type, qty, expected, destination) => h.callDoPost(Object.assign({ action: 'commit', sessionToken: 'tok-user', type: type,
+  destination: destination || 'Склад [Корректировка остатка]', deliveryDate: '2026-10-19', opId: opId, data: [{ article: 'A', quantity: qty, price: 100 }] },
+  expected === undefined ? {} : { expectedQuantities: expected }));
+const r026Stand = (qty) => {
+  const h = t0cStand();
+  h.setStockSheet(qty === null ? [] : [{ article: 'A', quantity: qty, avgCost: 100, capitalization: qty * 100 }]);
+  return h;
+};
+t0cCheck('R-026: s1 — stock moved 10 -> 15 after the screen loaded, expected {A:10}, Расход 2 -> refused, stock stays 15, nothing written, no memo', () => {
+  const h = r026Stand(15);
+  const rowsBefore = r026Rows(h);
+  const out = r026Commit(h, 'op-r026-1', 'Расход', 2, { A: 10 });
+  const msg = String(out.message || '');
+  return {
+    conds: {
+      'doPost answered an error': out.status === 'error',
+      'the message names the article, the seen value 10 and the current value 15': /A/.test(msg) && /10/.test(msg) && /15/.test(msg),
+      'stock still 15': h.stockOf('A').quantity === 15,
+      'no new history rows': r026Rows(h) === rowsBefore,
+      'no pending-op memo left': t0cMemoKeys(h).length === 0
+    },
+    note: 'status ' + out.status + ' | message ' + msg + ' | stock ' + h.stockOf('A').quantity + ' | rows ' + rowsBefore + '->' + r026Rows(h) + ' | memo ' + t0cMemoKeys(h).length
+  };
+});
+t0cCheck('R-026: s2 — stock 10, expected {A:10}, Расход 2 -> written, stock 8', () => {
+  const h = r026Stand(10);
+  const out = r026Commit(h, 'op-r026-2', 'Расход', 2, { A: 10 });
+  return {
+    conds: { 'doPost answered success': out.status === 'success', 'stock 8': h.stockOf('A').quantity === 8, 'one history row': r026Rows(h) === 1 },
+    note: 'status ' + out.status + ' ' + (out.message || '') + ' | stock ' + h.stockOf('A').quantity + ' | rows ' + r026Rows(h)
+  };
+});
+t0cCheck('R-026: s3 — article absent from «Остатки», expected {A:0}, Приход 5 -> written (missing = 0)', () => {
+  const h = r026Stand(null);
+  const out = r026Commit(h, 'op-r026-3', 'Приход', 5, { A: 0 }, 'Склад');
+  return {
+    conds: { 'doPost answered success': out.status === 'success', 'stock 5': h.stockOf('A').quantity === 5 },
+    note: 'status ' + out.status + ' ' + (out.message || '') + ' | stock ' + h.stockOf('A').quantity
+  };
+});
+t0cCheck('R-026: s3b — article absent from «Остатки», expected {A:7}, Приход 5 -> refused (missing counts as 0), nothing written', () => {
+  const h = r026Stand(null);
+  const out = r026Commit(h, 'op-r026-3b', 'Приход', 5, { A: 7 }, 'Склад');
+  return {
+    conds: { 'doPost answered an error': out.status === 'error', 'no history rows': r026Rows(h) === 0 },
+    note: 'status ' + out.status + ' ' + (out.message || '') + ' | rows ' + r026Rows(h)
+  };
+});
+t0cCheck('R-026: s4 — the same opId retried with a now-stale expected is an idempotent hit: not refused, nothing written twice', () => {
+  const h = r026Stand(10);
+  const first = r026Commit(h, 'op-r026-4', 'Расход', 2, { A: 10 });
+  const rowsAfterFirst = r026Rows(h);
+  const retry = r026Commit(h, 'op-r026-4', 'Расход', 2, { A: 10 });   // stock is now 8, so {A:10} is stale
+  return {
+    conds: { 'first commit succeeded': first.status === 'success', 'retry answered success, not an error': retry.status === 'success',
+      'stock 8, not 6': h.stockOf('A').quantity === 8, 'history rows unchanged by the retry': r026Rows(h) === rowsAfterFirst },
+    note: 'first ' + first.status + ' | retry ' + retry.status + ' ' + (retry.message || '') + ' | stock ' + h.stockOf('A').quantity + ' | rows ' + rowsAfterFirst + '->' + r026Rows(h)
+  };
+});
+t0cCheck('R-026: s5 — a commit without expectedQuantities is unaffected (regression)', () => {
+  const h = r026Stand(15);
+  const out = r026Commit(h, 'op-r026-5', 'Расход', 2, undefined);
+  return {
+    conds: { 'doPost answered success': out.status === 'success', 'stock 13': h.stockOf('A').quantity === 13 },
+    note: 'status ' + out.status + ' ' + (out.message || '') + ' | stock ' + h.stockOf('A').quantity
+  };
+});
+t0cCheck('R-026: s6 — quantity cell is -3 (screen shows 0), expected {A:0}, Приход 8 -> accepted, not refused', () => {
+  const h = r026Stand(-3);
+  const out = r026Commit(h, 'op-r026-6', 'Приход', 8, { A: 0 }, 'Склад');
+  const msg = String(out.message || '');
+  return {
+    conds: { 'doPost did not refuse (no «изменился» message)': !/изменился/.test(msg), 'doPost answered success': out.status === 'success' },
+    note: 'status ' + out.status + ' | message ' + msg
+  };
+});
+t0cCheck('R-026: s6b — quantity cell is -3 (screen shows 0), expected {A:5}, Приход 8 -> refused', () => {
+  const h = r026Stand(-3);
+  const out = r026Commit(h, 'op-r026-6b', 'Приход', 8, { A: 5 }, 'Склад');
+  return {
+    conds: { 'doPost answered an error': out.status === 'error', 'no history rows': r026Rows(h) === 0 },
+    note: 'status ' + out.status + ' | message ' + (out.message || '') + ' | rows ' + r026Rows(h)
+  };
+});
+t0cCheck('R-026: s7 — quantity cell is the TEXT "1 000" (screen shows 1000), expected {A:1000}, Расход 2 -> accepted, not refused', () => {
+  const h = r026Stand('1 000');
+  const out = r026Commit(h, 'op-r026-7', 'Расход', 2, { A: 1000 });
+  const msg = String(out.message || '');
+  return {
+    conds: { 'doPost did not refuse (no «изменился» message)': !/изменился/.test(msg), 'doPost answered success': out.status === 'success' },
+    note: 'status ' + out.status + ' | message ' + msg
+  };
+});
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

@@ -53,6 +53,8 @@ export interface CommitOptions {
   skipShipmentsRefresh?: boolean;
   /** Optional operation comment (item 90); sent only when non-empty after trimming. */
   comment?: string;
+  /** Item 100.3 / R-026: article -> quantity the user saw; the server refuses and writes nothing if the stock differs. */
+  expectedQuantities?: Record<string, number>;
   /** Item 90: combined-shipment number, the same for every order of one combined write-off. */
   shipmentId?: string;
 }
@@ -813,6 +815,7 @@ export const useWarehouseStore = create<WarehouseState>()(
         // out of the destination text and charge it to this order in full.
         ...(options?.additionalCosts === undefined ? {} : { additionalCosts: options.additionalCosts }),
         ...commentPayload(options?.comment),
+        ...(options?.expectedQuantities ? { expectedQuantities: options.expectedQuantities } : {}),
         ...(options?.shipmentId ? { shipmentId: options.shipmentId } : {})
       });
       

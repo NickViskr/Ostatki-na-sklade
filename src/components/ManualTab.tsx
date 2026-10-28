@@ -56,6 +56,7 @@ export const ManualTab: React.FC = React.memo(() => {
   const kits = useWarehouseStore((state) => state.kits);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   const commitTransaction = useWarehouseStore((state) => state.commitTransaction);
+  const fetchStock = useWarehouseStore((state) => state.fetchStock);
   
   const manualForm = useUIStore((state) => state.manualForm);
   const setManualForm = useUIStore((state) => state.setManualForm);
@@ -168,6 +169,9 @@ export const ManualTab: React.FC = React.memo(() => {
     if (manualForm.type === 'Корректировка остатка') {
       const incomingItems: any[] = [];
       const outgoingItems: any[] = [];
+      // Item 100.3 / R-026: the stock the user saw, checked by the server before anything is written
+      const expectedAll: Record<string, number> = {};
+      const expectedOut: Record<string, number> = {};
 
       for (const item of itemsToSubmit) {
         const kit = kits.find(k => k.kitSku === item.article);
@@ -180,6 +184,7 @@ export const ManualTab: React.FC = React.memo(() => {
         const targetQty = Number(item.quantity);
         const delta = targetQty - currentQty;
         const unitCost = st ? Number(st.avgCost) : 0;
+        expectedAll[item.article] = currentQty;
 
         if (delta > 0) {
           incomingItems.push({
@@ -189,6 +194,7 @@ export const ManualTab: React.FC = React.memo(() => {
             status: 'ok' as const,
           });
         } else if (delta < 0) {
+          expectedOut[item.article] = currentQty;
           outgoingItems.push({
             article: item.article,
             quantity: Math.abs(delta),
@@ -208,10 +214,10 @@ export const ManualTab: React.FC = React.memo(() => {
 
       let ok = true;
       if (incomingItems.length > 0) {
-        ok = await commitTransaction(incomingItems, 'Приход', labeledDestination, deliveryDate, takeOpId() + ':in', { comment });
+        ok = await commitTransaction(incomingItems, 'Приход', labeledDestination, deliveryDate, takeOpId() + ':in', { comment, expectedQuantities: expectedAll });
       }
       if (ok && outgoingItems.length > 0) {
-        ok = await commitTransaction(outgoingItems, 'Расход', labeledDestination, deliveryDate, takeOpId() + ':out', { comment });
+        ok = await commitTransaction(outgoingItems, 'Расход', labeledDestination, deliveryDate, takeOpId() + ':out', { comment, expectedQuantities: incomingItems.length > 0 ? expectedOut : expectedAll });
       }
 
       if (ok === true) {
@@ -226,6 +232,9 @@ export const ManualTab: React.FC = React.memo(() => {
         setArticleSearch('');
         setComment('');
         setWriteOffCapMode('debt');
+      } else {
+        // Refused (e.g. the stock changed since the screen was drawn): show the current stock
+        await fetchStock();
       }
       return;
     }

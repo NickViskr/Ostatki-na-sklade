@@ -402,7 +402,7 @@ function doPost(e) {
         break;
       case 'commit':
         // Item 97 T0-C: marks the next commitTransaction as made by this action; the memo of an interrupted one keeps the postingIds.
-        _commitAction = { postingIds: payload.postingIds || [] };
+        _commitAction = { postingIds: payload.postingIds || [], expectedQuantities: payload.expectedQuantities || null };
         result = commitTransaction(data, payload.type, payload.destination, payload.deliveryDate, currentUser.username, null, payload.opId, payload.additionalCosts, undefined, payload.comment, payload.shipmentId);
         // Пункт 28, этап C: привязка поставок Ozon выполняется здесь же, внутри замка.
         // Ошибка привязки не отменяет уже записанный расход — она возвращается клиенту как предупреждение.
@@ -3416,6 +3416,21 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       stockMap[m.article].avgCost = m.before[1];
       stockMap[m.article].capitalization = m.before[2];
     });
+  }
+
+  // Item 100.3 / R-026: the browser states the stock it showed (article -> quantity); if the sheet differs, nothing is
+  // written. Judged only for a fresh operation (no memo) and before the first write of any kind.
+  if (!memo && commitAction && commitAction.expectedQuantities) {
+    const expected = commitAction.expectedQuantities;
+    const changed = [];
+    Object.keys(expected).forEach(function(article) {
+      // Read the way the screen shows it: getStock's parseNumber, then normalizeStock's clamp of <= 0 to 0
+      const current = stockMap[article] ? Math.max(0, parseNumber(stockData[stockMap[article].rowIdx - 1][1])) : 0;
+      if (Number(expected[article]) !== current) {
+        changed.push('Остаток «' + article + '» изменился: на экране было ' + expected[article] + ', сейчас ' + current);
+      }
+    });
+    if (changed.length > 0) throw new Error(changed.join('; ') + '. Проверьте и сохраните снова.');
   }
 
   // 27.08.2026. Writes to the «Остатки» sheet are collected here and leave in ONE request at
