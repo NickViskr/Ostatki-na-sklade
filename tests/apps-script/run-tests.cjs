@@ -14136,6 +14136,97 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 100.4 / R-033, R-035: re-sort works per supply and is refused before any change =================
+{
+  const setCell = (h, rowNo, header, value) => {
+    const sheet = h.getRegistrySheet('Внешние отгрузки');
+    const dump = sheet.__dump();
+    dump[rowNo][dump[0].indexOf(header)] = value;
+    sheet.__setData(dump);
+  };
+  const shipRow = (h, postingId) => h.dumpExternalShipments().find(r => r.PostingID === postingId);
+  // each supply is its own expense of A for the same OrderID; supplies: [{posting, qty, pq, fromOffer}]
+  const peresortFixture = (supplies) => {
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([{ article: 'A', quantity: 30, avgCost: 100, capitalization: 3000 }, { article: 'B', quantity: 30, avgCost: 200, capitalization: 6000 }]);
+    const rows = supplies.map((s, i) => {
+      const wo = h.commitTransaction([{ article: 'A', quantity: s.qty, price: 100 }], 'Расход', 'Склад Тест', '2026-10-20', 'tester', '2026-10-19T0' + (i + 1) + ':00:00Z', 'op-' + s.posting, undefined, undefined, undefined, undefined, true);
+      return { postingId: s.posting, cabinet: 'MaxiStore', status: 'processed', items: [{ offerId: 'A', quantity: s.qty }],
+        transGroupInfo: JSON.stringify(wo.newTransactions.map(t => String(t.id))), orderNumber: '1300' };
+    });
+    h.setExternalShipmentsSheet(rows);
+    supplies.forEach((s, i) => {
+      setCell(h, i + 1, 'OrderID', 'ORDER-1');
+      setCell(h, i + 1, 'ПересортJSON', JSON.stringify({ pairs: [{ fromArticle: 'A', toArticle: 'B', fromOfferId: s.fromOffer || 'A', toOfferId: 'B', qty: s.pq }] }));
+    });
+    return h;
+  };
+  {
+    const h = peresortFixture([{ posting: 'P1', qty: 5, pq: 1 }, { posting: 'P2', qty: 7, pq: 7 }]);
+    const p2Before = shipRow(h, 'P2').TransGroupInfo;
+    h.commitShipmentPeresort('P1', 'tester');
+    const p2After = shipRow(h, 'P2').TransGroupInfo;
+    let err2 = '';
+    try { h.commitShipmentPeresort('P2', 'tester'); } catch (e) { err2 = String(e.message || e); }
+    const A = h.stockOf('A'), B = h.stockOf('B');
+    check('Item 100.4 / R-033: re-sort of supply P1 leaves the links (TransGroupInfo) of supply P2 of the same order unchanged',
+      p2After === p2Before, 'before ' + p2Before + ' after ' + p2After);
+    check('Item 100.4 / R-033: a later re-sort of supply P2 succeeds after P1 was re-sorted',
+      err2 === '', 'error "' + err2 + '"');
+    check('Item 100.4 / R-033: stock after both re-sorts is A 26 / B 22',
+      A.quantity === 26 && B.quantity === 22, 'A ' + A.quantity + ' B ' + B.quantity);
+  }
+  {
+    const h = peresortFixture([{ posting: 'P1', qty: 10, pq: 2, fromOffer: 'missing-offer' }]);
+    const snapStock = () => JSON.stringify(h.dumpStockSheet());
+    const snapHist = () => JSON.stringify(h.dumpTransSheet());
+    const snapExt = () => JSON.stringify(h.dumpExternalShipments());
+    const [st0, hi0, ex0] = [snapStock(), snapHist(), snapExt()];
+    let err = '';
+    try { h.commitShipmentPeresort('P1', 'tester'); } catch (e) { err = String(e.message || e); }
+    check('Item 100.4 / R-035: re-sort with a fromOfferId not in the supply is refused with an error', err !== '', 'no error thrown');
+    check('Item 100.4 / R-035: the refused re-sort leaves stock unchanged', snapStock() === st0, 'stock changed: ' + snapStock());
+    check('Item 100.4 / R-035: the refused re-sort leaves "История" unchanged (no deleted or added rows)', snapHist() === hi0, 'history changed');
+    check('Item 100.4 / R-035: the refused re-sort leaves the supply links unchanged', snapExt() === ex0, 'supply row changed');
+  }
+  {
+    // Two supplies of one order that share ONE write-off: both rows carry the same links, so a re-sort must relink both.
+    const h = peresortFixture([{ posting: 'P1', qty: 5, pq: 2 }]);
+    const shared = shipRow(h, 'P1').TransGroupInfo;
+    const sheetX = h.getRegistrySheet('Внешние отгрузки');
+    const dumpX = sheetX.__dump();
+    const rowP1 = dumpX[1].slice();
+    dumpX.push(rowP1.map((v, ci) => dumpX[0][ci] === 'PostingID' ? 'P2' : v));
+    sheetX.__setData(dumpX);
+    let err = '';
+    try { h.commitShipmentPeresort('P1', 'tester'); } catch (e) { err = String(e.message || e); }
+    const p1 = shipRow(h, 'P1').TransGroupInfo, p2 = shipRow(h, 'P2').TransGroupInfo;
+    check('Item 100.4 / R-033: two supplies sharing one write-off - re-sort of P1 relinks both rows to the new transactions',
+      err === '' && p1 !== shared && p2 === p1, 'error "' + err + '" shared ' + shared + ' P1 ' + p1 + ' P2 ' + p2);
+  }
+  {
+    // A foreign supply whose link cell is valid JSON but not an array is not a link to the replaced transactions.
+    const h = peresortFixture([{ posting: 'P1', qty: 5, pq: 2 }, { posting: 'P2', qty: 7, pq: 7 }]);
+    setCell(h, 2, 'TransGroupInfo', '{"legacy":true}');
+    h.commitShipmentPeresort('P1', 'tester');
+    check('Item 100.4 / R-033: a foreign supply with a non-array link cell is left untouched by a re-sort of P1',
+      shipRow(h, 'P2').TransGroupInfo === '{"legacy":true}', 'P2 links ' + shipRow(h, 'P2').TransGroupInfo);
+  }
+  {
+    const h = peresortFixture([{ posting: 'P1', qty: 5, pq: 2 }]);
+    const linksBefore = shipRow(h, 'P1').TransGroupInfo;
+    let err = '';
+    try { h.commitShipmentPeresort('P1', 'tester'); } catch (e) { err = String(e.message || e); }
+    const A = h.stockOf('A'), B = h.stockOf('B');
+    check('Item 100.4 / R-033: control - ordinary valid re-sort of a single-supply order works (A 27 / B 28, links rewritten, no error)',
+      err === '' && A.quantity === 27 && B.quantity === 28 && shipRow(h, 'P1').TransGroupInfo !== linksBefore,
+      'error "' + err + '" A ' + A.quantity + ' B ' + B.quantity);
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

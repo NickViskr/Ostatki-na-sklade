@@ -10084,6 +10084,14 @@ function computePeresortNetDeltas(mainTxItems, newComposition) {
  * @param {string} username - имя текущего пользователя
  * @returns {Object} результат операции { success: true, stock: ..., transactions: ... }
  */
+// True when a «TransGroupInfo» cell links at least one of the given transaction ids.
+function peresortLinksOverlap(transGroupInfoStr, ids) {
+  var linked;
+  try { linked = JSON.parse(transGroupInfoStr); } catch (e) { return false; }
+  if (!Array.isArray(linked)) return false;
+  return linked.some(function(id) { return ids.indexOf(String(id)) !== -1; });
+}
+
 function commitShipmentPeresort(postingId, username) {
   // Шаг 1. Если !postingId — throw new Error('PostingID is required').
   if (!postingId) {
@@ -10241,6 +10249,9 @@ function commitShipmentPeresort(postingId, username) {
     throw new Error('Проведение пересорта невозможно:\n' + errors.join('\n'));
   }
 
+  // Item 100.4 (R-035): the supply's new composition is checked before anything is deleted or written.
+  var newItemsJSON = buildPeresortAdjustedItemsJSON(originalItemsJSON, peresortJSONStr);
+
   // Шаг 9. Пере-проведение: для каждого id из mainTxRows вызови deleteTransaction(String(id), username, true). Затем вызови const commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate).
   for (var j = 0; j < mainTxRows.length; j++) {
     deleteTransaction(String(mainTxRows[j].id), username, true);
@@ -10279,6 +10290,8 @@ function commitShipmentPeresort(postingId, username) {
   var linkInfo = JSON.stringify(newTxIds);
 
   // Шаг 11. Обнови TransGroupInfo: если OrderID текущей строки непустой — пройди по ВСЕМ строкам листа «Внешние отгрузки» и в каждой строке, где String(OrderID).trim().toLowerCase() совпадает с текущим, Статус === 'processed' и TransGroupInfo непустой, запиши linkInfo. Если OrderID пустой — запиши linkInfo только в текущую строку.
+  // Item 100.4 (R-033, owner 2026-10-28: each supply separately): only the rows that pointed at the
+  // replaced transactions are relinked; another supply of the same order with its own write-off keeps its link.
   if (orderId) {
     var targetOrderIdLower = orderId.trim().toLowerCase();
     for (var i = 1; i < values.length; i++) {
@@ -10286,7 +10299,8 @@ function commitShipmentPeresort(postingId, username) {
       var currentOrderId = String(currentRowValues[orderIdIdx] || '').trim().toLowerCase();
       var currentStatus = String(currentRowValues[statusIdx] || '').trim();
       var currentTransGroupInfo = String(currentRowValues[transGroupInfoIdx] || '').trim();
-      if (currentOrderId === targetOrderIdLower && currentStatus === 'processed' && currentTransGroupInfo) {
+      if (currentOrderId === targetOrderIdLower && currentStatus === 'processed' && currentTransGroupInfo
+          && peresortLinksOverlap(currentTransGroupInfo, transGroupIdsStrSet)) {
         sheet.getRange(i + 1, transGroupInfoIdx + 1).setValue(linkInfo);
       }
     }
@@ -10295,7 +10309,6 @@ function commitShipmentPeresort(postingId, username) {
   }
 
   // Шаг 12. Обнови ПозицииJSON текущей строки: значением buildPeresortAdjustedItemsJSON(originalItemsJSON, peresortJSONStr).
-  var newItemsJSON = buildPeresortAdjustedItemsJSON(originalItemsJSON, peresortJSONStr);
   sheet.getRange(rowIndex, itemsJsonIdx + 1).setValue(newItemsJSON);
 
   // Шаг 13. Обнови ПересортJSON текущей строки: возьми peresortObj, добавь поля committedAt = new Date().toISOString(), committedBy = username, originalItemsJSON = originalItemsJSON; запиши JSON.stringify(peresortObj).
