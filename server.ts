@@ -315,6 +315,11 @@ async function startServer() {
   // ── Server-side GAS Response Cache ─────────────────────────────────────
   const gasCache = new Map<string, { data: any; cachedAt: number; action: string }>();
 
+  // Item 100.3 (R-056, R-058). Bumped by every write to GAS. A read remembers the value at its
+  // start and caches its answer only if no write happened meanwhile: a read in flight across a
+  // write (or a lock-free read answering with the old state) must not put old data back.
+  let gasWriteGen = 0;
+
   function invalidateCacheFor(writeAction: string): void {
     const affected = gasReadsInvalidatedBy(writeAction);
     if (!affected) {
@@ -326,6 +331,11 @@ async function startServer() {
         gasCache.delete(key);
       }
     }
+  }
+  // Call after a write to GAS returns (success or failure: a timed-out write may have landed).
+  function noteGasWrite(writeAction: string): void {
+    gasWriteGen++;
+    invalidateCacheFor(writeAction);
   }
   // Пункт 29: диагностика. Счётчик запросов к Apps Script, выполняющихся
   // прямо сейчас. Нужен, чтобы проверить, связаны ли сбои с параллельностью.
@@ -378,8 +388,9 @@ async function startServer() {
       }
 
       if (action && !isGasRead(action)) {
-        invalidateCacheFor(action);
+        noteGasWrite(action);
       }
+      const genAtStart = gasWriteGen;
 
       // Не пропускаем серверные action через клиентский прокси
       const forbiddenActions = ['getGeminiKey', 'getOzonKeys'];
@@ -529,7 +540,7 @@ async function startServer() {
 
           // Если GAS ответил успехом для сессии, сохраняем токен в кэш
           if (data && data.status === "success") {
-            if (cacheTtlMs > 0) {
+            if (cacheTtlMs > 0 && gasWriteGen === genAtStart) {
               gasCache.set(cacheKey, { data, cachedAt: Date.now(), action });
             }
 
@@ -569,6 +580,8 @@ async function startServer() {
         } finally {
           gasInFlight--;
           releaseGasSlot();
+          // The write may have landed even when this attempt failed or timed out
+          if (action && !isGasRead(action)) noteGasWrite(action);
         }
       }
     } catch (err: any) {
@@ -1015,7 +1028,7 @@ async function startServer() {
             data: { orderIds: cancelledOrderIds },
             ...(devMode ? { devMode: true } : {})
           })
-        });
+        }).finally(() => noteGasWrite('applyCancelledOzonOrders'));
         const rawTextCancel = await gasResponseCancel.text();
         const gasResultCancel: any = JSON.parse(rawTextCancel);
 
@@ -1231,7 +1244,7 @@ async function startServer() {
             shipments: shipmentsForGas
           }
         })
-      });
+      }).finally(() => noteGasWrite('saveExternalShipments'));
 
       const rawText2 = await gasResponse2.text();
       let gasData: any;
@@ -1381,7 +1394,7 @@ async function startServer() {
             rows: allRows
           }
         })
-      });
+      }).finally(() => noteGasWrite('saveOzonStocks'));
 
       const rawText2 = await gasResponse2.text();
       let gasData: any;
@@ -1453,7 +1466,7 @@ async function startServer() {
             clusters
           }
         })
-      });
+      }).finally(() => noteGasWrite('saveOzonClusters'));
 
       const rawText = await gasResponse.text();
       let gasData: any;
@@ -2184,6 +2197,8 @@ async function startServer() {
       throw new Error(e?.name === 'AbortError' ? 'Apps Script не ответил за 120 с (' + action + ')' : (e?.message || String(e)));
     } finally {
       clearTimeout(timer);
+      // callGasAction bypasses /api/gas, so every write through it drops the cached reads itself
+      if (!isGasRead(action)) noteGasWrite(action);
     }
     let parsed: any;
     try {
@@ -2299,8 +2314,8 @@ async function startServer() {
         // Item 79b. callGasAction bypasses /api/gas, so the 30-second cache of the journal read
         // kept serving the row without its record: a build finishing under 30 s after the row
         // was written left the tab on «Документы не собраны» (22.09.2026, orders 129770193 and
-        // 2000067584248, built in 29 s and 24 s).
-        invalidateCacheFor('saveOzonSupplyDocs');
+        // 2000067584248, built in 29 s and 24 s). Since item 100.3 the cache is dropped inside
+        // callGasAction (noteGasWrite).
       } catch (e: any) {
         problems.push('Журнал «Заявки Ozon» не обновлён: ' + (e?.message || String(e)));
       }
@@ -2606,7 +2621,7 @@ async function startServer() {
             rows: allRows
           }
         })
-      });
+      }).finally(() => noteGasWrite('saveOzonSales'));
 
       const rawText2 = await gasResponse2.text();
       let gasData: any;

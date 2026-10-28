@@ -185,7 +185,9 @@ describe('подключение серверной сборки докумен�
   it('proxy: the docs route clears the cached journal read right after the record is written', () => {
     // Item 89: the invalidation list moved from server.ts into src/lib/gasActions.ts.
     expect(gasReadsInvalidatedBy('saveOzonSupplyDocs')).toEqual(['getOzonSupplyRequests']);
-    expect(server).toMatch(/callGasAction\('saveOzonSupplyDocs'[^;]*;[\s\S]{0,600}?invalidateCacheFor\('saveOzonSupplyDocs'\);/);
+    // Part 2 of 100.3: the invalidation moved into callGasAction's finally (noteGasWrite for every non-read action).
+    expect(server).toContain("callGasAction('saveOzonSupplyDocs'");
+    expect(server).toMatch(/if \(!isGasRead\(action\)\) noteGasWrite\(action\);/);
   });
 
   // Item 79a. The order must reach «Поставки Озон» without the sync button.

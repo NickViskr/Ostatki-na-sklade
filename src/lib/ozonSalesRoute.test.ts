@@ -24,6 +24,7 @@ async function run(replies: Record<string, unknown[]>, body: Record<string, unkn
     app: { post: (_path: string, fn: any) => { handler = fn; } }, Date: FixedDate,
     console: { error() {}, warn() {} }, process: { env: { GAS_URL: 'https://gas.invalid' } },
     verifyGasSession: async () => true,
+    noteGasWrite: () => {},
     fetchOzonKeys: async () => ({ cabinets: Object.keys(replies).map(name => ({ name, clientId: name, apiKey: 'test' })) }),
     loadWarehouseClusterMap: async () => new Map([[1, 'Source'], [2, 'Buyer']]),
     fetchOzonApi: async (path: string, keys: any, payload: any) => {
