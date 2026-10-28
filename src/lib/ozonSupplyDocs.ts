@@ -9,7 +9,7 @@
 // Pure: no network, no store, so the proxy and the tests share it.
 
 import { SKUItem } from '../types';
-import { buildBoxesPayload, buildCargoPlan, CargoBoxPayload } from './ozonCargo';
+import { buildBoxesPayload, buildCargoPlan, CargoBoxPayload, parseCargoRules } from './ozonCargo';
 
 /** One line of /v1/supply-order/bundle, as loadBundleItems on the proxy shapes it. */
 export interface BundleItem {
@@ -59,6 +59,91 @@ export function layoutFromBundle(items: BundleItem[], skus: SKUItem[]): SupplyDo
   };
 }
 
+/** Item 101. What the record remembers about one supply, to redo only what is missing. */
+export interface SupplyDocsEntry {
+  supplyId: string;
+  clusterName: string;
+  /** Sorted, as strings (int64). Kept for comparison with Ozon only and dropped after SUPPLY_DOCS_IDS_KEEP_DAYS. */
+  cargoIds: string[];
+  /** The composition file was SAVED on Drive in that run. */
+  composition: boolean;
+  /** The cargo-label file was SAVED on Drive in that run. */
+  label: boolean;
+}
+
+/** Owner decision 2026-10-28: cargo ids in the journal live 20 days; Code.gs clears them on the same rule. */
+export const SUPPLY_DOCS_IDS_KEEP_DAYS = 20;
+
+/** Name of the composition file of a cluster on Drive (the same cleaning the file is created with). */
+export function compositionFileName(clusterName: string): string {
+  const cleaned = String(clusterName || '')
+    .replace(/[\/\\:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (cleaned || 'Без названия') + '.xlsx';
+}
+
+export type SupplyDocsAction = 'skip' | 'label' | 'recreate';
+
+export interface SupplyDocsDecisionInput {
+  supplyId: string;
+  clusterName: string;
+  /** This supply's entry of the previous record; null when there is none. */
+  previous: SupplyDocsEntry | null;
+  /** `at` of the previous record (ISO). */
+  recordAt: string;
+  nowMs: number;
+  /** cargo_id values Ozon holds for the supply right now. */
+  currentCargoIds: string[];
+  /** Raw supply_check_lists[] element of the supply, or null when Ozon returned none. */
+  checkList: any;
+  /** Names of the files in the order folder on Drive now. */
+  folderFiles: string[];
+  plannedBoxes: number;
+}
+
+/**
+ * Item 101. What a repeat «Собрать документы» does with one supply. Money-critical: a wrong
+ * 'skip' leaves labels that do not match the boxes, so every doubt answers 'recreate'.
+ * skip: the record is fresh, Ozon holds exactly the cargoes it remembers (as many as planned),
+ *   Ozon's content rules pass (cargoes present, every box filled, distribution valid), and both
+ *   files were saved and are still in the folder.
+ * label: the same, except the label file is missing (flag false or file absent).
+ */
+const CONTENT_RULES = ['cargoes_presents_rule', 'package_units_with_distribution_rule', 'is_valid_distribution_rule'];
+
+export function decideSupplyDocs(input: SupplyDocsDecisionInput): SupplyDocsAction {
+  const prev = input.previous;
+  if (!prev || prev.supplyId !== input.supplyId) return 'recreate';
+
+  const recordMs = Date.parse(input.recordAt);
+  if (!Number.isFinite(recordMs)) return 'recreate';
+  const ageMs = input.nowMs - recordMs;
+  if (ageMs < 0 || ageMs >= SUPPLY_DOCS_IDS_KEEP_DAYS * 24 * 60 * 60 * 1000) return 'recreate';
+
+  const current = input.currentCargoIds.map(String).sort();
+  const stored = prev.cargoIds.map(String).sort();
+  if (current.length === 0 || current.length !== stored.length) return 'recreate';
+  if (current.some((id, i) => id !== stored[i])) return 'recreate';
+  if (current.length !== input.plannedBoxes) return 'recreate';
+
+  // Only the rules that say «Ozon's cargoes still hold the supply's composition». Expiry dates,
+  // placement zones and the edit deadline do not change when the cargoes are recreated with the
+  // same layout, so requiring them would only force pointless recreations.
+  if (!input.checkList) return 'recreate';
+  const rules = parseCargoRules(input.checkList).rules;
+  for (const code of CONTENT_RULES) {
+    const rule = rules.find((r) => r.code === code);
+    if (!rule || !rule.satisfied) return 'recreate';
+  }
+
+  const files = input.folderFiles.map((f) => String(f).normalize('NFC'));
+  if (prev.composition !== true || files.indexOf(compositionFileName(input.clusterName).normalize('NFC')) < 0) return 'recreate';
+
+  const labelPresent = files.some((f) => f.indexOf(input.supplyId + '.') === 0 || f.indexOf('tags-cargoes-by-supply-' + input.supplyId + '.') === 0);
+  return prev.label === true && labelPresent ? 'skip' : 'label';
+}
+
 /** What the journal column «Документы» stores for one order. */
 export interface SupplyDocsRecord {
   at: string;
@@ -70,6 +155,8 @@ export interface SupplyDocsRecord {
   warnings: string[];
   problems: string[];
   missingLabels: string[];
+  /** Item 101: per-supply memory for the next build; empty in records made before it. */
+  supplies: SupplyDocsEntry[];
   /** Cargoes sent for every cluster, folder built, nothing missing. */
   ok: boolean;
 }
@@ -95,6 +182,15 @@ export function parseSupplyDocs(docsJSON?: string | null): SupplyDocsRecord | nu
     warnings: list(parsed.warnings),
     problems: list(parsed.problems),
     missingLabels: list(parsed.missingLabels),
+    supplies: (Array.isArray(parsed.supplies) ? parsed.supplies : [])
+      .filter((e: any) => e && typeof e === 'object' && String(e.supplyId || '') !== '')
+      .map((e: any) => ({
+        supplyId: String(e.supplyId),
+        clusterName: String(e.clusterName || ''),
+        cargoIds: list(e.cargoIds),
+        composition: e.composition === true,
+        label: e.label === true
+      })),
     ok: parsed.ok === true
   };
 }

@@ -200,3 +200,112 @@ describe('подключение серверной сборки докумен�
     expect(tab).toMatch(/if \(st\.kind === 'legacy'\) return null;[\s\S]{0,200}if \(st\.kind === 'issues'\)/);
   });
 });
+
+// ---- Item 101 ticket 03: decideSupplyDocs (skip / label / recreate) ----
+import { decideSupplyDocs, SupplyDocsDecisionInput, SupplyDocsEntry } from './ozonSupplyDocs';
+
+describe('decideSupplyDocs', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const NOW = Date.parse('2026-11-01T12:00:00Z');
+  const SID = '2000000000001';
+  const rule = (satisfied: boolean) => ({ satisfied, is_applicable: true, is_required: true });
+  const okCheckList = () => ({
+    supply_id: SID,
+    cargoes_presents_rule: rule(true),
+    package_units_with_distribution_rule: rule(true),
+    is_valid_distribution_rule: rule(true)
+  });
+  const entry = (over: Partial<SupplyDocsEntry> = {}): SupplyDocsEntry => ({
+    supplyId: SID, clusterName: 'Казань', cargoIds: ['902', '901'], composition: true, label: true, ...over
+  });
+  const input = (over: Partial<SupplyDocsDecisionInput> = {}): SupplyDocsDecisionInput => ({
+    supplyId: SID,
+    clusterName: 'Казань',
+    previous: entry(),
+    recordAt: new Date(NOW - DAY).toISOString(),
+    nowMs: NOW,
+    currentCargoIds: ['901', '902'],
+    checkList: okCheckList(),
+    folderFiles: ['Казань.xlsx', 'tags-cargoes-by-supply-' + SID + '.pdf'],
+    plannedBoxes: 2,
+    ...over
+  });
+
+  it('skips when everything matches: fresh record, same ids, rules pass, both files present', () => {
+    expect(decideSupplyDocs(input())).toBe('skip');
+  });
+  it('recreates when there is no previous entry', () => {
+    expect(decideSupplyDocs(input({ previous: null }))).toBe('recreate');
+  });
+  it('recreates when the previous entry belongs to another supply', () => {
+    expect(decideSupplyDocs(input({ previous: entry({ supplyId: '2000000000009' }) }))).toBe('recreate');
+  });
+  it('recreates when Ozon holds different cargo ids than the record', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: ['901', '903'] }))).toBe('recreate');
+  });
+  it('treats the same ids in another order as equal (both sides sorted)', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: ['902', '901'], previous: entry({ cargoIds: ['901', '902'] }) }))).toBe('skip');
+  });
+  it('recreates when Ozon returns no cargoes', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: [], previous: entry({ cargoIds: [] }), plannedBoxes: 0 }))).toBe('recreate');
+  });
+  it('recreates when the cargo count differs from the planned box count', () => {
+    expect(decideSupplyDocs(input({ plannedBoxes: 3 }))).toBe('recreate');
+  });
+  it('recreates when Ozon has more ids than the record', () => {
+    expect(decideSupplyDocs(input({ currentCargoIds: ['901', '902', '903'], plannedBoxes: 3 }))).toBe('recreate');
+  });
+  it('recreates when the check-list is missing', () => {
+    expect(decideSupplyDocs(input({ checkList: null }))).toBe('recreate');
+  });
+  for (const code of ['cargoes_presents_rule', 'package_units_with_distribution_rule', 'is_valid_distribution_rule']) {
+    it(`recreates when content rule ${code} is not satisfied`, () => {
+      expect(decideSupplyDocs(input({ checkList: { ...okCheckList(), [code]: rule(false) } }))).toBe('recreate');
+    });
+    it(`recreates when content rule ${code} is absent from the check-list`, () => {
+      const cl: any = okCheckList();
+      delete cl[code];
+      expect(decideSupplyDocs(input({ checkList: cl }))).toBe('recreate');
+    });
+  }
+  it('does NOT recreate when only placement_zones_rule / expiry / edit-deadline rules fail', () => {
+    const cl = { ...okCheckList(), placement_zones_rule: rule(false), expiration_dates_rule: rule(false), edit_deadline_rule: rule(false) };
+    expect(decideSupplyDocs(input({ checkList: cl }))).toBe('skip');
+  });
+  it('a record 19.9 days old still counts, a record exactly 20 days old does not', () => {
+    expect(decideSupplyDocs(input({ recordAt: new Date(NOW - 19.9 * DAY).toISOString() }))).toBe('skip');
+    expect(decideSupplyDocs(input({ recordAt: new Date(NOW - 20 * DAY).toISOString() }))).toBe('recreate');
+  });
+  it('recreates when the record time is in the future or unparsable', () => {
+    expect(decideSupplyDocs(input({ recordAt: new Date(NOW + 1000).toISOString() }))).toBe('recreate');
+    expect(decideSupplyDocs(input({ recordAt: 'garbage' }))).toBe('recreate');
+    expect(decideSupplyDocs(input({ recordAt: '' }))).toBe('recreate');
+  });
+  it('recreates when the composition flag is false even though the file is in the folder', () => {
+    expect(decideSupplyDocs(input({ previous: entry({ composition: false }) }))).toBe('recreate');
+  });
+  it('recreates when the composition file is absent from the folder', () => {
+    expect(decideSupplyDocs(input({ folderFiles: ['tags-cargoes-by-supply-' + SID + '.pdf'] }))).toBe('recreate');
+  });
+  it('returns label when the label flag is true but the label file is absent', () => {
+    expect(decideSupplyDocs(input({ folderFiles: ['Казань.xlsx'] }))).toBe('label');
+  });
+  it('returns label when the label file is present but the flag is false', () => {
+    expect(decideSupplyDocs(input({ previous: entry({ label: false }) }))).toBe('label');
+  });
+  it('counts <supplyId>.pdf and tags-cargoes-by-supply-<supplyId>.zip as the label file', () => {
+    expect(decideSupplyDocs(input({ folderFiles: ['Казань.xlsx', SID + '.pdf'] }))).toBe('skip');
+    expect(decideSupplyDocs(input({ folderFiles: ['Казань.xlsx', 'tags-cargoes-by-supply-' + SID + '.zip'] }))).toBe('skip');
+  });
+  it('does not count a longer id with the same prefix (<supplyId>1.pdf) as the label file', () => {
+    expect(decideSupplyDocs(input({ folderFiles: ['Казань.xlsx', SID + '1.pdf'] }))).toBe('label');
+  });
+  it('matches cluster names with «й» in NFD in the folder against NFC in the record (and the reverse)', () => {
+    for (const name of ['Новосибирск', 'Йошкар-Ола']) {
+      const nfc = name.normalize('NFC');
+      const nfd = name.normalize('NFD');
+      expect(decideSupplyDocs(input({ clusterName: nfc, folderFiles: [nfd + '.xlsx', SID + '.pdf'] }))).toBe('skip');
+      expect(decideSupplyDocs(input({ clusterName: nfd, folderFiles: [nfc + '.xlsx', SID + '.pdf'] }))).toBe('skip');
+    }
+  });
+});

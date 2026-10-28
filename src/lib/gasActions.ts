@@ -112,6 +112,9 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   // Item 87 step 5: the settings change journal. Deliberately not cached — the journal gains a
   // row on every saveOzonSettings, so a cached answer would hide the most recent change.
   getOzonSettingsJournal: read(),
+  // Item 101: the previous «Документы» record of an order and the file names in its Drive folder, read before a
+  // docs build decides what to redo. Never cached: the build writes both right before the next press.
+  getSupplyDocsState: read(),
 
   // ── Writes with a narrow invalidation ──
   // Пункт 29, этап C: точечная очистка кэша. Сюда попали только действия, про которые точно

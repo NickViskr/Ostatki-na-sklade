@@ -13837,6 +13837,153 @@ t0cCheck('Item 101 stale labels: a fresh label of another supply in the same cal
   };
 });
 
+// ================= Item 101 ticket 03: getSupplyDocsState, savedBySupply, purgeExpiredSupplyDocsCargoIds =================
+const RESUME_JOURNAL_HEADERS = ['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус', 'Документы'];
+function resumeStand(rows) {
+  const H = freshHarness();
+  H.setNow('2026-11-01T12:00:00Z');
+  const root = H.resetFakeDrive();
+  const ss = H.context.SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.insertSheet('Заявки Ozon');
+  sheet.__setData([RESUME_JOURNAL_HEADERS.slice()].concat(rows));
+  return { H, root, sheet, ctx: H.context };
+}
+const resumeRow = (id, orderId, docs, date) => [id, new Date(date || '2026-10-30T10:00:00Z'), 'Mercurius', 'D1', orderId, 'Точка', '1', '[]', 'Николай', 'Создана', docs];
+const resumeRecord = (atIso, ids) => JSON.stringify({
+  at: atIso, orderNumber: 'N1', folderName: 'Озон N1', ok: true,
+  supplies: [
+    { supplyId: '2000000000011', clusterName: 'Казань', cargoIds: ids.slice(), composition: true, label: true },
+    { supplyId: '2000000000012', clusterName: 'Самара', cargoIds: ids.slice(), composition: true, label: false }
+  ]
+});
+
+t0cCheck('Item 101 getSupplyDocsState: returns the docsJSON of the LAST journal row of the order that has one, and the live file names of the order folder', () => {
+  const st = resumeStand([
+    resumeRow('R1', '777', '{"at":"old"}'),
+    resumeRow('R2', '888', '{"at":"other order"}'),
+    resumeRow('R3', '777', '{"at":"newest"}'),
+    resumeRow('R4', '777', '')
+  ]);
+  const folder = st.root.createFolder('Озон N1');
+  folder.__addFile('Казань.xlsx');
+  folder.__addFile('2000000000011.pdf');
+  folder.__addFile('gone.pdf').setTrashed(true);
+  const out = st.ctx.getSupplyDocsState({ orderId: '777', folderName: 'Озон N1' });
+  return {
+    conds: {
+      'last row with a record wins (empty row after it ignored)': out.docsJSON === '{"at":"newest"}',
+      'file names listed': JSON.stringify(out.folderFiles) === '["Казань.xlsx","2000000000011.pdf"]'
+    },
+    note: JSON.stringify(out)
+  };
+});
+t0cCheck('Item 101 getSupplyDocsState: an absent order folder gives [] and the folder is NOT created; no record gives an empty docsJSON', () => {
+  const st = resumeStand([resumeRow('R1', '777', '')]);
+  const out = st.ctx.getSupplyDocsState({ orderId: '777', folderName: 'Озон N-absent' });
+  return {
+    conds: {
+      'folderFiles empty': Array.isArray(out.folderFiles) && out.folderFiles.length === 0,
+      'docsJSON empty': out.docsJSON === '',
+      'root folder still has no sub-folders': st.root.__folders.length === 0
+    },
+    note: JSON.stringify(out)
+  };
+});
+t0cCheck('Item 101 getSupplyDocsState: without orderId it throws and reads nothing', () => {
+  const st = resumeStand([]);
+  let msg = '';
+  try { st.ctx.getSupplyDocsState({ folderName: 'x' }); } catch (e) { msg = String(e && e.message); }
+  return { conds: { 'threw about orderId': /orderId/.test(msg) }, note: msg };
+});
+
+function savedBySupplyRun(label500) {
+  const st = resumeStand([]);
+  const U = st.ctx.Utilities;
+  const hadMime = 'MimeType' in st.ctx;
+  const keepMime = st.ctx.MimeType;
+  st.ctx.MimeType = { MICROSOFT_EXCEL: 'xls' };
+  const realFetch = st.ctx.UrlFetchApp.fetch;
+  const keep = { newBlob: U.newBlob, base64Decode: U.base64Decode };
+  U.newBlob = (bytes, mime, name) => st.H.makeFakeDriveBlob(name);
+  U.base64Decode = () => [1, 2, 3];
+  st.ctx.UrlFetchApp.fetch = (url) => (String(url).indexOf('label-ok') >= 0 && !label500
+    ? { getResponseCode: () => 200, getBlob: () => st.H.makeFakeDriveBlob('x'), getAllHeaders: () => ({ 'Content-Type': 'application/pdf' }) }
+    : { getResponseCode: () => 500, getBlob: () => st.H.makeFakeDriveBlob('x'), getAllHeaders: () => ({}) });
+  try {
+    return st.ctx.saveSupplyDocsToDrive({
+      folderName: 'Order-1',
+      articles: [],
+      files: [
+        { kind: 'base64', name: 'Казань.xlsx', supplyId: '2000000000011', content: 'AAA=' },
+        { kind: 'url', url: 'https://ozon.fake/label-ok-1', supplyId: '2000000000011', fallbackName: 'tags-cargoes-by-supply-2000000000011' },
+        { kind: 'base64', name: 'Самара.xlsx', supplyId: '2000000000012', content: 'AAA=' },
+        { kind: 'url', url: 'https://ozon.fake/label-bad-2', supplyId: '2000000000012', fallbackName: 'tags-cargoes-by-supply-2000000000012' }
+      ]
+    });
+  } finally {
+    U.newBlob = keep.newBlob; U.base64Decode = keep.base64Decode;
+    if (hadMime) st.ctx.MimeType = keepMime; else delete st.ctx.MimeType;
+    st.ctx.UrlFetchApp.fetch = realFetch;
+  }
+}
+t0cCheck('Item 101 savedBySupply: a label whose URL fetch returns HTTP 500 has label false while its composition file is true; the good supply has both true', () => {
+  const out = savedBySupplyRun(false);
+  const a = out.savedBySupply['2000000000011'];
+  const b = out.savedBySupply['2000000000012'];
+  return {
+    conds: {
+      'supply 11 composition and label true': !!a && a.composition === true && a.label === true,
+      'supply 12 composition true': !!b && b.composition === true,
+      'supply 12 label false after HTTP 500': !!b && b.label === false,
+      'the HTTP 500 is reported in problems': out.problems.some(p => /HTTP 500/.test(p))
+    },
+    note: JSON.stringify(out.savedBySupply) + ' problems ' + JSON.stringify(out.problems)
+  };
+});
+t0cCheck('Item 101 savedBySupply: when every label fetch fails no supply gets label true', () => {
+  const out = savedBySupplyRun(true);
+  const labels = Object.keys(out.savedBySupply).map(k => out.savedBySupply[k].label);
+  return { conds: { 'two supplies listed': labels.length === 2, 'all labels false': labels.every(v => v === false) }, note: JSON.stringify(out.savedBySupply) };
+});
+
+t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: clears cargoIds of a 21-day-old record, keeps a 19-day-old one, other fields of both stay', () => {
+  const old = resumeRecord('2026-10-11T12:00:00Z', ['901', '902']);   // 21 days before 2026-11-01T12:00Z
+  const fresh = resumeRecord('2026-10-13T12:00:00Z', ['903']);        // 19 days
+  const st = resumeStand([resumeRow('R1', '1', old), resumeRow('R2', '2', fresh), resumeRow('R3', '3', '')]);
+  const changed = st.ctx.purgeExpiredSupplyDocsCargoIds();
+  const rows = st.ctx.getOzonSupplyRequests();
+  const r1 = JSON.parse(rows[0].docsJSON);
+  const r2 = JSON.parse(rows[1].docsJSON);
+  return {
+    conds: {
+      'one cell rewritten': changed === 1,
+      'old record ids cleared': r1.supplies.every(e => e.cargoIds.length === 0),
+      'old record other fields kept': r1.supplies[0].supplyId === '2000000000011' && r1.supplies[0].composition === true && r1.supplies[0].label === true && r1.supplies[0].clusterName === 'Казань' && r1.orderNumber === 'N1' && r1.ok === true && r1.at === '2026-10-11T12:00:00Z',
+      'fresh record untouched byte for byte': rows[1].docsJSON === fresh,
+      'empty cell stays empty': rows[2].docsJSON === ''
+    },
+    note: 'changed ' + changed
+  };
+});
+t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: a second run changes nothing, and a record from before the item (no supplies[]) or with broken JSON is left alone', () => {
+  const legacy = JSON.stringify({ at: '2026-01-01T00:00:00Z', ok: true, cargoes: 3 });
+  const st = resumeStand([resumeRow('R1', '1', resumeRecord('2026-10-11T12:00:00Z', ['901'])), resumeRow('R2', '2', legacy), resumeRow('R3', '3', '{broken')]);
+  const first = st.ctx.purgeExpiredSupplyDocsCargoIds();
+  const second = st.ctx.purgeExpiredSupplyDocsCargoIds();
+  const rows = st.ctx.getOzonSupplyRequests();
+  return {
+    conds: { 'first run rewrote one': first === 1, 'second run rewrote none': second === 0, 'legacy untouched': rows[1].docsJSON === legacy, 'broken untouched': rows[2].docsJSON === '{broken' },
+    note: first + '/' + second
+  };
+});
+t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders calls it at its end (the result carries purgedDocsCargoIds)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'Code.gs'), 'utf8');
+  const body = src.slice(src.indexOf('function applyCancelledOzonOrders'));
+  const end = body.indexOf('\nfunction ', 10);
+  const fn = body.slice(0, end);
+  return { conds: { 'call present': /result\.purgedDocsCargoIds\s*=\s*purgeExpiredSupplyDocsCargoIds\(\)/.test(fn), 'before the final return': fn.indexOf('purgeExpiredSupplyDocsCargoIds()') > fn.lastIndexOf('syncOzonJournalFromShipments') } };
+});
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

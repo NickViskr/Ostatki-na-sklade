@@ -284,7 +284,9 @@ function doPost(e) {
       'getChinaForecastData',
       'calcChinaForecast',
       // Item 93 ticket 05: a pure read of the cost journal for the «История» marker; any signed-in user.
-      'getOzonCostKanMarkers'
+      'getOzonCostKanMarkers',
+      // Item 101: a pure read of the docs record and of the order folder's file names (creates nothing).
+      'getSupplyDocsState'
     ];
     if (!LOCK_FREE_ACTIONS.includes(action)) {
       lock = LockService.getScriptLock();
@@ -514,6 +516,8 @@ function doPost(e) {
       // Item 93 ticket 05: no admin check — the browser decides whose markers are shown (author + admin).
       case 'getOzonCostKanMarkers': result = getOzonCostKanMarkers(); break;
       case 'markOzonCostExported': assertAdmin(currentUser); result = markOzonCostExported(data, currentUser.username); break;
+      // Item 101: same access as saveOzonSupplyDocs / saveSupplyDocsToDrive, the route it serves.
+      case 'getSupplyDocsState': assertAdmin(currentUser); result = getSupplyDocsState(data); break;
       case 'saveSupplyDocsToDrive': assertAdmin(currentUser); result = saveSupplyDocsToDrive(data); break;
       // Item 78a: the manual «Обновить из KAN» button; the nightly trigger does the same.
       case 'runKanPullNow': assertAdmin(currentUser); result = kanTurnoverDaily(); break;
@@ -5838,6 +5842,9 @@ function syncOzonJournalFromShipments() {
 /** Сколько дней хранить отменённые заявки, прежде чем удалить их из базы. */
 const OZON_CANCELLED_KEEP_DAYS = 28;
 
+/** Item 101: days the cargo ids of a «Документы» record are kept (mirrors SUPPLY_DOCS_IDS_KEEP_DAYS in src/lib/ozonSupplyDocs.ts). */
+const SUPPLY_DOCS_IDS_KEEP_DAYS = 20;
+
 /**
  * Обработка заявок, отменённых в Ozon Seller.
  * 1) Сразу помечает строки журнала «Заявки Ozon» статусом «Отменена». Это мгновенно
@@ -5956,6 +5963,9 @@ function applyCancelledOzonOrders(data) {
   // после начала отслеживания, опрос повторно не запрашивает
   result.closedFromShipments = syncOzonJournalFromShipments();
 
+  // Item 101: the daily-ish poll also drops the cargo ids of old docs records
+  result.purgedDocsCargoIds = purgeExpiredSupplyDocsCargoIds();
+
   return result;
 }
 
@@ -6064,9 +6074,11 @@ function extFromContentType(contentType) {
  * Ссылки Ozon действуют 24 часа и открываются без ключей — в журналы их не писать.
  *
  * @param {Object} data { folderName, files, articles, staleLabelSupplyIds? }
+ *   files[].supplyId (item 101): lets the answer say which supply's file was saved.
  *   staleLabelSupplyIds: supplies whose cargoes were recreated without a new label file (item 101);
  *   their old label files in the folder are trashed before anything new is written.
- * @returns {Object} { folderName, folderUrl, saved, missingLabels, problems, removedStaleLabels }
+ * @returns {Object} { folderName, folderUrl, saved, missingLabels, problems, removedStaleLabels, savedBySupply }
+ *   savedBySupply: { <supplyId>: { composition, label } } — true only for files that reached the folder in this call.
  */
 function saveSupplyDocsToDrive(data) {
   if (!data || typeof data !== 'object') {
@@ -6097,6 +6109,14 @@ function saveSupplyDocsToDrive(data) {
   const targetFolder = getOrCreateChildFolder(rootFolder, folderName);
   const saved = [];
   const problems = [];
+  // Item 101: which files of which supply were actually SAVED here (the proxy remembers it for the next build).
+  const savedBySupply = {};
+  const markSaved = function (supplyId, kind) {
+    const id = String(supplyId || '');
+    if (!id) return;
+    if (!savedBySupply[id]) savedBySupply[id] = { composition: false, label: false };
+    savedBySupply[id][kind] = true;
+  };
 
   // Item 101: a label file of an earlier run names cargo ids that no longer exist. Trash (recoverable)
   // only files directly in this folder named "<id>." or "tags-cargoes-by-supply-<id>." (dot included,
@@ -6134,6 +6154,7 @@ function saveSupplyDocsToDrive(data) {
         const xlsBlob = Utilities.newBlob(Utilities.base64Decode(String(f.content || '')), MimeType.MICROSOFT_EXCEL, xlsName);
         replaceFileInFolder(targetFolder, xlsName, xlsBlob);
         saved.push(xlsName);
+        markSaved(f.supplyId, 'composition');
       } else if (f.kind === 'url') {
         const response = UrlFetchApp.fetch(String(f.url || ''), { muteHttpExceptions: true, followRedirects: true });
         const code = response.getResponseCode();
@@ -6153,6 +6174,7 @@ function saveSupplyDocsToDrive(data) {
         }
         replaceFileInFolder(targetFolder, fileName, blob);
         saved.push(fileName);
+        markSaved(f.supplyId, 'label');
       } else {
         problems.push('Неизвестный тип файла: ' + String(f.kind));
       }
@@ -6204,7 +6226,8 @@ function saveSupplyDocsToDrive(data) {
     saved: saved,
     missingLabels: missingLabels,
     problems: problems,
-    removedStaleLabels: removedStaleLabels
+    removedStaleLabels: removedStaleLabels,
+    savedBySupply: savedBySupply
   };
 }
 
@@ -7536,6 +7559,84 @@ function getOzonSupplyRequests() {
     });
   }
   return rows;
+}
+
+/**
+ * Item 101. What a docs build needs to know before it writes anything: the «Документы» record of
+ * the order (the last journal row of it that has one) and the names of the files now in its Drive
+ * folder. Reads only: the folder is never created, an absent folder or setting gives no file names.
+ *
+ * @param {Object} data { orderId, folderName }
+ * @returns {Object} { docsJSON, folderFiles }
+ */
+function getSupplyDocsState(data) {
+  const orderId = String((data && data.orderId) || '').trim();
+  if (!orderId) throw new Error('Не передан номер заявки (orderId)');
+
+  let docsJSON = '';
+  const rows = getOzonSupplyRequests();
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i].orderId || '').trim() === orderId && String(rows[i].docsJSON || '').trim()) {
+      docsJSON = String(rows[i].docsJSON);
+    }
+  }
+
+  const folderFiles = [];
+  const folderName = sanitizeDriveName(data && data.folderName);
+  const rootFolderId = String(getOzonSettings().supplyDocsFolderId || '').trim();
+  if (folderName && rootFolderId) {
+    const folders = DriveApp.getFolderById(rootFolderId).getFoldersByName(folderName);
+    if (folders.hasNext()) {
+      const it = folders.next().getFiles();
+      while (it.hasNext()) {
+        const file = it.next();
+        if (!file.isTrashed()) folderFiles.push(file.getName());
+      }
+    }
+  }
+  return { docsJSON: docsJSON, folderFiles: folderFiles };
+}
+
+/**
+ * Item 101. Cargo ids in the «Документы» records are kept for comparison with Ozon only, and only
+ * SUPPLY_DOCS_IDS_KEEP_DAYS days (owner decision 2026-10-28): older records lose `supplies[].cargoIds`,
+ * the rest of the record stays. Runs from applyCancelledOzonOrders, i.e. from every Ozon poll.
+ *
+ * @returns {number} how many journal cells were rewritten
+ */
+function purgeExpiredSupplyDocsCargoIds() {
+  const sheet = getOrCreateSheet(getSpreadsheet(), 'Заявки Ozon', OZON_SUPPLY_REQUESTS_HEADERS);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+  const cDocs = readHeaderRow(sheet).indexOf('Документы');
+  if (cDocs < 0) return 0;
+
+  const cutoff = Date.now() - SUPPLY_DOCS_IDS_KEEP_DAYS * 24 * 60 * 60 * 1000;
+  const range = sheet.getRange(2, cDocs + 1, lastRow - 1, 1);
+  const values = range.getValues();
+  let changed = 0;
+  for (let r = 0; r < values.length; r++) {
+    const raw = String(values[r][0] || '').trim();
+    if (!raw) continue;
+    let rec;
+    try { rec = JSON.parse(raw); } catch (e) { continue; }
+    if (!rec || !Array.isArray(rec.supplies)) continue;
+    const at = new Date(String(rec.at || '')).getTime();
+    if (isNaN(at) || at >= cutoff) continue;
+    let touched = false;
+    for (let k = 0; k < rec.supplies.length; k++) {
+      const entry = rec.supplies[k];
+      if (entry && Array.isArray(entry.cargoIds) && entry.cargoIds.length > 0) {
+        entry.cargoIds = [];
+        touched = true;
+      }
+    }
+    if (!touched) continue;
+    values[r][0] = JSON.stringify(rec);
+    changed++;
+  }
+  if (changed > 0) range.setValues(values);
+  return changed;
 }
 
 /**

@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { buildCompositionXlsxBase64, readCargoIds } from "./src/lib/ozonComposition";
-import { layoutFromBundle } from "./src/lib/ozonSupplyDocs";
+import { compositionFileName, decideSupplyDocs, layoutFromBundle, parseSupplyDocs, SupplyDocsAction, SupplyDocsEntry } from "./src/lib/ozonSupplyDocs";
 import { parseOzonJson } from "./src/lib/ozonJson";
 import { gasCacheTtlMs, gasReadsInvalidatedBy, isGasRead } from "./src/lib/gasActions";
 import { analyticsItemToStockRow } from "./src/lib/ozonStockRow";
@@ -1997,14 +1997,6 @@ async function startServer() {
   const CARGO_POLL_ATTEMPTS = 15;
   const CARGO_POLL_DELAY_MS = 2000;
 
-  function sanitizeFileName(name: string): string {
-    const cleaned = String(name || '')
-      .replace(/[\/\\:*?"<>|]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return cleaned || 'Без названия';
-  }
-
   // Создание грузомест одной поставки с полной перезаписью прежней раскладки
   async function createCargoesForSupply(cab: any, supplyId: string, boxes: any[]): Promise<Record<string, string>> {
     const payload = {
@@ -2099,21 +2091,103 @@ async function startServer() {
   }
 
   type SupplyDocsTarget = { supply: any; clusterName: string; boxes: any[] };
-  type SupplyDocsResult = { files: any[]; warnings: string[]; checkLists: any[]; cargoes: number; staleLabelSupplyIds: string[] };
+  // Item 101: what to do per supply (decideSupplyDocs) and, for 'label'/'skip', the cargo ids Ozon holds now.
+  type SupplyDocsPlan = Record<string, { action: SupplyDocsAction; cargoIds: string[]; previous: SupplyDocsEntry | null }>;
+  type SupplyDocsRun = { cargoIds: string[]; compositionBuilt: boolean };
+  type SupplyDocsResult = {
+    files: any[]; warnings: string[]; checkLists: any[]; cargoes: number; staleLabelSupplyIds: string[];
+    // per supply this run touched (not 'skip'): the ids it ended with and whether the composition file was built
+    runs: Record<string, SupplyDocsRun>;
+    skipped: number; labelOnly: number; recreated: number;
+  };
+
+  // Item 101. Stop starting NEW Ozon work this long after the request began: the Drive save (about 65 s on a
+  // 13-supply order) and the journal write must still fit Cloud Run's 300 s.
+  const SUPPLY_DOCS_OZON_BUDGET_MS = 200_000;
+  const SUPPLY_DOCS_LABEL_RETRY_PAUSE_MS = 20_000;
+  const SUPPLY_DOCS_OUT_OF_TIME = ': не успели — нажмите «Собрать документы» ещё раз';
+
+  // Item 101. Per supply: skip / labels only / recreate. ANY doubt or failed read means 'recreate'
+  // for every supply (the behaviour before this item). Ozon stays the source of truth: the stored
+  // cargo ids are only compared with what /v1/cargoes/get returns now.
+  async function planSupplyDocs(cab: OzonCabinetKeys, token: string, devMode: boolean, orderId: string, folderName: string, targets: SupplyDocsTarget[]): Promise<SupplyDocsPlan> {
+    const plan: SupplyDocsPlan = {};
+    try {
+      const supplyIds = targets.map(t => String(t.supply?.supply_id || '')).filter(id => id !== '');
+      if (supplyIds.length === 0) return plan;
+
+      const state: any = await callGasAction('getSupplyDocsState', token, devMode, { orderId, folderName });
+      const record = parseSupplyDocs(state?.docsJSON);
+      // Nothing remembered: every supply is recreated, no point in asking Ozon what it holds.
+      if (!record || record.supplies.length === 0) return plan;
+      const folderFiles: string[] = Array.isArray(state?.folderFiles) ? state.folderFiles.map(String) : [];
+
+      const cargoIdsBySupply: Record<string, string[]> = {};
+      const checkListBySupply: Record<string, any> = {};
+      for (let i = 0; i < supplyIds.length; i += 100) {
+        const chunk = supplyIds.slice(i, i + 100);
+        const keys = { ozonClientId: cab.clientId, ozonApiKey: cab.apiKey };
+        const got: any = await fetchOzonApi("/v1/cargoes/get", keys, { supply_ids: chunk });
+        for (const sup of Array.isArray(got?.supply) ? got.supply : []) {
+          cargoIdsBySupply[String(sup?.supply_id)] = (Array.isArray(sup?.cargoes) ? sup.cargoes : [])
+            .map((c: any) => String(c?.cargo_id ?? '').trim()).filter((v: string) => v !== '');
+        }
+        const rules: any = await fetchOzonApi("/v1/cargoes/rules/get", keys, { supply_ids: chunk });
+        for (const cl of Array.isArray(rules?.supply_check_lists) ? rules.supply_check_lists : []) {
+          checkListBySupply[String(cl?.supply_id)] = cl;
+        }
+      }
+
+      for (const t of targets) {
+        const supplyId = String(t.supply?.supply_id || '');
+        if (!supplyId) continue;
+        const currentCargoIds = cargoIdsBySupply[supplyId] || [];
+        const previous = record.supplies.find(e => e.supplyId === supplyId) || null;
+        const action = decideSupplyDocs({
+          supplyId,
+          clusterName: t.clusterName,
+          previous,
+          recordAt: record.at,
+          nowMs: Date.now(),
+          currentCargoIds,
+          checkList: checkListBySupply[supplyId] || null,
+          folderFiles,
+          plannedBoxes: (Array.isArray(t.boxes) ? t.boxes : []).length
+        });
+        plan[supplyId] = { action, cargoIds: currentCargoIds.slice().sort(), previous };
+      }
+      return plan;
+    } catch (e: any) {
+      console.warn('SUPPLYDOCS plan failed, recreating everything: ' + (e?.message || String(e)));
+      return {};
+    }
+  }
 
   // Item 74a. The per-supply work shared by finalize (right after creation, layout from the
   // wizard) and /api/ozon/supply/docs (any time later, layout from Ozon's own composition):
   // cargoes with a full rewrite of the previous layout, the composition file, the label file,
   // then the readiness check-lists of all supplies touched.
-  async function collectSupplyDocs(cab: OzonCabinetKeys, targets: SupplyDocsTarget[], zones: Record<string, string>): Promise<SupplyDocsResult> {
+  // Item 101: three passes. 1) cargoes + composition file for the supplies planned 'recreate';
+  // 2) labels for 'recreate' and 'label' supplies; 3) the labels that failed, once more after a pause.
+  // 'skip' supplies make no Ozon writes. No new Ozon work starts after `deadlineAt`.
+  async function collectSupplyDocs(cab: OzonCabinetKeys, targets: SupplyDocsTarget[], zones: Record<string, string>, plan: SupplyDocsPlan = {}, deadlineAt: number = Infinity): Promise<SupplyDocsResult> {
     const warnings: string[] = [];
     const files: any[] = [];
     const supplyIds: string[] = [];
+    const runs: Record<string, SupplyDocsRun> = {};
     let cargoes = 0;
-    // Item 101: supplies whose cargoes this run recreated (or tried to) without ending with a label
-    // URL. The label file of the previous run in the Drive folder points at cargo ids that no longer exist.
-    const staleLabelSupplyIds = new Set<string>();
+    let skipped = 0;
+    let labelOnly = 0;
+    let recreated = 0;
+    // Item 101: supplies this run called create or label for. The ones that do not end with a label URL
+    // are "stale": the label file of the previous run in the Drive folder points at cargo ids that no longer exist.
+    const attempted = new Set<string>();
+    const labelDone = new Set<string>();
+    const outOfTime = () => Date.now() >= deadlineAt;
+    const clusterOf: Record<string, string> = {};
+    const labelQueue: string[] = [];
 
+    // pass 1
     for (const t of targets) {
       const clusterName = t.clusterName;
       const boxes = Array.isArray(t.boxes) ? t.boxes : [];
@@ -2124,14 +2198,35 @@ async function startServer() {
         continue;
       }
       supplyIds.push(supplyId);
+      clusterOf[supplyId] = clusterName;
 
       if (boxes.length === 0) {
         warnings.push('Кластер ' + clusterName + ': пустая раскладка, грузоместа не отправлены');
         continue;
       }
 
+      const decided = plan[supplyId];
+      if (decided && decided.action === 'skip') {
+        skipped++;
+        cargoes += decided.cargoIds.length;
+        continue;
+      }
+      if (decided && decided.action === 'label') {
+        labelOnly++;
+        cargoes += decided.cargoIds.length;
+        runs[supplyId] = { cargoIds: decided.cargoIds, compositionBuilt: true };
+        labelQueue.push(supplyId);
+        continue;
+      }
+
+      if (outOfTime()) {
+        warnings.push('Кластер ' + clusterName + SUPPLY_DOCS_OUT_OF_TIME);
+        continue;
+      }
+
       let cargoIdByKey: Record<string, string> = {};
-      staleLabelSupplyIds.add(supplyId);
+      attempted.add(supplyId);
+      recreated++;
       try {
         cargoIdByKey = await createCargoesForSupply(cab, supplyId, boxes);
       } catch (e: any) {
@@ -2139,6 +2234,7 @@ async function startServer() {
         continue;
       }
       cargoes += Object.keys(cargoIdByKey).length;
+      runs[supplyId] = { cargoIds: Object.values(cargoIdByKey).sort(), compositionBuilt: false };
 
       const missingKeys = boxes
         .map((b: any) => String(b?.key || ''))
@@ -2150,25 +2246,48 @@ async function startServer() {
       try {
         files.push({
           kind: 'base64',
-          name: sanitizeFileName(clusterName) + '.xlsx',
+          name: compositionFileName(clusterName),
+          supplyId,
           content: buildCompositionXlsxBase64(boxes, cargoIdByKey, zones)
         });
+        runs[supplyId].compositionBuilt = true;
       } catch (e: any) {
         warnings.push('Кластер ' + clusterName + ': не удалось собрать файл состава — ' + (e?.message || String(e)));
       }
+      labelQueue.push(supplyId);
+    }
 
+    // passes 2 and 3
+    const tryLabel = async (supplyId: string): Promise<string> => {
+      attempted.add(supplyId);
       try {
         const labelUrl = await createCargoLabelUrl(cab, supplyId);
-        files.push({
-          kind: 'url',
-          url: labelUrl,
-          fallbackName: 'tags-cargoes-by-supply-' + supplyId
-        });
-        staleLabelSupplyIds.delete(supplyId);
+        files.push({ kind: 'url', url: labelUrl, supplyId, fallbackName: 'tags-cargoes-by-supply-' + supplyId });
+        labelDone.add(supplyId);
+        return '';
       } catch (e: any) {
-        warnings.push('Кластер ' + clusterName + ': этикетки грузомест не получены — ' + (e?.message || String(e)));
+        return 'Кластер ' + clusterOf[supplyId] + ': этикетки грузомест не получены — ' + (e?.message || String(e));
+      }
+    };
+    let failedLabels: Record<string, string> = {};
+    for (const supplyId of labelQueue) {
+      if (outOfTime()) {
+        warnings.push('Кластер ' + clusterOf[supplyId] + SUPPLY_DOCS_OUT_OF_TIME);
+        continue;
+      }
+      const failure = await tryLabel(supplyId);
+      if (failure) failedLabels[supplyId] = failure;
+    }
+    if (Object.keys(failedLabels).length > 0 && Date.now() + SUPPLY_DOCS_LABEL_RETRY_PAUSE_MS < deadlineAt) {
+      await sleep(SUPPLY_DOCS_LABEL_RETRY_PAUSE_MS);
+      for (const supplyId of Object.keys(failedLabels)) {
+        if (outOfTime()) break;
+        const failure = await tryLabel(supplyId);
+        if (failure) failedLabels[supplyId] = failure;
+        else delete failedLabels[supplyId];
       }
     }
+    warnings.push(...Object.values(failedLabels));
 
     let checkLists: any[] = [];
     if (supplyIds.length > 0) {
@@ -2181,7 +2300,8 @@ async function startServer() {
       }
     }
 
-    return { files, warnings, checkLists, cargoes, staleLabelSupplyIds: Array.from(staleLabelSupplyIds) };
+    const staleLabelSupplyIds = Array.from(attempted).filter(id => !labelDone.has(id));
+    return { files, warnings, checkLists, cargoes, staleLabelSupplyIds, runs, skipped, labelOnly, recreated };
   }
 
   // Item 74a. One Apps Script action on behalf of the user's session. Throws on any failure:
@@ -2229,6 +2349,7 @@ async function startServer() {
   const supplyDocsInFlight = new Set<string>();
   app.post("/api/ozon/supply/docs", async (req, res) => {
     let claimedOrderId = '';
+    const startedAt = Date.now();
     try {
       const token = req.body?.sessionToken;
       if (!token || !(await verifyGasSession(token))) {
@@ -2292,15 +2413,17 @@ async function startServer() {
         targets.push({ supply, clusterName, boxes: layout.boxes });
       }
 
-      const docs = await collectSupplyDocs(cab, targets, zones);
+      const folderName = 'Озон ' + (orderNumber || orderId);
+      const plan = await planSupplyDocs(cab, token, devMode, orderId, folderName, targets);
+      const docs = await collectSupplyDocs(cab, targets, zones, plan, startedAt + SUPPLY_DOCS_OZON_BUDGET_MS);
       warnings.push(...docs.warnings);
 
-      const folderName = 'Озон ' + (orderNumber || orderId);
       let folderUrl = '';
       let saved: string[] = [];
       let problems: string[] = [];
       let missingLabels: string[] = [];
       let removedStaleLabels: string[] = [];
+      let savedBySupply: Record<string, { composition?: boolean; label?: boolean }> = {};
       try {
         const drive: any = await callGasAction('saveSupplyDocsToDrive', token, devMode, { folderName, files: docs.files, articles, staleLabelSupplyIds: docs.staleLabelSupplyIds });
         folderUrl = String(drive?.folderUrl || '');
@@ -2308,6 +2431,7 @@ async function startServer() {
         problems = Array.isArray(drive?.problems) ? drive.problems.map(String) : [];
         missingLabels = Array.isArray(drive?.missingLabels) ? drive.missingLabels.map(String) : [];
         removedStaleLabels = Array.isArray(drive?.removedStaleLabels) ? drive.removedStaleLabels.map(String) : [];
+        savedBySupply = drive?.savedBySupply && typeof drive.savedBySupply === 'object' ? drive.savedBySupply : {};
       } catch (e: any) {
         problems.push('Папка на Google Диске не собрана: ' + (e?.message || String(e)));
       }
@@ -2321,6 +2445,29 @@ async function startServer() {
         else warnings.push('Кластер ' + (target?.clusterName || removedId) + ': ' + note);
       }
 
+      // Item 101: the memory for the next build. A skipped supply keeps its previous entry; the others get
+      // this run's outcome, the file flags coming from what Drive reports as SAVED (not from Ozon's answer).
+      const supplyEntries: SupplyDocsEntry[] = [];
+      for (const t of targets) {
+        const supplyId = String(t.supply?.supply_id || '');
+        if (!supplyId) continue;
+        const decided = plan[supplyId];
+        if (decided && decided.action === 'skip' && decided.previous) {
+          supplyEntries.push(decided.previous);
+          continue;
+        }
+        const run = docs.runs[supplyId];
+        const savedHere = savedBySupply[supplyId] || {};
+        supplyEntries.push({
+          supplyId,
+          clusterName: t.clusterName,
+          cargoIds: run ? run.cargoIds : [],
+          // label-only: the composition file was not rewritten, the decision already saw it in the folder
+          composition: !!run && run.compositionBuilt && (decided?.action === 'label' || savedHere.composition === true),
+          label: savedHere.label === true
+        });
+      }
+
       const record = {
         at: new Date().toISOString(),
         orderNumber,
@@ -2331,6 +2478,7 @@ async function startServer() {
         warnings,
         problems,
         missingLabels,
+        supplies: supplyEntries,
         ok: docs.cargoes > 0 && warnings.length === 0 && problems.length === 0 && missingLabels.length === 0
       };
 
@@ -2347,7 +2495,7 @@ async function startServer() {
         problems.push('Журнал «Заявки Ozon» не обновлён: ' + (e?.message || String(e)));
       }
 
-      console.log(`SUPPLYDOCS order=${orderId} number=${orderNumber} supplies=${supplies.length} cargoes=${docs.cargoes} saved=${saved.length} warnings=${warnings.length} problems=${problems.length} journal=${journalUpdated} ok=${record.ok}`);
+      console.log(`SUPPLYDOCS order=${orderId} number=${orderNumber} supplies=${supplies.length} cargoes=${docs.cargoes} saved=${saved.length} warnings=${warnings.length} problems=${problems.length} journal=${journalUpdated} skipped=${docs.skipped} labelOnly=${docs.labelOnly} recreated=${docs.recreated} ok=${record.ok}`);
 
       return res.json({
         status: "success",
