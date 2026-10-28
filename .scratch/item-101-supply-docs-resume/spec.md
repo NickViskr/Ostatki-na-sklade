@@ -34,3 +34,11 @@ A second click takes very long and ends the same way.
 ## Live check (owner)
 Press «Собрать документы»; if some clusters hit 429, press again: the second run must take seconds,
 cargo ids of finished clusters must not change, `SUPPLYDOCS` line in Cloud Run must show the reuse.
+
+## Cloud Run evidence (read 2026-10-28)
+Order 137416710 (13 supplies, 17 cargoes). `SUPPLYDOCS` lines: 10:25:40 saved=28 warnings=2; 10:32:10 saved=27 warnings=3;
+10:39:09 saved=29 warnings=1 (all ok=false). Request latencies 198 s / 178 s / 189 s; the browser gives up at 180 s.
+Earlier orders since 30.09 (1–15 supplies): 27–160 s, warnings=0. The failing clusters differ from run to run
+(`saved` 28→27→29) = rate limit, not a defective cluster. The first run overlapped three `/api/ozon/check` polls
+(22–25 s each, same cabinet) — they share the Ozon limit. 429s leave NO log line: ticket 01 must add one
+(endpoint, attempt, cabinet) so the next incident is measurable. Which clusters failed is only in the journal record.
