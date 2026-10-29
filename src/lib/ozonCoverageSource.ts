@@ -13,6 +13,8 @@ import { buildPendingSupplies, OzonSupplyRequestRow, PendingSuppliesResult } fro
 
 export interface CoverageStoreData {
   ozonStocks: OzonStockRow[];
+  /** R-031: false until the store has fetched Ozon stocks; undefined counts as loaded. */
+  ozonStocksLoaded?: boolean;
   ozonSales: OzonSalesRow[] | null | undefined;
   ozonStockHistory: OzonStockHistoryRow[] | null | undefined;
   skus: SKUItem[];
@@ -91,7 +93,8 @@ export function buildCoverageSource(data: CoverageStoreData, opts: CoverageSourc
     if (!(c.componentSku in myStockAvailability)) myStockAvailability[c.componentSku] = data.availabilityOf(c.componentSku);
   }
 
-  const ready = stocks.length > 0 && (!opts.waitForClusterRefs || opts.clusterRefsLoaded === true);
+  // R-031: «loaded, empty» is a valid state; only «not fetched yet» blocks the build.
+  const ready = data.ozonStocksLoaded !== false && (!opts.waitForClusterRefs || opts.clusterRefsLoaded === true);
 
   return {
     stocks,

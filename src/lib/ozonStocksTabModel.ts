@@ -187,7 +187,7 @@ export function buildCoverageRows(
       // Item 85: the same pipeline as calcFactorySignal — «Мой склад» net of the reserve and the
       // forecast speed, so «хватит на N дн.» never disagrees with the signal itself.
       factoryDaysLeft: art.factory ? art.factory.daysLeft : (art.forecastPerDay > 0 ? (art.totalEstimated + Math.max(0, art.freeMyStock) + (factoryOnOrder[art.article] || 0)) / art.forecastPerDay : null),
-      inFlightTotal: art.clusters.reduce((s, c) => s + (c.inFlightQty || 0), 0) + (pendingSupplies.unboundInFlightByArticle[art.article] || 0),
+      inFlightTotal: art.clusters.reduce((s, c) => s + (c.inFlightQty || 0), 0) + Math.max(pendingSupplies.unboundInFlightByArticle[art.article] || 0, sumTotals(unboundRows).transit + sumTotals(unboundRows).requested), // R-037: same max() as unboundEstimated in the coverage build
       // Item 86 step C: same threshold as calcFactorySignal (lead + delivery to Ozon + minStockDays).
       factoryThreshold: (Number(art.leadTimeDays) || 0) + (Number(deliveryToOzonDays) || 0) + minStockDays,
       clusters: clustersWithNeed,

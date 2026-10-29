@@ -58,6 +58,7 @@ export const Dashboard: React.FC = React.memo(() => {
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
+  const ozonStocksLoaded = useWarehouseStore((state) => state.ozonStocksLoaded);
   const ozonSales = useWarehouseStore((state) => state.ozonSales);
   // Item 86, step D: history-aware sales speed. Absent/empty behaves exactly like before this item.
   const ozonStockHistory = useWarehouseStore((state) => state.ozonStockHistory);
@@ -221,10 +222,10 @@ export const Dashboard: React.FC = React.memo(() => {
     const d = new Date();
     const todayIsoNow = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     return buildCoverageSource(
-      { ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, availabilityOf: getEffectiveAvailability },
+      { ozonStocks, ozonStocksLoaded, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, availabilityOf: getEffectiveAvailability },
       { cabinet: 'all', todayIso: todayIsoNow, waitForClusterRefs: false }
     );
-  }, [ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, getEffectiveAvailability, stock]);
+  }, [ozonStocks, ozonStocksLoaded, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, getEffectiveAvailability, stock]);
 
   // Локальный зачёт: товар из уже созданных заявок, который Ozon ещё не показал в «В заявках».
   // На главной кабинеты не разделяются — берутся все записи.

@@ -342,3 +342,153 @@ describe('рекомендации пересчитываются сразу п�
     expect(modal).not.toContain('await fetchOzonSupplyRequests()');
   });
 });
+
+// ===== Item 100.7 (review b4-planning): R-032 and R-036. Written FAILING first; the fix follows. =====
+
+describe('R-032: after «return the unshipped part» only the shipped quantity stays in flight', () => {
+  const now = new Date('2026-10-20T08:00:00Z');
+  const row = (over: Partial<ExternalShipment> = {}): ExternalShipment => ({
+    postingId: 'P1', detectedAt: '2026-10-19 12:00:00', shipmentDate: '2026-10-19', status: 'processed',
+    itemsJSON: JSON.stringify([{ offerId: ARTICLE, quantity: 10 }]), transGroupInfo: '', orderId: 'O1',
+    ozonStatus: 'IN_TRANSIT', clusterId: 'C1', cabinet: 'M', ...over
+  });
+  const record = (shipped: number) => JSON.stringify({
+    lines: [{ offerId: ARTICLE, article: ARTICLE, declared: 10, shipped }],
+    returnTxIds: ['T1'], returnedAt: '2026-10-19 13:00:00', by: 'x'
+  });
+
+  it('counts 5 in flight, not the declared 10, when 5 of 10 were shipped and 5 returned', () => {
+    const res = buildPendingSupplies({ shipments: [row({ shippedJSON: record(5) })], requests: [], skus, now });
+    expect(res.byArticleCluster[ARTICLE]?.C1).toBe(5);
+    expect(res.byArticle).toEqual({});
+  });
+
+  it('control: a row never returned (no shippedJSON) keeps the declared 10 in flight', () => {
+    const res = buildPendingSupplies({ shipments: [row()], requests: [], skus, now });
+    expect(res.byArticleCluster[ARTICLE]?.C1).toBe(10);
+  });
+
+  it('shipped 0 (whole supply returned) leaves nothing in flight', () => {
+    const res = buildPendingSupplies({ shipments: [row({ shippedJSON: record(0) })], requests: [], skus, now });
+    expect(res.byArticleCluster[ARTICLE]?.C1 || 0).toBe(0);
+  });
+});
+
+describe('R-036: the 7-day safety window reads the sheet date in the script zone Asia/Yekaterinburg, not the process zone', () => {
+  // detectedAt is written by Code.gs in the script zone (+05:00): 2026-10-13 12:00 = 07:00Z.
+  // At 2026-10-20 08:00Z 169 h have passed => expired in ANY process TZ.
+  // Run this file under TZ=UTC and TZ=Asia/Yekaterinburg — both must pass.
+  const unknownStatusRow = (detectedAt: string): ExternalShipment => ({
+    postingId: 'P1', detectedAt, shipmentDate: '', status: 'new',
+    itemsJSON: JSON.stringify([{ offerId: ARTICLE, quantity: 10 }]), transGroupInfo: '', orderId: 'O1',
+    ozonStatus: 'NEW_UNKNOWN', clusterId: '', cabinet: 'M'
+  });
+
+  it('a row 169 h old (script zone) is expired: no reserve', () => {
+    const res = buildPendingSupplies({ shipments: [unknownStatusRow('2026-10-13 12:00:00')], requests: [], skus, now: new Date('2026-10-20T08:00:00Z') });
+    expect(res.byArticle).toEqual({});
+  });
+
+  it('a row 167 h old (script zone) is still reserved', () => {
+    // 2026-10-13 14:00 +05:00 = 09:00Z; now 2026-10-20 08:00Z => 167 h.
+    const res = buildPendingSupplies({ shipments: [unknownStatusRow('2026-10-13 14:00:00')], requests: [], skus, now: new Date('2026-10-20T08:00:00Z') });
+    expect(res.byArticle).toEqual({ [ARTICLE]: 10 });
+  });
+});
+
+// ===== Item 100.7: R-036 real date formats reaching parseSheetDate (via the 7-day safety window) =====
+// Real formats as the GAS API returns them: Code.gs getExternalShipments formats detectedAt as
+// 'yyyy-MM-dd HH:mm:ss' and shipmentDate as 'yyyy-MM-dd' (script zone Asia/Yekaterinburg, +05:00);
+// getOzonSupplyRequests returns the journal «Дата» as Date.toISOString() (UTC, 'Z', with milliseconds).
+// Probe: a row whose reserve is kept iff the date parsed (NaN => null => not within the window).
+// The instant 2026-10-13T07:00:00Z is 169 h before NOW_PROBE, so every format below that denotes it
+// must be expired, and the same string shifted +3 h (09:00Z, 167 h) must be kept — under any process TZ.
+describe('R-036: every real sheet date format parses to the same instant and never to NaN (run under TZ=UTC and TZ=Asia/Yekaterinburg)', () => {
+  const NOW_PROBE = new Date('2026-10-20T08:00:00Z');
+  const shipmentWith = (detectedAt: string, shipmentDate = ''): ExternalShipment => ({
+    postingId: 'P1', detectedAt, shipmentDate, status: 'new',
+    itemsJSON: JSON.stringify([{ offerId: ARTICLE, quantity: 10 }]), transGroupInfo: '', orderId: 'O1',
+    ozonStatus: 'NEW_UNKNOWN', clusterId: '', cabinet: 'M'
+  });
+  const requestWith = (date: string): OzonSupplyRequestRow => ({
+    id: 'SUP-1', date, cabinet: 'M', draftId: 'D1', orderId: 'O2', dropOffName: '', clusters: '',
+    itemsJSON: JSON.stringify([{ article: ARTICLE, clusterId: 'C1', qty: 7 }]), who: 'x', status: 'Создана'
+  });
+  const keptByShipment = (detectedAt: string, shipmentDate = '') =>
+    (buildPendingSupplies({ shipments: [shipmentWith(detectedAt, shipmentDate)], requests: [], skus, now: NOW_PROBE }).byArticle[ARTICLE] || 0) > 0;
+  const keptByRequest = (date: string) =>
+    (buildPendingSupplies({ shipments: [], requests: [requestWith(date)], skus, now: NOW_PROBE }).byArticle[ARTICLE] || 0) > 0;
+
+  // [format label, string for 169 h ago (expired), string for 167 h ago (kept)]
+  const shipmentFormats: Array<[string, string, string]> = [
+    ['detectedAt yyyy-MM-dd HH:mm:ss (script zone)', '2026-10-13 12:00:00', '2026-10-13 14:00:00'],
+    ['detectedAt ISO with T and no offset', '2026-10-13T12:00:00', '2026-10-13T14:00:00'],
+    ['detectedAt ISO with +05:00', '2026-10-13T12:00:00+05:00', '2026-10-13T14:00:00+05:00'],
+    ['detectedAt ISO with Z', '2026-10-13T07:00:00Z', '2026-10-13T09:00:00Z'],
+    ['detectedAt ISO with Z and milliseconds', '2026-10-13T07:00:00.000Z', '2026-10-13T09:00:00.000Z']
+  ];
+
+  for (const [label, expired, kept] of shipmentFormats) {
+    it(`shipment ${label}: parses (not NaN) and lands on the same instant`, () => {
+      expect(keptByShipment(expired)).toBe(false);
+      expect(keptByShipment(kept)).toBe(true);
+    });
+  }
+
+  it('shipmentDate yyyy-MM-dd (date-only fallback when detectedAt is empty) is read as midnight +05:00, not NaN', () => {
+    // 2026-10-13 00:00 +05:00 = 2026-10-12T19:00Z => 181 h before NOW_PROBE: expired.
+    expect(keptByShipment('', '2026-10-13')).toBe(false);
+    // 2026-10-14 00:00 +05:00 = 2026-10-13T19:00Z => 157 h: kept.
+    expect(keptByShipment('', '2026-10-14')).toBe(true);
+  });
+
+  it('journal «Дата» as Date.toISOString() (Z with milliseconds) parses to the same instant', () => {
+    expect(keptByRequest('2026-10-13T07:00:00.000Z')).toBe(false);
+    expect(keptByRequest('2026-10-13T09:00:00.000Z')).toBe(true);
+  });
+
+  it('the offset-less script-zone string and the equal ISO-Z instant agree at the window boundary', () => {
+    for (const [local, utc] of [['2026-10-13 13:00:00', '2026-10-13T08:00:00.000Z'], ['2026-10-13 12:59:59', '2026-10-13T07:59:59.000Z']]) {
+      expect(keptByShipment(local)).toBe(keptByRequest(utc));
+    }
+  });
+});
+
+// ===== Item 100.7: R-032 matching gaps =====
+describe('R-032: matching of shippedJSON lines to supply lines', () => {
+  const now = new Date('2026-10-20T08:00:00Z');
+  const base = (items: object[], shippedLines: object[]): ExternalShipment => ({
+    postingId: 'P1', detectedAt: '2026-10-19 12:00:00', shipmentDate: '2026-10-19', status: 'processed',
+    itemsJSON: JSON.stringify(items), transGroupInfo: '', orderId: 'O1', ozonStatus: 'IN_TRANSIT', clusterId: 'C1', cabinet: 'M',
+    shippedJSON: JSON.stringify({ lines: shippedLines, returnTxIds: ['T1'], returnedAt: '2026-10-19 13:00:00', by: 'x' })
+  });
+
+  it('a shippedJSON line is matched by article when its offerId differs from the supply line offerId', () => {
+    const row = base([{ offerId: ARTICLE, quantity: 10 }], [{ offerId: 'OTHER-OFFER-ID', article: ARTICLE, declared: 10, shipped: 4 }]);
+    const res = buildPendingSupplies({ shipments: [row], requests: [], skus, now });
+    expect(res.byArticleCluster[ARTICLE]?.C1).toBe(4);
+  });
+
+  it('two lines of one supply: the partly shipped line shrinks, the untouched line keeps its declared quantity', () => {
+    const other = 'OtherArticle_77';
+    const row = base(
+      [{ offerId: ARTICLE, quantity: 10 }, { offerId: other, quantity: 6 }],
+      [{ offerId: ARTICLE, article: ARTICLE, declared: 10, shipped: 3 }, { offerId: other, article: other, declared: 6, shipped: 6 }]
+    );
+    const res = buildPendingSupplies({ shipments: [row], requests: [], skus, now });
+    expect(res.byArticleCluster[ARTICLE]?.C1).toBe(3);
+    expect(res.byArticleCluster[other]?.C1).toBe(6);
+  });
+
+  it('a supply line absent from shippedJSON keeps its declared quantity', () => {
+    const row = base([{ offerId: ARTICLE, quantity: 10 }], [{ offerId: 'Unrelated', article: 'Unrelated', declared: 2, shipped: 0 }]);
+    const res = buildPendingSupplies({ shipments: [row], requests: [], skus, now });
+    expect(res.byArticleCluster[ARTICLE]?.C1).toBe(10);
+  });
+
+  it('shipped greater than declared never inflates the reserve: min(declared, shipped) = declared', () => {
+    const row = base([{ offerId: ARTICLE, quantity: 10 }], [{ offerId: ARTICLE, article: ARTICLE, declared: 10, shipped: 25 }]);
+    const res = buildPendingSupplies({ shipments: [row], requests: [], skus, now });
+    expect(res.byArticleCluster[ARTICLE]?.C1).toBe(10);
+  });
+});

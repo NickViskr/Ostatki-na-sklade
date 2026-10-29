@@ -1,6 +1,7 @@
 import { ExternalShipment, SKUItem } from '../types';
 import { resolveOzonArticle } from './ozonCoverage';
 import { isAcceptanceStage } from './ozonStatus';
+import { parseShippedRecord } from './ozonUnshipped';
 
 // ===== Локальный зачёт потребности после создания заявки (пункт 23) =====
 // Задача: количества из уже созданных заявок на поставку вычитаются из потребности сразу,
@@ -68,7 +69,10 @@ export function isPendingActive(ozonStatus?: string): boolean {
 function parseSheetDate(value?: string): number | null {
   const raw = String(value || '').trim();
   if (!raw) return null;
-  const normalized = raw.indexOf('T') < 0 && raw.indexOf(' ') > 0 ? raw.replace(' ', 'T') : raw;
+  let normalized = raw.indexOf('T') < 0 && raw.indexOf(' ') > 0 ? raw.replace(' ', 'T') : raw;
+  // R-036: Code.gs writes sheet dates in the script zone (Asia/Yekaterinburg, UTC+5, no DST).
+  // A string without an offset would otherwise be read in the browser's zone.
+  if (/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?$/.test(normalized)) normalized += (normalized.indexOf('T') < 0 ? 'T00:00:00' : '') + '+05:00';
   const time = new Date(normalized).getTime();
   return isNaN(time) ? null : time;
 }
@@ -223,14 +227,21 @@ export function buildPendingSupplies(input: PendingSuppliesInput): PendingSuppli
 
     const clusterId = String(row.clusterId || '').trim();
     const items = parseArray(row.itemsJSON);
+    // R-032 (item 68): after «вернуть неотгруженное» only the shipped quantity is in flight.
+    const shippedRecord = parseShippedRecord(row.shippedJSON);
     for (const item of items) {
       if (!item) continue;
       const rawQty = item.quantity !== undefined && item.quantity !== null ? item.quantity : item.qty;
-      const qty = Number(rawQty) || 0;
-      if (qty <= 0) continue;
+      let qty = Number(rawQty) || 0;
       const offerId = String(item.offerId || item.offer_id || '').trim();
+      if (qty <= 0) continue;
       const barcode = String(item.barcode || '').trim();
       const article = resolveOzonArticle(skus, offerId, barcode);
+      if (shippedRecord) {
+        const line = shippedRecord.lines.find((l) => l && ((offerId && String(l.offerId || '').trim() === offerId) || (article && String(l.article || '').trim() === article)));
+        if (line && line.shipped !== undefined && line.shipped !== null) qty = Math.min(qty, Number(line.shipped) || 0);
+      }
+      if (qty <= 0) continue;
       details.push({
         source: 'shipment',
         orderId: String(row.orderId || '').trim(),

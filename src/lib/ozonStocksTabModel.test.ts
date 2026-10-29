@@ -947,3 +947,44 @@ describe('buildOzonStocksTabModel: wide toggle on a kit sharing a component with
     expect(captured).toEqual(model);
   });
 });
+
+// ===== Item 100.7 (review b4-planning): R-037. Written FAILING first; the fix follows. =====
+describe('R-037: «Едет» total includes Ozon transit that has no known cluster', () => {
+  const unboundTransit = (): OzonStockRow => ({ ...stockRow('A', 'ART-U', '', '', 0), transit: 10 });
+  const data = () => makeData({
+    skus: [makeSku({ sku: 'ART-U', pcsPerBox: 1 })],
+    ozonStocks: [unboundTransit()],
+    ozonSales: salesRows('A', 'ART-U', 'Москва', 28),
+    availability: { 'ART-U': 0 }
+  });
+
+  it('inFlightTotal is 10 for an article whose only Ozon transit sits on a row without a cluster', () => {
+    const model = buildOzonStocksTabModel(makeInput(data()));
+    const row = model.coverageRows.find((r) => r.article === 'ART-U')!;
+    expect(row).toBeDefined();
+    expect(row.unboundEstimated).toBe(10); // the calculation already counts it
+    expect(row.inFlightTotal).toBe(10);
+  });
+
+  it('the hook returns the same inFlightTotal as the pure model', () => {
+    const input = makeInput(data());
+    let captured: OzonStocksTabModel | null = null;
+    function Probe(props: OzonStocksTabModelInput) {
+      captured = useOzonStocksTabModel(props);
+      return null;
+    }
+    renderToStaticMarkup(createElement(Probe, input));
+    expect(captured!.coverageRows.find((r) => r.article === 'ART-U')!.inFlightTotal).toBe(10);
+  });
+
+  it('control: transit on a known cluster is counted once, as before', () => {
+    const d = makeData({
+      skus: [makeSku({ sku: 'ART-K', pcsPerBox: 1 })],
+      ozonStocks: [{ ...stockRow('A', 'ART-K', 'C1', 'Москва', 0), transit: 10 }],
+      ozonSales: salesRows('A', 'ART-K', 'Москва', 28),
+      availability: { 'ART-K': 0 }
+    });
+    const row = buildOzonStocksTabModel(makeInput(d)).coverageRows.find((r) => r.article === 'ART-K')!;
+    expect(row.inFlightTotal).toBe(10);
+  });
+});

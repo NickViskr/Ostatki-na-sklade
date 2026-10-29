@@ -34,6 +34,7 @@ export const OzonStocksTab: React.FC = React.memo(() => {
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin' || ['admin', 'админ', 'администратор'].includes(currentUser?.username?.toLowerCase() || '');
 
   const ozonStocks = useWarehouseStore((state) => state.ozonStocks);
+  const ozonStocksLoaded = useWarehouseStore((state) => state.ozonStocksLoaded);
   const ozonStocksSyncIssues = useWarehouseStore((state) => state.ozonStocksSyncIssues);
   const fetchOzonStocks = useWarehouseStore((state) => state.fetchOzonStocks);
   const runOzonStocksSync = useWarehouseStore((state) => state.runOzonStocksSync);
@@ -249,10 +250,10 @@ export const OzonStocksTab: React.FC = React.memo(() => {
     const d = new Date();
     const todayIsoNow = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     return buildCoverageSource(
-      { ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, availabilityOf: getEffectiveAvailability },
+      { ozonStocks, ozonStocksLoaded, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, availabilityOf: getEffectiveAvailability },
       { cabinet: cabinetFilter, todayIso: todayIsoNow, waitForClusterRefs: true, clusterRefsLoaded }
     );
-  }, [ozonStocks, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, getEffectiveAvailability, rawStocks, cabinetFilter, clusterRefsLoaded]);
+  }, [ozonStocks, ozonStocksLoaded, ozonSales, ozonStockHistory, skus, kits, clusterRefs, externalShipments, ozonSupplyRequests, factoryOrders, getEffectiveAvailability, rawStocks, cabinetFilter, clusterRefsLoaded]);
 
   const filteredOzonStocks = coverageSource.stocks;
 

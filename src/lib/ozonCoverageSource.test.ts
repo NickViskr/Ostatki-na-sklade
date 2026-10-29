@@ -230,8 +230,8 @@ describe('buildCoverageSource: the cluster-reference wait is a parameter, not a 
     expect(computeCoverage(source, SETTINGS)).not.toBeNull();
   });
 
-  it('no stocks at all gives null regardless of waitForClusterRefs', () => {
-    const source = buildCoverageSource(makeData({ ozonStocks: [] }), { cabinet: 'all', todayIso: TODAY_ISO, waitForClusterRefs: false });
+  it('stocks not loaded yet give null regardless of waitForClusterRefs', () => {
+    const source = buildCoverageSource({ ...makeData({ ozonStocks: [] }), ozonStocksLoaded: false }, { cabinet: 'all', todayIso: TODAY_ISO, waitForClusterRefs: false });
     expect(computeCoverage(source, SETTINGS)).toBeNull();
   });
 });
@@ -262,5 +262,30 @@ describe('buildCoverageSource: availability includes kit components without thei
     const component = result.components.find((c) => c.component === 'COMP-NO-CARD');
     expect(component).toBeDefined();
     expect(component!.myStockQty).toBe(77);
+  });
+});
+
+// ===== Item 100.7 (review b4-planning): R-031. Written FAILING first; the fix follows. =====
+describe('R-031: a LOADED but empty Ozon stock list still gives a ready source and a computed coverage', () => {
+  const sales = salesRows('A', 'ART-A', 28);
+  const data = () => makeData({ ozonStocks: [], ozonSales: sales, skus: [makeSku({ sku: 'ART-A' })], availabilityOf: (a: string) => (a === 'ART-A' ? 10 : 0) });
+
+  it('is ready and computes coverage (not null) when stocks are empty but cluster refs are loaded', () => {
+    const source = buildCoverageSource(data(), { cabinet: 'all', todayIso: TODAY_ISO, waitForClusterRefs: true, clusterRefsLoaded: true });
+    expect(source.ready).toBe(true);
+    expect(computeCoverage(source, SETTINGS)).not.toBeNull();
+  });
+
+  it('is ready when a cabinet filter leaves zero stock rows although other cabinets have stock', () => {
+    const d = makeData({ ozonStocks: [stockRow('A', 'ART-A', 5)], ozonSales: sales, skus: [makeSku({ sku: 'ART-A' })] });
+    const source = buildCoverageSource(d, { cabinet: 'B', todayIso: TODAY_ISO, waitForClusterRefs: false });
+    expect(source.stocks).toEqual([]);
+    expect(source.ready).toBe(true);
+  });
+
+  it('control: empty stock with cluster refs NOT loaded stays not ready', () => {
+    const source = buildCoverageSource(data(), { cabinet: 'all', todayIso: TODAY_ISO, waitForClusterRefs: true, clusterRefsLoaded: false });
+    expect(source.ready).toBe(false);
+    expect(computeCoverage(source, SETTINGS)).toBeNull();
   });
 });

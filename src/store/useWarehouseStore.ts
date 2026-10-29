@@ -243,6 +243,7 @@ interface WarehouseState {
   setOzonSyncEnabled: (enabled: boolean) => Promise<void>;
   runOzonSyncNow: () => Promise<void>;
   ozonStocks: OzonStockRow[];
+  ozonStocksLoaded: boolean;
   ozonStocksSyncIssues: { name: string; message: string }[];
   /** Item 26 stage A1: one composite read replacing five separate start-up calls. */
   fetchOzonInitialData: () => Promise<boolean>;
@@ -324,6 +325,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   devMode: typeof localStorage !== 'undefined' && localStorage.getItem('devMode') === 'true',
   ozonSyncStatus: null,
   ozonStocks: [],
+  ozonStocksLoaded: false,
   ozonStocksSyncIssues: [],
   ozonSales: [],
   ozonStockHistory: [],
@@ -1940,7 +1942,7 @@ export const useWarehouseStore = create<WarehouseState>()(
         return false;
       }
       const d = result.data;
-      if (Array.isArray(d.stocks)) set({ ozonStocks: d.stocks });
+      if (Array.isArray(d.stocks)) set({ ozonStocks: d.stocks, ozonStocksLoaded: true });
       if (Array.isArray(d.sales)) set({ ozonSales: d.sales });
       // Item 86, step D: absent — old servers without the field, or none collected yet — leaves
       // the default [], the exact behaviour of every calculation before this item.
@@ -2016,7 +2018,7 @@ export const useWarehouseStore = create<WarehouseState>()(
     try {
       const result = await get().fetchGas('getOzonStocks');
       if (result.status === 'success' && Array.isArray(result.data)) {
-        set({ ozonStocks: result.data });
+        set({ ozonStocks: result.data, ozonStocksLoaded: true });
       } else {
         console.error('getOzonStocks failed:', result.message);
       }
