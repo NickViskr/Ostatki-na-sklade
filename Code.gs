@@ -1893,6 +1893,24 @@ function assertReceiptWithinEditWindow(type, dateStr, verb) {
 }
 
 /**
+ * Item 100.6 (R-021): the same 30-day rule as deleteTransaction, applied to a whole set of
+ * transactions BEFORE any of them is deleted, so a multi-row removal is all or nothing.
+ * An id that is not found is left to deleteTransaction itself.
+ */
+function assertTransactionsWithinEditWindow(ids, verb) {
+  const sheet = getTransactionSheet(getSpreadsheet());
+  if (!sheet || sheet.getLastRow() <= 1) return;
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(h => String(h).trim());
+  const dIdx = headers.indexOf('Дата') !== -1 ? headers.indexOf('Дата') : 1;
+  const wanted = {};
+  ids.forEach(function (id) { wanted[String(id)] = true; });
+  for (let i = 1; i < values.length; i++) {
+    if (wanted[String(values[i][0])]) assertReceiptWithinEditWindow(values[i][2], values[i][dIdx], verb);
+  }
+}
+
+/**
  * Item 90. Rewrites ONLY the «Комментарий» cell of an «История» row (and of the component rows
  * when the row is a kit main row). No money, no stock, no id/OpID change, no archive, and no
  * edit-window / China-owned guards: a note may be added to any operation, old ones included.

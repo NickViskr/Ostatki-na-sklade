@@ -14460,6 +14460,247 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 100.6 part 2: China money / files regressions (R-018, R-020, R-021, R-022, R-040, R-047) =================
+// Test-first: every check asserts the CORRECT behaviour and is expected to FAIL until the fixes land.
+{
+  const N7 = 'Николай';
+  const run = (fn) => { try { return { v: fn(), err: '' }; } catch (e) { return { v: undefined, err: String(e && e.message || e) }; } };
+  const postable7 = (h, over, reportOver) => {
+    h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10], ['ART-POST-2', 10]]);
+    h.setStockSheet([]); h.ensureTransSheet();
+    h.saveChinaReport(Object.assign({ reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [],
+      freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, reportOver || {}), N7);
+    return h.saveChinaBatch(Object.assign({ orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+      weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+      lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+      costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }] }, over || {}), N7).batches[0];
+  };
+
+  // ---- R-020: same marking in two lines of a posted batch - changing one line's quantity must be refused
+  {
+    const lines = q1 => [
+      { marking: 'SAME', boxes: 1, pcsPerBox: 3, qty: q1, priceCny: 10, article: 'ART-POST-1' },
+      { marking: 'SAME', boxes: 1, pcsPerBox: 7, qty: 7, priceCny: 10, article: 'ART-POST-1' }];
+    const payload = (id, q1) => ({ id, orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+      weightKg: 100, ratePerKgUsd: 1, rubRate: 12, lines: lines(q1), costs: [{ type: 'Прочее', amountRub: 500, comment: 'разгрузка' }] });
+    const setup = () => {
+      const h = withChina();
+      const b = postable7(h, { lines: lines(3) });
+      h.postChinaBatch({ id: b.id, opId: 'op-r20', lines: [{ article: 'ART-POST-1', qty: 10 }] }, N7);
+      return { h, b };
+    };
+    {
+      const { h, b } = setup();
+      const stBefore = h.stockOf('ART-POST-1');
+      const r = run(() => h.saveChinaBatch(payload(b.id, 30), N7));
+      const after = h.getChinaBatches().batches.filter(x => x.id === b.id)[0];
+      const qtySaved = after.lines.reduce((t, l) => t + l.qty, 0);
+      const st = h.stockOf('ART-POST-1');
+      check('Item 100.6 part 2 / R-020: posted batch, one marking in two lines (3+7) - resaving with the first line 30 is refused with the "quantities fixed" error',
+        r.err !== '' && r.err.toLowerCase().indexOf('количеств') !== -1, 'error "' + r.err + '"');
+      check('Item 100.6 part 2 / R-020: the refused resave changes nothing - saved line quantities stay 10 in total, stock unchanged',
+        qtySaved === 10 && st.quantity === stBefore.quantity && st.capitalization === stBefore.capitalization,
+        'qtySaved ' + qtySaved + ' stock ' + st.quantity + '/' + st.capitalization + ' before ' + stBefore.quantity + '/' + stBefore.capitalization);
+    }
+    {
+      const { h, b } = setup();
+      const r = run(() => h.saveChinaBatch(payload(b.id, 3), N7));
+      const after = h.getChinaBatches().batches.filter(x => x.id === b.id)[0];
+      check('Item 100.6 part 2 / R-020 control: resaving the posted batch with unchanged quantities succeeds',
+        r.err === '' && after.lines.reduce((t, l) => t + l.qty, 0) === 10, 'error "' + r.err + '"');
+    }
+    {
+      const { h, b } = setup();
+      const p = payload(b.id, 3);
+      p.lines = p.lines.slice().reverse();
+      const r = run(() => h.saveChinaBatch(p, N7));
+      check('Item 100.6 part 2 / R-020 gap: resaving a posted batch with the lines only REORDERED (same quantities) is accepted',
+        r.err === '', 'error "' + r.err + '"');
+    }
+    {
+      const { h, b } = setup();
+      const p = payload(b.id, 3);
+      p.lines[0].article = 'ART-POST-2';
+      const r = run(() => h.saveChinaBatch(p, N7));
+      const after = h.getChinaBatches().batches.filter(x => x.id === b.id)[0];
+      check('Item 100.6 part 2 / R-020 gap: posted batch, duplicate marking - changing the ARTICLE of one line is refused and saved articles stay unchanged',
+        r.err !== '' && after.lines.every(l => l.article === 'ART-POST-1'),
+        'error "' + r.err + '" articles ' + JSON.stringify(after.lines.map(l => l.article)));
+    }
+  }
+
+  // ---- R-021: cancelling an old posting must be all-or-nothing
+  {
+    const payload = (rf, id) => Object.assign(id ? { id } : {}, {
+      orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+      weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+      lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+      costs: [{ type: 'Прочее', amountRub: rf, comment: 'разгрузка' }] });
+    const h = withChina();
+    h.setNow('2026-09-01T07:00:00Z');
+    h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10]]); h.setStockSheet([]); h.ensureTransSheet();
+    h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: -50,
+      freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, N7);
+    const b = h.saveChinaBatch(payload(500), N7).batches[0];
+    h.postChinaBatch({ id: b.id, opId: 'op-r21', lines: [{ article: 'ART-POST-1', qty: 100 }] }, N7);
+    h.setNow('2026-10-20T07:00:00Z');
+    h.saveChinaBatch(payload(700, b.id), N7);
+    const before = h.stockOf('ART-POST-1');
+    const rowsBefore = h.dumpTransSheet().length;
+    const recBefore = JSON.stringify(h.getChinaBatches().batches.filter(x => x.id === b.id)[0].postingRecords);
+    const r = run(() => h.cancelChinaBatchPosting({ id: b.id }, N7));
+    const after = h.stockOf('ART-POST-1');
+    const rowsAfter = h.dumpTransSheet().length;
+    const recAfter = JSON.stringify(h.getChinaBatches().batches.filter(x => x.id === b.id)[0].postingRecords);
+    check('Item 100.6 part 2 / R-021: cancelling a posting older than 30 days that has a later correction is refused (age error)',
+      r.err !== '', 'no error thrown');
+    check('Item 100.6 part 2 / R-021: the refused cancel deletes nothing - capitalization 16900, 2 transaction rows, postingRecords unchanged',
+      after.capitalization === before.capitalization && before.capitalization === 16900 && after.quantity === before.quantity &&
+      rowsBefore === 2 && rowsAfter === rowsBefore && recAfter === recBefore,
+      'cap ' + before.capitalization + '->' + after.capitalization + ' qty ' + before.quantity + '->' + after.quantity + ' rows ' + rowsBefore + '->' + rowsAfter + ' recordsSame ' + (recAfter === recBefore));
+  }
+
+  // ---- R-021 gap: a fresh posting WITH a correction cancels fully
+  {
+    const payload = (rf, id) => Object.assign(id ? { id } : {}, {
+      orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+      weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+      lines: [{ marking: 'M1', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 10, article: 'ART-POST-1' }],
+      costs: [{ type: 'Прочее', amountRub: rf, comment: 'разгрузка' }] });
+    const h = withChina();
+    h.setNow('2026-09-01T07:00:00Z');
+    h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10]]); h.setStockSheet([]); h.ensureTransSheet();
+    h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: -50,
+      freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, N7);
+    const b = h.saveChinaBatch(payload(500), N7).batches[0];
+    h.postChinaBatch({ id: b.id, opId: 'op-r21f', lines: [{ article: 'ART-POST-1', qty: 100 }] }, N7);
+    h.setNow('2026-09-05T07:00:00Z');
+    h.saveChinaBatch(payload(700, b.id), N7);
+    const rowsBefore = h.dumpTransSheet().length;
+    const r = run(() => h.cancelChinaBatchPosting({ id: b.id }, N7));
+    const st = h.stockOf('ART-POST-1');
+    const rec = h.getChinaBatches().batches.filter(x => x.id === b.id)[0].postingRecords;
+    check('Item 100.6 part 2 / R-021 gap: a fresh posting with a correction (rows ' + rowsBefore + ') cancels fully - no error, no transaction rows, no stock left',
+      rowsBefore === 2 && r.err === '' && h.dumpTransSheet().length === 0 && (!st || Number(st.quantity) === 0) && (!rec || rec.length === 0),
+      'rowsBefore ' + rowsBefore + ' error "' + r.err + '" rowsAfter ' + h.dumpTransSheet().length + ' stock ' + JSON.stringify(st) + ' records ' + JSON.stringify(rec));
+  }
+
+  // ---- R-018: a crash in the middle of per-article cost corrections must not double-apply on retry
+  {
+    const payload = (rf, id) => Object.assign(id ? { id } : {}, {
+      orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+      weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+      lines: [
+        { marking: 'MA', boxes: 5, pcsPerBox: 10, qty: 50, priceCny: 10, article: 'ART-POST-1' },
+        { marking: 'MB', boxes: 5, pcsPerBox: 10, qty: 50, priceCny: 10, article: 'ART-POST-2' }],
+      costs: [{ type: 'Прочее', amountRub: rf, comment: 'разгрузка' }] });
+    const caps = h => [h.stockOf('ART-POST-1').capitalization, h.stockOf('ART-POST-2').capitalization];
+    const scenario = (failSecond) => {
+      const h = withChina();
+      h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10], ['ART-POST-2', 10]]);
+      h.setStockSheet([]); h.ensureTransSheet();
+      h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [], openingFreightUsd: -50,
+        freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, N7);
+      const b = h.saveChinaBatch(payload(500), N7).batches[0];
+      h.postChinaBatch({ id: b.id, opId: 'op-r18', lines: [{ article: 'ART-POST-1', qty: 50 }, { article: 'ART-POST-2', qty: 50 }] }, N7);
+      let calls = 0; const orig = h.context.commitCostCorrection; let crashed = '';
+      if (failSecond) h.context.commitCostCorrection = function () { calls++; if (calls === 2) throw new Error('simulated crash'); return orig.apply(this, arguments); };
+      try { h.saveChinaBatch(payload(900, b.id), N7); } catch (e) { crashed = e.message; }
+      h.context.commitCostCorrection = orig;
+      const retry = run(() => h.saveChinaBatch(payload(900, b.id), N7));
+      return { final: caps(h), crashed, retryErr: retry.err, calls };
+    };
+    const ctrl = scenario(false), fail = scenario(true);
+    check('Item 100.6 part 2 / R-018 control: without a crash both articles get capitalization 8550 after the cost correction',
+      JSON.stringify(ctrl.final) === '[8550,8550]', JSON.stringify(ctrl));
+    check('Item 100.6 part 2 / R-018: crash on the 2nd per-article correction, then retry - final capitalizations equal the no-crash control [8550,8550] (top-up not added twice to article A)',
+      JSON.stringify(fail.final) === JSON.stringify(ctrl.final), 'final ' + JSON.stringify(fail.final) + ' control ' + JSON.stringify(ctrl.final) + ' crashed "' + fail.crashed + '" retryErr "' + fail.retryErr + '" calls ' + fail.calls);
+  }
+
+  // ---- R-022: the empty-article "one product" fill applies to the SAME marking only
+  {
+    const mk = (orderNo, markings) => {
+      const h = withChina();
+      h.saveChinaReport({ reportDate: '2026-09-25', source: 'скрипт', orders: [{ orderNo, date: '2026-09-01', receivedCny: 0, totalCny: 1000, unpaidCny: 1000 }], receipts: [], freights: [] }, N7);
+      const b = h.saveChinaBatch({ orderNo, code: 'NV-' + orderNo, status: 'В пути', shippedAt: '2026-09-16', rubRate: 12,
+        lines: markings.map(m => ({ marking: m, boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 0, article: '' })) }, N7).batches[0];
+      return b;
+    };
+    const b = mk('77', ['CHAIR10', 'TABLE10']);
+    check('Item 100.6 part 2 / R-022: two DIFFERENT markings with empty articles and zero prices - goods are not filled from the 1000 yuan order total as one product',
+      b.goodsCny === 0, 'goodsCny ' + b.goodsCny + ' missing ' + JSON.stringify(b.missing));
+    const c = mk('78', ['SAME', 'SAME']);
+    check('Item 100.6 part 2 / R-022 control: the SAME marking twice with empty article - fill from the report is still allowed (goodsCny 1000)',
+      c.goodsCny === 1000, 'goodsCny ' + c.goodsCny);
+  }
+
+  // ---- R-040: a posting request must cover all lines of the batch
+  {
+    const setup40 = () => {
+      const h = withChina();
+      h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-A', 10], ['ART-B', 10]]);
+      h.setStockSheet([]); h.ensureTransSheet();
+      h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [], receipts: [],
+        freights: [{ code: 'NV-POST-1', orderNo: 'P1', amountUsd: 50, cargoRate: 7 }] }, N7);
+      const b = h.saveChinaBatch({ orderNo: 'P1', code: 'NV-POST-1', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+        weightKg: 100, ratePerKgUsd: 1, rubRate: 12,
+        lines: [{ marking: 'M1', boxes: 5, pcsPerBox: 10, qty: 50, priceCny: 10, article: 'ART-A' },
+                { marking: 'M2', boxes: 5, pcsPerBox: 10, qty: 50, priceCny: 10, article: 'ART-B' }],
+        costs: [{ type: 'Прочее', amountRub: 500, comment: 'x' }] }, N7).batches[0];
+      return { h, b };
+    };
+    {
+      const { h, b } = setup40();
+      const factoryOf = () => JSON.stringify(h.dumpFactoryOrders());
+      const factoryBefore = factoryOf();
+      const r = run(() => h.postChinaBatch({ id: b.id, opId: 'op-r40a', lines: [{ article: 'ART-A', qty: 50 }] }, N7));
+      const after = h.getChinaBatches().batches.find(x => x.id === b.id);
+      check('Item 100.6 part 2 / R-040: a posting request covering only ART-A of a two-article batch is refused with an error',
+        b.canPost === true && r.err !== '', 'canPost ' + b.canPost + ' error "' + r.err + '"');
+      check('Item 100.6 part 2 / R-040: the refused partial request posts nothing - no stock for ART-A/ART-B, postingState empty, factory rows unchanged',
+        !h.stockOf('ART-A') && !h.stockOf('ART-B') && (after.postingState || '') === '' && factoryOf() === factoryBefore,
+        'stockA ' + !!h.stockOf('ART-A') + ' stockB ' + !!h.stockOf('ART-B') + ' state "' + after.postingState + '" factoryChanged ' + (factoryOf() !== factoryBefore));
+    }
+    {
+      const { h, b } = setup40();
+      const r = run(() => h.postChinaBatch({ id: b.id, opId: 'op-r40b', lines: [{ article: 'ART-A', qty: 50 }, { article: 'ART-B', qty: 50 }] }, N7));
+      const after = h.getChinaBatches().batches.find(x => x.id === b.id);
+      check('Item 100.6 part 2 / R-040 control: the full request (both articles) still posts the batch',
+        r.err === '' && !!h.stockOf('ART-A') && !!h.stockOf('ART-B') && (after.postingState || '') !== '',
+        'error "' + r.err + '" state "' + after.postingState + '"');
+    }
+  }
+
+  // ---- R-047 (owner decision): the same article in two forecast lines is summed into one factory row
+  {
+    const h = withChina();
+    h.setNow('2026-10-20T07:00:00Z');
+    const mkBase = (article) => h.saveChinaBatch({ orderNo: '44', code: 'NV-BOX-' + article, status: 'Прибыла', shippedAt: '2026-01-01', arrivedAt: '2026-02-01',
+      lines: [{ marking: 'NVX' + article, name: 'x', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 20, boxLengthM: 0.3, boxWidthM: 0.2, boxHeightM: 0.1, factoryBoxKg: 5, article }] }, N7);
+    mkBase('ART-F');
+    const r = run(() => h.saveChinaForecast({ orderNo: '45', lines: [{ article: 'ART-F', pieces: 5 }, { article: 'ART-F', pieces: 7 }], expectedShipAt: '2026-10-21' }, N7));
+    const rows = h.dumpFactoryOrders().filter(x => x['Заказ Китай'] === '45');
+    check('Item 100.6 part 2 / R-047: a forecast with the same article in two lines (5 and 7) produces ONE factory row with quantity 12',
+      r.err === '' && rows.length === 1 && Number(rows[0]['Количество']) === 12,
+      'error "' + r.err + '" rows ' + JSON.stringify(rows.map(x => x['Количество'])));
+
+    const syncAgain = run(() => { h.context.syncChinaFactoryOrders(N7); h.context.syncChinaFactoryOrders(N7); });
+    const rows2 = h.dumpFactoryOrders().filter(x => x['Заказ Китай'] === '45');
+    check('Item 100.6 part 2 / R-047 gap: syncing the same forecast again (twice more) is idempotent - still ONE row with quantity 12, no growth to 24',
+      syncAgain.err === '' && rows2.length === 1 && Number(rows2[0]['Количество']) === 12,
+      'error "' + syncAgain.err + '" rows ' + JSON.stringify(rows2.map(x => x['Количество'])));
+
+    const h2 = withChina();
+    h2.setNow('2026-10-20T07:00:00Z');
+    ['ART-F', 'ART-G'].forEach(article => h2.saveChinaBatch({ orderNo: '44' + article, code: 'NV-BOX-' + article, status: 'Прибыла', shippedAt: '2026-01-01', arrivedAt: '2026-02-01',
+      lines: [{ marking: 'NVX' + article, name: 'x', boxes: 10, pcsPerBox: 10, qty: 100, priceCny: 20, boxLengthM: 0.3, boxWidthM: 0.2, boxHeightM: 0.1, factoryBoxKg: 5, article }] }, N7));
+    const r3 = run(() => h2.saveChinaForecast({ orderNo: '46', lines: [{ article: 'ART-F', pieces: 5 }, { article: 'ART-G', pieces: 7 }], expectedShipAt: '2026-10-21' }, N7));
+    const rows3 = h2.dumpFactoryOrders().filter(x => x['Заказ Китай'] === '46').map(x => Number(x['Количество'])).sort((a, b) => a - b);
+    check('Item 100.6 part 2 / R-047 control: a forecast with two DISTINCT articles (5 and 7) keeps two separate factory rows',
+      r3.err === '' && JSON.stringify(rows3) === '[5,7]', 'error "' + r3.err + '" rows ' + JSON.stringify(rows3));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

@@ -1419,15 +1419,15 @@ function saveChinaBatch(data, username) {
     if (postedState) {
       const existingLines = chinaReadSheet(ss, CHINA_LINES_SHEET, CHINA_LINE_HEADERS).rows
         .map(chinaLineFromRow).filter(function (l) { return l.batchId === batchId; });
-      const byMarking = function (list) {
-        const out = {};
-        list.forEach(function (l) {
-          out[String(l.marking || '').trim()] = { article: String(l.article || '').trim(), qty: Number(l.qty) || 0 };
-        });
-        return out;
+      // Item 100.6 R-020: compare EVERY line (a sorted multiset of marking|article|qty), not one
+      // entry per marking — two lines with the same marking must not hide a change in the earlier one.
+      const lineKeys = function (list) {
+        return list.map(function (l) {
+          return String(l.marking || '').trim() + '|' + String(l.article || '').trim() + '|' + (Number(l.qty) || 0);
+        }).sort();
       };
-      const before = byMarking(existingLines);
-      const after = byMarking(incoming);
+      const before = lineKeys(existingLines);
+      const after = lineKeys(incoming);
       if (JSON.stringify(before) !== JSON.stringify(after)) {
         throw new Error('Партия оприходована — менять артикулы и количества строк нельзя, доступны только денежные поля');
       }
@@ -1659,8 +1659,12 @@ function chinaFillGoodsPriceFromOrder(ss, batch, lines, batchId) {
   const hasPrice = list.some(function (l) { return Number(l.priceCny) > 0; });
   if (hasPrice) return { note: '' };
 
+  // Item 100.6 R-022: a line without an article is identified by its marking (one marking = one product)
   const articles = {};
-  list.forEach(function (l) { articles[String(l.article || '').trim()] = true; });
+  list.forEach(function (l) {
+    const art = String(l.article || '').trim();
+    articles[art || ('M:' + String(l.marking || '').trim())] = true;
+  });
   const singleProduct = list.length === 1 || Object.keys(articles).length === 1;
   if (!singleProduct) return { note: '' };
 
@@ -2679,6 +2683,14 @@ function postChinaBatch(data, username) {
     qtyByArticle[article] = (qtyByArticle[article] || 0) + qty;
   });
 
+  // Item 100.6 (R-040): the request must cover every article of the batch — a partial request would
+  // post only part of it and mark the whole batch posted.
+  const batchArticles = {};
+  lines.forEach(function (l) { const a = String(l.article || '').trim(); if (a) batchArticles[a] = true; });
+  if (Object.keys(batchArticles).some(function (a) { return !(a in qtyByArticle); })) {
+    throw new Error('В запросе на оприходование не все строки партии — обновите окно и попробуйте снова');
+  }
+
   // The batch's own cost per article, from the SAME calc just used for the blockers — one
   // article split across several lines (decision B) sums here into one number.
   const costByArticle = {};
@@ -2770,6 +2782,15 @@ function cancelChinaBatchPosting(data, username) {
     throw new Error('Нельзя отменить оприходование — часть товара уже отгружена: ' + blockers.join('; '));
   }
 
+  // Item 100.6 (R-021): every refusal comes BEFORE the first deletion — the 30-day age rule of
+  // deleteTransaction is checked here for ALL rows to be removed, so nothing is archived on a refusal.
+  const toDelete = [];
+  records.forEach(function (rec) {
+    (rec.corrections || []).forEach(function (c) { if (c && c.txnId) toDelete.push(c.txnId); });
+    if (rec.receiptTxnId) toDelete.push(rec.receiptTxnId);
+  });
+  assertTransactionsWithinEditWindow(toDelete, 'удалять');
+
   records.forEach(function (rec) {
     (rec.corrections || []).forEach(function (c) {
       // allowChinaInternal=true: cancelChinaBatchPosting is the ONE caller allowed to delete a
@@ -2840,11 +2861,11 @@ function chinaApplyCostCorrection(ss, batchId, calc, username) {
     if (!rec.corrections) rec.corrections = [];
     rec.corrections.push({ amount: diff, txnId: txn ? txn.id : '', date: chinaStamp() });
     changed = true;
+    // Item 100.6 (R-018): persist right after each article's stock write, so a crash on a later
+    // article followed by a retry finds this correction already recorded and does not add it twice.
+    chinaWritePostingFields(batchCtx, target.__row, { postingRecords: JSON.stringify(records) });
   });
 
-  if (changed) {
-    chinaWritePostingFields(batchCtx, target.__row, { postingRecords: JSON.stringify(records) });
-  }
   if (batch.postingState === CHINA_POSTING_STATE_PROVISIONAL) {
     chinaWritePostingFields(batchCtx, target.__row, { postingState: CHINA_POSTING_STATE_FINAL });
     changed = true;
@@ -4998,8 +5019,12 @@ function chinaFactoryDesiredRows(ss) {
       const article = String(l.article || '').trim();
       const qty = Number(l.pieces) || 0;
       if (!article || !(qty > 0)) return;
+      // Item 100.6 (R-047, owner): lines of one forecast with the same article are summed into one row.
+      const forecastKey = 'F:' + f.id + ':' + article;
+      const sameRow = desired.filter(function (d) { return d.key === forecastKey; })[0];
+      if (sameRow) { sameRow.qty += qty; return; }
       desired.push({
-        key: 'F:' + f.id + ':' + article,
+        key: forecastKey,
         source: CHINA_FACTORY_SOURCE_FORECAST,
         chinaOrderNo: orderNo,
         chinaBatchCode: '',
