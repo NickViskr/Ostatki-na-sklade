@@ -6137,11 +6137,17 @@ function chinaReceiptOf(id, date, goodsCny, status, reportId) {
   check('81g-1: same-date content change is APPLIED, not dropped as a no-op',
     h.dumpChinaSheet('Отчёты').length === 1 && revised.warnings.length === 0, JSON.stringify(revised));
   const revisedMovements = h.dumpChinaSheet('Движения заказов');
-  check('81g-1: the revision\'s own movement is the 1000 ¥ that moved, not measured against itself',
-    revisedMovements.length === 2 &&
-    revisedMovements.some(function (r) { return r['Номер заказа'] === '29' && r['Изменение ¥'] === -1000; }) &&
-    revisedMovements.some(function (r) { return r['Номер заказа'] === '30' && r['Изменение ¥'] === 1000; }),
+  // The movement journal is append-only: the 3 baseline rows stay, the revision appends only its delta vs the pre-revision content.
+  check('81g-1: the revision appends the 1000 yuan that moved (-1000 for 29, +1000 for 30) after the 3 untouched baseline rows',
+    revisedMovements.length === 5 &&
+    revisedMovements.filter(function (r) { return r['Номер заказа'] === '29' && r['Изменение ¥'] === -1000; }).length === 1 &&
+    revisedMovements.filter(function (r) { return r['Номер заказа'] === '30' && r['Изменение ¥'] === 1000; }).length === 1,
     JSON.stringify(revisedMovements));
+  check('81g-1: per order the journal rows sum to the revised receivedCny (28: 51706, 29: 5300, 30: 7955)',
+    [['28', 51706], ['29', 5300], ['30', 7955]].every(function (e) {
+      return revisedMovements.filter(function (r) { return r['Номер заказа'] === e[0]; })
+        .reduce(function (a, r) { return a + Number(r['Изменение ¥']); }, 0) === e[1];
+    }), JSON.stringify(revisedMovements));
   check('81g-1: the goods pool allocation reflects the revised content immediately',
     (function () {
       const ar = h.dumpChinaSheet('Отчёты').map(function (r) {
@@ -14244,6 +14250,214 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   const r2 = readBack(['ID', 'Дата', 'Кабинет', 'DraftID', 'OrderID', 'Точка отгрузки', 'Кластеры', 'Состав', 'Кто', 'Статус', 'Документы']);
   check('Item 100.5 / R-060: control - the standard header order still reads back every field correctly',
     okAll(r2), JSON.stringify(r2));
+}
+
+// ================= Item 100.6 part 1: China money / files regressions (R-017, R-019, R-023, R-039, R-041, R-042) =================
+// Test-first: every check asserts the CORRECT behaviour and is expected to FAIL until part 2 lands.
+{
+  const N6 = 'Николай';
+  const r2 = (x) => Math.round(x * 100) / 100;
+  const ordersOf = (h) => h.getChinaMoney().orders.map(o => ({ o: o.orderNo, cny: o.knownCny !== undefined ? o.knownCny : o.cny, rub: o.knownRub !== undefined ? o.knownRub : o.rub }));
+
+  // ---- R-017: pruning old reports must not re-price money already allocated between orders
+  {
+    const h = withChina();
+    const rc = [{ date: '2026-08-10', goodsCny: 100 }, { date: '2026-08-20', goodsCny: 100 }];
+    const rep = (date, a, b) => h.saveChinaReport({ reportDate: date, source: 'скрипт',
+      orders: [{ orderNo: 'A', date: '2026-08-01', receivedCny: a, totalCny: 1000 }, { orderNo: 'B', date: '2026-08-05', receivedCny: b, totalCny: 1000 }],
+      receipts: rc, freights: [] }, N6);
+    h.saveChinaPayment({ date: '2026-08-10', amountRub: 1000, rate: 10, comment: 'PA' }, N6);
+    h.saveChinaPayment({ date: '2026-08-20', amountRub: 2000, rate: 20, comment: 'PB' }, N6);
+    rep('2026-09-01', 100, 100);
+    rep('2026-09-02', 50, 150);
+    rep('2026-09-03', 100, 100);
+    rep('2026-09-04', 100, 100);
+    const o4 = ordersOf(h);
+    rep('2026-09-05', 100, 100);
+    const o5 = ordersOf(h);
+    const rubOf = (arr, k) => (arr.find(x => x.o === k) || {}).rub;
+    check('Item 100.6 part 1 / R-017: saving report 5 (no change, the 4th-oldest report is pruned) does not re-price orders A and B',
+      JSON.stringify(o4) === JSON.stringify(o5), 'R4 ' + JSON.stringify(o4) + ' R5 ' + JSON.stringify(o5));
+    rep('2026-09-06', 100, 100);
+    const o6 = ordersOf(h);
+    check('Item 100.6 part 1 / R-017: a SECOND prune (report 6, baseline chained) still leaves orders A and B unchanged',
+      JSON.stringify(o5) === JSON.stringify(o6), 'R5 ' + JSON.stringify(o5) + ' R6 ' + JSON.stringify(o6));
+    check('Item 100.6 part 1 / R-017: after report 5 order A keeps 1333.30 and order B 1666.70 rubles (not 1000.00 / 2000.00)',
+      r2(rubOf(o5, 'A')) === 1333.3 && r2(rubOf(o5, 'B')) === 1666.7, 'A ' + rubOf(o5, 'A') + ' B ' + rubOf(o5, 'B'));
+  }
+
+  // ---- R-041: pruning with real Date cells in «Дата отчёта» keeps the newest
+  {
+    const h = withChina();
+    ['2026-10-13', '2026-10-14', '2026-10-15'].forEach(d => h.saveChinaReport({ reportDate: d, source: 'скрипт', orders: [], receipts: [] }, N6));
+    // midnight of the stand's script zone (Europe/Moscow, UTC+3) - independent of the process TZ
+    const mk = (y, m, d) => new Date(Date.UTC(y, m - 1, d) - 3 * 3600 * 1000);
+    const sheet = h.context.chinaSpreadsheet().getSheetByName('Отчёты');
+    const hdr = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    const col = hdr.indexOf('Дата отчёта') + 1;
+    [mk(2026, 10, 13), mk(2026, 10, 14), mk(2026, 10, 15)].forEach((d, i) => sheet.getRange(i + 2, col, 1, 1).setValue(d));
+    const row = hdr.map(() => ''); row[hdr.indexOf('ID')] = 'CR9'; row[hdr.indexOf('Дата отчёта')] = mk(2026, 10, 16);
+    row[hdr.indexOf('Данные (JSON)')] = JSON.stringify({ orders: [], receipts: [], freights: [] });
+    sheet.appendRow(row);
+    h.context.chinaPruneReports(h.context.chinaSpreadsheet());
+    const left = h.context.chinaReadSheet(h.context.chinaSpreadsheet(), 'Отчёты', h.context.CHINA_REPORT_HEADERS).rows
+      .map(r => h.context.chinaDateText(r['Дата отчёта'], 'x')).sort();
+    check('Item 100.6 part 1 / R-041: pruning with Date-typed «Дата отчёта» cells deletes the OLDEST report and keeps the three newest',
+      JSON.stringify(left) === JSON.stringify(['2026-10-14', '2026-10-15', '2026-10-16']), JSON.stringify(left));
+  }
+
+  // ---- R-042: same-day correction keeps the movement journal equal to the latest receivedCny
+  {
+    const h = withChina();
+    const rep = (d, cny) => ({ reportDate: d, source: 'скрипт', orders: [{ orderNo: '28', date: '2026-01-01', receivedCny: cny }], receipts: [] });
+    h.saveChinaReport(rep('2026-10-10', 100), N6);
+    h.saveChinaReport(rep('2026-10-11', 150), N6);
+    h.saveChinaReport(rep('2026-10-11', 160), N6);
+    const rows = h.dumpChinaSheet('Движения заказов').map(r => Number(r['Изменение ¥']));
+    const sum = r2(rows.reduce((a, b) => a + b, 0));
+    check('Item 100.6 part 1 / R-042: two reports on the same date - the movement journal sums to the latest receivedCny (160)',
+      sum === 160, 'rows ' + JSON.stringify(rows) + ' sum ' + sum);
+  }
+
+  // ---- R-023: chinaSplitLots conserves money
+  {
+    const h = withChina();
+    const lots = [1, 2, 3, 4, 5, 6].map(i => ({ receiptId: 'r' + i, cny: 100 }));
+    const s = h.chinaSplitLots(lots, 0.03);
+    const sum = (a) => r2(a.reduce((t, x) => t + x.cny, 0));
+    const t = sum(s.taken), rem = sum(s.remaining);
+    check('Item 100.6 part 1 / R-023: moving 0.03 out of six 100-yuan lots takes exactly 0.03, leaves 599.97, total 600.00',
+      t === 0.03 && rem === 599.97 && r2(t + rem) === 600 && s.remaining.every(x => x.cny <= 100) && s.taken.every(x => x.cny >= 0),
+      'taken ' + t + ' remaining ' + rem + ' total ' + r2(t + rem));
+    const bad = [];
+    for (let n = 2; n <= 10; n++) for (let c = 1; c <= 10; c++) {
+      const amt = c / 100; const ls = []; for (let i = 0; i < n; i++) ls.push({ receiptId: 'r' + i, cny: 100 });
+      const sp = h.chinaSplitLots(ls, amt);
+      const tk = sum(sp.taken), rm = sum(sp.remaining);
+      if (tk !== amt || r2(tk + rm) !== n * 100) bad.push({ n, amt, tk, rm });
+    }
+    check('Item 100.6 part 1 / R-023: sweep n=2..10 equal lots x amounts 0.01..0.10 - taken == amount and taken+remaining == original total in every combination',
+      bad.length === 0, bad.length + ' bad, first ' + JSON.stringify(bad.slice(0, 3)));
+  }
+
+  // ---- R-019 (owner decision): a newer report revises a matched receipt
+  {
+    const setup = () => {
+      const h = withChina();
+      h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [{ orderNo: '1', date: '2026-08-01', receivedCny: 600, totalCny: 600 }],
+        receipts: [{ date: '2026-08-20', goodsCny: 600, freightCny: 400 }], freights: [] }, N6);
+      h.saveChinaPayment({ date: '2026-08-20', amountRub: 10000, rate: 10, comment: 'P1' }, N6);
+      return h;
+    };
+    const next = (h, g, f, tot) => h.saveChinaReport({ reportDate: '2026-09-02', source: 'скрипт',
+      orders: [{ orderNo: '1', date: '2026-08-01', receivedCny: tot, totalCny: tot }],
+      receipts: [{ date: '2026-08-20', goodsCny: g, freightCny: f }], freights: [] }, N6);
+
+    // a) same total, different split
+    {
+      const h = setup();
+      const pre = h.dumpChinaSheet('Поступления')[0];
+      next(h, 400, 600, 400);
+      const r = h.dumpChinaSheet('Поступления')[0], p = h.dumpChinaSheet('Платежи')[0];
+      const amountRub = Number(p['Сумма ₽']);
+      const rubGoods = r2(amountRub * 400 / 1000), rubFreight = r2(amountRub - rubGoods);
+      check('Item 100.6 part 1 / R-019a: same total, new goods/freight split - the matched receipt\'s «Товар ¥»/«Доставка ¥» are rewritten to 400/600',
+        pre['Статус'] === 'сопоставлено' && Number(r['Товар ¥']) === 400 && Number(r['Доставка ¥']) === 600, JSON.stringify(r));
+      check('Item 100.6 part 1 / R-019a: same total, new split - «₽ товар»/«₽ доставка» are recomputed from the same payment (4000/6000)',
+        Number(r['₽ товар']) === rubGoods && Number(r['₽ доставка']) === rubFreight, 'rub ' + r['₽ товар'] + '/' + r['₽ доставка'] + ' expected ' + rubGoods + '/' + rubFreight);
+      check('Item 100.6 part 1 / R-019a: same total, new split - the match stays (receipt «сопоставлено», payment tied to it)',
+        r['Статус'] === 'сопоставлено' && String(r['ОплатаID']) === String(p['ID']) && String(p['ПоступлениеID']) === String(r['ID']),
+        'receipt ' + r['Статус'] + '/' + r['ОплатаID'] + ' payment ' + p['ПоступлениеID']);
+    }
+    // a2) same total, amount that does not split evenly: the two rouble parts must add up to the payment exactly
+    {
+      const h = withChina();
+      h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [{ orderNo: '1', date: '2026-08-01', receivedCny: 3, totalCny: 3 }],
+        receipts: [{ date: '2026-08-20', goodsCny: 1, freightCny: 2 }], freights: [] }, N6);
+      h.saveChinaPayment({ date: '2026-08-20', amountRub: 100, rate: 100 / 3, comment: 'P1' }, N6);
+      const matched = h.dumpChinaSheet('Поступления')[0]['Статус'] === 'сопоставлено';
+      next(h, 2, 1, 3);
+      const r = h.dumpChinaSheet('Поступления')[0], p = h.dumpChinaSheet('Платежи')[0];
+      check('Item 100.6 part 1 / R-019a rounding: payment 100.00 RUB, split 1/2 -> 2/1 yuan - ₽ товар + ₽ доставка equals the payment exactly',
+        matched && r['Статус'] === 'сопоставлено' && r2(Number(r['₽ товар']) + Number(r['₽ доставка'])) === Number(p['Сумма ₽']) && Number(r['₽ товар']) === 66.67,
+        'matched ' + matched + ' ' + JSON.stringify(r));
+    }
+    // b) changed total
+    {
+      const h = setup();
+      const res = next(h, 600, 600, 600);
+      const r = h.dumpChinaSheet('Поступления')[0], p = h.dumpChinaSheet('Платежи')[0];
+      const warns = (res && res.warnings || []).map(String);
+      check('Item 100.6 part 1 / R-019b: changed total - the payment is released (not distributed, empty ПоступлениеID / Юани по отчёту / Курс фактический)',
+        p['Статус'] === 'не распределена' && String(p['ПоступлениеID']) === '' && String(p['Юани по отчёту']) === '' && String(p['Курс фактический']) === '',
+        JSON.stringify(p));
+      check('Item 100.6 part 1 / R-019b: changed total - the receipt loses the match (no ОплатаID, no ₽ товар / ₽ доставка, status not «сопоставлено»)',
+        r['Статус'] !== 'сопоставлено' && String(r['ОплатаID']) === '' && String(r['₽ товар']) === '' && String(r['₽ доставка']) === '' && Number(r['Всего ¥']) === 1200,
+        JSON.stringify(r));
+      check('Item 100.6 part 1 / R-019b: changed total - a warning names the receipt date 2026-08-20 and says the match was removed («сопоставлен»)',
+        warns.some(w => w.indexOf('2026-08-20') !== -1 && w.indexOf('сопоставлен') !== -1), JSON.stringify(warns));
+    }
+    // control: UNmatched receipt with a changed total
+    {
+      const h = withChina();
+      h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт', orders: [{ orderNo: '1', date: '2026-08-01', receivedCny: 600, totalCny: 600 }],
+        receipts: [{ date: '2026-08-20', goodsCny: 600, freightCny: 400 }], freights: [] }, N6);
+      const res = next(h, 600, 600, 600);
+      const r = h.dumpChinaSheet('Поступления')[0];
+      const warns = (res && res.warnings || []).map(String);
+      check('Item 100.6 part 1 / R-019 control: an UNmatched receipt with a changed total is rewritten (1200) and gets the existing «изменилось» warning',
+        Number(r['Товар ¥']) === 600 && Number(r['Доставка ¥']) === 600 && Number(r['Всего ¥']) === 1200 && r['Статус'] !== 'сопоставлено' &&
+        warns.some(w => w.indexOf('изменилось') !== -1), JSON.stringify(r) + ' ' + JSON.stringify(warns));
+    }
+  }
+
+  // ---- R-039 (owner decision): editing an allocated payment's money is refused
+  {
+    const setup = () => {
+      const h = withChina();
+      h.saveChinaReport({ reportDate: '2026-08-22', source: 'скрипт', orders: [], receipts: [{ date: '2026-08-30', goodsCny: 100 }] }, N6);
+      h.saveChinaPayment({ date: '2026-08-22', amountRub: 1000, rate: 10, comment: 'p' }, N6);
+      const pay = h.dumpChinaSheet('Платежи')[0];
+      h.matchChinaPayment({ paymentId: pay.ID, receiptId: h.getChinaMoney().receipts[0].id }, N6);
+      return { h, id: pay.ID };
+    };
+    const base = { date: '2026-08-22', amountRub: 1000, rate: 10, comment: 'p' };
+    const variants = [
+      ['amountRub', { amountRub: 2000, rate: 20 }],
+      ['rate', { rate: 20 }],
+      ['amountCny', { rate: undefined, amountCny: 50 }],
+      ['date', { date: '2026-08-23' }]
+    ];
+    variants.forEach(([label, change]) => {
+      const { h, id } = setup();
+      const before = JSON.stringify([h.dumpChinaSheet('Платежи'), h.dumpChinaSheet('Поступления')]);
+      let err = '';
+      try { h.saveChinaPayment(Object.assign({ id }, base, change), N6); } catch (e) { err = String(e.message || e); }
+      const after = JSON.stringify([h.dumpChinaSheet('Платежи'), h.dumpChinaSheet('Поступления')]);
+      check('Item 100.6 part 1 / R-039: editing ' + label + ' of an allocated payment throws «отмените сопоставление»',
+        err.toLowerCase().indexOf('отмените сопоставление') !== -1, 'error "' + err + '"');
+      check('Item 100.6 part 1 / R-039: the refused ' + label + ' edit leaves both the payments and the receipts sheet unchanged',
+        before === after, before === after ? '' : 'sheets changed');
+    });
+    {
+      const { h, id } = setup();
+      let err = '';
+      try { h.saveChinaPayment(Object.assign({ id }, base, { comment: 'new note', confirmed: true }), N6); } catch (e) { err = String(e.message || e); }
+      const p = h.dumpChinaSheet('Платежи')[0];
+      check('Item 100.6 part 1 / R-039: changing only comment and confirmed on an allocated payment still succeeds and keeps the match',
+        err === '' && p['Комментарий'] === 'new note' && p['Подтверждено'] === 'да' && p['Статус'] === 'распределена' && Number(p['Сумма ₽']) === 1000,
+        'error "' + err + '" ' + JSON.stringify(p));
+    }
+    {
+      const h = withChina();
+      h.saveChinaPayment({ date: '2026-08-22', amountRub: 1000, rate: 10, comment: 'p' }, N6);
+      const id = h.dumpChinaSheet('Платежи')[0].ID;
+      let err = '';
+      try { h.saveChinaPayment({ id, date: '2026-08-22', amountRub: 2000, rate: 20, comment: 'p' }, N6); } catch (e) { err = String(e.message || e); }
+      check('Item 100.6 part 1 / R-039 control: editing the amount of an UNallocated payment still works',
+        err === '' && Number(h.dumpChinaSheet('Платежи')[0]['Сумма ₽']) === 2000, 'error "' + err + '"');
+    }
+  }
 }
 
 // ================= Итог =================

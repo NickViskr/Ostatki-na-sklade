@@ -520,7 +520,8 @@ function getChinaSettings() {
 
 function chinaDateText(value, field) {
   if (value === null || value === undefined || value === '') return '';
-  if (value instanceof Date) {
+  // toString check as well as instanceof: a Date built in another realm (the test stand) is not an instance of this Date
+  if (value instanceof Date || Object.prototype.toString.call(value) === '[object Date]') {
     return Utilities.formatDate(value, _chinaTimeZone || Session.getScriptTimeZone() || 'GMT', 'yyyy-MM-dd');
   }
   const str = String(value).trim();
@@ -909,29 +910,38 @@ function chinaBatchesPicture(ss) {
 
 // ---------------------------------------------------------------- costing (no sheets here)
 
-// Splits an amount over bases so the shares add up to the amount EXACTLY. Every share is
-// rounded to the kopeck and the remainder goes to the largest base — a line with a zero
-// base gets nothing, whatever the rounding did.
+// Splits an amount over bases so the shares add up to the amount EXACTLY. Largest-remainder
+// method in whole kopecks: every share starts at the floor of its exact kopeck value, then the
+// leftover kopecks go one each to the largest fractional parts (ties: the larger base, then the
+// earlier line). So no share is ever negative or off by more than one kopeck, and a line with a
+// zero base gets nothing.
 function chinaAllocate(total, bases) {
   const amount = roundToTwo(Number(total) || 0);
   const out = [];
-  let sum = 0, best = -1, bestBase = 0;
+  let sum = 0, positive = 0;
   for (let i = 0; i < bases.length; i++) {
     const b = Number(bases[i]) || 0;
     out.push(0);
-    if (b > 0) sum += b;
-    if (b > bestBase) { bestBase = b; best = i; }
+    if (b > 0) { sum += b; positive++; }
   }
-  if (amount === 0 || sum <= 0 || best === -1) return out;
+  if (amount === 0 || sum <= 0 || positive === 0) return out;
+  const sign = amount < 0 ? -1 : 1;
+  const cents = Math.round(Math.abs(amount) * 100);
+  const parts = [];
   let given = 0;
   for (let i = 0; i < bases.length; i++) {
     const b = Number(bases[i]) || 0;
-    if (b <= 0 || i === best) continue;
-    out[i] = roundToTwo(amount * b / sum);
-    given = roundToTwo(given + out[i]);
+    if (b <= 0) continue;
+    const exact = cents * b / sum;
+    // 1e-9 guards against a binary-float 4.999999999 that should be a whole kopeck
+    const whole = Math.floor(exact + 1e-9);
+    out[i] = whole;
+    given += whole;
+    parts.push({ i: i, frac: exact - whole, base: b });
   }
-  out[best] = roundToTwo(amount - given);
-  return out;
+  parts.sort(function (x, y) { return (y.frac - x.frac) || (y.base - x.base) || (x.i - y.i); });
+  for (let k = 0; k < cents - given; k++) out[parts[k % parts.length].i] += 1;
+  return out.map(function (c) { return c === 0 ? 0 : sign * c / 100; });
 }
 
 // What makes two lines THE SAME GOODS (owner, 2026-09-22). Each of three things says so on
@@ -3003,9 +3013,24 @@ function saveChinaPayment(data, username) {
   if (requested && !targetRow) throw new Error('Оплата ' + requested + ' не найдена');
   const isNew = !targetRow;
 
+  const newDateText = chinaDateText(data.date, 'Дата') || getTodayDateString();
+  // Item 100.6 (R-039): the money of a payment tied to a receipt (rubles, rate, yuan, date) is what
+  // the match was computed from — changing it in place would leave «₽ товар»/«₽ доставка» and the
+  // actual rate stale. Comment / confirmed / purpose edits stay allowed.
+  if (previousRecord && String(previousRecord['Статус'] || '').trim() === CHINA_PAYMENT_ALLOCATED) {
+    const moneyChanged = Math.abs(parseNumber(previousRecord['Сумма ₽']) - money.amountRub) > 0.004 ||
+      Math.abs(parseNumber(previousRecord['Курс ₽/¥']) - money.rate) > 0.0001 ||
+      Math.abs(parseNumber(previousRecord['Куплено ¥']) - money.amountCny) > 0.004 ||
+      chinaDateText(previousRecord['Дата'], 'Дата') !== newDateText;
+    if (moneyChanged) {
+      throw new Error('Оплата ' + requested + ' сопоставлена с поступлением — сначала отмените сопоставление, ' +
+        'потом меняйте сумму, курс или дату');
+    }
+  }
+
   const values = {
     'ID': requested || chinaNextId(ctx.rows, 'CP'),
-    'Дата': chinaDateText(data.date, 'Дата') || getTodayDateString(),
+    'Дата': newDateText,
     'Сумма ₽': money.amountRub,
     'Курс ₽/¥': money.rate,
     'Куплено ¥': money.amountCny,
@@ -3134,7 +3159,10 @@ function chinaReportFromRow(r) {
     receipts: Array.isArray(parsed.receipts) ? parsed.receipts : [],
     freights: Array.isArray(parsed.freights) ? parsed.freights : [],
     carriedOverCny: Number(parsed.carriedOverCny) || 0,
-    openingFreightUsd: Number(parsed.openingFreightUsd) || 0
+    openingFreightUsd: Number(parsed.openingFreightUsd) || 0,
+    // Item 100.6 (R-017): the goods ledger as it stood right AFTER this report, written by
+    // chinaPruneReports when the reports before it are deleted. Absent on every other report.
+    ledgerBaseline: parsed.ledgerBaseline && typeof parsed.ledgerBaseline === 'object' ? parsed.ledgerBaseline : null
   };
 }
 
@@ -3251,12 +3279,35 @@ function chinaReportCanonical(orders, receipts, freights, carriedOverCny, openin
 // Keeps only the 3 newest report rows by «Дата отчёта» (owner, 2026-09-24: "keep only the last
 // 2–3 reports"). Deletes bottom-up by row number so an earlier delete never shifts the row
 // number of one still to be removed.
+//
+// Item 100.6 (R-017): the goods ledger is replayed from the kept reports, so deleting the older
+// ones would lose the money moves between orders and re-price them (the oldest kept report would
+// be re-read as a fresh FIFO baseline). Before deleting, the ledger state right after the oldest
+// KEPT report is folded into that report's JSON (`ledgerBaseline`), and the replay starts there.
 function chinaPruneReports(ss) {
-  const ctx = chinaReadSheet(ss, CHINA_REPORTS_SHEET, CHINA_REPORT_HEADERS);
+  // Fresh read: row numbers feed deleteRow below, so a cached copy must never decide them.
+  const ctx = chinaReadSheetFresh(ss, CHINA_REPORTS_SHEET, CHINA_REPORT_HEADERS);
   const sorted = ctx.rows.slice().sort(function (a, b) {
-    return String(b['Дата отчёта']).localeCompare(String(a['Дата отчёта']));
+    // Date cells and 'yyyy-MM-dd' text must compare the same way; same date -> the later row is newer
+    return chinaDateText(b['Дата отчёта'], 'Дата отчёта').localeCompare(chinaDateText(a['Дата отчёта'], 'Дата отчёта')) ||
+      (b.__row - a.__row);
   });
-  sorted.slice(3)
+  const doomed = sorted.slice(3);
+  if (doomed.length === 0) return;
+
+  const oldestKept = sorted[2];
+  const reports = ctx.rows.map(chinaReportFromRow);
+  const receipts = chinaReadSheet(ss, CHINA_RECEIPTS_SHEET, CHINA_RECEIPT_HEADERS).rows.map(chinaReceiptFromRow);
+  const snapshot = chinaAllocateGoodsLedger(reports, receipts, String(oldestKept['ID']).trim()).snapshot;
+  if (snapshot) {
+    let parsed = {};
+    try { parsed = JSON.parse(String(oldestKept['Данные (JSON)'] || '') || '{}'); } catch (e) { parsed = {}; }
+    parsed.ledgerBaseline = snapshot;
+    const dataCol = ctx.headers.indexOf('Данные (JSON)') + 1;
+    ctx.sheet.getRange(oldestKept.__row, dataCol, 1, 1).setValue(JSON.stringify(parsed));
+  }
+
+  doomed
     .map(function (r) { return r.__row; })
     .sort(function (a, b) { return b - a; })
     .forEach(function (row) { ctx.sheet.deleteRow(row); });
@@ -3392,7 +3443,7 @@ function chinaLotsSummary(lots, receiptsById) {
  * which this function picks up on its very next call; freight is a separate FIFO walk this
  * function does not touch).
  */
-function chinaAllocateGoodsLedger(reports, receipts) {
+function chinaAllocateGoodsLedger(reports, receipts, snapshotAfterReportId) {
   const receiptsById = {};
   (receipts || []).forEach(function (r) { receiptsById[r.id] = r; });
 
@@ -3419,6 +3470,7 @@ function chinaAllocateGoodsLedger(reports, receipts) {
   let pool = [];
   const warnings = [];
   let previousByOrder = {};
+  let snapshot = null;
 
   sortedReports.forEach(function (report, reportIndex) {
     const introduced = (byReport[report.id] || []).map(function (r) {
@@ -3426,7 +3478,17 @@ function chinaAllocateGoodsLedger(reports, receipts) {
     });
     const list = Array.isArray(report.orders) ? report.orders : [];
 
-    if (reportIndex === 0) {
+    if (reportIndex === 0 && report.ledgerBaseline) {
+      // Item 100.6 (R-017): older reports were pruned — start from the state they left behind
+      // instead of re-reading this report as a fresh FIFO baseline. Every receipt introduced up
+      // to and including this report is already inside the stored lots.
+      const base = report.ledgerBaseline;
+      Object.keys(base.orders || {}).forEach(function (orderNo) {
+        const o = base.orders[orderNo] || {};
+        orders[orderNo] = { lots: chinaMergeLots(o.lots), totalCny: roundToTwo(Number(o.totalCny) || 0) };
+      });
+      pool = chinaMergeLots(base.pool);
+    } else if (reportIndex === 0) {
       const sortedOrders = list.slice().sort(function (a, b) {
         const d = String(a.date || '').localeCompare(String(b.date || ''));
         return d !== 0 ? d : String(a.orderNo || '').localeCompare(String(b.orderNo || ''));
@@ -3505,9 +3567,16 @@ function chinaAllocateGoodsLedger(reports, receipts) {
       const orderNo = String(o.orderNo || '').trim();
       if (orderNo) previousByOrder[orderNo] = Number(o.receivedCny) || 0;
     });
+
+    if (snapshotAfterReportId && report.id === snapshotAfterReportId) {
+      snapshot = { orders: {}, pool: chinaMergeLots(pool) };
+      Object.keys(orders).forEach(function (orderNo) {
+        snapshot.orders[orderNo] = { lots: chinaMergeLots(orders[orderNo].lots), totalCny: orders[orderNo].totalCny };
+      });
+    }
   });
 
-  const out = { orders: {}, pool: null, warnings: warnings };
+  const out = { orders: {}, pool: null, warnings: warnings, snapshot: snapshot };
   Object.keys(orders).forEach(function (orderNo) {
     const o = orders[orderNo];
     const summary = chinaLotsSummary(o.lots, receiptsById);
@@ -3581,15 +3650,6 @@ function saveChinaReport(data, username) {
   // fresh baseline for every order.
   const warnings = [];
   const reportId = isRevision ? newest.id : chinaNextId(reportCtx.rows, 'CR');
-  if (isRevision) {
-    // The movement rows the ORIGINAL upload of this date wrote are stale — the revision
-    // recomputes its own Δ below and replaces them, not adds to them.
-    const staleMovements = chinaReadSheet(ss, CHINA_MOVEMENTS_SHEET, CHINA_MOVEMENT_HEADERS);
-    const kept = staleMovements.rows
-      .filter(function (r) { return String(r['Отчёт']).trim() !== reportId; })
-      .map(function (r) { return chinaRowFrom(staleMovements.headers, r); });
-    chinaWriteSheet(staleMovements.sheet, staleMovements.headers, kept);
-  }
 
   const incomingReceipts = parsed.receipts.map(function (r) {
     return {
@@ -3619,13 +3679,46 @@ function saveChinaReport(data, username) {
     const existingRow = byDate[r.date];
     if (existingRow) {
       const previousTotal = parseNumber(existingRow['Всего ¥']);
-      if (Math.abs(previousTotal - totalCny) > 0.004) {
-        warnings.push('Поступление за ' + r.date + ' изменилось: было ' + previousTotal +
-          ' ¥, стало ' + totalCny + ' ¥');
-        const row = chinaRowFrom(receiptCtx.headers, Object.assign({}, chinaStripRow(existingRow), {
+      const totalChanged = Math.abs(previousTotal - totalCny) > 0.004;
+      const isMatched = String(existingRow['Статус'] || '').trim() === 'сопоставлено';
+      const splitChanged = Math.abs(parseNumber(existingRow['Товар ¥']) - r.goodsCny) > 0.004 ||
+        Math.abs(parseNumber(existingRow['Доставка ¥']) - r.freightCny) > 0.004 ||
+        Math.abs(parseNumber(existingRow['Доставка $']) - r.freightUsd) > 0.004 ||
+        Math.abs(parseNumber(existingRow['Курс ¥/$']) - r.cargoRate) > 0.0001;
+      // Item 100.6 (R-019): a matched receipt is rewritten on ANY change, not only a new total.
+      if (totalChanged || (isMatched && splitChanged)) {
+        const fields = {
           'Товар ¥': r.goodsCny, 'Доставка ¥': r.freightCny, 'Доставка $': r.freightUsd,
           'Курс ¥/$': r.cargoRate, 'Всего ¥': totalCny
-        }));
+        };
+        if (totalChanged) {
+          warnings.push('Поступление за ' + r.date + ' изменилось: было ' + previousTotal +
+            ' ¥, стало ' + totalCny + ' ¥');
+        }
+        const matchedPaymentId = String(existingRow['ОплатаID'] || '').trim();
+        if (isMatched && matchedPaymentId) {
+          if (totalChanged) {
+            // The payment was matched to the OLD total — its ¥ and actual rate no longer describe
+            // this receipt, so the match is dropped (the payment and the receipt go back to waiting).
+            chinaUnmatchInternal(ss, matchedPaymentId, username);
+            warnings.push('Поступление за ' + r.date + ': сопоставление с оплатой ' + matchedPaymentId +
+              ' снято, потому что сумма поступления изменилась — сопоставьте заново');
+            fields['Статус'] = chinaReceiptStatus(r.date);
+            fields['ОплатаID'] = '';
+            fields['₽ товар'] = '';
+            fields['₽ доставка'] = '';
+          } else {
+            // Same total, new goods/freight split: same payment, same matching rule as chinaMatchInternal.
+            const payRows = chinaReadSheet(ss, CHINA_PAYMENTS_SHEET, CHINA_PAYMENT_HEADERS).rows;
+            const payRow = payRows.filter(function (p) { return String(p['ID']).trim() === matchedPaymentId; })[0];
+            if (payRow) {
+              const amountRub = parseNumber(payRow['Сумма ₽']);
+              fields['₽ товар'] = roundToTwo(amountRub * r.goodsCny / totalCny);
+              fields['₽ доставка'] = roundToTwo(amountRub - fields['₽ товар']);
+            }
+          }
+        }
+        const row = chinaRowFrom(receiptCtx.headers, Object.assign({}, chinaStripRow(existingRow), fields));
         receiptCtx.sheet.getRange(existingRow.__row, 1, 1, receiptCtx.headers.length).setValues([row]);
       }
       return; // already known — not "introduced" by THIS report
@@ -3640,6 +3733,10 @@ function saveChinaReport(data, username) {
   });
 
   const movementCtx = chinaReadSheet(ss, CHINA_MOVEMENTS_SHEET, CHINA_MOVEMENT_HEADERS);
+  // The movement journal is append-only history: a same-date revision does NOT delete the rows
+  // the original upload of that date wrote. It appends its own Δ against `newest` (the
+  // pre-revision content), so for every order the journal rows always sum to its latest
+  // receivedCny (R-042).
   const previousByOrder = {};
   if (newest) {
     (newest.orders || []).forEach(function (o) {
