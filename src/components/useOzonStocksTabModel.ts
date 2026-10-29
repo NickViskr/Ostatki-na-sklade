@@ -36,13 +36,22 @@ import {
   findFactoryModalRow,
   OzonStocksTabModel,
   OzonStocksTabModelInput,
+  normalWantsOf,
   resolveWideWeeks,
 } from '../lib/ozonStocksTabModel';
 
 export function useOzonStocksTabModel(input: OzonStocksTabModelInput): OzonStocksTabModel {
-  const { source, settings, factoryOrders, wideArticles, selectedSupply, manualQty, searchQuery, onlyWithRecommendations, factoryModalArticle, maxBoxesPerCluster, todayIso } = input;
+  const { source: inputSource, settings, factoryOrders, wideArticles, selectedSupply, manualQty, searchQuery, onlyWithRecommendations, factoryModalArticle, maxBoxesPerCluster, todayIso } = input;
 
-  const factoryOnOrder = source.openFactoryOrders.qty;
+  const factoryOnOrder = inputSource.openFactoryOrders.qty;
+
+  const anyWide = Object.keys(wideArticles).some((a) => wideArticles[a]);
+  // Item 100.7 / R-029: wide-mode articles take a shared component only after the normal ones.
+  const lateArticles = useMemo(() => Object.keys(wideArticles).filter((a) => wideArticles[a]), [wideArticles]);
+  const source = useMemo(
+    () => (anyWide ? { ...inputSource, lateArticles } : inputSource),
+    [inputSource, anyWide, lateArticles]
+  );
 
   const coverage = useMemo<OzonCoverageResult | null>(() => {
     // Пункт 29, этап E: замер времени расчёта. Диагностика, логику не меняет.
@@ -52,7 +61,6 @@ export function useOzonStocksTabModel(input: OzonStocksTabModelInput): OzonStock
     return result;
   }, [source, settings]);
 
-  const anyWide = Object.keys(wideArticles).some((a) => wideArticles[a]);
   /** Окно тренда из настроек: сколько недель берём, когда распределяем весь остаток. */
   const wideWeeks = resolveWideWeeks(settings);
 
@@ -66,10 +74,10 @@ export function useOzonStocksTabModel(input: OzonStocksTabModelInput): OzonStock
     if (!anyWide) return null;
     if (!source.ready) return null;
     const perfStart = performance.now();
-    const result = computeCoverage(source, { ...settings, speedWeeks: wideWeeks });
+    const result = computeCoverage(source, { ...settings, speedWeeks: wideWeeks }, normalWantsOf(coverage));
     console.log(`OZONPERF wideCoverage total=${Math.round(performance.now() - perfStart)}ms weeks=${wideWeeks}`);
     return result;
-  }, [anyWide, wideWeeks, source, settings]);
+  }, [anyWide, wideWeeks, source, settings, coverage]);
 
   const coverageRows = useMemo(() => {
     // Пункт 29, этап E: начало отсчёта времени. Диагностика.

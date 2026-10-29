@@ -287,10 +287,11 @@ export const Dashboard: React.FC = React.memo(() => {
       reservedByArticle,
       availableByArticle,
       namesByArticle,
+      kits,
     });
     const hidden = new Set(dismissedAlerts);
     return all.filter((a) => !hidden.has(a.key));
-  }, [isAdmin, skus, ozonStocks, pendingSupplies, dismissedAlerts, getEffectiveAvailability]);
+  }, [isAdmin, skus, kits, ozonStocks, pendingSupplies, dismissedAlerts, getEffectiveAvailability]);
 
   const alerts = useMemo(() => {
     if (!isAdmin) return [];

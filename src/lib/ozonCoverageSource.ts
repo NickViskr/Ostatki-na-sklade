@@ -45,6 +45,8 @@ export interface CoverageSource {
   kits: KitItem[];
   clusters: OzonClusterRef[];
   ready: boolean;
+  /** Item 100.7 / R-029: articles on «Распределить весь остаток» (see OzonCoverageInput.lateArticles). */
+  lateArticles?: string[];
 }
 
 /** Builds the coverage input for one screen and one cabinet choice. Pure. */
@@ -106,7 +108,12 @@ export function buildCoverageSource(data: CoverageStoreData, opts: CoverageSourc
 }
 
 /** Runs the coverage build over an assembled source. Returns null while the source is not ready. */
-export function computeCoverage(source: CoverageSource, settings: OzonCoverageSettings): OzonCoverageResult | null {
+export function computeCoverage(
+  source: CoverageSource,
+  settings: OzonCoverageSettings,
+  /** Item 100.7 / R-029: the normal run's wants, kept by normal articles in the wide run (see OzonCoverageInput). */
+  wantOverride?: Record<string, number>
+): OzonCoverageResult | null {
   if (!source.ready) return null;
   return buildOzonCoverage({
     stocks: source.stocks,
@@ -119,5 +126,7 @@ export function computeCoverage(source: CoverageSource, settings: OzonCoverageSe
     factoryOnOrder: source.openFactoryOrders.qty,
     kits: source.kits,
     stockHistory: source.stockHistory,
+    lateArticles: source.lateArticles,
+    wantOverride,
   });
 }

@@ -852,3 +852,98 @@ describe('useOzonStocksTabModel: parity with buildOzonStocksTabModel, full objec
     expect(captured).toEqual(model);
   });
 });
+
+// ===== Item 100.7 part 1 / R-029: «Распределить весь остаток» vs a component shared with normal kits =====
+// Owner decision: kits in the NORMAL mode get their need first (proportional split if short);
+// a kit with the wide toggle takes only what is left of the shared component after them.
+describe('buildOzonStocksTabModel: wide toggle on a kit sharing a component with normal kits (item 100.7, R-029)', () => {
+  const WEEKS13 = Array.from({ length: 13 }, (_, i) =>
+    new Date(Date.parse('2024-01-01T00:00:00Z') - (12 - i) * 7 * 86400000).toISOString().slice(0, 10));
+  const lastIdx = WEEKS13.length - 1;
+  const settings = makeSettings({ speedWeeks: 1, trendWeeks: 13, minStockDays: 10, targetStockDays: 30 });
+  const kits: KitItem[] = [
+    { kitSku: 'K1', type: 'virtual', components: [{ componentSku: 'COMP', quantity: 1 }] },
+    { kitSku: 'K2', type: 'virtual', components: [{ componentSku: 'COMP', quantity: 1 }] }
+  ];
+  const sales = (article: string, qtyOf: (i: number) => number): OzonSalesRow[] =>
+    WEEKS13.map((week, i) => ({ week, cabinet: 'M', offerId: article, clusterName: 'Москва', qty: qtyOf(i), updatedAt: '', days: 7 }));
+
+  function panel(k1OzonAvailable: number, k1LastWeekQty: number) {
+    const data = makeData({
+      skus: ['K1', 'K2', 'COMP'].map((s) => makeSku({ sku: s })),
+      kits,
+      ozonStocks: [stockRow('M', 'K1', 'C1', 'Москва', k1OzonAvailable), stockRow('M', 'K2', 'C1', 'Москва', 0)],
+      ozonSales: [
+        ...sales('K1', (i) => (i === lastIdx ? k1LastWeekQty : 7)),
+        ...sales('K2', (i) => (i === lastIdx ? 0 : 70))
+      ],
+      availability: { COMP: 10, K1: 10, K2: 10 }
+    });
+    const model = buildOzonStocksTabModel(makeInput(data, { settings, wideArticles: { K2: true } }));
+    const shown: Record<string, number> = {};
+    for (const s of model.recommendations.supplies) {
+      shown[s.article] = s.clusters.reduce((t, c) => t + (c.recommendation ? c.recommendation.qty : 0), 0);
+    }
+    return shown;
+  }
+
+  it('normal kit needing the whole component (10) gets 10; the wide kit gets 0, panel total never exceeds the stock', () => {
+    const shown = panel(0, 70);
+    expect((shown.K1 || 0)).toBe(10);
+    expect((shown.K2 || 0)).toBe(0);
+    expect((shown.K1 || 0) + (shown.K2 || 0)).toBeLessThanOrEqual(10);
+  });
+
+  it('normal kit needing only 4 leaves 6 of the shared component to the wide kit', () => {
+    const shown = panel(26, 7); // perDay 1 * target 30 - 26 on Ozon = 4
+    expect(shown.K1 || 0).toBe(4);
+    expect(shown.K2 || 0).toBe(6);
+  });
+
+  it('two wide kits and one normal kit: the normal one keeps its 4, the wide ones share the remaining 6', () => {
+    const kits3: KitItem[] = ['K1', 'K2', 'K3'].map((k) => ({ kitSku: k, type: 'virtual', components: [{ componentSku: 'COMP', quantity: 1 }] }));
+    const data = makeData({
+      skus: ['K1', 'K2', 'K3', 'COMP'].map((s) => makeSku({ sku: s })),
+      kits: kits3,
+      ozonStocks: [stockRow('M', 'K1', 'C1', 'Москва', 26), stockRow('M', 'K2', 'C1', 'Москва', 0), stockRow('M', 'K3', 'C1', 'Москва', 0)],
+      ozonSales: [
+        ...sales('K1', (i) => (i === lastIdx ? 7 : 7)),
+        ...sales('K2', (i) => (i === lastIdx ? 0 : 70)),
+        ...sales('K3', (i) => (i === lastIdx ? 0 : 70))
+      ],
+      availability: { COMP: 10, K1: 10, K2: 10, K3: 10 }
+    });
+    const model = buildOzonStocksTabModel(makeInput(data, { settings, wideArticles: { K2: true, K3: true } }));
+    const shown: Record<string, number> = {};
+    for (const s of model.recommendations.supplies) {
+      shown[s.article] = s.clusters.reduce((t, c) => t + (c.recommendation ? c.recommendation.qty : 0), 0);
+    }
+    expect(shown.K1 || 0).toBe(4);
+    expect((shown.K2 || 0) + (shown.K3 || 0)).toBe(6);
+  });
+
+  it('hook and pure model agree on a wide-mode shared-component case (lateArticles / wantOverride wiring)', () => {
+    const data = makeData({
+      skus: ['K1', 'K2', 'COMP'].map((s) => makeSku({ sku: s })),
+      kits,
+      ozonStocks: [stockRow('M', 'K1', 'C1', 'Москва', 26), stockRow('M', 'K2', 'C1', 'Москва', 0)],
+      ozonSales: [...sales('K1', () => 7), ...sales('K2', (i) => (i === lastIdx ? 0 : 70))],
+      availability: { COMP: 10, K1: 10, K2: 10 }
+    });
+    const input = makeInput(data, { settings, wideArticles: { K2: true } });
+    const model = buildOzonStocksTabModel(input);
+    let captured: OzonStocksTabModel | null = null;
+    function Probe(props: OzonStocksTabModelInput) {
+      captured = useOzonStocksTabModel(props);
+      return null;
+    }
+    renderToStaticMarkup(createElement(Probe, input));
+    expect(captured).not.toBeNull();
+    const total = (m: OzonStocksTabModel, a: string) =>
+      m.recommendations.supplies.filter((s) => s.article === a).reduce((t, s) => t + s.clusters.reduce((u, c) => u + (c.recommendation ? c.recommendation.qty : 0), 0), 0);
+    // Sanity: the case really splits the shared component (4 normal + 6 wide).
+    expect(total(model, 'K1')).toBe(4);
+    expect(total(model, 'K2')).toBe(6);
+    expect(captured).toEqual(model);
+  });
+});

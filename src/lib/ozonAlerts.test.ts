@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCoverageAlerts } from './ozonAlerts';
+import { buildCoverageAlerts, buildReserveShortageAlerts } from './ozonAlerts';
 import { isFunnelVisibleStatus } from './ozonStatus';
 import type { ArticleCoverage, ClusterCoverageRow, ComponentCoverage, FactorySignal, OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
 import { readOzonStocksScreen } from './ozonStocksScreen.fixture';
@@ -371,5 +371,58 @@ describe('Item 86 step C: factory_order alert threshold includes deliveryToOzonD
     };
     const alerts = buildCoverageAlerts(coverage, settingsWithD, {});
     expect(alerts.filter(x => x.type === 'factory_order')).toEqual([]);
+  });
+});
+
+// ===== Item 100.7 part 1 / R-038: reserve shortage on a component shared by reserved kits =====
+describe('buildReserveShortageAlerts: shared component across open reserved supplies (item 100.7, R-038)', () => {
+  const kits = [
+    { kitSku: 'K1', type: 'virtual', components: [{ componentSku: 'COMP', quantity: 1 }] },
+    { kitSku: 'K2', type: 'virtual', components: [{ componentSku: 'COMP', quantity: 1 }] }
+  ];
+
+  it('reserved {K1:6,K2:6} over one component with stock 10 raises a shortage alert for the component', () => {
+    // Inputs as the dashboard builds them: each kit gets its own availability (min over components = 10),
+    // the component itself 10. `kits` is the extra input the fix is expected to accept (assumed name).
+    const input: any = {
+      reservedByArticle: { K1: 6, K2: 6 },
+      availableByArticle: { K1: 10, K2: 10, COMP: 10 },
+      kits
+    };
+    const alerts = buildReserveShortageAlerts(input);
+    expect(alerts.length).toBeGreaterThan(0);
+    const comp = alerts.find((a) => a.article === 'COMP');
+    expect(comp).toBeDefined();
+    expect(comp!.description).toContain('не хватает 2 шт');
+  });
+
+  it('control: reserved {K1:4,K2:6} over the same stock 10 raises no alert', () => {
+    const input: any = {
+      reservedByArticle: { K1: 4, K2: 6 },
+      availableByArticle: { K1: 10, K2: 10, COMP: 10 },
+      kits
+    };
+    expect(buildReserveShortageAlerts(input)).toEqual([]);
+  });
+
+  it('a direct reserve of the component and a kit reserve add up against the component stock', () => {
+    const input: any = {
+      reservedByArticle: { COMP: 5, K1: 6 },
+      availableByArticle: { K1: 10, COMP: 10 },
+      kits
+    };
+    const comp = buildReserveShortageAlerts(input).find((a) => a.article === 'COMP');
+    expect(comp).toBeDefined();
+    expect(comp!.description).toContain('не хватает 1 шт');
+  });
+
+  it('a kit with component norm 2 turns reserve 3 into demand 6 of the component', () => {
+    const norm2 = [{ kitSku: 'K2X', type: 'virtual', components: [{ componentSku: 'COMP', quantity: 2 }] }];
+    const short: any = { reservedByArticle: { K2X: 3 }, availableByArticle: { K2X: 5, COMP: 5 }, kits: norm2 };
+    const comp = buildReserveShortageAlerts(short).find((a) => a.article === 'COMP');
+    expect(comp).toBeDefined();
+    expect(comp!.description).toContain('не хватает 1 шт');
+    const ok: any = { reservedByArticle: { K2X: 3 }, availableByArticle: { K2X: 3, COMP: 6 }, kits: norm2 };
+    expect(buildReserveShortageAlerts(ok)).toEqual([]);
   });
 });

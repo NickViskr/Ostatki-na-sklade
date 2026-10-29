@@ -1,4 +1,4 @@
-import { ExternalShipment, SKUItem } from '../types';
+import { ExternalShipment, KitItem, SKUItem } from '../types';
 import { detectPeresort } from './ozonPeresort';
 import { findShortShipments } from './ozonUnshipped';
 import { OzonCoverageResult, OzonCoverageSettings } from './ozonCoverage';
@@ -419,6 +419,12 @@ export interface ReserveShortageInput {
   availableByArticle: Record<string, number>;
   /** Названия товаров для подписи: артикул -> название. Необязательно. */
   namesByArticle?: Record<string, string>;
+  /**
+   * Item 100.7 / R-038. Kit composition. With it, the reserve of a virtual kit is turned into
+   * demand for its components and compared with the COMPONENT's stock — two kits reserving
+   * 6 + 6 over one component of 10 no longer both see «10 available». Absent — as before.
+   */
+  kits?: KitItem[];
 }
 
 /**
@@ -435,9 +441,26 @@ export function buildReserveShortageAlerts(input: ReserveShortageInput): OzonAle
 
   const items: { alert: OzonAlert; missing: number }[] = [];
 
+  // Virtual kits reserved: their pieces count against the components (a kit's own availability
+  // is a per-kit minimum that every kit sharing a component sees in full).
+  const virtualKits = new Map<string, KitItem>();
+  for (const k of (input && input.kits) || []) if (k.type === 'virtual') virtualKits.set(k.kitSku, k);
+  const demand: Record<string, number> = {};
   for (const article of Object.keys(reserved)) {
-    const reservedQty = Math.max(0, Number(reserved[article]) || 0);
-    if (reservedQty <= 0) continue;
+    const qty = Math.max(0, Number(reserved[article]) || 0);
+    if (qty <= 0) continue;
+    const kit = virtualKits.get(article);
+    if (!kit) {
+      demand[article] = (demand[article] || 0) + qty;
+      continue;
+    }
+    for (const c of kit.components) {
+      demand[c.componentSku] = (demand[c.componentSku] || 0) + qty * (Number(c.quantity) || 1);
+    }
+  }
+
+  for (const article of Object.keys(demand)) {
+    const reservedQty = demand[article];
 
     const availableQty = Math.max(0, Number(available[article]) || 0);
     const missing = reservedQty - availableQty;

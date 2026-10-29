@@ -1862,3 +1862,119 @@ describe('factoryOnOrderByArticle', () => {
     }
   });
 });
+
+// ===== Item 100.7 part 1 / R-028: kits sharing several components never exceed the free budget =====
+describe('buildOzonCoverage: shared components never over-committed (item 100.7, R-028)', () => {
+  const NOW_28 = new Date('2026-09-16T09:00:00Z');
+  const WEEKS_28 = ['2026-08-17', '2026-08-24', '2026-08-31', '2026-09-07'];
+  const settings28: OzonCoverageSettings = {
+    speedWeeks: 4, minStockDays: 10, targetStockDays: 30, deliveryToOzonDays: 7, maxClusterDays: 60,
+    factoryOrderDays: 14, returnsToSalePct: 0, excludedClusters: '', deficitDays: 0, demandGrowthPct: 0
+  } as OzonCoverageSettings;
+  const ozonRow = (article: string): OzonStockRow => ({
+    cabinet: 'M', sku: '', offerId: article, name: article, warehouseName: 'W', clusterName: 'Москва', clusterId: 'C1',
+    available: 0, preparing: 0, requested: 0, transit: 0, excess: 0, returns: 0, other: 0, updatedAt: ''
+  });
+  const salesOf = (article: string, qty: number): OzonSalesRow[] =>
+    WEEKS_28.map((week) => ({ week, cabinet: 'M', offerId: article, clusterName: 'Москва', qty, updatedAt: '', days: 7 }));
+
+  function recommendedByKit(kits: KitItem[], stock: Record<string, number>) {
+    const kitSkus = kits.map((k) => k.kitSku);
+    const comps = Array.from(new Set(kits.flatMap((k) => k.components.map((c) => c.componentSku))));
+    const availability: Record<string, number> = { ...stock };
+    for (const k of kits) {
+      availability[k.kitSku] = Math.min(...k.components.map((c) => Math.floor((stock[c.componentSku] || 0) / (Number(c.quantity) || 1))));
+    }
+    const res = buildOzonCoverage({
+      stocks: kitSkus.map(ozonRow),
+      sales: kitSkus.flatMap((k) => salesOf(k, 7)),
+      skus: [...kitSkus, ...comps].map((s) => makeSku({ sku: s })),
+      clusters: [{ clusterId: 'C1', clusterName: 'Москва' }],
+      settings: settings28,
+      myStockAvailability: availability,
+      kits,
+      now: NOW_28
+    } as OzonCoverageInput);
+    const rec: Record<string, number> = {};
+    for (const k of kitSkus) {
+      const a = res.articles.find((x) => x.article === k)!;
+      rec[k] = a.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0);
+    }
+    return rec;
+  }
+
+  const usedOf = (kits: KitItem[], rec: Record<string, number>, comp: string) =>
+    kits.reduce((s, k) => s + (rec[k.kitSku] || 0) * (k.components.find((c) => c.componentSku === comp)?.quantity || 0), 0);
+
+  it('two kits with cross norms (K1 = A+2B, K2 = 2A+B) over A=4,B=4 never need more than 4 of A or of B', () => {
+    const kits: KitItem[] = [
+      { kitSku: 'K1', type: 'virtual', components: [{ componentSku: 'A', quantity: 1 }, { componentSku: 'B', quantity: 2 }] },
+      { kitSku: 'K2', type: 'virtual', components: [{ componentSku: 'A', quantity: 2 }, { componentSku: 'B', quantity: 1 }] }
+    ];
+    const rec = recommendedByKit(kits, { A: 4, B: 4 });
+    expect(usedOf(kits, rec, 'A'), `rec=${JSON.stringify(rec)}`).toBeLessThanOrEqual(4);
+    expect(usedOf(kits, rec, 'B'), `rec=${JSON.stringify(rec)}`).toBeLessThanOrEqual(4);
+  });
+
+  it('seeded random kit sets: component use stays within stock and something is recommended when one kit is buildable', () => {
+    let seed = 20261029;
+    const rnd = (n: number) => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed % n; };
+    for (let iter = 0; iter < 60; iter++) {
+      const nComp = 1 + rnd(3);
+      const comps = Array.from({ length: nComp }, (_, i) => `C${i}`);
+      const stock: Record<string, number> = {};
+      for (const c of comps) stock[c] = rnd(21);
+      const nKits = 2 + rnd(3);
+      const kits: KitItem[] = Array.from({ length: nKits }, (_, i) => {
+        const shared = comps.filter((_c, j) => j === 0 || rnd(2) === 1); // every kit uses the first component => shared
+        return { kitSku: `K${i}`, type: 'virtual', components: shared.map((c) => ({ componentSku: c, quantity: 1 + rnd(3) })) };
+      });
+      const rec = recommendedByKit(kits, stock);
+      const label = `iter=${iter} stock=${JSON.stringify(stock)} kits=${JSON.stringify(kits.map((k) => k.components))} rec=${JSON.stringify(rec)}`;
+      for (const c of comps) expect(usedOf(kits, rec, c), label).toBeLessThanOrEqual(stock[c]);
+      const someBuildable = kits.some((k) => k.components.every((c) => stock[c.componentSku] >= c.quantity));
+      if (someBuildable) expect(Object.values(rec).reduce((s, v) => s + v, 0), label).toBeGreaterThan(0);
+    }
+  });
+
+  it('no shared overcommit: ample stock leaves every kit at its own need (repair changes nothing)', () => {
+    const kits: KitItem[] = [
+      { kitSku: 'K1', type: 'virtual', components: [{ componentSku: 'A', quantity: 1 }, { componentSku: 'B', quantity: 2 }] },
+      { kitSku: 'K2', type: 'virtual', components: [{ componentSku: 'A', quantity: 2 }, { componentSku: 'B', quantity: 1 }] }
+    ];
+    const big = recommendedByKit(kits, { A: 100000, B: 100000 });
+    const alone = recommendedByKit([kits[0]], { A: 100000, B: 100000 });
+    // Each kit sells 1/day: need = 37 units (30 target days + 7 delivery days), nothing taken away by the repair.
+    expect(big).toEqual({ K1: 37, K2: 37 });
+    expect(alone).toEqual({ K1: 37 });
+  });
+
+  it('repair takes the unit from the claimant using the MOST of the over-budget component (pinned split)', () => {
+    // K0 = 3A+B, K1 = 2A+3B over A=25, B=18; K0 sells 16/day, K1 7/day. Found by a seeded search where the
+    // repair actually runs: the heavier user (K0) ends with 5 and K1 with 4; taking from the smallest user
+    // would give 6 / 3 instead.
+    const kits: KitItem[] = [
+      { kitSku: 'K0', type: 'virtual', components: [{ componentSku: 'A', quantity: 3 }, { componentSku: 'B', quantity: 1 }] },
+      { kitSku: 'K1', type: 'virtual', components: [{ componentSku: 'A', quantity: 2 }, { componentSku: 'B', quantity: 3 }] }
+    ];
+    const kitSkus = ['K0', 'K1'];
+    const rate: Record<string, number> = { K0: 16, K1: 7 };
+    const stock: Record<string, number> = { A: 25, B: 18 };
+    const availability: Record<string, number> = { ...stock, K0: 8, K1: 6 };
+    const res = buildOzonCoverage({
+      stocks: kitSkus.map(ozonRow),
+      sales: kitSkus.flatMap((k) => salesOf(k, rate[k])),
+      skus: [...kitSkus, 'A', 'B'].map((s) => makeSku({ sku: s })),
+      clusters: [{ clusterId: 'C1', clusterName: 'Москва' }],
+      settings: settings28,
+      myStockAvailability: availability,
+      kits,
+      now: NOW_28
+    } as OzonCoverageInput);
+    const rec: Record<string, number> = {};
+    for (const k of kitSkus) {
+      rec[k] = res.articles.find((x) => x.article === k)!.clusters.reduce((s, c) => s + (c.recommendation ? c.recommendation.qty : 0), 0);
+    }
+    expect(rec).toEqual({ K0: 5, K1: 4 });
+  });
+});

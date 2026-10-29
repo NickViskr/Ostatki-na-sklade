@@ -866,13 +866,23 @@ export function resolveWideWeeks(settings: OzonCoverageSettings): number {
   return Number(settings.trendWeeks) > 0 ? Math.floor(Number(settings.trendWeeks)) : 13;
 }
 
-export function buildOzonStocksTabModel(input: OzonStocksTabModelInput): OzonStocksTabModel {
-  const coverage = computeCoverage(input.source, input.settings);
+/** Item 100.7 / R-029: total want of every article in the normal run — the claim normal kits keep in the wide run. */
+export function normalWantsOf(coverage: OzonCoverageResult | null): Record<string, number> {
+  const wants: Record<string, number> = {};
+  for (const a of coverage ? coverage.articles : []) {
+    wants[a.article] = a.clusters.reduce((sum, c) => sum + (c.recommendation ? c.recommendation.wantQty : 0), 0);
+  }
+  return wants;
+}
 
+export function buildOzonStocksTabModel(input: OzonStocksTabModelInput): OzonStocksTabModel {
   const anyWide = Object.keys(input.wideArticles).some((a) => input.wideArticles[a]);
+  const lateArticles = Object.keys(input.wideArticles).filter((a) => input.wideArticles[a]);
+  const source: CoverageSource = anyWide ? { ...input.source, lateArticles } : input.source;
+  const coverage = computeCoverage(source, input.settings);
   const wideWeeks = resolveWideWeeks(input.settings);
   const wideCoverage = anyWide && input.source.ready
-    ? computeCoverage(input.source, { ...input.settings, speedWeeks: wideWeeks })
+    ? computeCoverage(source, { ...input.settings, speedWeeks: wideWeeks }, normalWantsOf(coverage))
     : null;
 
   const factoryOnOrder = input.source.openFactoryOrders.qty;

@@ -180,6 +180,12 @@ export interface OzonCoverageInput {
   /** Item 86, step D. Daily in-stock marks («История остатков Ozon»). Absent or empty — every
    *  result is byte-identical to before this item (speed by calendar days). */
   stockHistory?: OzonStockHistoryRow[];
+  /** Item 100.7 / R-029. Articles on «Распределить весь остаток»: in a shared component they take
+   *  only what the other (normal) articles leave. Absent — every article is equal, as before. */
+  lateArticles?: string[];
+  /** Item 100.7 / R-029. Per-article total want (pieces) that replaces the computed one — the wide
+   *  run passes the NORMAL run's wants for the normal articles so their claim stays the normal one. */
+  wantOverride?: Record<string, number>;
 }
 
 export interface OzonCoverageResult {

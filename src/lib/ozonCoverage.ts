@@ -561,9 +561,14 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
   // kits limited elsewhere (their own bowls) are given only what they can use, and the rest
   // goes to the others — repeated until nothing moves. A component sold on Ozon by itself takes
   // part as one more claimant with norm 1.
+  // Item 100.7 / R-029: «Распределить весь остаток» articles are served after the normal ones.
+  const lateSet = new Set(input.lateArticles || []);
   const wantByArticle: Record<string, number> = {};
   for (const d of drafts) {
-    wantByArticle[d.article] = d.clusterRows.reduce((sum, r) => sum + (r.recommendation ? r.recommendation.wantQty : 0), 0);
+    const override = !lateSet.has(d.article) && input.wantOverride ? input.wantOverride[d.article] : undefined;
+    wantByArticle[d.article] = override !== undefined
+      ? override
+      : d.clusterRows.reduce((sum, r) => sum + (r.recommendation ? r.recommendation.wantQty : 0), 0);
   }
   const claimants = new Map<string, { article: string; norm: number }[]>();
   for (const d of drafts) {
@@ -586,36 +591,46 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
     for (const c of Object.keys(own)) if (c !== skip) cap = Math.min(cap, own[c]);
     return cap;
   };
+  // Splits `budget` of one component between claimants in proportion to need; writes the units
+  // of the ARTICLE per claimant into `next` (Infinity = no limit) and returns the component used.
+  const splitBudget = (demand: { article: string; norm: number; units: number }[], budget: number, next: Record<string, number>): number => {
+    const total = demand.reduce((sum, x) => sum + x.units * x.norm, 0);
+    if (total <= budget) {
+      for (const x of demand) next[x.article] = Number.POSITIVE_INFINITY;
+      return total;
+    }
+    let left = budget;
+    for (const x of demand) {
+      next[x.article] = Math.floor((budget * (x.units * x.norm) / total) / x.norm);
+      left -= next[x.article] * x.norm;
+    }
+    // Pieces left by the rounding go one unit at a time to the largest unmet need.
+    let moved = true;
+    while (moved) {
+      moved = false;
+      const order = demand
+        .filter((x) => next[x.article] < x.units && x.norm <= left)
+        .sort((a, b) => ((b.units - next[b.article]) - (a.units - next[a.article])) || a.article.localeCompare(b.article));
+      if (order.length) {
+        next[order[0].article] += 1;
+        left -= order[0].norm;
+        moved = true;
+      }
+    }
+    return budget - left;
+  };
   for (let round = 0; round < 20; round++) {
     let changed = false;
     for (const c of sharedComponents) {
       const list = claimants.get(c) || [];
       const budget = Math.max(0, stockOf(c) - (physReserve[c] || 0));
       const demand = list.map((x) => ({ ...x, units: Math.max(0, Math.min(wantByArticle[x.article] || 0, capExcept(x.article, c))) }));
-      const total = demand.reduce((sum, x) => sum + x.units * x.norm, 0);
+      // Normal claimants split the budget first; the wide ones share what is left of it.
       const next: Record<string, number> = {};
-      if (total <= budget) {
-        for (const x of demand) next[x.article] = Number.POSITIVE_INFINITY;
-      } else {
-        let left = budget;
-        for (const x of demand) {
-          next[x.article] = Math.floor((budget * (x.units * x.norm) / total) / x.norm);
-          left -= next[x.article] * x.norm;
-        }
-        // Pieces left by the rounding go one unit at a time to the largest unmet need.
-        let moved = true;
-        while (moved) {
-          moved = false;
-          const order = demand
-            .filter((x) => next[x.article] < x.units && x.norm <= left)
-            .sort((a, b) => ((b.units - next[b.article]) - (a.units - next[a.article])) || a.article.localeCompare(b.article));
-          if (order.length) {
-            next[order[0].article] += 1;
-            left -= order[0].norm;
-            moved = true;
-          }
-        }
-      }
+      const normalDemand = demand.filter((x) => !lateSet.has(x.article));
+      const lateDemand = demand.filter((x) => lateSet.has(x.article));
+      const used = splitBudget(normalDemand, budget, next);
+      splitBudget(lateDemand, Math.max(0, budget - used), next);
       for (const x of demand) {
         const prev = alloc[x.article] && alloc[x.article][c];
         if (prev !== next[x.article]) {
@@ -626,6 +641,28 @@ export function buildOzonCoverage(input: OzonCoverageInput): OzonCoverageResult 
       }
     }
     if (!changed) break;
+  }
+  // Item 100.7 / R-028: the loop above can oscillate or stop on a split in which kits with
+  // cross norms (K1 = A+2B, K2 = 2A+B) together still need more of a component than is free.
+  // Final feasibility repair: while a shared component is over-committed, a wide-mode claimant
+  // first, then the one using the most of it, gives up one unit (ties: article name). Terminates — every step lowers a use.
+  const usedUnits = (article: string) => Math.max(0, Math.min(wantByArticle[article] || 0, capExcept(article, '')));
+  for (let guard = 0; guard < 100000; guard++) {
+    let fixed = true;
+    for (const c of sharedComponents) {
+      const budget = Math.max(0, stockOf(c) - (physReserve[c] || 0));
+      const list = (claimants.get(c) || []).map((x) => ({ ...x, units: usedUnits(x.article) }));
+      if (list.reduce((sum, x) => sum + x.units * x.norm, 0) <= budget) continue;
+      const biggest = list
+        .filter((x) => x.units > 0)
+        .sort((a, b) => (Number(lateSet.has(b.article)) - Number(lateSet.has(a.article)))
+          || (b.units * b.norm - a.units * a.norm) || a.article.localeCompare(b.article))[0];
+      if (!alloc[biggest.article]) alloc[biggest.article] = {};
+      alloc[biggest.article][c] = biggest.units - 1;
+      fixed = false;
+      break;
+    }
+    if (fixed) break;
   }
 
   const articles: ArticleCoverage[] = [];
