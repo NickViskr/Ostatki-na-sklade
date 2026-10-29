@@ -26,17 +26,18 @@ export function chinaDateCell(value: Date): string {
 }
 
 /** Serial-number y/m/d → the same 'yyyy-MM-dd' text `chinaDateCell` gives a `Date`, TZ-free. */
-function chinaDateFromSerial(serial: number): string {
-  const parsed = XLSX.SSF.parse_date_code(serial);
+function chinaDateFromSerial(serial: number, is1904 = false): string {
+  // The 1904 date system (Mac workbooks) counts from 1462 days later than the 1900 one.
+  const parsed = XLSX.SSF.parse_date_code(is1904 ? serial + 1462 : serial);
   if (!parsed) return '';
   return `${parsed.y}-${pad(parsed.m)}-${pad(parsed.d)}`;
 }
 
-function chinaCellValue(cell: XLSX.CellObject | undefined): string | number {
+function chinaCellValue(cell: XLSX.CellObject | undefined, is1904 = false): string | number {
   if (!cell) return '';
   if (cell.t === 'n') {
     if (typeof cell.v !== 'number' || !isFinite(cell.v)) return 0;
-    if (cell.z && XLSX.SSF.is_date(cell.z)) return chinaDateFromSerial(cell.v);
+    if (cell.z && XLSX.SSF.is_date(cell.z)) return chinaDateFromSerial(cell.v, is1904);
     return cell.v;
   }
   if (cell.t === 's') return cell.v === undefined || cell.v === null ? '' : String(cell.v);
@@ -45,6 +46,7 @@ function chinaCellValue(cell: XLSX.CellObject | undefined): string | number {
 
 export function chinaSheetsFromWorkbook(wb: XLSX.WorkBook): ChinaSheets {
   const sheets: ChinaSheets = {};
+  const is1904 = !!wb.Workbook?.WBProps?.date1904;
   wb.SheetNames.forEach((name) => {
     const ws = wb.Sheets[name];
     const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
@@ -52,7 +54,7 @@ export function chinaSheetsFromWorkbook(wb: XLSX.WorkBook): ChinaSheets {
     for (let r = range.s.r; r <= range.e.r; r++) {
       const row: (string | number)[] = [];
       for (let c = range.s.c; c <= range.e.c; c++) {
-        row.push(chinaCellValue(ws[XLSX.utils.encode_cell({ r, c })]));
+        row.push(chinaCellValue(ws[XLSX.utils.encode_cell({ r, c })], is1904));
       }
       grid.push(row);
     }

@@ -63,6 +63,8 @@ export const ChinaPaymentsCard: React.FC = () => {
   const [amountRub, setAmountRub] = useState('');
   const [rate, setRate] = useState('');
   const [comment, setComment] = useState('');
+  // Yuan the Chinese side confirmed in the pasted message (R-046); 0 when the message has none.
+  const [parsedCny, setParsedCny] = useState(0);
   const [picked, setPicked] = useState<Record<string, string>>({});
   const [ordersOpen, setOrdersOpen] = useState(() => readOrdersOpen(username));
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -86,6 +88,7 @@ export const ChinaPaymentsCard: React.FC = () => {
     setDate(parsed.date);
     setAmountRub(chinaGroupThousands(String(parsed.amountRub)));
     setRate(parsed.rate ? String(parsed.rate) : '');
+    setParsedCny(parsed.amountCny > 0 ? parsed.amountCny : 0);
     // The owner's own sentence goes whole into the comment, so nothing he wrote is lost — unless
     // he already typed a comment of his own, which the parse must not overwrite.
     if (!comment.trim()) setComment(parsed.comment);
@@ -101,9 +104,10 @@ export const ChinaPaymentsCard: React.FC = () => {
       date: date.trim(),
       amountRub: chinaNumber(amountRub),
       rate: chinaNumber(rate),
-      comment: comment.trim()
+      comment: comment.trim(),
+      ...(parsedCny > 0 ? { amountCny: parsedCny } : {})
     });
-    if (ok) { setText(''); setDate(''); setAmountRub(''); setRate(''); setComment(''); }
+    if (ok) { setText(''); setDate(''); setAmountRub(''); setRate(''); setComment(''); setParsedCny(0); }
   };
 
   // Item 89: «100000 должны выглядеть как 100 000» — the field groups thousands as the owner
@@ -133,6 +137,8 @@ export const ChinaPaymentsCard: React.FC = () => {
     const digitCount = digitsBefore(raw, input.selectionStart ?? raw.length);
     const formatted = chinaGroupThousands(raw);
     setAmountRub(formatted);
+    // A hand-edited ruble amount no longer matches the yuan parsed for the old one.
+    setParsedCny(0);
     // Same trick `readOrdersOpen` etc. do not need: React commits the state update after this
     // handler returns, re-assigning the SAME string to `input.value` — which browsers do not
     // move the caret for. Setting it here too makes the field correct even before that commit.
@@ -228,7 +234,7 @@ export const ChinaPaymentsCard: React.FC = () => {
         </label>
         <label className="block">
           <span className="text-[11px] font-bold text-slate-500 uppercase">Курс ₽/¥</span>
-          <input className={`${field} w-24`} value={rate} onChange={(e) => setRate(e.target.value)} />
+          <input className={`${field} w-24`} value={rate} onChange={(e) => { setRate(e.target.value); setParsedCny(0); }} />
         </label>
         <label className="block grow">
           <span className="text-[11px] font-bold text-slate-500 uppercase">Комментарий</span>

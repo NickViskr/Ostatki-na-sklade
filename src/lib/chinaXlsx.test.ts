@@ -124,3 +124,32 @@ describe('item 81e: a date cell reads the same in every time zone', () => {
     expect(results).toEqual(['2026-09-24', '2026-09-24', '2026-09-24']);
   });
 });
+
+describe('R-043: the workbook date system (1900 vs 1904) does not shift dates', () => {
+  const readBack = (serial: number, is1904: boolean) => {
+    const ws: XLSX.WorkSheet = { A1: { t: 'n', v: serial, z: 'yyyy-mm-dd' }, '!ref': 'A1' };
+    const wb: XLSX.WorkBook = { SheetNames: ['S'], Sheets: { S: ws }, Workbook: { WBProps: { date1904: is1904 } } as any };
+    const back = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { cellDates: false, cellNF: true });
+    return { flag: (back.Workbook as any)?.WBProps?.date1904, value: chinaSheetsFromWorkbook(back)['S'][0][0] };
+  };
+
+  it('control: a 1900-system workbook with serial 46289 reads as 2026-09-24', () => {
+    expect(readBack(46289, false).value).toBe('2026-09-24');
+  });
+
+  it('a 1904-system workbook with serial 44827 (the same calendar day) reads as 2026-09-24 too', () => {
+    const r = readBack(44827, true);
+    expect(r.flag).toBe(true);
+    expect(r.value).toBe('2026-09-24');
+  });
+});
+
+describe('R-043: a 1904 workbook leaves non-date numbers alone', () => {
+  it('a plain number cell (no date format) stays the same number in a 1904 workbook', () => {
+    const ws: XLSX.WorkSheet = { A1: { t: 'n', v: 44827 }, '!ref': 'A1' };
+    const wb: XLSX.WorkBook = { SheetNames: ['S'], Sheets: { S: ws }, Workbook: { WBProps: { date1904: true } } as any };
+    const back = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { cellDates: false, cellNF: true });
+    expect((back.Workbook as any)?.WBProps?.date1904).toBe(true);
+    expect(chinaSheetsFromWorkbook(back)['S'][0][0]).toBe(44827);
+  });
+});

@@ -253,12 +253,19 @@ export function chinaBatchLineChecks(batch: {
   let goodsFromLines = 0;
   let sumFromFile = 0;
   let palletWeight = 0;
-  batch.lines.forEach((l) => {
-    goodsFromLines = round2(goodsFromLines + round2(l.qty * l.priceCny));
+  let lineWarned = false;
+  batch.lines.forEach((l, i) => {
+    const lineGoods = round2(l.qty * l.priceCny);
+    // Per line, so opposite errors on two lines cannot cancel in the total (R-044).
+    if (Math.abs(lineGoods - l.sumCny) > 0.01) {
+      lineWarned = true;
+      warnings.push(`Товар, строка ${i + 1}: количество на цену даёт ${lineGoods} ¥, а сумма строки ${l.sumCny} ¥`);
+    }
+    goodsFromLines = round2(goodsFromLines + lineGoods);
     sumFromFile = round2(sumFromFile + l.sumCny);
     palletWeight = round2(palletWeight + l.palletWeightKg);
   });
-  if (Math.abs(goodsFromLines - sumFromFile) > 0.01) {
+  if (!lineWarned && Math.abs(goodsFromLines - sumFromFile) > 0.01) {
     warnings.push(`Товар: количество на цену даёт ${goodsFromLines} ¥, а суммы строк ${sumFromFile} ¥`);
   }
   if (batch.declaredValueCny > 0) {
@@ -537,6 +544,7 @@ export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | n
 
   const orders: ChinaReportOrder[] = [];
   const transfers: ChinaReportTransfer[] = [];
+  let printedTransfersTotal = 0;
   for (let r = gHead + 1; r < goods.length; r++) {
     const row = goods[r];
     const orderNo = gCol.orderNo === -1 ? '' : str(row[gCol.orderNo]);
@@ -555,6 +563,13 @@ export function parseChinaReportFile(sheets: ChinaSheets): ChinaParsedReport | n
     const tDate = gCol.transferDate === -1 ? '' : str(row[gCol.transferDate]);
     const tAmount = gCol.transferAmount === -1 ? 0 : num(row[gCol.transferAmount]);
     if (tDate && tAmount > 0) transfers.push({ date: tDate, amountCny: tAmount });
+    // The totals line has an amount in the transfer column but no date and no order number.
+    else if (!tDate && !orderNo && tAmount > 0) printedTransfersTotal = tAmount;
+  }
+  // A transfer row dropped by the parser must not pass silently (R-045).
+  const parsedTransfersTotal = round2(transfers.reduce((sum, t) => sum + t.amountCny, 0));
+  if (printedTransfersTotal > 0 && Math.abs(parsedTransfersTotal - printedTransfersTotal) > 0.01) {
+    warnings.push(`Переводы: по строкам ${parsedTransfersTotal} ¥, в итоговой строке файла ${printedTransfersTotal} ¥`);
   }
 
   const freightSheet = sheetWith(sheets, ['票号', '总金额']);

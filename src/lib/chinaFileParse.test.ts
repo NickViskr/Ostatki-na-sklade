@@ -2,8 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { ARRIVAL_FILE_NV0923, ARRIVAL_FILE_NV0916, BATCH_FILE_28, BATCH_FILE_27, BATCH_FILE_30, REPORT_FILE, ChinaSheetGrid } from './chinaFiles.fixture';
 import {
   detectChinaFile, parseChinaBatchFile, parseChinaArrivalFile, parseChinaReportFile, cargoRateFromNote,
-  orderNoFromTicket, chinaFreightOf, chinaOrderOf, chinaReportPayload, chinaReceiptFreightCny, ChinaSheets
+  orderNoFromTicket, chinaFreightOf, chinaOrderOf, chinaReportPayload, chinaReceiptFreightCny, chinaBatchLineChecks, ChinaSheets
 } from './chinaFileParse';
+import { chinaAiFallbackNeeded } from './chinaAiRead';
 
 const copy = (sheets: ChinaSheets): ChinaSheets => {
   const out: ChinaSheets = {};
@@ -573,5 +574,89 @@ describe('номер заказа из номера билета', () => {
   it('is empty when the ticket does not name an order', () => {
     expect(orderNoFromTicket('NV-1209-7')).toBe('');
     expect(orderNoFromTicket('')).toBe('');
+  });
+});
+
+describe('R-044: per-line arithmetic errors that cancel in the total are still warned about', () => {
+  it('warns about +120 on one line and -120 on another, naming both lines', () => {
+    const w = chinaBatchLineChecks({
+      lines: [
+        { qty: 240, priceCny: 20.3, sumCny: 4992, palletWeightKg: 0 }, // really 4872, stated +120
+        { qty: 120, priceCny: 20.3, sumCny: 2316, palletWeightKg: 0 }  // really 2436, stated -120
+      ],
+      chinaDeliveryCny: 0, declaredValueCny: 0, weightKg: 0
+    });
+    // Each line is identified by its own stated sum (4992 / 2316) or its position; today only the total is compared.
+    expect(w.some((x) => /4992/.test(x))).toBe(true);
+    expect(w.some((x) => /2316/.test(x))).toBe(true);
+  });
+
+  it('control: lines whose qty x price equals the stated sum give no warnings', () => {
+    const w = chinaBatchLineChecks({
+      lines: [
+        { qty: 240, priceCny: 20.3, sumCny: 4872, palletWeightKg: 0 },
+        { qty: 120, priceCny: 20.3, sumCny: 2436, palletWeightKg: 0 }
+      ],
+      chinaDeliveryCny: 0, declaredValueCny: 0, weightKg: 0
+    });
+    expect(w).toEqual([]);
+  });
+});
+
+describe('R-045: a finance report whose parsed transfers do not add up to the printed total is flagged', () => {
+  const withoutTransfer4819 = (): ChinaSheets => {
+    const sheets = copy(REPORT_FILE);
+    const grid = sheets['货款结算'];
+    const i = grid.findIndex((r) => r[12] === 4819);
+    grid[i][11] = '';
+    grid[i][12] = '';
+    return sheets;
+  };
+
+  it('warns (parse result and payload) and asks for the AI fallback when the 4819 transfer row is missing', () => {
+    const parsed = parseChinaReportFile(withoutTransfer4819())!;
+    expect(parsed.transfers.reduce((a, t) => a + t.amountCny, 0)).toBe(224292);
+    expect(parsed.warnings.length).toBeGreaterThan(0);
+    expect(chinaReportPayload(parsed).warnings.length).toBeGreaterThan(0);
+    expect(chinaAiFallbackNeeded(parsed)).toBe(true);
+  });
+
+  it('control: the intact report has no warnings and needs no fallback', () => {
+    const parsed = parseChinaReportFile(copy(REPORT_FILE))!;
+    expect(parsed.transfers.reduce((a, t) => a + t.amountCny, 0)).toBe(229111);
+    expect(parsed.warnings).toEqual([]);
+    expect(chinaReportPayload(parsed).warnings).toEqual([]);
+    expect(chinaAiFallbackNeeded(parsed)).toBe(false);
+  });
+});
+
+describe('R-044/R-045 false-alarm guard: every intact real fixture stays silent', () => {
+  const batches: Array<[string, Record<string, ChinaSheetGrid>]> = [
+    ['BATCH_FILE_27', BATCH_FILE_27], ['BATCH_FILE_28', BATCH_FILE_28], ['BATCH_FILE_30', BATCH_FILE_30]
+  ];
+  batches.forEach(([name, file]) => {
+    it(`${name}: no per-line, total or any other warning, and every line already matches qty x price`, () => {
+      const parsed = parseChinaBatchFile(copy(file))!;
+      expect(parsed.lines.length).toBeGreaterThan(0);
+      expect(parsed.warnings).toEqual([]);
+      parsed.lines.forEach((l) => expect(Math.abs(Math.round(l.qty * l.priceCny * 100) / 100 - l.sumCny)).toBeLessThanOrEqual(0.01));
+    });
+  });
+
+  it('REPORT_FILE: the transfers total check gives no warning', () => {
+    expect(parseChinaReportFile(copy(REPORT_FILE))!.warnings).toEqual([]);
+  });
+});
+
+describe('R-045: a report without a totals row is not flagged', () => {
+  it('drops the totals row and the parse has no warnings', () => {
+    const sheets = copy(REPORT_FILE);
+    const grid = sheets['货款结算'];
+    const i = grid.findIndex((r) => r[12] === 229111);
+    expect(i).toBeGreaterThan(-1);
+    grid.splice(i, 1);
+    const parsed = parseChinaReportFile(sheets)!;
+    expect(parsed.transfers.reduce((a, t) => a + t.amountCny, 0)).toBe(229111);
+    expect(parsed.warnings).toEqual([]);
   });
 });
