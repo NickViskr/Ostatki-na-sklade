@@ -238,16 +238,21 @@ export function buildSalesTrendWithHistory(
     if (!win.covered) continue; // baseline (today's calculation) stands
 
     const usableWeeks: string[] = [];
+    // Calendar position of each kept week in `weeks`: skipped (stock-out) weeks leave real gaps
+    // that the regression x-axis must keep, otherwise the slope inflates.
+    const weekIndex: number[] = [];
     const rateSeries: number[] = [];
     let windowQty = 0;
     let zeroWeeks = 0;
-    for (const w of weeks) {
+    for (let wi = 0; wi < weeks.length; wi++) {
+      const w = weeks[wi];
       const f = historyArticleFraction(historyCtx, article, w);
       const rawQty = (weeklyQty[article] && weeklyQty[article][w]) || 0;
       windowQty += rawQty;
       if (rawQty === 0) zeroWeeks++;
       if (7 * f < 3) continue; // too little of the week in stock to rate
       usableWeeks.push(w);
+      weekIndex.push(wi);
       rateSeries.push(rawQty / f);
     }
 
@@ -259,12 +264,12 @@ export function buildSalesTrendWithHistory(
       reason = 'shortWindow';
     } else {
       mean = rateSeries.reduce((s, v) => s + v, 0) / rateSeries.length;
-      const meanX = (rateSeries.length - 1) / 2;
+      const meanX = weekIndex.reduce((s, v) => s + v, 0) / weekIndex.length;
       let cov = 0;
       let varX = 0;
       for (let i = 0; i < rateSeries.length; i++) {
-        cov += (i - meanX) * (rateSeries[i] - mean);
-        varX += (i - meanX) * (i - meanX);
+        cov += (weekIndex[i] - meanX) * (rateSeries[i] - mean);
+        varX += (weekIndex[i] - meanX) * (weekIndex[i] - meanX);
       }
       slope = varX > 0 ? cov / varX : 0;
       raw = mean > 0 ? (mean + slope * WEEKS_PER_MONTH) / mean : 1;
