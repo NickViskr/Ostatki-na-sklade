@@ -1843,6 +1843,12 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
   transSheet.deleteRow(rowIndex);
   SpreadsheetApp.flush();
 
+  // Item 100.8 (owner, 2026-10-30): a REAL delete of a return-of-unshipped receipt may leave the supply's
+  // marker pointing at receipts that are all gone — clear it then. An edit (isUpdate) re-writes the row at once.
+  if (!isUpdate && opIdHeaderIdx !== -1 && String(transData[opIdHeaderIdx] || '').trim().indexOf(UNSHIPPED_RETURN_OPID_PREFIX) === 0) {
+    clearUnshippedReturnMarkerIfGone(String(id));
+  }
+
   // Item 93: a deleted shipment to Ozon leaves the chain of its cabinet+article. An edit or a re-sort
   // (isUpdate) re-writes the row at once and follows the journal itself.
   let costJournalError = '';
@@ -3424,9 +3430,9 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
     const row = stockData[i];
     stockMap[String(row[0])] = {
       rowIdx: i + 1,
-      quantity: Number(row[1]),
-      avgCost: Number(row[2]),
-      capitalization: Number(row[3])
+      quantity: parseNumber(row[1]),
+      avgCost: parseNumber(row[2]),
+      capitalization: parseNumber(row[3])
     };
   }
   if (stockAlreadyWritten) {
@@ -4285,6 +4291,11 @@ function restoreTransaction(payload) {
   
   if (!transSheet) return;
 
+  // Item 100.8: the receipt of a return of unshipped goods is never restored — the return is made again.
+  if (String(payload.opId || '').indexOf(UNSHIPPED_RETURN_OPID_PREFIX) === 0) {
+    throw new Error('Приход возврата неотгруженного не восстанавливается — проведите возврат заново кнопкой «Отгружено меньше»');
+  }
+
   // Проверка на дубликат. Проверяем в транзакциях
   const transData = transSheet.getDataRange().getValues();
   for (let i = 1; i < transData.length; i++) {
@@ -4673,6 +4684,7 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
   let duplicatesCount = 0;
   let chinaRestored = 0;
   let chinaErrors = [];
+  let unshippedRefused = 0;
 
   // Owner, 2026-09-24: a 'ChinaBatch' has nothing in common with a transaction — restore it
   // row by row through restoreChinaBatch (same path as the single-item restore) BEFORE the
@@ -4701,8 +4713,15 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
   for (let i = 1; i < archiveDataAll.length; i++) {
     const archiveId = String(archiveDataAll[i][0]);
     if (idsSet.has(archiveId)) {
-      rowsToDeleteFromArchive.push(i);
       const dataJSON = String(archiveDataAll[i][3]);
+      // Item 100.8: a return-of-unshipped receipt stays in the archive, the rest of the batch restores.
+      let refusedOpId = '';
+      try { refusedOpId = String(JSON.parse(dataJSON).opId || ''); } catch (e) { refusedOpId = ''; }
+      if (refusedOpId.indexOf(UNSHIPPED_RETURN_OPID_PREFIX) === 0) {
+        unshippedRefused++;
+        continue;
+      }
+      rowsToDeleteFromArchive.push(i);
       try {
         const payload = JSON.parse(dataJSON);
         // Даты сохраняем как есть (ISO-формат payload), без переформатирования
@@ -4902,10 +4921,11 @@ function restoreMultipleArchivedItems(archiveIds, restoredBy) {
   const restoreJournalError = followOzonCostJournal(restoredOzonOpIds, restoredOzonWithoutOpId, OZON_COST_SOURCE_RESTORE,
     'Операции восстановлены, но журнал «Себестоимость Озон» для КАН НЕ обновлён: ');
 
-  if (duplicatesCount > 0 || apiErrors > 0 || warnings.length > 0 || chinaRestored > 0 || chinaErrors.length > 0) {
+  if (duplicatesCount > 0 || apiErrors > 0 || warnings.length > 0 || chinaRestored > 0 || chinaErrors.length > 0 || unshippedRefused > 0) {
      restoreMsg = `Восстановлено: ${transactionsToRestore.length}. `;
      if (chinaRestored > 0) restoreMsg += `Партий «Заказы в Китае» восстановлено: ${chinaRestored}. `;
      if (chinaErrors.length > 0) restoreMsg += `Ошибки восстановления партий «Заказы в Китае»: ${chinaErrors.join('; ')}. `;
+     if (unshippedRefused > 0) restoreMsg += `Не восстановлено приходов возврата неотгруженного: ${unshippedRefused} — проведите возврат заново кнопкой «Отгружено меньше». `;
      if (duplicatesCount > 0) restoreMsg += `Пропущено дубликатов: ${duplicatesCount}. `;
      if (apiErrors > 0) restoreMsg += `Ошибок удаления из архива: ${apiErrors}. `;
      if (warnings.length > 0) restoreMsg += `Предупреждения: ${warnings.join('; ')}.`;
@@ -9544,19 +9564,59 @@ function unshippedReturnPricesFromWriteOff(txIds) {
   return { mainPrice: mainPrice, compPrice: compPrice, compPerKit: compPerKit };
 }
 
+const UNSHIPPED_RETURN_OPID_PREFIX = 'unshipped-return:';
+
+/**
+ * Clears «ОтгруженоJSON» of the supply whose marker lists `deletedId` among its returnTxIds, when NONE of
+ * the marker's receipts is still in «История». One receipt left alive keeps the marker unchanged.
+ */
+function clearUnshippedReturnMarkerIfGone(deletedId) {
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return;
+  const iShipped = data[0].map(function(h) { return String(h).trim(); }).indexOf('ОтгруженоJSON');
+  if (iShipped === -1) return;
+  for (let i = 1; i < data.length; i++) {
+    const raw = String(data[i][iShipped] || '').trim();
+    if (!raw) continue;
+    let ids = null;
+    try { ids = JSON.parse(raw).returnTxIds; } catch (e) { ids = null; }
+    if (!Array.isArray(ids) || ids.map(String).indexOf(deletedId) === -1) continue;
+    if (!unshippedReturnAnyReceiptLive(ids)) {
+      sheet.getRange(i + 1, iShipped + 1).setValue('');
+      SpreadsheetApp.flush();
+    }
+    return;
+  }
+}
+
+/** True when at least one of the given ids is still a row of «История». */
+function unshippedReturnAnyReceiptLive(ids) {
+  const transSheet = getTransactionSheet(getSpreadsheet());
+  const lastRow = transSheet.getLastRow();
+  if (lastRow <= 1) return false;
+  const iId = getTransColIndex(transSheet, 'ID');
+  const live = {};
+  transSheet.getRange(2, iId + 1, lastRow - 1, 1).getValues().forEach(function(r) { live[String(r[0]).trim()] = true; });
+  return ids.some(function(id) { return live[String(id).trim()] === true; });
+}
+
 /**
  * Returns the unshipped part of a written-off supply to «Мой склад».
  * shipped: [{ offerId, article, shipped }] — what actually left, per position of the supply.
  * Refused when the supply is not written off, when it was already returned, when a quantity
  * is outside 0…declared, or when nothing is left to return. Nothing is written before all
  * checks pass.
+ * Repeat (owner, 2026-10-30): when every receipt id recorded in «ОтгруженоJSON» (returnTxIds) is gone from
+ * «История», the supply counts as not returned: a new receipt is posted and the marker rewritten. The fixed
+ * opId stays (R-015); the deleted rows no longer carry it, so the idempotency lookup finds nothing stale.
  */
 function commitUnshippedReturn(postingId, shipped, username, opId) {
   if (!postingId) throw new Error('PostingID is required');
   if (!Array.isArray(shipped) || shipped.length === 0) throw new Error('Не передано, сколько уехало');
   // Item 100.4 (R-015): one operation per supply, whatever the browser sends — a retry after a failed
   // marker write (a new click, a reload) finds the receipt already posted instead of posting it again.
-  opId = 'unshipped-return:' + String(postingId).trim().toLowerCase();
+  opId = UNSHIPPED_RETURN_OPID_PREFIX + String(postingId).trim().toLowerCase();
 
   const sheet = getExternalShipmentsSheet();
   const data = sheet.getDataRange().getValues();
@@ -9584,8 +9644,15 @@ function commitUnshippedReturn(postingId, shipped, username, opId) {
   if (String(row[iStatus] || '').trim() !== 'processed') {
     throw new Error('Поставка ' + postingId + ' не оформлена: возвращать нечего');
   }
+  // Owner, 2026-10-30 (100.8 C): a marker whose return receipts were ALL deleted from «История» (deleteTransaction
+  // removes the row physically) no longer stands for a return, so the return may be made again; one live receipt
+  // is enough to refuse. A marker that cannot be read, or has no ids, keeps the refusal.
   if (String(row[iShipped] || '').trim() !== '') {
-    throw new Error('Возврат по поставке ' + postingId + ' уже проведён');
+    let oldIds = null;
+    try { oldIds = JSON.parse(String(row[iShipped])).returnTxIds; } catch (e) { oldIds = null; }
+    if (!Array.isArray(oldIds) || oldIds.length === 0 || unshippedReturnAnyReceiptLive(oldIds)) {
+      throw new Error('Возврат по поставке ' + postingId + ' уже проведён');
+    }
   }
   let txIds = [];
   try { txIds = JSON.parse(String(row[iTrans] || '[]')); } catch (e) { txIds = []; }

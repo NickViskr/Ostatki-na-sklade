@@ -2087,6 +2087,11 @@ function chinaWithPaymentRate(ss, batch) {
   // chinaRemainingOf) — an unpaid order keeps the batch 'предварительно'.
   const remaining = chinaRemainingOf(ledger, batch);
   out.goodsUnpaidCny = remaining.remainingGoodsKnown ? remaining.remainingGoodsCny : 0;
+  // Owner, 2026-10-30 (100.8 A): a batch WITH an order number whose order is absent from the newest
+  // report (while a newest report exists) cannot be called settled. No report at all, or a batch
+  // without an order number, is a different case and is NOT flagged here. A newest report with NO order
+  // lines at all (freight-only) says nothing about orders, so it is not flagged either.
+  out.orderAbsentFromReport = !!(ledger.newest && (ledger.newest.orders || []).length > 0 && String(batch.orderNo || '').trim() && !remaining.remainingGoodsKnown);
   out.billInfo = bill;
   // Item B: > 1 only when the batch's own code prefix-matches several bills in the report and
   // none of them could be picked — chinaMissingListOf reports the ambiguity by name instead of
@@ -2239,6 +2244,7 @@ function chinaMissingListOf(rated, calc) {
       chinaLotsMissingMessages(order.lots, receiptsById, 'goodsCny', 'на этот заказ', order.historyCny));
   }
   if (order.unknownCny > 0.004) missing.push(order.unknownCny + ' ¥ товара без курса (не хватает поступлений)');
+  if (rated.orderAbsentFromReport) missing.push('заказа ' + String(rated.orderNo || '').trim() + ' нет в свежем отчёте');
   if (rated.goodsUnpaidCny > 0.004) missing.push('товар не оплачен полностью (' + rated.goodsUnpaidCny + ' ¥)');
   if (bill && bill.unpaidUsd > 0.004) missing.push('перевозка не оплачена полностью (' + bill.unpaidUsd + ' $)');
   if (bill && (bill.pendingCny > 0.004 || bill.historyCny > 0.004)) {

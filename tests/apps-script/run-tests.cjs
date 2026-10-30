@@ -14723,6 +14723,221 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 100.8 T4: owner decisions of 2026-10-30 (A: absent order, B: text quantity cells, C: repeat unshipped return) =================
+{
+  // ---- A) a China batch whose order is absent from the newest report is not closed ----
+  const batchOf = (h, id) => h.getChinaBatches().batches.filter(x => x.id === id)[0];
+  {
+    // The batch is costed and posted when the newest report ALREADY lacks its order (the report lists order 2 only).
+    const h = withChina();
+    h.setSkuSheet(['SKU', 'ШТ/КОР'], [['ART-POST-1', 10]]); h.setStockSheet([]); h.ensureTransSheet();
+    const frt = { code: 'NV-R16', orderNo: '1', amountUsd: 10, cargoRate: 7 };
+    // Report 1 settles order 1 and pays its receipts at a real rate; report 2 (newer) lists order 2 only,
+    // so the only thing left to hold the batch open is the absent order.
+    h.saveChinaReport({ reportDate: '2026-09-01', source: 'скрипт',
+      orders: [{ orderNo: '1', date: '2026-08-20', receivedCny: 100, totalCny: 100, unpaidCny: 0 }],
+      receipts: [{ date: '2026-09-01', goodsCny: 100, freightCny: 70, freightUsd: 10 }], freights: [frt] }, 'Николай');
+    h.saveChinaPayment({ date: '2026-09-01', amountRub: 1700, rate: 10, comment: 'P1' }, 'Николай');
+    h.saveChinaReport({ reportDate: '2026-09-02', source: 'скрипт',
+      orders: [{ orderNo: '2', date: '2026-08-20', receivedCny: 0, totalCny: 500, unpaidCny: 500 }],
+      receipts: [{ date: '2026-09-01', goodsCny: 100, freightCny: 70, freightUsd: 10 }], freights: [frt] }, 'Николай');
+    const pl = function (id) {
+      return Object.assign(id ? { id: id } : {}, { orderNo: '1', code: 'NV-R16', status: 'Прибыла', shippedAt: '2026-08-01', arrivedAt: '2026-08-25',
+        weightKg: 100, ratePerKgUsd: 1, cargoRate: 7,
+        lines: [{ marking: 'M1', boxes: 1, pcsPerBox: 10, qty: 10, priceCny: 100, article: 'ART-POST-1' }],
+        costs: [{ type: 'Прочее', amountRub: 100, comment: 'разгрузка' }] });
+    };
+    const b0 = h.saveChinaBatch(pl(), 'Николай').batches[0];
+    h.postChinaBatch({ id: b0.id, opId: 'op-t4a', lines: [{ article: 'ART-POST-1', qty: 10 }] }, 'Николай');
+    h.saveChinaBatch(pl(b0.id), 'Николай');
+    const after = batchOf(h, b0.id);
+    check('100.8 T4 A sanity: the ONLY missing reason of that batch is the absent order (no provisional rate etc.)',
+      after.missing.length === 1 && /заказ/i.test(after.missing[0]), JSON.stringify(after.missing));
+    check('100.8 T4 A: a batch costed and posted while the newest report lacks its order is NOT closed and not «окончательно»',
+      after.closed === false && after.postingState !== 'окончательно',
+      JSON.stringify({ closed: after.closed, state: after.postingState, missing: after.missing }));
+    check('100.8 T4 A: the missing list of that batch names the absent order (an entry with «заказ» and «отчёт»)',
+      after.missing.some(m => /заказ/i.test(m) && /отчёт/i.test(m) && m.indexOf('товар не оплачен') === -1),
+      JSON.stringify(after.missing));
+  }
+  {
+    // A batch that is already «окончательно» is not reopened by a later report without its order.
+    const h = withChina();
+    const s = china100R016Scenario(h, 900);
+    h.saveChinaPayment({ date: '2026-09-10', amountRub: 18000, rate: 20, comment: 'P2' }, 'Николай');
+    h.saveChinaReport({ reportDate: '2026-09-10', source: 'скрипт',
+      orders: [{ orderNo: '1', date: '2026-08-20', receivedCny: 1000, totalCny: 1000, unpaidCny: 0 }],
+      receipts: [{ date: '2026-09-01', goodsCny: 100, freightCny: 70, freightUsd: 10 }, { date: '2026-09-10', goodsCny: 900 }], freights: [s.frt] }, 'Николай');
+    const fin0 = batchOf(h, s.id);
+    h.saveChinaReport({ reportDate: '2026-09-11', source: 'скрипт',
+      orders: [{ orderNo: '2', date: '2026-09-05', receivedCny: 0, totalCny: 500, unpaidCny: 500 }],
+      receipts: [{ date: '2026-09-01', goodsCny: 100, freightCny: 70, freightUsd: 10 }, { date: '2026-09-10', goodsCny: 900 }], freights: [s.frt] }, 'Николай');
+    const fin1 = batchOf(h, s.id);
+    check('100.8 T4 A guard: a batch already «окончательно» stays «окончательно» (and closed) after a later report without its order',
+      fin0.postingState === 'окончательно' && fin1.postingState === 'окончательно' && fin1.closed === true,
+      JSON.stringify({ before: fin0.postingState, after: fin1.postingState, closed: fin1.closed, missing: fin1.missing }));
+  }
+  {
+    const h = withChina();
+    h.saveChinaBatch({ orderNo: '99', code: 'OLDBATCH', status: 'Черновик', shippedAt: '2026-05-01',
+      lines: [{ marking: 'M1', name: 'x', boxes: 1, pcsPerBox: 1, qty: 1, priceCny: 10 }] }, 'Николай');
+    h.saveChinaReport({ reportDate: '2026-09-10', source: 'скрипт',
+      orders: [{ orderNo: '2', date: '2026-09-05', receivedCny: 0, totalCny: 500, unpaidCny: 500 }],
+      receipts: [], freights: [] }, 'Николай');
+    const old = h.getChinaBatches().batches.filter(b => b.code === 'OLDBATCH')[0];
+    check('100.8 T4 A guard: a history batch (shipped before tracking) with its order absent from the newest report stays closed with no missing entries',
+      old.history === true && old.closed === true && old.missing.length === 0,
+      JSON.stringify({ history: old.history, closed: old.closed, missing: old.missing }));
+  }
+
+  // ---- B) text cells in «Остатки» are read like parseNumber ----
+  {
+    const run = (type, qty, price) => {
+      const h = freshHarness();
+      h.ensureTransSheet();
+      h.setStockSheet([{ article: 'ART-TXT', quantity: '10,5', avgCost: '5,5', capitalization: '57,75' }]);
+      let err = '';
+      try { h.commitTransaction([{ article: 'ART-TXT', quantity: qty, price: price }], type, type === 'Приход' ? 'Поставка' : 'Склад Тест', '', 'tester', '2026-01-05T09:00:00Z', ''); }
+      catch (e) { err = String(e.message || e); }
+      const row = h.dumpStockSheet().rows.filter(r => r[0] === 'ART-TXT')[0];
+      return { err, row };
+    };
+    const e = run('Расход', 3, 5.5);
+    check('100.8 T4 B: an expense of 3 from a text-quantity row «10,5» leaves a real NUMBER 7.5 in «Остатки» (not NaN, not text)',
+      e.err === '' && typeof e.row[1] === 'number' && e.row[1] === 7.5, JSON.stringify({ err: e.err, row: e.row }));
+    check('100.8 T4 B: that expense capitalizes correctly from text cells (57.75 - 3*5.5 = 41.25, avg 5.5)',
+      typeof e.row[3] === 'number' && Math.abs(e.row[3] - 41.25) < 0.005 && Math.abs(e.row[2] - 5.5) < 0.005, JSON.stringify(e.row));
+    const r = run('Приход', 5, 6);
+    check('100.8 T4 B: a receipt of 5 at 6 on a text-quantity row «10,5» adds correctly: quantity 15.5, capitalization 87.75',
+      r.err === '' && r.row[1] === 15.5 && Math.abs(r.row[3] - 87.75) < 0.005, JSON.stringify({ err: r.err, row: r.row }));
+  }
+
+  // ---- C) «вернуть неотгруженное» may be repeated once all its receipts were deleted ----
+  {
+    const stand = (articles) => {
+      const h = freshHarness();
+      h.setNow('2026-10-20T07:00:00Z');
+      h.ensureTransSheet();
+      h.ensureArchiveSheet();
+      h.setStockSheet(articles.map(a => ({ article: a, quantity: 20, avgCost: 100, capitalization: 2000 })));
+      const wo = h.commitTransaction(articles.map(a => ({ article: a, quantity: 10, price: 100 })), 'Расход', 'Ozon (MaxiStore)', '2026-10-20', 'tester', '2026-10-19T07:00:00Z', 'op-wo', undefined, undefined, undefined, undefined, true);
+      h.setExternalShipmentsSheet([{ postingId: 'P1', cabinet: 'MaxiStore', status: 'processed', items: articles.map(a => ({ offerId: a, quantity: 10 })),
+        transGroupInfo: JSON.stringify(wo.newTransactions.map(t => String(t.id))), orderNumber: '1' }]);
+      return h;
+    };
+    const ret = (h, articles, shipped, op) => h.commitUnshippedReturn('P1', articles.map(a => ({ offerId: a, article: a, shipped })), 'tester', op);
+    const receipts = (h) => h.dumpTransSheet().filter(r => r['Тип'] === 'Приход');
+    const marker = (h) => (h.dumpExternalShipments().find(r => r.PostingID === 'P1') || {}).ОтгруженоJSON || '';
+    {
+      const h = stand(['A']);
+      ret(h, ['A'], 5, 'x');
+      const oldId = String(receipts(h)[0]['ID']);
+      h.deleteTransaction(oldId, 'tester');
+      let err = '';
+      try { ret(h, ['A'], 3, 'y'); } catch (e) { err = String(e.message || e); }
+      const live = receipts(h);
+      check('100.8 T4 C: after the return receipt was deleted from «История», returning again (3 shipped) succeeds without an error',
+        err === '', 'error "' + err + '"');
+      check('100.8 T4 C: the repeated return leaves exactly one live receipt, new id, quantity 7, and stock 17',
+        live.length === 1 && String(live[0]['ID']) !== oldId && Number(live[0]['Количество']) === 7 && h.stockOf('A').quantity === 17,
+        JSON.stringify({ receipts: live.map(r => [r['ID'], r['Количество']]), oldId: oldId, stock: h.stockOf('A').quantity }));
+      check('100.8 T4 C: ОтгруженоJSON is rewritten to point at the new receipt, not the deleted one',
+        err === '' && marker(h) !== '' && JSON.parse(marker(h)).returnTxIds.indexOf(oldId) === -1 && JSON.parse(marker(h)).returnTxIds.indexOf(String(live[0] && live[0]['ID'])) !== -1,
+        'marker "' + marker(h) + '"');
+      let err3 = '';
+      try { ret(h, ['A'], 3, 'z'); } catch (e) { err3 = String(e.message || e); }
+      check('100.8 T4 C guard: a further return while the repeated receipt is live is refused and posts nothing',
+        err3 !== '' && receipts(h).length === 1 && h.stockOf('A').quantity === 17, 'error "' + err3 + '" receipts ' + receipts(h).length + ' stock ' + h.stockOf('A').quantity);
+    }
+    {
+      const h = stand(['A']);
+      ret(h, ['A'], 5, 'x');
+      let err = '';
+      try { ret(h, ['A'], 3, 'y'); } catch (e) { err = String(e.message || e); }
+      check('100.8 T4 C guard: a second return while the first receipt still exists is refused; stock stays 15, one receipt',
+        err !== '' && h.stockOf('A').quantity === 15 && receipts(h).length === 1, 'error "' + err + '" stock ' + h.stockOf('A').quantity + ' receipts ' + receipts(h).length);
+    }
+    {
+      const h = stand(['A', 'B']);
+      ret(h, ['A', 'B'], 5, 'x');
+      h.deleteTransaction(String(receipts(h)[0]['ID']), 'tester');
+      let err = '';
+      try { ret(h, ['A', 'B'], 3, 'y'); } catch (e) { err = String(e.message || e); }
+      check('100.8 T4 C guard: with only SOME of the return receipts deleted (one of two live) a repeat is refused and posts nothing',
+        err !== '' && receipts(h).length === 1, 'error "' + err + '" receipts ' + receipts(h).length);
+    }
+    {
+      const h = stand(['A']);
+      ret(h, ['A'], 5, 'x');
+      h.deleteTransaction(String(receipts(h)[0]['ID']), 'tester');
+      check('100.8 T4 C: deleting the only return receipt clears «ОтгруженоJSON» of the supply (marker empty)',
+        marker(h) === '', 'marker "' + marker(h) + '"');
+    }
+    {
+      const h = stand(['A', 'B']);
+      ret(h, ['A', 'B'], 5, 'x');
+      const before = marker(h);
+      h.deleteTransaction(String(receipts(h)[0]['ID']), 'tester');
+      check('100.8 T4 C: deleting ONE of two return receipts leaves «ОтгруженоJSON» unchanged',
+        before !== '' && marker(h) === before, 'before "' + before + '" after "' + marker(h) + '"');
+    }
+    {
+      const h = stand(['A']);
+      ret(h, ['A'], 5, 'x');
+      const before = marker(h);
+      const r = receipts(h)[0];
+      let err = '';
+      try {
+        h.updateTransaction(String(r['ID']), { article: 'A', quantity: 4, price: 100, type: 'Приход', destination: String(r['Объект']), date: '2026-10-20T07:00:00Z' }, 'tester');
+      } catch (e) { err = String(e.message || e); }
+      check('100.8 T4 C: a pencil edit of the return receipt (update path) does NOT clear «ОтгруженоJSON»',
+        err === '' && marker(h) !== '' && marker(h) === before, 'error "' + err + '" before "' + before + '" after "' + marker(h) + '"');
+    }
+    // ---- restore of a deleted return receipt from the archive is refused (owner ruling 2026-10-30, option A) ----
+    {
+      const h = stand(['A']);
+      ret(h, ['A'], 5, 'x');
+      h.deleteTransaction(String(receipts(h)[0]['ID']), 'tester');
+      const archiveId = h.dumpArchive()[h.dumpArchive().length - 1].archiveId;
+      const stockBefore = h.stockOf('A').quantity;
+      let err = '';
+      try { h.restoreArchivedItem(archiveId, 'tester'); } catch (e) { err = String(e.message || e); }
+      check('100.8 T4 C restore: restoring a deleted return-of-unshipped receipt (single restore) is refused with a message',
+        err !== '', 'no error thrown');
+      check('100.8 T4 C restore: the refused single restore changes no stock and leaves the receipt out of «История»',
+        h.stockOf('A').quantity === stockBefore && receipts(h).length === 0,
+        'stock ' + h.stockOf('A').quantity + ' (was ' + stockBefore + ') receipts ' + receipts(h).length);
+      check('100.8 T4 C restore: the refused row stays in the archive',
+        h.dumpArchive().some(a => a.archiveId === archiveId), 'archive ids ' + JSON.stringify(h.dumpArchive().map(a => a.archiveId)));
+    }
+    {
+      const h = stand(['A']);
+      ret(h, ['A'], 5, 'x');
+      h.deleteTransaction(String(receipts(h)[0]['ID']), 'tester');
+      const ids = h.dumpArchive().map(a => a.archiveId);
+      const stockBefore = h.stockOf('A').quantity;
+      let res = null, err = '';
+      try { res = h.restoreMultipleArchivedItems(ids, 'tester'); } catch (e) { err = String(e.message || e); }
+      check('100.8 T4 C restore: the multiple-restore path also refuses a return-of-unshipped receipt (no receipt back, stock unchanged, row stays in the archive)',
+        receipts(h).length === 0 && h.stockOf('A').quantity === stockBefore && h.dumpArchive().length === ids.length,
+        JSON.stringify({ err: err, receipts: receipts(h).length, stock: h.stockOf('A').quantity, was: stockBefore, archive: h.dumpArchive().length, message: res && res.message }));
+    }
+    {
+      const h = stand(['A']);
+      h.commitTransaction([{ article: 'A', quantity: 4, price: 100 }], 'Приход', 'Поставка', '2026-10-20', 'tester', '2026-10-20T06:00:00Z', 'op-plain');
+      const plain = receipts(h)[0];
+      h.deleteTransaction(String(plain['ID']), 'tester');
+      const archiveId = h.dumpArchive()[h.dumpArchive().length - 1].archiveId;
+      const stockBefore = h.stockOf('A').quantity;
+      let err = '';
+      try { h.restoreArchivedItem(archiveId, 'tester'); } catch (e) { err = String(e.message || e); }
+      check('100.8 T4 C restore guard: restoring an ordinary deleted receipt still works (back in «История», stock +4)',
+        err === '' && receipts(h).length === 1 && h.stockOf('A').quantity === stockBefore + 4,
+        'error "' + err + '" receipts ' + receipts(h).length + ' stock ' + h.stockOf('A').quantity + ' (was ' + stockBefore + ')');
+    }
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
