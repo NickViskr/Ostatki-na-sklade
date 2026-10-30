@@ -21,10 +21,16 @@ export function buildFreeStockRows(
   return out;
 }
 
+// RFC 4180 with «;» as the separator: a field holding «;», «"», LF or CR is wrapped in double
+// quotes and inner quotes are doubled, so an odd article cannot split or break the row.
+function escapeCsvField(value: string): string {
+  return /[;"\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
 export function buildFreeStockCsv(rows: FreeStockRow[], reservedByArticle: Record<string, number>): string {
   const lines = ['Артикул;Свободно'];
   for (const r of buildFreeStockRows(rows, reservedByArticle)) {
-    lines.push(`${r.article};${r.free}`);
+    lines.push(`${escapeCsvField(r.article)};${r.free}`);
   }
   return lines.join('\n');
 }
