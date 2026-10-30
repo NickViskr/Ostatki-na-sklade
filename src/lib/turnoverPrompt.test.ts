@@ -5,14 +5,14 @@ import { ArticleTurnover, TurnoverResult } from './turnover';
 
 const art = (over: Partial<ArticleTurnover> = {}): ArticleTurnover => ({
   article: 'A', isKit: false, kitOf: [], kanArticles: ['A'], shelfQty: 20, shelfCapital: 2000, ozonQty: 30, ozonStockCost: 3000,
-  deliveringCost: 200, returningCost: 100, avgWarehouseCapital: 1500, avgOzonCapital: 3300, avgCapital: 4800,
+  deliveringCost: 200, returningCost: 100, transitCost: 0, avgWarehouseCapital: 1500, avgOzonCapital: 3300, avgTransitCapital: 0, avgCapital: 4800,
   costOfSales: 2400, grossProfit: 1200, boughtQty: 20, orderedQty: 30, turns: 0.5, daysPerTurn: 20, gmroiPct: 25,
   coverDays: 25, lastSaleDay: '2026-09-20', lastReceiptDay: '2026-09-16', ageDays: 1, status: 'normal', ...over,
 });
 const result: TurnoverResult = {
   articles: [art(), art({ article: 'KIT', isKit: true, turns: null, daysPerTurn: null, gmroiPct: null, coverDays: null, ageDays: null, lastSaleDay: null, lastReceiptDay: null, status: 'slow' }), art({ article: 'C1', kitOf: ['KIT'], status: 'component' })],
   portfolio: {
-    periodDays: 10, fromDay: '2026-09-11', toDay: '2026-09-20', shelfCapital: 2000, ozonStockCost: 3000, deliveringCost: 200, returningCost: 100,
+    periodDays: 10, fromDay: '2026-09-11', toDay: '2026-09-20', shelfCapital: 2000, ozonStockCost: 3000, deliveringCost: 200, returningCost: 100, transitCost: 0, avgTransitCapital: 0,
     capitalNow: 5300, avgCapital: 4800, avgWarehouseCapital: 1500, avgOzonCapital: 3300, costOfSales: 2400, grossProfit: 1200,
     turns: 0.5, daysPerTurn: 20, gmroiPct: 25, ozonOnlyTurns: 0.8, slowCapital: 5300, slowSharePct: 100, fastCapital: 0,
     counts: { fast: 0, normal: 1, slow: 1, component: 1 },

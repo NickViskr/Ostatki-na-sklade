@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { formatCurrency, formatDateRu } from '../lib/utils';
-import { ArticleTurnover, buildTurnover, gmroiTone, GmroiTone, shelfFromStock, TurnoverStatus } from '../lib/turnover';
+import { ArticleTurnover, buildTurnover, gmroiTone, GmroiTone, shelfFromStock, transitLots, TurnoverStatus } from '../lib/turnover';
 import { buildTurnoverSnapshot, TURNOVER_PRESETS, TURNOVER_SYSTEM_PROMPT } from '../lib/turnoverPrompt';
 import { OzonSettingsModal } from './OzonSettingsModal';
 import { canEditOzonSettings } from '../lib/ozonSettingsFields';
@@ -54,6 +54,8 @@ export const TurnoverTab: React.FC = () => {
   const ozonSettings = useWarehouseStore((s) => s.ozonSettings);
   const ozonRefsLoaded = useWarehouseStore((s) => s.ozonRefsLoaded);
   const fetchOzonInitialData = useWarehouseStore((s) => s.fetchOzonInitialData);
+  const externalShipments = useWarehouseStore((s) => s.externalShipments);
+  const fetchExternalShipments = useWarehouseStore((s) => s.fetchExternalShipments);
   const turnoverData = useWarehouseStore((s) => s.turnoverData);
   const fetchTurnoverData = useWarehouseStore((s) => s.fetchTurnoverData);
   const runKanPullNow = useWarehouseStore((s) => s.runKanPullNow);
@@ -104,6 +106,16 @@ export const TurnoverTab: React.FC = () => {
     if (!ozonRefsLoaded) fetchOzonInitialData();
   }, [ozonRefsLoaded, fetchOzonInitialData]);
 
+  // R-051: goods in transit come from the supply journal; the store has no «loaded» flag, so ask once
+  // per mount when it is empty (an empty answer must not loop).
+  const shipmentsRequested = useRef(false);
+  useEffect(() => {
+    if (externalShipments.length === 0 && !shipmentsRequested.current) {
+      shipmentsRequested.current = true;
+      fetchExternalShipments();
+    }
+  }, [externalShipments, fetchExternalShipments]);
+
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -117,13 +129,14 @@ export const TurnoverTab: React.FC = () => {
       kanRows: turnoverData.kanRows,
       snapshots: turnoverData.snapshots,
       shelf: shelfFromStock(stock, kits),
+      transit: transitLots({ shipments: externalShipments, transactions, skus }),
       transactions,
       skus,
       kits,
       settings: { periodDays, slowDays, fastDays },
       latestKanDay: turnoverData.latestKanDay,
     });
-  }, [turnoverData, stock, kits, transactions, skus, periodDays, slowDays, fastDays]);
+  }, [turnoverData, stock, kits, transactions, skus, externalShipments, periodDays, slowDays, fastDays]);
 
   const rows = useMemo<ArticleTurnover[]>(() => {
     if (!result) return [];
@@ -207,7 +220,7 @@ export const TurnoverTab: React.FC = () => {
 
       {p && (
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-          <Card title="Капитал сейчас" value={money(p.capitalNow)} note={`склад ${money(p.shelfCapital)} · Ozon ${money(p.ozonStockCost)} · в доставке ${money(p.deliveringCost)} · возвраты ${money(p.returningCost)}`} />
+          <Card title="Капитал сейчас" value={money(p.capitalNow)} note={`склад ${money(p.shelfCapital)} · Ozon ${money(p.ozonStockCost)} · в доставке ${money(p.deliveringCost)} · возвраты ${money(p.returningCost)} · едет на Ozon ${money(p.transitCost)}`} />
           <Card title="Средний капитал" value={money(p.avgCapital)} note={`склад ${money(p.avgWarehouseCapital)} · Ozon ${money(p.avgOzonCapital)}`} />
           <Card title="Оборачиваемость" value={p.turns === null ? '—' : `${p.turns} раза`} note={p.daysPerTurn === null ? 'продаж не было' : `один оборот ≈ ${p.daysPerTurn} дн.`} />
           <Card title="GMROI" value={p.gmroiPct === null ? '—' : `${p.gmroiPct} %`} note={`валовая прибыль ${money(p.grossProfit)} / себестоимость продаж ${money(p.costOfSales)} · зелёный от ${gmroiGreen} %, красный ниже ${gmroiRed} %`} gmroi={gmroiTone(p.gmroiPct, gmroiGreen, gmroiRed)} />

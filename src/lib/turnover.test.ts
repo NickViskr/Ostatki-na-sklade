@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { buildTurnover, gmroiTone, periodDays, shelfFromStock, shelfHistory, shiftDay, KanDayRow, SnapshotRow, TurnoverInput } from './turnover';
+import { buildTurnover, gmroiTone, periodDays, shelfFromStock, shelfHistory, shiftDay, transitLots, KanDayRow, SnapshotRow, TransitLot, TurnoverInput } from './turnover';
 import { readFileSync } from 'fs';
-import { KitItem, SKUItem, Transaction } from '../types';
+import { ExternalShipment, KitItem, SKUItem, Transaction } from '../types';
 
 const NOW = new Date('2026-09-21T12:00:00');
 const settings = { periodDays: 10, slowDays: 45, fastDays: 20 };
@@ -223,10 +223,12 @@ describe('buildTurnover: kits and components', () => {
     const r3 = buildTurnover(base({ kits, shelf, kanRows: rows, transactions: [tx('2026-09-18', 'KIT', 3, 'Расход')] }));
     expect(r3.articles.find((a) => a.article === 'KIT')!.avgWarehouseCapital).toBe(440);
   });
-  it('a slow kit freezes its shelf capital: slowCapital includes the kit\'s 440', () => {
+  it('100.8 R-052 a slow kit slows its components\' shelf once: slowCapital = C1 300 + C2 200 + kit Ozon 1100 = 1600, never the kit\'s 440 on top', () => {
     const r3 = buildTurnover(base({ kits, shelf, kanRows: rows, settings: { periodDays: 10, slowDays: 1, fastDays: 0 } }));
     expect(r3.articles.find((a) => a.article === 'KIT')!.status).toBe('slow');
-    expect(r3.portfolio.slowCapital).toBe(440 + 1100);
+    // shelf: C1 10×30 = 300, C2 4×50 = 200 (both only on the kit's slow path); Ozon: KIT 1100 stock cost; capitalNow = 500 + 1100
+    expect(r3.portfolio.slowCapital).toBe(300 + 200 + 1100);
+    expect(r3.portfolio.capitalNow).toBe(1600);
   });
   it('the portfolio counts the physical shelf once: 300 + 200, never the kit\'s 440 on top', () => {
     expect(r.portfolio.shelfCapital).toBe(500);
@@ -240,6 +242,236 @@ describe('buildTurnover: kits and components', () => {
       kanRows: [...rows, ...periodDays('2026-09-20', 10).map((d) => kan(d, 'A', { stockCost: 10, costOfSales: 5 }))],
     }));
     expect(r2.articles.map((a) => a.article)).toEqual(['A', 'KIT', 'B', 'C1', 'C2']);
+  });
+});
+
+// ===== Item 100.8 part 1 (R-051, R-052, R-053) =====
+// Fixtures below avoid snapshots where possible (R-054 will read a snapshot dated D as the close of D-1).
+const NOW2 = new Date('2026-10-20T12:00:00');
+const skus2 = ['A', 'B', 'K', 'K1', 'K2', 'KB', 'KIT', 'C1', 'C2'].map((s) => ({ sku: s })) as SKUItem[];
+const settings2 = { periodDays: 2, slowDays: 45, fastDays: 20 };
+function base2(over: Partial<TurnoverInput> = {}): TurnoverInput {
+  return { kanRows: [], snapshots: [], shelf: [], transactions: [], skus: skus2, kits: [], settings: settings2, latestKanDay: '2026-10-19', now: NOW2, ...over };
+}
+const virtualKit = (kitSku: string, components: Array<[string, number]>): KitItem =>
+  ({ kitSku, type: 'virtual', components: components.map(([componentSku, quantity]) => ({ componentSku, quantity })) });
+
+describe('100.8 R-053 virtual kit warehouse history follows its components', () => {
+  it('100.8 R-053 probe: kit {A×1}, A received 10 on the last day → kit capital (0 + 1000) / 2 = 500, daysPerTurn 10', () => {
+    const kits = [virtualKit('K', [['A', 1]])];
+    const r = buildTurnover(base2({
+      kits, shelf: shelfFromStock([{ article: 'A', quantity: 10, avgCost: 100 }], kits),
+      transactions: [tx('2026-10-19 12:00:00', 'A', 10)],
+      kanRows: [kan('2026-10-18', 'K', { costOfSales: -50 }), kan('2026-10-19', 'K', { costOfSales: -50 })],
+    }));
+    const k = r.articles.find((a) => a.article === 'K')!;
+    // A: day 18 = 10 − 10 (receipt on 19) = 0, day 19 = 10 → kit 0 and 10 pcs × 100 → (0 + 1000) / 2 = 500
+    expect(k.avgWarehouseCapital).toBe(500);
+    // cost of sales 2×50 = 100; turns = 100 / 500 = 0.2; days per turn = 2 / 0.2 = 10
+    expect(k.daysPerTurn).toBe(10);
+    expect(r.portfolio.avgWarehouseCapital).toBe(500);
+  });
+  it('100.8 R-053 kit quantity per day is floored: C1 7 (2 per kit) and C2 10 → 3 kits × 110 = 330; with C1 received +2 mid-period → (5×220 + 5×330) / 10 = 275', () => {
+    const kits = [virtualKit('KIT', [['C1', 2], ['C2', 1]])];
+    const stock = [{ article: 'C1', quantity: 7, avgCost: 30 }, { article: 'C2', quantity: 10, avgCost: 50 }];
+    const none = buildTurnover(base({ kits, shelf: shelfFromStock(stock, kits) }));
+    // floor(7 / 2) = 3, min(3, 10) = 3; kit cost 2×30 + 1×50 = 110 → 330 every day
+    expect(none.articles.find((a) => a.article === 'KIT')!.avgWarehouseCapital).toBe(330);
+    const moved = buildTurnover(base({ kits, shelf: shelfFromStock(stock, kits), transactions: [tx('2026-09-16 12:00:00', 'C1', 2)] }));
+    // days 11..15: C1 = 7 − 2 = 5 → floor(5/2) = 2 kits × 110 = 220; days 16..20: 3 × 110 = 330; (5×220 + 5×330) / 10 = 275 (not 330 from 2.5 / 3.5 kits)
+    expect(moved.articles.find((a) => a.article === 'KIT')!.avgWarehouseCapital).toBe(275);
+  });
+  it('100.8 R-053 the scarcest component sets the day: C2 (4 pcs) arrives on the last day → only that day has 4 kits × 80 → 320 / 10 = 32', () => {
+    const kits = [virtualKit('KIT', [['C1', 1], ['C2', 1]])];
+    const r = buildTurnover(base({
+      kits, shelf: shelfFromStock([{ article: 'C1', quantity: 10, avgCost: 30 }, { article: 'C2', quantity: 4, avgCost: 50 }], kits),
+      transactions: [tx('2026-09-20 12:00:00', 'C2', 4)],
+    }));
+    // C2 history: days 11..19 = 4 − 4 = 0 → min(10, 0) = 0 kits; day 20 = 4 → 4 kits × (30 + 50) = 320; 320 / 10 = 32
+    expect(r.articles.find((a) => a.article === 'KIT')!.avgWarehouseCapital).toBe(32);
+  });
+  it('100.8 R-053 a day is valued at the component\'s snapshot cost: B at 50 on two days (today 100) → (8×1000 + 2×500) / 10 = 900 for B and its kit', () => {
+    // two consecutive snapshot days with the same cost: the count of days at 50 is 2 whether a snapshot dated D
+    // is read as the close of D or of D−1 (R-054), and qty 10 equals today's shelf, so the figure holds under both readings
+    const kits = [virtualKit('KB', [['B', 1]])];
+    const r = buildTurnover(base({
+      kits, shelf: shelfFromStock([{ article: 'B', quantity: 10, avgCost: 100 }], kits),
+      snapshots: [snap('2026-09-15', 'B', 10, 50), snap('2026-09-16', 'B', 10, 50)],
+    }));
+    expect(r.articles.find((a) => a.article === 'B')!.avgWarehouseCapital).toBe(900);
+    expect(r.articles.find((a) => a.article === 'KB')!.avgWarehouseCapital).toBe(900);
+  });
+  it('100.8 R-053 a snapshot row of the kit itself is ignored: kit {A×1}, A 10@100, kit snapshots 99 pcs at 1 → still 10 × 100 = 1000', () => {
+    const kits = [virtualKit('K', [['A', 1]])];
+    const r = buildTurnover(base({
+      kits, shelf: shelfFromStock([{ article: 'A', quantity: 10, avgCost: 100 }], kits),
+      snapshots: [snap('2026-09-15', 'K', 99, 1), snap('2026-09-16', 'K', 99, 1)],
+    }));
+    expect(r.articles.find((a) => a.article === 'K')!.avgWarehouseCapital).toBe(1000);
+  });
+});
+
+describe('100.8 R-052 slow/fast capital counts each rouble once', () => {
+  const kits2 = [virtualKit('K1', [['A', 1]]), virtualKit('K2', [['A', 1]])];
+  const stockA = [{ article: 'A', quantity: 10, avgCost: 100 }];
+  const days10 = periodDays('2026-09-20', 10);
+  it('100.8 R-052 probe: two slow kits share component A → slowCapital 1000 = capitalNow, slowSharePct 100', () => {
+    const p = buildTurnover(base({ kits: kits2, shelf: shelfFromStock(stockA, kits2) })).portfolio;
+    // A shelf 10 × 100 = 1000 counted once (kit shelves never enter); no Ozon data
+    expect(p.capitalNow).toBe(1000);
+    expect(p.slowCapital).toBe(1000);
+    expect(p.slowSharePct).toBe(100);
+  });
+  it('100.8 R-052 one fast path wins: K1 fast, K2 slow → A\'s shelf 1000 and K1\'s Ozon 100 are fast, K2\'s Ozon 200 is slow', () => {
+    const rows = [
+      ...days10.map((d) => kan(d, 'K1', { stockCost: 100, stockQty: 1, costOfSales: 500, boughtQty: 1 })),
+      ...days10.map((d) => kan(d, 'K2', { stockCost: 200, stockQty: 2 })),
+    ];
+    const r = buildTurnover(base({ kits: kits2, shelf: shelfFromStock(stockA, kits2), kanRows: rows }));
+    expect(r.articles.find((a) => a.article === 'K1')!.status).toBe('fast');
+    expect(r.articles.find((a) => a.article === 'K2')!.status).toBe('slow');
+    const p = r.portfolio;
+    // K1: avg capital 1000 (A) + 100 = 1100, cost of sales 5000 → turns 4.55 → 2 days per turn < 20 = fast; K2: no sales = slow
+    // capitalNow = A shelf 1000 + Ozon 100 + 200 = 1300; fast = 1000 + 100 = 1100; slow = 200; 200 / 1300 = 15.38 %
+    expect(p.capitalNow).toBe(1300);
+    expect(p.fastCapital).toBe(1100);
+    expect(p.slowCapital).toBe(200);
+    expect(p.slowSharePct).toBe(15.38);
+  });
+  it('100.8 R-052 one normal and one slow kit → A\'s shelf is neither slow nor fast; only the slow kit\'s Ozon 500 is slow', () => {
+    const rows = [
+      // K1: avg capital 1000 (A) + 1000 = 2000; cost of sales 10 × 80 = 800 → turns 0.4 → 25 days per turn → normal (20..45)
+      ...days10.map((d) => kan(d, 'K1', { stockCost: 1000, stockQty: 10, costOfSales: 80, boughtQty: 1 })),
+      ...days10.map((d) => kan(d, 'K2', { stockCost: 500, stockQty: 5 })),
+    ];
+    const r = buildTurnover(base({ kits: kits2, shelf: shelfFromStock(stockA, kits2), kanRows: rows }));
+    expect(r.articles.find((a) => a.article === 'K1')!.status).toBe('normal');
+    expect(r.articles.find((a) => a.article === 'K2')!.status).toBe('slow');
+    const p = r.portfolio;
+    // capitalNow = 1000 + 1000 + 500 = 2500; slow = 500 (K2 Ozon); fast = 0; 500 / 2500 = 20 %
+    expect(p.capitalNow).toBe(2500);
+    expect(p.slowCapital).toBe(500);
+    expect(p.fastCapital).toBe(0);
+    expect(p.slowSharePct).toBe(20);
+  });
+  it('100.8 R-052 A sells slowly on Ozon itself but its kit is fast → A\'s shelf is fast, A\'s own Ozon 100 stays slow', () => {
+    const kits = [virtualKit('K', [['A', 1]])];
+    const rows = [
+      ...days10.map((d) => kan(d, 'A', { stockCost: 100, stockQty: 1 })),
+      ...days10.map((d) => kan(d, 'K', { stockCost: 100, stockQty: 1, costOfSales: 500, boughtQty: 1 })),
+    ];
+    const r = buildTurnover(base({ kits, shelf: shelfFromStock(stockA, kits), kanRows: rows }));
+    expect(r.articles.find((a) => a.article === 'A')!.status).toBe('slow');
+    expect(r.articles.find((a) => a.article === 'K')!.status).toBe('fast');
+    const p = r.portfolio;
+    // K: 1100 avg capital, cost of sales 5000 → 2 days per turn = fast. Paths of A: kit fast + own slow → fast.
+    // capitalNow = 1000 + 100 + 100 = 1200; fast = 1000 (shelf) + 100 (K's Ozon); slow = 100 (A's Ozon); 100 / 1200 = 8.33 %
+    expect(p.capitalNow).toBe(1200);
+    expect(p.fastCapital).toBe(1100);
+    expect(p.slowCapital).toBe(100);
+    expect(p.slowSharePct).toBe(8.33);
+  });
+  it('100.8 R-052 invariant on a mixed fixture: slowCapital + fastCapital ≤ capitalNow and slowSharePct ≤ 100', () => {
+    const kits = [virtualKit('KIT', [['C1', 2], ['C2', 1]]), virtualKit('KIT2', [['C1', 1]])];
+    const stock = [
+      { article: 'C1', quantity: 10, avgCost: 30 }, { article: 'C2', quantity: 4, avgCost: 50 },
+      { article: 'B', quantity: 5, avgCost: 10 }, { article: 'A', quantity: 3, avgCost: 20 },
+    ];
+    const rows = [
+      ...days10.map((d) => kan(d, 'KIT', { stockCost: 1100, stockQty: 10, costOfSales: 110, boughtQty: 1 })),
+      ...days10.map((d) => kan(d, 'KIT2', { stockCost: 100, stockQty: 1 })),
+      ...days10.map((d) => kan(d, 'B', { stockCost: 50, stockQty: 5 })),
+      ...days10.map((d) => kan(d, 'A', { stockCost: 30, stockQty: 1, costOfSales: 500, boughtQty: 2 })),
+    ];
+    const p = buildTurnover(base({ kits, shelf: shelfFromStock(stock, kits), kanRows: rows })).portfolio;
+    expect(p.slowCapital).toBeGreaterThan(0);
+    expect(p.fastCapital).toBeGreaterThan(0);
+    expect(p.slowCapital + p.fastCapital).toBeLessThanOrEqual(p.capitalNow);
+    expect(p.slowSharePct).toBeLessThanOrEqual(100);
+  });
+});
+
+describe('100.8 R-051 goods in transit to an Ozon FBO supply', () => {
+  const ship = (over: Partial<ExternalShipment> = {}): ExternalShipment => ({
+    postingId: 'p1', detectedAt: '2026-10-18 10:00:00', shipmentDate: '2026-10-18', status: 'processed',
+    itemsJSON: JSON.stringify([{ offerId: 'A', quantity: 10 }]), transGroupInfo: JSON.stringify(['t1']),
+    orderId: 'O1', ozonStatus: 'IN_TRANSIT', ozonStatusDate: '', ...over,
+  });
+  const out = (id: string, date: string, article: string, quantity: number, writeOffCost: number, total: number, over: Partial<Transaction> = {}): Transaction =>
+    ({ id, date, type: 'Расход', article, quantity, writeOffCost, total, price: 0, destination: 'Ozon', ...over } as Transaction);
+  const lotsOf = (shipments: ExternalShipment[], transactions: Transaction[]): TransitLot[] => transitLots({ shipments, transactions, skus: skus2 });
+  const tx1 = out('t1', '2026-10-18 14:00:00', 'A', 10, 1000, 1240);
+
+  it('100.8 R-051 an IN_TRANSIT supply gives an open lot at the write-off cost: 1000 / 10 = 100 per piece (not the total 1240)', () => {
+    expect(lotsOf([ship()], [tx1])).toEqual([{ article: 'A', qty: 10, unitCost: 100, fromDay: '2026-10-18', toDay: null }]);
+  });
+  it('100.8 R-051 an acceptance stage or a cleared status closes the lot on the status day', () => {
+    const accepted = lotsOf([ship({ ozonStatus: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', ozonStatusDate: '2026-10-19 09:00:00' })], [tx1]);
+    expect(accepted).toEqual([{ article: 'A', qty: 10, unitCost: 100, fromDay: '2026-10-18', toDay: '2026-10-19' }]);
+    const completed = lotsOf([ship({ ozonStatus: 'COMPLETED', ozonStatusDate: '2026-10-19 09:00:00' })], [tx1]);
+    expect(completed[0].toDay).toBe('2026-10-19');
+    const cancelled = lotsOf([ship({ ozonStatus: 'CANCELLED', ozonStatusDate: '2026-10-19 09:00:00' })], [tx1]);
+    expect(cancelled[0].toDay).toBe('2026-10-19');
+  });
+  it('100.8 R-051 no lot for an unprocessed, ignored or virtual row, nor for an empty or unknown Ozon status', () => {
+    expect(lotsOf([ship({ status: 'new' })], [tx1])).toEqual([]);
+    expect(lotsOf([ship({ status: 'ignored' })], [tx1])).toEqual([]);
+    expect(lotsOf([ship({ isVirtual: true })], [tx1])).toEqual([]);
+    expect(lotsOf([ship({ ozonStatus: '' })], [tx1])).toEqual([]);
+    expect(lotsOf([ship({ ozonStatus: 'SOMETHING_NEW' })], [tx1])).toEqual([]);
+  });
+  it('100.8 R-051 a virtual kit row costs its component rows: (120 + 100) / 2 = 110 per kit, one lot for K and none for components', () => {
+    const txs = [
+      out('k1', '2026-10-18 14:00:00', 'K', 2, 0, 300, { groupId: 'g1' }),
+      out('c1', '2026-10-18 14:00:00', 'A', 2, 0, 120, { groupId: 'g1', isComponent: true }),
+      out('c2', '2026-10-18 14:00:00', 'B', 2, 0, 100, { groupId: 'g1', isComponent: true }),
+    ];
+    const lots = lotsOf([ship({ itemsJSON: JSON.stringify([{ offerId: 'K', quantity: 2 }]), transGroupInfo: JSON.stringify(['k1', 'c1', 'c2']) })], txs);
+    expect(lots).toEqual([{ article: 'K', qty: 2, unitCost: 110, fromDay: '2026-10-18', toDay: null }]);
+  });
+  it('100.8 R-051 after a partial return only the shipped quantity is in transit: shipped 6 of 10 → qty 6 at 100', () => {
+    const shippedJSON = JSON.stringify({ lines: [{ offerId: 'A', article: 'A', declared: 10, shipped: 6 }], returnTxIds: [], returnedAt: '', by: '' });
+    expect(lotsOf([ship({ shippedJSON })], [tx1])).toEqual([{ article: 'A', qty: 6, unitCost: 100, fromDay: '2026-10-18', toDay: null }]);
+  });
+  it('100.8 R-051 two rows of one order share the write-off: lot 6 stays open, lot 4 closed on 19.10, both at 100', () => {
+    const txs = [out('t5a', '2026-10-18 10:00:00', 'A', 6, 600, 700), out('t5b', '2026-10-18 16:00:00', 'A', 4, 400, 480)];
+    const shared = JSON.stringify(['t5a', 't5b']);
+    const lots = lotsOf([
+      ship({ postingId: 'p1', orderId: 'O5', transGroupInfo: shared, itemsJSON: JSON.stringify([{ offerId: 'A', quantity: 6 }]) }),
+      ship({ postingId: 'p2', orderId: 'O5', transGroupInfo: shared, itemsJSON: JSON.stringify([{ offerId: 'A', quantity: 4 }]),
+        ozonStatus: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', ozonStatusDate: '2026-10-19 09:00:00' }),
+    ], txs);
+    // unit cost = (600 + 400) / (6 + 4) = 100
+    expect(lots).toHaveLength(2);
+    expect(lots).toContainEqual({ article: 'A', qty: 6, unitCost: 100, fromDay: '2026-10-18', toDay: null });
+    expect(lots).toContainEqual({ article: 'A', qty: 4, unitCost: 100, fromDay: '2026-10-18', toDay: '2026-10-19' });
+  });
+  it('100.8 R-051 probe: shelf A 0, open lot 10 × 100 from 18.10 → capitalNow 1000 and A stays in the list with average capital 1000', () => {
+    const transit: TransitLot[] = [{ article: 'A', qty: 10, unitCost: 100, fromDay: '2026-10-18', toDay: null }];
+    const r = buildTurnover(base2({ shelf: [{ article: 'A', quantity: 0, avgCost: 100 }], transit }));
+    const a = r.articles.find((x) => x.article === 'A')!;
+    expect(a).toBeDefined();
+    // open lot counts on both period days 18 and 19: (1000 + 1000) / 2 = 1000
+    expect(a.transitCost).toBe(1000);
+    expect(a.avgTransitCapital).toBe(1000);
+    expect(a.avgCapital).toBe(1000);
+    expect(r.portfolio.transitCost).toBe(1000);
+    expect(r.portfolio.avgTransitCapital).toBe(1000);
+    expect(r.portfolio.capitalNow).toBe(1000);
+    expect(r.portfolio.avgCapital).toBe(1000);
+  });
+  it('100.8 R-051 a lot closed on 19.10 counts only the days before it: period 17..20, lot 17 → 19 → (1000 + 1000) / 4 = 500, not in capitalNow', () => {
+    const transit: TransitLot[] = [{ article: 'A', qty: 10, unitCost: 100, fromDay: '2026-10-17', toDay: '2026-10-19' }];
+    const r = buildTurnover(base2({
+      shelf: [{ article: 'A', quantity: 5, avgCost: 100 }], transit,
+      settings: { ...settings2, periodDays: 4 }, latestKanDay: '2026-10-20', now: new Date('2026-10-21T12:00:00'),
+    }));
+    const a = r.articles.find((x) => x.article === 'A')!;
+    // days 17 and 18 satisfy d < toDay (19), days 19 and 20 do not; 2 × 1000 / 4 = 500
+    expect(a.avgTransitCapital).toBe(500);
+    expect(r.portfolio.avgTransitCapital).toBe(500);
+    expect(a.transitCost).toBe(0);
+    expect(r.portfolio.capitalNow).toBe(500);
   });
 });
 

@@ -29,7 +29,7 @@ import { buildFreeStockCsv } from '../lib/freeStockCsv';
 import { resolveOzonArticle, OzonCoverageResult } from '../lib/ozonCoverage';
 import { buildCoverageSource, computeCoverage } from '../lib/ozonCoverageSource';
 import { coverageDays, daysLying, lastReceiptByArticle, turnoverSortValue } from '../lib/turnoverDays';
-import { buildTurnover, shelfFromStock } from '../lib/turnover';
+import { buildTurnover, shelfFromStock, transitLots } from '../lib/turnover';
 
 // Колонки таблицы остатков, которые можно скрывать. «Артикул» скрыть нельзя — это опора строки.
 const DASH_TOGGLEABLE_COLS: { key: string; label: string }[] = [
@@ -207,13 +207,13 @@ export const Dashboard: React.FC = React.memo(() => {
     const map: Record<string, { daysPerTurn: number | null; status: string; turns: number | null }> = {};
     if (!turnoverData) return map;
     const r = buildTurnover({
-      kanRows: turnoverData.kanRows, snapshots: turnoverData.snapshots, shelf: shelfFromStock(stock, kits), transactions, skus, kits,
+      kanRows: turnoverData.kanRows, snapshots: turnoverData.snapshots, shelf: shelfFromStock(stock, kits), transit: transitLots({ shipments: externalShipments, transactions, skus }), transactions, skus, kits,
       settings: { periodDays: turnoverPeriodDays, slowDays: Number(ozonSettings.turnoverSlowDays) || 45, fastDays: Number(ozonSettings.turnoverFastDays) || 20 },
       latestKanDay: turnoverData.latestKanDay,
     });
     for (const a of r.articles) map[a.article] = { daysPerTurn: a.daysPerTurn, status: a.status, turns: a.turns };
     return map;
-  }, [turnoverData, stock, kits, transactions, skus, turnoverPeriodDays, ozonSettings.turnoverSlowDays, ozonSettings.turnoverFastDays]);
+  }, [turnoverData, stock, kits, transactions, skus, externalShipments, turnoverPeriodDays, ozonSettings.turnoverSlowDays, ozonSettings.turnoverFastDays]);
 
   // Item 88 ticket 03: one shared coverage source, shared with OzonStocksTab.tsx. Cabinet 'all' —
   // the dashboard never splits by shop — and `waitForClusterRefs: false`, so it keeps not

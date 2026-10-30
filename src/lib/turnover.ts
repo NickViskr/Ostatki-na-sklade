@@ -25,8 +25,11 @@
  * quantity at the kit's cost. The portfolio counts the warehouse capital of PHYSICAL articles
  * only, so a kit and its components are not added twice.
  */
-import { KitItem, SKUItem, Transaction } from '../types';
+import { ExternalShipment, KitItem, SKUItem, Transaction } from '../types';
 import { resolveOzonArticle } from './ozonCoverage';
+import { isAcceptanceStage } from './ozonStatus';
+import { isPendingActive, isPendingCleared } from './ozonPending';
+import { parseShippedRecord } from './ozonUnshipped';
 import { parseAppDate } from './utils';
 
 export interface KanDayRow {
@@ -80,8 +83,11 @@ export interface ArticleTurnover {
   ozonStockCost: number;
   deliveringCost: number;
   returningCost: number;
+  /** Item 100.8 (R-051): goods written off to an Ozon supply that Ozon has not accepted yet. */
+  transitCost: number;
   avgWarehouseCapital: number;
   avgOzonCapital: number;
+  avgTransitCapital: number;
   avgCapital: number;
   costOfSales: number;
   grossProfit: number;
@@ -105,10 +111,12 @@ export interface PortfolioTurnover {
   ozonStockCost: number;
   deliveringCost: number;
   returningCost: number;
+  transitCost: number;
   capitalNow: number;
   avgCapital: number;
   avgWarehouseCapital: number;
   avgOzonCapital: number;
+  avgTransitCapital: number;
   costOfSales: number;
   grossProfit: number;
   turns: number | null;
@@ -131,6 +139,8 @@ export interface TurnoverInput {
   kanRows: KanDayRow[];
   snapshots: SnapshotRow[];
   shelf: ShelfItem[];
+  /** Item 100.8 (R-051): lots on their way to an Ozon supply, from `transitLots`. */
+  transit?: TransitLot[];
   transactions: Transaction[];
   skus: SKUItem[];
   kits: KitItem[];
@@ -212,7 +222,7 @@ export function shelfHistory(
   article: string, shelfNow: number, days: string[], snapshots: SnapshotRow[], transactions: Transaction[]
 ): number[] {
   const snapByDay = new Map<string, number>();
-  for (const s of snapshots) if (s.article === article) snapByDay.set(s.date, Number(s.qty) || 0);
+  for (const s of snapshots) if (s.article === article) snapByDay.set(snapshotDay(s), Number(s.qty) || 0);
   const moves: Array<{ day: string; delta: number }> = [];
   for (const t of transactions || []) {
     if (t.article !== article) continue;
@@ -234,6 +244,144 @@ function round2(v: number): number {
   return Math.round(v * 100) / 100;
 }
 
+/** The day a snapshot row is keyed by. One place, so a later change of the reading (R-054) touches only this. */
+function snapshotDay(s: SnapshotRow): string {
+  return s.date;
+}
+
+/**
+ * Item 100.8 (R-053): the warehouse capital of a virtual kit on each period day. The kit
+ * quantity of a day is the largest whole number of kits the components' shelf history of that
+ * day allows; it is valued at the sum of the components' costs of that day (their snapshot
+ * cost, else today's). Snapshot rows of the kit itself are never read.
+ */
+export function kitWarehouseDaily(
+  kit: KitItem, days: string[], shelfByArticle: Map<string, ShelfItem>,
+  snapshots: SnapshotRow[], transactions: Transaction[]
+): number[] {
+  const components = (kit.components || []).map((c) => {
+    const item = shelfByArticle.get(c.componentSku);
+    const now = item ? Number(item.quantity) || 0 : 0;
+    const costByDay = new Map<string, number>();
+    for (const s of snapshots) if (s.article === c.componentSku) costByDay.set(snapshotDay(s), Number(s.avgCost) || 0);
+    return {
+      required: Number(c.quantity) || 1,
+      todayCost: item ? Number(item.avgCost) || 0 : 0,
+      costByDay,
+      history: shelfHistory(c.componentSku, now, days, snapshots, transactions),
+    };
+  });
+  return days.map((day, i) => {
+    if (components.length === 0) return 0;
+    let kitQty = Infinity;
+    let unitCost = 0;
+    for (const c of components) {
+      kitQty = Math.min(kitQty, Math.floor(c.history[i] / c.required));
+      unitCost += c.required * (c.costByDay.has(day) ? c.costByDay.get(day)! : c.todayCost);
+    }
+    return kitQty * unitCost;
+  });
+}
+
+/** Item 100.8 (R-051): pieces written off to an Ozon supply that Ozon has not accepted yet. */
+export interface TransitLot {
+  article: string;
+  qty: number;
+  unitCost: number;
+  /** First local day the goods were off the shelf and not yet on Ozon. */
+  fromDay: string;
+  /** Local day Ozon took the goods over (acceptance began) or the supply was cleared; null while still on the way. */
+  toDay: string | null;
+}
+
+function parseJsonArray(json?: string): any[] {
+  const raw = String(json || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Goods in transit: «Расход» rows of processed supplies whose Ozon status says Ozon has not
+ * yet taken them (or took them after the period day). Cost is the WRITE-OFF cost, never the
+ * row total (the total includes the sale markup/services); a virtual-kit row costs its
+ * component rows. Rows of one order share the order's write-off transactions, so the unit
+ * cost is averaged per article over the whole order and each shipment row gets its own qty.
+ */
+export function transitLots(input: { shipments: ExternalShipment[]; transactions: Transaction[]; skus: SKUItem[] }): TransitLot[] {
+  const txById = new Map<string, Transaction>();
+  for (const t of input.transactions || []) txById.set(String(t.id), t);
+
+  const rows = (input.shipments || []).filter((s) => String(s.status || '').trim().toLowerCase() === 'processed' && s.isVirtual !== true);
+  const rowsByOrder = new Map<string, ExternalShipment[]>();
+  for (const s of rows) {
+    const key = String(s.orderId || '').trim() || `posting:${s.postingId}`;
+    const list = rowsByOrder.get(key) || [];
+    list.push(s);
+    rowsByOrder.set(key, list);
+  }
+
+  const lots: TransitLot[] = [];
+  for (const orderRows of rowsByOrder.values()) {
+    const txIds = new Set<string>();
+    for (const s of orderRows) for (const id of parseJsonArray(s.transGroupInfo)) txIds.add(String(id));
+    const orderTxs = [...txIds].map((id) => txById.get(id)).filter((t): t is Transaction => !!t);
+
+    const perArticle = new Map<string, { cost: number; qty: number; fromDay: string }>();
+    for (const t of orderTxs) {
+      if (t.type !== 'Расход' || t.isComponent === true) continue;
+      const date = parseAppDate(t.date);
+      if (!date) continue;
+      let cost = Number(t.writeOffCost) || 0;
+      if (t.groupId) {
+        for (const c of orderTxs) if (c.isComponent === true && c.groupId === t.groupId) cost += Number(c.total) || 0;
+      }
+      const day = localDay(date);
+      const acc = perArticle.get(t.article) || { cost: 0, qty: 0, fromDay: day };
+      acc.cost += cost;
+      acc.qty += Number(t.quantity) || 0;
+      if (day < acc.fromDay) acc.fromDay = day;
+      perArticle.set(t.article, acc);
+    }
+
+    for (const s of orderRows) {
+      const status = String(s.ozonStatus || '').trim();
+      let toDay: string | null;
+      if (isAcceptanceStage(status) || isPendingCleared(status)) {
+        const statusDate = parseAppDate(s.ozonStatusDate);
+        if (!statusDate) continue;
+        toDay = localDay(statusDate);
+      } else if (isPendingActive(status)) {
+        toDay = null;
+      } else {
+        continue;
+      }
+      const shipped = parseShippedRecord(s.shippedJSON);
+      for (const item of parseJsonArray(s.itemsJSON)) {
+        if (!item) continue;
+        const rawQty = item.quantity !== undefined && item.quantity !== null ? item.quantity : item.qty;
+        let qty = Number(rawQty) || 0;
+        const offerId = String(item.offerId || item.offer_id || '').trim();
+        const article = resolveOzonArticle(input.skus, offerId, String(item.barcode || '').trim());
+        if (shipped) {
+          const line = shipped.lines.find((l) => l && ((offerId && String(l.offerId || '').trim() === offerId) || (article && String(l.article || '').trim() === article)));
+          if (line && line.shipped !== undefined && line.shipped !== null) qty = Math.min(qty, Number(line.shipped) || 0);
+        }
+        const acc = perArticle.get(article);
+        if (qty <= 0 || !acc || !(acc.qty > 0)) continue;
+        const unitCost = acc.cost / acc.qty;
+        if (!(unitCost > 0)) continue;
+        lots.push({ article, qty, unitCost, fromDay: acc.fromDay, toDay });
+      }
+    }
+  }
+  return lots;
+}
+
 export function buildTurnover(input: TurnoverInput): TurnoverResult {
   const now = input.now || new Date();
   const today = localDay(now);
@@ -248,8 +396,10 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
   const kitCost = new Map<string, number>();
   const shelfByArticle = new Map<string, ShelfItem>();
   for (const s of input.shelf) shelfByArticle.set(s.article, s);
+  const virtualKits = new Map<string, KitItem>();
   for (const k of input.kits || []) {
     if (k.type !== 'virtual') continue;
+    virtualKits.set(k.kitSku, k);
     let cost = 0;
     for (const c of k.components || []) {
       const list = kitOf.get(c.componentSku) || [];
@@ -286,7 +436,14 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
     if (!lastReceipt.has(t.article) || day > lastReceipt.get(t.article)!) lastReceipt.set(t.article, day);
   }
 
-  const articleSet = new Set<string>([...input.shelf.map((s) => s.article), ...kanByArticle.keys()]);
+  const transitByArticle = new Map<string, TransitLot[]>();
+  for (const lot of input.transit || []) {
+    const list = transitByArticle.get(lot.article) || [];
+    list.push(lot);
+    transitByArticle.set(lot.article, list);
+  }
+
+  const articleSet = new Set<string>([...input.shelf.map((s) => s.article), ...kanByArticle.keys(), ...transitByArticle.keys()]);
   const articles: ArticleTurnover[] = [];
 
   for (const article of articleSet) {
@@ -298,10 +455,16 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
 
     // Warehouse capital per day: snapshots carry their own cost; reconstructed days use today's.
     const snapCost = new Map<string, number>();
-    for (const s of input.snapshots) if (s.article === article) snapCost.set(s.date, Number(s.avgCost) || 0);
-    const history = shelfHistory(article, shelfQty, days, input.snapshots, isKit ? [] : input.transactions);
+    for (const s of input.snapshots) if (s.article === article) snapCost.set(snapshotDay(s), Number(s.avgCost) || 0);
+    const kitDef = isKit ? virtualKits.get(article) : undefined;
     let whSum = 0;
-    for (let i = 0; i < days.length; i++) whSum += history[i] * (snapCost.has(days[i]) ? snapCost.get(days[i])! : unitCost);
+    if (kitDef) {
+      // R-053: a virtual kit follows its components' history, not its own rows or snapshots.
+      for (const v of kitWarehouseDaily(kitDef, days, shelfByArticle, input.snapshots, input.transactions)) whSum += v;
+    } else {
+      const history = shelfHistory(article, shelfQty, days, input.snapshots, isKit ? [] : input.transactions);
+      for (let i = 0; i < days.length; i++) whSum += history[i] * (snapCost.has(days[i]) ? snapCost.get(days[i])! : unitCost);
+    }
     const avgWarehouseCapital = round2(whSum / period);
 
     const rows = kanByArticle.get(article) || [];
@@ -328,7 +491,18 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
       returningCost += r.returningCost;
     }
     const avgOzonCapital = round2(ozonSum / period);
-    const avgCapital = round2(avgWarehouseCapital + avgOzonCapital);
+
+    // R-051: a lot counts on day d from its first day up to (not including) the day Ozon took it over.
+    const lots = transitByArticle.get(article) || [];
+    let transitSum = 0, transitNow = 0;
+    for (const lot of lots) {
+      const value = (Number(lot.qty) || 0) * (Number(lot.unitCost) || 0);
+      for (const d of days) if (lot.fromDay <= d && (lot.toDay === null || d < lot.toDay)) transitSum += value;
+      if (lot.toDay === null) transitNow += value;
+    }
+    const avgTransitCapital = round2(transitSum / period);
+    const transitCost = round2(transitNow);
+    const avgCapital = round2(avgWarehouseCapital + avgOzonCapital + avgTransitCapital);
 
     const turns = avgCapital > 0 ? costOfSales / avgCapital : null;
     const daysPerTurn = turns !== null && turns > 0 ? Math.round(period / turns) : null;
@@ -340,7 +514,7 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
 
     // Nothing anywhere and nothing sold: an article KAN still lists but the business no longer
     // holds (live 2026-09-22: six such rows). It is not «slow» — it is absent, and is left out.
-    if (avgCapital === 0 && shelfQty === 0 && ozonQty === 0 && costOfSales === 0) continue;
+    if (avgCapital === 0 && shelfQty === 0 && ozonQty === 0 && costOfSales === 0 && transitCost === 0) continue;
 
     const kitsOfThis = kitOf.get(article) || [];
     let status: TurnoverStatus;
@@ -353,7 +527,7 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
     articles.push({
       article, isKit, kitOf: kitsOfThis, kanArticles: [...(kanNames.get(article) || [])].sort(),
       shelfQty, shelfCapital, ozonQty, ozonStockCost: round2(ozonStockCost), deliveringCost: round2(deliveringCost),
-      returningCost: round2(returningCost), avgWarehouseCapital, avgOzonCapital, avgCapital,
+      returningCost: round2(returningCost), transitCost, avgWarehouseCapital, avgOzonCapital, avgTransitCapital, avgCapital,
       costOfSales: round2(costOfSales), grossProfit: round2(grossProfit), boughtQty, orderedQty,
       turns: turns === null ? null : round2(turns), daysPerTurn, gmroiPct, coverDays, lastSaleDay, lastReceiptDay, ageDays, status,
     });
@@ -368,25 +542,37 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
   let shelfCapital = 0, avgWarehouseCapital = 0;
   for (const a of physical) { shelfCapital += a.shelfCapital; avgWarehouseCapital += a.avgWarehouseCapital; }
   let ozonStockCost = 0, deliveringCost = 0, returningCost = 0, avgOzonCapital = 0, costOfSales = 0, grossProfit = 0;
-  let avgOzonStockOnly = 0;
+  let avgOzonStockOnly = 0, transitCost = 0, avgTransitCapital = 0;
   for (const a of articles) {
     ozonStockCost += a.ozonStockCost; deliveringCost += a.deliveringCost; returningCost += a.returningCost;
+    transitCost += a.transitCost; avgTransitCapital += a.avgTransitCapital;
     avgOzonCapital += a.avgOzonCapital; costOfSales += a.costOfSales; grossProfit += a.grossProfit;
   }
   for (const r of input.kanRows || []) if (daySet.has(r.date)) avgOzonStockOnly += r.stockCost;
   avgOzonStockOnly /= period;
-  const avgCapital = round2(avgWarehouseCapital + avgOzonCapital);
+  const avgCapital = round2(avgWarehouseCapital + avgOzonCapital + avgTransitCapital);
   const turns = avgCapital > 0 ? costOfSales / avgCapital : null;
-  const capitalNow = round2(shelfCapital + ozonStockCost + deliveringCost + returningCost);
+  const capitalNow = round2(shelfCapital + ozonStockCost + deliveringCost + returningCost + transitCost);
   const counts = { fast: 0, normal: 0, slow: 0, component: 0 };
   let slowCapital = 0, fastCapital = 0;
+  // R-052: each rouble is counted once. The Ozon side (stock, delivery, returns, transit) of every
+  // article counts by its own status. The shelf belongs to physical articles only and counts by the
+  // paths that hold it: the statuses of the kits it is a component of, plus its own status unless
+  // it is only a «component». Slow when every path is slow, fast when any path is fast; a kit's
+  // own shelf capital never enters (it is the components' shelf).
+  const statusOf = new Map<string, TurnoverStatus>();
+  for (const a of articles) statusOf.set(a.article, a.status);
   for (const a of articles) {
     counts[a.status] += 1;
-    // A slow kit freezes its components' capital: the kit's shelf counts here even though the
-    // portfolio total counts the physical components (a share of a total, not an addition).
-    const own = a.shelfCapital + a.ozonStockCost + a.deliveringCost + a.returningCost;
-    if (a.status === 'slow') slowCapital += own;
-    if (a.status === 'fast') fastCapital += own;
+    const ozonSide = a.ozonStockCost + a.deliveringCost + a.returningCost + a.transitCost;
+    if (a.status === 'slow') slowCapital += ozonSide;
+    if (a.status === 'fast') fastCapital += ozonSide;
+    if (a.isKit) continue;
+    const paths: TurnoverStatus[] = [];
+    for (const k of a.kitOf) { const st = statusOf.get(k); if (st) paths.push(st); }
+    if (a.status !== 'component') paths.push(a.status);
+    if (paths.length > 0 && paths.every((st) => st === 'slow')) slowCapital += a.shelfCapital;
+    else if (paths.some((st) => st === 'fast')) fastCapital += a.shelfCapital;
   }
 
   return {
@@ -394,8 +580,8 @@ export function buildTurnover(input: TurnoverInput): TurnoverResult {
     portfolio: {
       periodDays: period, fromDay, toDay,
       shelfCapital: round2(shelfCapital), ozonStockCost: round2(ozonStockCost), deliveringCost: round2(deliveringCost),
-      returningCost: round2(returningCost), capitalNow, avgCapital,
-      avgWarehouseCapital: round2(avgWarehouseCapital), avgOzonCapital: round2(avgOzonCapital),
+      returningCost: round2(returningCost), transitCost: round2(transitCost), capitalNow, avgCapital,
+      avgWarehouseCapital: round2(avgWarehouseCapital), avgOzonCapital: round2(avgOzonCapital), avgTransitCapital: round2(avgTransitCapital),
       costOfSales: round2(costOfSales), grossProfit: round2(grossProfit),
       turns: turns === null ? null : round2(turns),
       daysPerTurn: turns !== null && turns > 0 ? Math.round(period / turns) : null,
