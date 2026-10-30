@@ -5141,9 +5141,10 @@ function stockCapitalizationTotal() {
 /**
  * Пишет в таблицу платёжного календаря одну строку: «дата — капитализация склада».
  *
- * Идемпотентна по дате: повторный запуск ПЕРЕЗАПИСЫВАЕТ строку этого дня, а не добавляет
- * вторую. Календарь берёт только те дни, которых у него ещё нет, и задним числом ничего не
- * перечитывает, поэтому задвоенная строка осталась бы в таблице навсегда.
+ * Idempotent per date: a repeat run does NOT touch the row of an existing day and does not
+ * add a second one - the first (nightly) value is the true close of the day and is kept. The
+ * calendar takes only days it does not have yet and never re-reads past days, so a duplicated
+ * row would stay in the sheet forever. To recompute a day, the owner deletes its row by hand.
  *
  * Ничего не бросает наружу: функция висит на ночном триггере, и падение означало бы письмо
  * об ошибке владельцу каждую ночь. Причина всегда уходит в журнал выполнений и в результат.
@@ -5180,16 +5181,17 @@ function writeStockSummary() {
   }
 
   const values = sheet.getDataRange().getValues();
-  let row = 0;
   for (let i = 1; i < values.length; i++) {
-    if (stockSummaryKeyOf(values[i][0]) === day.key) { row = i + 1; break; }
+    if (stockSummaryKeyOf(values[i][0]) === day.key) {
+      Logger.log('Стоимость остатков: строка за ' + day.key + ' уже есть — оставлена без изменений');
+      return { written: false, reason: 'exists', day: day.key, total: total };
+    }
   }
-  const replaced = row > 0;
-  if (!replaced) row = Math.max(sheet.getLastRow(), 1) + 1;
 
+  const row = Math.max(sheet.getLastRow(), 1) + 1;
   sheet.getRange(row, 1, 1, 2).setValues([[day.date, total]]);
-  Logger.log('Стоимость остатков: ' + day.key + ' = ' + total + ' ₽ (' + (replaced ? 'строка обновлена' : 'строка добавлена') + ')');
-  return { written: true, day: day.key, total: total, replaced: replaced };
+  Logger.log('Стоимость остатков: ' + day.key + ' = ' + total + ' ₽ (строка добавлена)');
+  return { written: true, day: day.key, total: total, replaced: false };
 }
 
 /** Ночной триггер выгрузки: 02:00 по времени скрипта, один раз в сутки. */

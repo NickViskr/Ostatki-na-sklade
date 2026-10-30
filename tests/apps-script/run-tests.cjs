@@ -3130,7 +3130,29 @@ function speedHarness(articles) {
     const res = h.context.writeStockSummary();
     const dump = h.dumpTargetSheet(SHEET);
     check('Стоимость остатков: повтор в тот же день НЕ задваивает строку', dump.length === 2, 'строк=' + dump.length);
-    check('Стоимость остатков: повтор перезаписывает значение', dump[1][1] === 1200 && res.replaced === true, 'B=' + dump[1][1]);
+    check('Стоимость остатков: повтор сохраняет первое значение (100.8 R-055)', dump[1][1] === 1000 && res.written !== true, 'B=' + dump[1][1] + ' written=' + res.written);
+  }
+
+  // ---- 100.8 R-055: a repeat run keeps the closed day's first value ----
+  {
+    const h = freshHarness();
+    h.setNow('2026-10-19T21:00:00Z'); // 02:00 Ekb on 20.10 -> row for 19.10
+    h.setScriptProperty(PROP, h.targetSpreadsheetId);
+    h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.context.writeStockSummary();
+    h.setNow('2026-10-20T07:00:00Z'); // noon 20.10; a receipt of 5 x 100 raises the stock
+    h.setStockSheet([{ article: 'A', quantity: 15, avgCost: 100, capitalization: 1500 }]);
+    const res = h.context.writeStockSummary();
+    const dump = h.dumpTargetSheet(SHEET);
+    check('100.8 R-055: repeat run the same day keeps 19.10 = 1000 after a receipt', dump[1][1] === 1000, 'B=' + dump[1][1]);
+    check('100.8 R-055: repeat run adds no second row and reports written !== true', dump.length === 2 && res.written !== true, 'rows=' + (dump.length - 1) + ' written=' + res.written);
+  }
+  {
+    const h = standWithStock([{ article: 'A', quantity: 1, avgCost: 7, capitalization: 7 }]);
+    h.setTargetSheet(SHEET, [['Дата', 'Капитализация, ₽'], ['09.09.2026', 999]]);
+    const res = h.context.writeStockSummary();
+    const dump = h.dumpTargetSheet(SHEET);
+    check('100.8 R-055: a hand-typed TEXT date row of that day is kept, no second row', dump.length === 2 && dump[1][1] === 999 && res.written !== true, JSON.stringify(dump));
   }
 
   // ---- Следующий день: история растёт ----
@@ -3151,7 +3173,7 @@ function speedHarness(articles) {
     h.setTargetSheet(SHEET, [['Дата', 'Капитализация, ₽'], ['09.09.2026', 999]]);
     h.context.writeStockSummary();
     const dump = h.dumpTargetSheet(SHEET);
-    check('Стоимость остатков: день узнаётся и в формате ДД.ММ.ГГГГ, строка не задваивается', dump.length === 2 && dump[1][1] === 7, JSON.stringify(dump));
+    check('Стоимость остатков: день узнаётся и в формате ДД.ММ.ГГГГ, строка не задваивается и не перезаписывается', dump.length === 2 && dump[1][1] === 999, JSON.stringify(dump));
   }
 
   // ---- Стёртые заголовки восстанавливаются ----
