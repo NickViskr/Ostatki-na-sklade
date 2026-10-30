@@ -15071,7 +15071,7 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   const REAL_ZONE = 'Asia/Yekaterinburg'; // appsscript.json; the stand hard-codes Europe/Moscow
   const freshReal = () => {
     const h = freshHarness();
-    h.context.Session.getScriptTimeZone = () => REAL_ZONE;
+    h.setScriptTimeZone(REAL_ZONE);
     h.setNow('2026-10-20T07:00:00Z');
     return h;
   };
@@ -15168,6 +15168,90 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
     const got = rows[0] && rows[0].detectedAt;
     check('100.9 R-068: «Дата обнаружения» of «Внешние отгрузки» (saveExternalShipments/getExternalShipments) reads back as written with spreadsheet zone UTC',
       got === WANTED, 'got=' + got + ' rows=' + rows.length);
+  }
+}
+
+// ================= Item 100.10 part 1: R-070 (the stand is weaker than real Apps Script) =================
+{
+  const hasSwitch = (h) => typeof h.setScriptTimeZone === 'function';
+  const INSTANT = Date.parse('2026-10-20T07:05:09Z'); // 12:05:09 Yekaterinburg, 10:05:09 Moscow
+  const fmt = (h, zone, pattern) => {
+    try { return h.context.Utilities.formatDate(new h.FakeDate(INSTANT), zone, pattern); } catch (e) { return 'THROWS: ' + e.message; }
+  };
+  {
+    const h = freshHarness();
+    const a = fmt(h, 'Asia/Yekaterinburg', "yyyy-MM-dd'T'HH:mm:ss");
+    const b = fmt(h, 'Europe/Moscow', "yyyy-MM-dd'T'HH:mm:ss");
+    check("100.10 R-070: formatDate supports yyyy-MM-dd'T'HH:mm:ss (Yekaterinburg and Moscow)",
+      a === '2026-10-20T12:05:09' && b === '2026-10-20T10:05:09', JSON.stringify({ ekb: a, msk: b }));
+  }
+  {
+    const h = freshHarness();
+    const a = fmt(h, 'Asia/Yekaterinburg', 'yyyy-MM-dd HH-mm');
+    const b = fmt(h, 'Europe/Moscow', 'yyyy-MM-dd HH-mm');
+    check('100.10 R-070: formatDate supports yyyy-MM-dd HH-mm (Yekaterinburg and Moscow)',
+      a === '2026-10-20 12-05' && b === '2026-10-20 10-05', JSON.stringify({ ekb: a, msk: b }));
+  }
+  {
+    const h = freshHarness();
+    const def = h.context.Session.getScriptTimeZone();
+    let after = null;
+    if (hasSwitch(h)) { h.setScriptTimeZone('Asia/Yekaterinburg'); after = h.context.Session.getScriptTimeZone(); }
+    check('100.10 R-070: setScriptTimeZone switches Session.getScriptTimeZone; the default stays Europe/Moscow',
+      hasSwitch(h) && def === 'Europe/Moscow' && after === 'Asia/Yekaterinburg', JSON.stringify({ hasSwitch: hasSwitch(h), def: def, after: after }));
+  }
+  {
+    const h = freshHarness();
+    let other = null;
+    if (hasSwitch(h)) { h.setScriptTimeZone('Asia/Yekaterinburg'); other = freshHarness().context.Session.getScriptTimeZone(); }
+    check('100.10 R-070: setScriptTimeZone is per harness instance (a fresh harness is back on Europe/Moscow)',
+      hasSwitch(h) && other === 'Europe/Moscow', JSON.stringify({ hasSwitch: hasSwitch(h), fresh: other }));
+  }
+  {
+    const isDate = (v) => Object.prototype.toString.call(v) === '[object Date]';
+    const appendRead = (mode, noFormat) => {
+      const h = freshHarness();
+      h.setSheetAutoDates(mode);
+      const sheet = h.ensureTransSheet();
+      if (noFormat) sheet.getRange(2, 1).setNumberFormat('@');
+      sheet.appendRow(['2026-10-14 15:30:00']);
+      return sheet.getRange(2, 1, 1, 1).getValues()[0][0];
+    };
+    const viaSetValues = (() => {
+      const h = freshHarness();
+      h.setSheetAutoDates('UTC');
+      const sheet = h.ensureTransSheet();
+      sheet.getRange(2, 1, 1, 1).setValues([['2026-10-14 15:30:00']]);
+      return sheet.getRange(2, 1, 1, 1).getValues()[0][0];
+    })();
+    const auto = appendRead('UTC', false);
+    check('100.10 R-070: appendRow of a yyyy-MM-dd HH:mm:ss text under setSheetAutoDates becomes a Date, like setValues',
+      isDate(viaSetValues) && isDate(auto) && auto.getTime() === Date.parse('2026-10-14T15:30:00Z'),
+      'appendRow gave ' + (isDate(auto) ? 'Date ' + auto.toISOString() : JSON.stringify(auto)));
+    const plain = appendRead(null, false);
+    check('100.10 R-070 control: appendRow keeps the text when setSheetAutoDates is off',
+      plain === '2026-10-14 15:30:00', JSON.stringify(plain));
+    const asText = appendRead('UTC', true);
+    check("100.10 R-070 control: appendRow keeps the text in a cell already formatted '@' under setSheetAutoDates",
+      asText === '2026-10-14 15:30:00', JSON.stringify(asText));
+  }
+  {
+    const h = freshHarness();
+    let got = null, err = '';
+    if (hasSwitch(h)) {
+      h.setScriptTimeZone('Asia/Yekaterinburg');
+      const sheet = h.ensureTransSheet();
+      const H = h.TRANS_HEADERS;
+      const row = H.map(() => '');
+      row[H.indexOf('ID')] = 'T-100-10';
+      row[H.indexOf('Дата')] = new h.FakeDate(INSTANT);
+      row[H.indexOf('Тип')] = 'Приход';
+      row[H.indexOf('Артикул')] = 'A';
+      sheet.__setData([H.slice(), row]);
+      try { const r = h.getTransactions({}); got = r.rows && r.rows[0] && r.rows[0].date; } catch (e) { err = e.message; }
+    }
+    check('100.10 R-070: under setScriptTimeZone(Yekaterinburg) a «Транзакции» row with a Date cell is read back as the Yekaterinburg wall time ISO string',
+      got === '2026-10-20T12:05:09', JSON.stringify({ hasSwitch: hasSwitch(h), got: got, err: err }));
   }
 }
 

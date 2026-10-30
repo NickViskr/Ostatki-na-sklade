@@ -32,6 +32,15 @@ function formatDateImpl(date, tz, fmt) {
     const ss = pad(shifted.getUTCSeconds());
     return `${yyyy}-${MM}-${dd} ${HH}:${mm}:${ss}`;
   }
+  if (fmt === "yyyy-MM-dd'T'HH:mm:ss") {
+    const HH = pad(shifted.getUTCHours());
+    const mm = pad(shifted.getUTCMinutes());
+    const ss = pad(shifted.getUTCSeconds());
+    return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}`;
+  }
+  if (fmt === 'yyyy-MM-dd HH-mm') {
+    return `${yyyy}-${MM}-${dd} ${pad(shifted.getUTCHours())}-${pad(shifted.getUTCMinutes())}`;
+  }
   throw new Error('Неподдерживаемый формат в стенде: ' + fmt);
 }
 
@@ -58,6 +67,10 @@ const logs = [];
 // older check changes; setSheetAutoDates(zone) switches the fake setValue/setValues to that behaviour, the wall time
 // being read in `zone` (a zone other than the script zone of the stand shows what the shift does to an age).
 let sheetAutoDateZone = null;
+
+// Script time zone returned by Session.getScriptTimeZone. Europe/Moscow by default (each fresh require of the harness
+// starts there); setScriptTimeZone(zone) switches it for the instance.
+let scriptTimeZone = 'Europe/Moscow';
 
 // ---------- Item «faster saveChinaBatch»: a global counter of Spreadsheet service calls ----------
 // Real Apps Script bills time for EVERY Spreadsheet service call (openById, getSheetByName,
@@ -92,7 +105,8 @@ function makeFakeSheet(headers, name) {
     getName() { return name; },
     appendRow(row) {
       apiCallCounts.appendRow++;
-      data.push(row.slice());
+      const rowIdx = data.length;
+      data.push(row.map((v, i) => autoDate(v, rowIdx + 1, i + 1)));
     },
     setFrozenRows() { /* нет визуального представления в стенде — заглушка */ },
     getLastRow() {
@@ -277,7 +291,7 @@ const sandbox = {
     Charset: { UTF_8: 'UTF_8' }
   },
   Session: {
-    getScriptTimeZone: () => 'Europe/Moscow'
+    getScriptTimeZone: () => scriptTimeZone
   },
   Logger: {
     log: (msg) => { logs.push(String(msg)); }
@@ -840,6 +854,8 @@ module.exports = {
   setupKanCostWatchTrigger: (...args) => context.setupKanCostWatchTrigger(...args),
   // Item 93 ticket 04: the fake sheets start to parse 'yyyy-MM-dd HH:mm:ss' texts into Dates (wall time in `zone`)
   // unless the cell is formatted '@'; setSheetAutoDates(null) turns it off again.
+  // Sets the zone Session.getScriptTimeZone returns (only zones tzOffsetMs knows); default Europe/Moscow.
+  setScriptTimeZone(zone) { tzOffsetMs(zone); scriptTimeZone = zone; },
   setSheetAutoDates(zone) { sheetAutoDateZone = zone || null; },
   // The triggers as plain data: { handler, kind, minutes }.
   scriptTriggers() { return projectTriggers.map((t) => ({ handler: t.spec.handler, kind: t.spec.kind, minutes: t.spec.minutes })); },
