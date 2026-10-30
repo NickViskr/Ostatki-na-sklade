@@ -11,6 +11,8 @@
  * hand-made increase or a hand-added line.
  */
 
+import { disabledReason, isClusterSelectable, type DirectClusterRule } from './ozonDirectSupply';
+
 export interface SupplyLine {
   article: string;
   clusterId: string;
@@ -210,3 +212,28 @@ export const resolveAddLine = (
   if ((existingKeys || []).indexOf(wanted) < 0) return 'new';
   return (removedKeys || []).indexOf(wanted) >= 0 ? 'restore' : 'duplicate';
 };
+
+/**
+ * R-069. Add-line validation for the supply wizard, kept pure so it can be tested.
+ * Returns '' when the line may be added, otherwise the first error message.
+ * The cluster check is the item 58 guard (a pick that slipped past a greyed list entry).
+ */
+export function addLineError(input: {
+  clusterFound: boolean;
+  rules: DirectClusterRule[];
+  supplyClusterIds: string[];
+  clusterId: string;
+  article: string;
+  qtyText: string;
+  cap: number;
+}): string {
+  if (!input.clusterFound) return 'Выберите кластер';
+  if (!isClusterSelectable(input.rules, input.supplyClusterIds, input.clusterId)) {
+    return disabledReason(input.rules, input.supplyClusterIds, input.clusterId);
+  }
+  if (!input.article) return 'Выберите товар';
+  const asked = parseInt(input.qtyText, 10);
+  if (!(asked > 0)) return 'Укажите количество больше нуля';
+  if (asked > input.cap) return `${input.article}: свободно для отгрузки ${input.cap} шт`;
+  return '';
+}

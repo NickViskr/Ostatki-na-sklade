@@ -4,10 +4,10 @@ import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { supplyBoxTotals } from '../lib/supplyBoxes';
-import { directWarehouseFor, disabledReason, isClusterSelectable, parseDirectClusters, validateSelection } from '../lib/ozonDirectSupply';
+import { directWarehouseFor, isClusterSelectable, parseDirectClusters, validateSelection } from '../lib/ozonDirectSupply';
 import { isCabinetCompatible } from '../lib/ozonSupplyCabinet';
 import { resolveOzonArticle, parseExcludedClusters } from '../lib/ozonCoverage';
-import { acceptedForLine, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, resolveAddLine, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
+import { acceptedForLine, addLineError, applyOzonCorrection, capForSupplyLine, foldOzonVerdict, qtyFieldValue, resolveAddLine, shouldBlankQtyOnFocus, sortClustersBySalesShare } from '../lib/ozonSupplyLines';
 import { defaultManualQty } from '../lib/ozonManualSupply';
 import type { DraftFailure } from '../lib/ozonDraftErrors';
 import { DRAFT_RETRY_DELAY_SEC, draftRetryExhaustedMessage, draftRetryNotice, isDraftRateLimited, shouldAutoRetryDraft } from '../lib/ozonDraftErrors';
@@ -491,28 +491,20 @@ export const OzonSupplyModal: React.FC<OzonSupplyModalProps> = ({
 
   const addLine = () => {
     const cluster = clusterOptions.find((c) => c.clusterId === addForm.clusterId);
-    if (!cluster) {
-      toast.error('Выберите кластер');
-      return;
-    }
-    // Пункт 58. Сторож на случай, если выбор всё же прошёл мимо серого пункта списка.
-    if (!isClusterSelectable(directRules, supplyClusterIds, cluster.clusterId)) {
-      toast.error(disabledReason(directRules, supplyClusterIds, cluster.clusterId));
-      return;
-    }
-    if (!addForm.article) {
-      toast.error('Выберите товар');
+    const err = addLineError({
+      clusterFound: !!cluster,
+      rules: directRules,
+      supplyClusterIds,
+      clusterId: addForm.clusterId,
+      article: addForm.article,
+      qtyText: addForm.qty,
+      cap: addFormCap
+    });
+    if (err || !cluster) {
+      toast.error(err);
       return;
     }
     const asked = parseInt(addForm.qty, 10);
-    if (!(asked > 0)) {
-      toast.error('Укажите количество больше нуля');
-      return;
-    }
-    if (asked > addFormCap) {
-      toast.error(`${addForm.article}: свободно для отгрузки ${addFormCap} шт`);
-      return;
-    }
     const key = `${addForm.article}|||${addForm.clusterId}`;
     const action = resolveAddLine(allRows.map((r) => rowKey(r)), Object.keys(removedRows).filter((k) => removedRows[k]), key);
     if (action === 'duplicate') {

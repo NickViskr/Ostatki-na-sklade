@@ -6,8 +6,10 @@ import { capForSupplyLine, supplyLineKey,
   sortClustersBySalesShare,
   qtyFieldValue,
   shouldBlankQtyOnFocus,
-  resolveAddLine
+  resolveAddLine,
+  addLineError
 } from './ozonSupplyLines';
+import { disabledReason, type DirectClusterRule } from './ozonDirectSupply';
 
 const free = { 'ART-A': 100, 'ART-B': 30, 'ART-ZERO': 0 };
 
@@ -429,5 +431,59 @@ describe('подключение пункта 61 к мастеру', () => {
   it('возврат снимает пометку удаления, а не заводит вторую строку', () => {
     expect(modal).toMatch(/delete nextRemoved\[key\];[\s\S]{0,120}setRemovedRows\(nextRemoved\)/);
     expect(modal).toMatch(/action === 'restore'[\s\S]{0,600}setQtyEdit\(\{ \.\.\.qtyEdit, \[key\]: asked \}\)/);
+  });
+});
+
+describe('R-069. addLineError: pure add-line validation for the supply wizard', () => {
+  const directRules: DirectClusterRule[] = [
+    { clusterId: 'EKB', clusterName: 'Екатеринбург', warehouseId: 'W1', warehouseName: 'Склад ЕКБ' }
+  ];
+  const ok = {
+    clusterFound: true,
+    rules: directRules,
+    supplyClusterIds: [] as string[],
+    clusterId: 'MSK',
+    article: 'ART-A',
+    qtyText: '5',
+    cap: 10
+  };
+
+  it('returns empty string when the line may be added', () => {
+    expect(addLineError(ok)).toBe('');
+  });
+
+  it('reports a missing cluster first', () => {
+    expect(addLineError({ ...ok, clusterFound: false, article: '', qtyText: '' })).toBe('Выберите кластер');
+  });
+
+  it('reports the disabledReason text when the cluster mixes with a selected direct cluster', () => {
+    const input = { ...ok, supplyClusterIds: ['EKB'], clusterId: 'MSK' };
+    const msg = addLineError(input);
+    expect(msg).not.toBe('');
+    expect(msg).toBe(disabledReason(directRules, ['EKB'], 'MSK'));
+  });
+
+  it('a blocked cluster with an empty article reports the cluster reason, not the article one', () => {
+    const msg = addLineError({ ...ok, supplyClusterIds: ['EKB'], article: '' });
+    expect(msg).toBe(disabledReason(directRules, ['EKB'], 'MSK'));
+    expect(msg).not.toBe('Выберите товар');
+  });
+
+  it('reports a missing article', () => {
+    expect(addLineError({ ...ok, article: '' })).toBe('Выберите товар');
+  });
+
+  it('rejects zero, negative and non-numeric quantity', () => {
+    for (const qtyText of ['0', '-3', '', 'abc']) {
+      expect(addLineError({ ...ok, qtyText })).toBe('Укажите количество больше нуля');
+    }
+  });
+
+  it('rejects quantity above the cap with the article and cap in the message', () => {
+    expect(addLineError({ ...ok, qtyText: '11' })).toBe('ART-A: свободно для отгрузки 10 шт');
+  });
+
+  it('accepts quantity equal to the cap', () => {
+    expect(addLineError({ ...ok, qtyText: '10' })).toBe('');
   });
 });

@@ -236,8 +236,8 @@ describe('подключение правила к экранам', () => {
     expect(modal).toContain('только отдельной заявкой');
   });
 
-  it('Мастер: добавление строки остановит сторож, даже если список обошли', () => {
-    expect(modal).toMatch(/if \(!isClusterSelectable\(directRules, supplyClusterIds, cluster\.clusterId\)\) \{[\s\S]{0,160}return;/);
+  it('Мастер: addLine вызывает addLineError и выходит при непустом ответе (wiring)', () => {
+    expect(modal).toMatch(/const err = addLineError\([\s\S]{0,400}?\);\s*if \(err\b[^)]*\) \{[\s\S]{0,80}return;/);
   });
 
   it('Мастер: выбор считается по кластерам живого состава заявки', () => {
