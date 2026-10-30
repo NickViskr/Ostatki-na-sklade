@@ -39,9 +39,9 @@ describe('shelfHistory: snapshots first, the journal walked back otherwise', () 
     // now 100; 20: 100-50=50; 19: 50; 18: 50-30=20; 17: 20+10=30
     expect(shelfHistory('A', 100, days, [], t)).toEqual([30, 20, 50, 50]);
   });
-  it('a snapshot wins over the reconstruction for its day', () => {
+  it('a snapshot wins over the reconstruction for its day (a snapshot dated D is the close of D-1, R-054)', () => {
     const t = [tx('2026-09-21', 'A', 50)];
-    expect(shelfHistory('A', 100, days, [snap('2026-09-18', 'A', 7, 1)], t)).toEqual([50, 7, 50, 50]);
+    expect(shelfHistory('A', 100, days, [snap('2026-09-19', 'A', 7, 1)], t)).toEqual([50, 7, 50, 50]);
   });
   it('never goes below zero and ignores other articles and unreadable dates', () => {
     const t = [tx('2026-09-19', 'A', 500), tx('2026-09-19', 'B', 1, 'Расход'), tx('вчера', 'A', 5, 'Расход')];
@@ -151,8 +151,8 @@ describe('buildTurnover: no sales, snapshots with their own cost, two cabinets',
     expect(r.articles[0].ageDays).toBeNull();
   });
   it('a snapshot day is valued at the snapshot cost, a reconstructed day at today\'s', () => {
-    // 10-day period, shelf now 10 at 100; snapshot on the 20th says 10 pcs at 50 → that day 500, the other nine 1000 → 9500 / 10 = 950
-    const r = buildTurnover(base({ shelf: [{ article: 'B', quantity: 10, avgCost: 100 }], snapshots: [snap('2026-09-20', 'B', 10, 50)] }));
+    // 10-day period, shelf now 10 at 100; a snapshot dated the 21st is the close of the 20th (R-054): 10 pcs at 50 → that day 500, the other nine 1000 → 9500 / 10 = 950
+    const r = buildTurnover(base({ shelf: [{ article: 'B', quantity: 10, avgCost: 100 }], snapshots: [snap('2026-09-21', 'B', 10, 50)] }));
     expect(r.articles[0].avgWarehouseCapital).toBe(950);
   });
   it('two KAN products of one article (two cabinets) are summed per day', () => {
@@ -554,5 +554,37 @@ describe('screen wiring (item 78c)', () => {
     const modal = read('../components/OzonSettingsModal.tsx');
     expect(modal).toMatch(/turnoverSlowDays: numSetting\(res\.data\.turnoverSlowDays, 45\)/);
     expect(read('../lib/ozonSettingsFields.ts')).toMatch(/key: 'turnoverFastDays'/);
+  });
+});
+
+describe('100.8 R-054 a snapshot dated D is the close of day D-1', () => {
+  const shelfB = [{ article: 'B', quantity: 10, avgCost: 100 }];
+  it('100.8 R-054 a snapshot dated 09-11 is the close of 09-10, outside the period 11..20 → ignored: 10 × 100 = 1000', () => {
+    // new reading: day 10 is outside → all ten days 10 × 100 → 1000; old reading: day 11 = 4 × 100 → (9 × 1000 + 400) / 10 = 940
+    const r = buildTurnover(base({ shelf: shelfB, snapshots: [snap('2026-09-11', 'B', 4, 100)] }));
+    expect(r.articles[0].avgWarehouseCapital).toBe(1000);
+  });
+  it('100.8 R-054 a snapshot dated 09-21 is the close of 09-20, the last period day → (9 × 1000 + 400) / 10 = 940', () => {
+    const r = buildTurnover(base({ shelf: shelfB, snapshots: [snap('2026-09-21', 'B', 4, 100)] }));
+    expect(r.articles[0].avgWarehouseCapital).toBe(940);
+  });
+  it('100.8 R-054 probe: morning snapshot (10-19, 0 pcs) taken before a noon receipt of 10 × 100 on 10-19, period 1 → close of 19.10 is 10 × 100 = 1000', () => {
+    // new reading: the row is the close of 18.10, outside the one-day period → day 19 reconstructed = 10 → 1000; old reading: 0
+    const r = buildTurnover(base2({
+      kanRows: [kan('2026-10-19', 'A')], snapshots: [{ date: '2026-10-19', article: 'A', qty: 0, avgCost: 0, capital: 0 }],
+      shelf: [{ article: 'A', quantity: 10, avgCost: 100 }], transactions: [tx('2026-10-19 12:00:00', 'A', 10)],
+      settings: { ...settings2, periodDays: 1 },
+    }));
+    expect(r.portfolio.avgWarehouseCapital).toBe(1000);
+  });
+  it('100.8 R-054 a virtual kit follows its component snapshot under the shift: A snapshot dated 09-21 with 0 pcs → kit 0 on 09-20 → (9 × 1000 + 0) / 10 = 900 for A and K', () => {
+    const kits = [virtualKit('K', [['A', 1]])];
+    const r = buildTurnover(base({
+      kits, shelf: shelfFromStock([{ article: 'A', quantity: 10, avgCost: 100 }], kits),
+      snapshots: [snap('2026-09-21', 'A', 0, 100)],
+    }));
+    // old reading: the row is outside the period → 1000 for both
+    expect(r.articles.find((a) => a.article === 'A')!.avgWarehouseCapital).toBe(900);
+    expect(r.articles.find((a) => a.article === 'K')!.avgWarehouseCapital).toBe(900);
   });
 });

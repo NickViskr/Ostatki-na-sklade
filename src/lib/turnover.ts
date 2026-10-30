@@ -7,6 +7,7 @@
  *  - «KAN дни» (`KanDayRow`): per Ozon product and day — stock cost, pieces, cost in delivery
  *    and in returns, cost of sales, gross profit, bought and ordered pieces;
  *  - «Снимки склада» (`SnapshotRow`): per article and day — pieces, average cost, capital.
+ *    A snapshot is taken at 05:00 and dated D, so it is the close of D−1 (R-054); the storage keeps D.
  * Days before the first snapshot are reconstructed from the transaction journal: the shelf of
  * a past day is today's shelf minus the receipts after that day plus the expenses after it,
  * valued at today's average cost (corrections carry quantity 0 and do not move the shelf).
@@ -213,7 +214,8 @@ function daysBetween(fromDay: string, toDay: string): number {
 }
 
 /**
- * The shelf of one article on each period day: the snapshot when there is one, else the
+ * The shelf of one article on each period day: the snapshot of that day's close (a row dated
+ * D+1, see `snapshotDay`) when there is one, else the
  * journal walked back from today's shelf. Receipts after the day are subtracted, expenses
  * added; the day itself is included in the day's closing shelf (transactions ON the day have
  * already happened by its end).
@@ -244,9 +246,9 @@ function round2(v: number): number {
   return Math.round(v * 100) / 100;
 }
 
-/** The day a snapshot row is keyed by. One place, so a later change of the reading (R-054) touches only this. */
+/** The day whose close a snapshot row describes: taken at 05:00 and dated D, it is the close of D−1 (R-054). */
 function snapshotDay(s: SnapshotRow): string {
-  return s.date;
+  return shiftDay(s.date, -1);
 }
 
 /**
