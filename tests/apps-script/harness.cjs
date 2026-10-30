@@ -370,6 +370,8 @@ const sandbox = {
       // deleteMultipleTransactions спрашивает идентификатор ещё до сканирования строк:
       // без заглушки массовое удаление вообще не проверить.
       getId: () => 'fake-spreadsheet-id',
+      // Item 100.9 R-068: as Apps Script has it — readers format sheet-parsed text dates in this zone.
+      getSpreadsheetTimeZone: () => targetSpreadsheetTimeZone,
       getSheetByName: (name) => (name === 'SKU' ? skuSheet : (sheetRegistry[name] || null)),
       getSheets: () => {
         const all = [];

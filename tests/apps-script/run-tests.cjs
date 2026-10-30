@@ -15066,6 +15066,111 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 100.9 part 2: R-062 (text receipt date read month-first), R-068 («Обновлено» shifts when the spreadsheet zone differs from the script zone) =================
+{
+  const REAL_ZONE = 'Asia/Yekaterinburg'; // appsscript.json; the stand hard-codes Europe/Moscow
+  const freshReal = () => {
+    const h = freshHarness();
+    h.context.Session.getScriptTimeZone = () => REAL_ZONE;
+    h.setNow('2026-10-20T07:00:00Z');
+    return h;
+  };
+
+  // --- R-062 ---
+  {
+    const h = freshReal();
+    const a = h.daysSinceTransactionDate('01.10.2026');
+    const b = h.daysSinceTransactionDate('10.08.2026');
+    const c = h.daysSinceTransactionDate('01-10-2026');
+    check('100.9 R-062: a text date dd.mm.yyyy is read day-first (01.10.2026 is 19 days old at 2026-10-20)', a === 19, 'age=' + a);
+    check('100.9 R-062: a text date dd.mm.yyyy is read day-first (10.08.2026 is 71 days old, not month-first 10 Aug read as 8 Oct)', b === 71, 'age=' + b);
+    check('100.9 R-062: a text date dd-mm-yyyy is read day-first (01-10-2026 is 19 days old)', c === 19, 'age=' + c);
+    const iso = h.daysSinceTransactionDate('2026-10-01');
+    const isoTime = h.daysSinceTransactionDate('2026-10-01T00:00:00');
+    check('100.9 R-062 control: ISO strings keep their age (2026-10-01 and 2026-10-01T00:00:00 are both 19 days old)',
+      iso === 19 && isoTime === 19, JSON.stringify({ iso: iso, isoTime: isoTime }));
+    check('100.9 R-062 control: an empty or unreadable date has age 0',
+      h.daysSinceTransactionDate('') === 0 && h.daysSinceTransactionDate('not a date') === 0,
+      JSON.stringify({ empty: h.daysSinceTransactionDate(''), junk: h.daysSinceTransactionDate('not a date') }));
+  }
+  {
+    const h = freshReal();
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([]);
+    const tx = h.commitTransaction([{ article: 'A', quantity: 10, price: 100 }], 'Приход', 'Склад', '', 'tester', undefined, 'op-old');
+    const id = tx.newTransactions[0].id;
+    const sheet = h.getRegistrySheet('Транзакции');
+    const d = sheet.__dump();
+    d[1][d[0].indexOf('Дата')] = '10.08.2026'; // text date, 71 days old
+    sheet.__setData(d);
+    let delErr = '';
+    try { h.deleteTransaction(id, 'tester'); } catch (e) { delErr = e.message; }
+    const after = h.stockOf('A');
+    check('100.9 R-062: deleting a receipt whose date cell is the text 10.08.2026 (71 days) is refused and stock stays 10',
+      !!delErr && after.quantity === 10, JSON.stringify({ error: delErr, stock: after }));
+  }
+
+  // --- R-068 ---
+  const stocksPayload = () => ({ rows: [{ cabinet: 'K1', sku: '1', offerId: 'A', name: 'n', warehouseName: 'w', clusterName: 'c', clusterId: '1', available: 1, preparing: 0, requested: 0, transit: 0, excess: 0, returns: 0, other: 0 }] });
+  const stocksRoundTrip = (sheetZone) => {
+    const h = freshReal();
+    h.setOzonStocksSheet([]);
+    h.setSheetAutoDates(sheetZone); // Sheets turns the written text into a date-time read in the SPREADSHEET zone
+    h.setTargetSpreadsheetTimeZone(sheetZone);
+    h.context.saveOzonStocks(stocksPayload());
+    const rows = h.context.getOzonStocks();
+    return rows[0] && rows[0].updatedAt;
+  };
+  const WANTED = '2026-10-20 12:00:00'; // 07:00Z = 12:00 Yekaterinburg
+  {
+    const got = stocksRoundTrip('UTC');
+    check('100.9 R-068: «Обновлено» of «Остатки Ozon» reads back as written when the spreadsheet zone is UTC and the script zone is Yekaterinburg',
+      got === WANTED, 'got=' + got);
+  }
+  {
+    const got = stocksRoundTrip(REAL_ZONE);
+    check('100.9 R-068 control: «Обновлено» of «Остатки Ozon» reads back as written when the spreadsheet zone equals the script zone',
+      got === WANTED, 'got=' + got);
+  }
+  {
+    const h = freshReal();
+    h.setOzonSalesSheet([]);
+    h.setOzonSalesArchiveSheet([]);
+    h.setOzonSettings({ salesRetentionWeeks: 78 });
+    h.setSheetAutoDates('UTC');
+    h.setTargetSpreadsheetTimeZone('UTC');
+    h.saveOzonSales({ rows: [{ week: '2026-10-12', cabinet: 'K1', offerId: 'A', cluster: 'c', qty: 3 }], okCabinets: ['K1'], mode: 'recent', replacedWeeks: ['2026-10-12'] });
+    const rows = h.getOzonSales(78);
+    const got = rows[0] && rows[0].updatedAt;
+    check('100.9 R-068: «Обновлено» of «Продажи Ozon» (saveOzonSales/getOzonSales) reads back as written with spreadsheet zone UTC',
+      got === WANTED, 'got=' + got + ' rows=' + rows.length);
+  }
+  {
+    const h = freshReal();
+    h.setOzonStocksSheet([]);
+    h.setSheetAutoDates('UTC');
+    h.setTargetSpreadsheetTimeZone('UTC');
+    h.context.saveOzonStocks(stocksPayload());
+    const rows = h.context.getOzonStockHistory();
+    const got = rows[0] && rows[0].updatedAt;
+    check('100.9 R-068: «Обновлено» of «История остатков Ozon» (saveOzonStocks/getOzonStockHistory) reads back as written with spreadsheet zone UTC',
+      got === WANTED, 'got=' + got + ' rows=' + rows.length);
+  }
+  {
+    // The only writer of «Дата обнаружения» is saveExternalShipments (new row = script-zone text, via setValues).
+    const h = freshReal();
+    h.setExternalShipmentsSheet([]);
+    h.setSheetAutoDates('UTC');
+    h.setTargetSpreadsheetTimeZone('UTC');
+    h.context.saveExternalShipments([{ postingId: 'P-1', shipmentDate: '2026-10-21', itemsJSON: '[]', cabinet: 'K1' }]);
+    const rows = h.context.getExternalShipments();
+    const got = rows[0] && rows[0].detectedAt;
+    check('100.9 R-068: «Дата обнаружения» of «Внешние отгрузки» (saveExternalShipments/getExternalShipments) reads back as written with spreadsheet zone UTC',
+      got === WANTED, 'got=' + got + ' rows=' + rows.length);
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

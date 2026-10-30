@@ -1880,7 +1880,10 @@ const RECEIPT_EDIT_WINDOW_DAYS = 30;
 function daysSinceTransactionDate(dateStr) {
   const raw = String(dateStr || '').trim();
   if (!raw) return 0;
-  const then = new Date(raw);
+  // Item 100.9 R-062: a text date dd.mm.yyyy / dd-mm-yyyy (optionally followed by ", time") is
+  // day-first local midnight; new Date(raw) would read 10.08.2026 month-first. Other strings are unchanged.
+  const dayFirst = raw.split(',')[0].trim().match(/^(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})(?:\s.*)?$/);
+  const then = dayFirst ? new Date(Number(dayFirst[3]), Number(dayFirst[2]) - 1, Number(dayFirst[1])) : new Date(raw);
   if (isNaN(then.getTime())) return 0;
   const diff = new Date().getTime() - then.getTime();
   if (diff <= 0) return 0;
@@ -7748,6 +7751,17 @@ function getExternalShipmentsSheet() {
   return sheet;
 }
 
+// Item 100.9 R-068: a «Обновлено» / «Дата обнаружения» text is written in the SCRIPT zone, Sheets
+// parses it into a Date in the SPREADSHEET zone, so it must be formatted back in the spreadsheet
+// zone to return exactly the written text. Falls back to the script zone if unavailable.
+function sheetTextDateZone() {
+  try {
+    const zone = getSpreadsheet().getSpreadsheetTimeZone();
+    if (zone) return zone;
+  } catch (e) { /* fall back below */ }
+  return Session.getScriptTimeZone() || 'GMT';
+}
+
 function getOzonStocksSheet() {
   const ss = getSpreadsheet();
   const sheet = getOrCreateSheet(ss, 'Остатки Ozon', OZON_STOCKS_HEADERS);
@@ -8939,6 +8953,7 @@ function readOzonSalesSheetRows(sheet, sheetLabel, tz) {
     throw new Error('Некоторые обязательные колонки не найдены в листе "' + sheetLabel + '"');
   }
 
+  const updatedTz = sheetTextDateZone();
   const rows = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -8958,7 +8973,7 @@ function readOzonSalesSheetRows(sheet, sheetLabel, tz) {
     let updatedVal = '';
     if (row[updatedIdx] instanceof Date) {
       try {
-        updatedVal = Utilities.formatDate(row[updatedIdx], tz, 'yyyy-MM-dd HH:mm:ss');
+        updatedVal = Utilities.formatDate(row[updatedIdx], updatedTz, 'yyyy-MM-dd HH:mm:ss');
       } catch (e) {
         updatedVal = String(row[updatedIdx] || '');
       }
@@ -9064,6 +9079,7 @@ function getOzonStockHistory() {
   }
 
   const tz = Session.getScriptTimeZone();
+  const updatedTz = sheetTextDateZone();
   const rows = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -9094,7 +9110,7 @@ function getOzonStockHistory() {
     let updatedVal = '';
     if (row[updatedIdx] instanceof Date) {
       try {
-        updatedVal = Utilities.formatDate(row[updatedIdx], tz, 'yyyy-MM-dd HH:mm:ss');
+        updatedVal = Utilities.formatDate(row[updatedIdx], updatedTz, 'yyyy-MM-dd HH:mm:ss');
       } catch (e) {
         updatedVal = String(row[updatedIdx] || '');
       }
@@ -9147,6 +9163,7 @@ function getOzonStocks() {
     throw new Error('Некоторые обязательные колонки не найдены в листе "Остатки Ozon"');
   }
 
+  const updatedTz = sheetTextDateZone();
   const rows = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -9155,7 +9172,7 @@ function getOzonStocks() {
     let updatedVal = '';
     if (row[updatedIdx] instanceof Date) {
       try {
-        updatedVal = Utilities.formatDate(row[updatedIdx], Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+        updatedVal = Utilities.formatDate(row[updatedIdx], updatedTz, 'yyyy-MM-dd HH:mm:ss');
       } catch (e) {
         updatedVal = String(row[updatedIdx] || '');
       }
@@ -9395,6 +9412,7 @@ function getExternalShipments() {
   
   const shipments = [];
   const tz = Session.getScriptTimeZone() || "GMT";
+  const detectedTz = sheetTextDateZone();
   
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -9407,7 +9425,7 @@ function getExternalShipments() {
       const val = row[idx];
       if (isDate && val instanceof Date) {
         try {
-          return Utilities.formatDate(val, tz, dateFormat);
+          return Utilities.formatDate(val, idx === detectedAtIdx ? detectedTz : tz, dateFormat);
         } catch (e) {
           return String(val);
         }
