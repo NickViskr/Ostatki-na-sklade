@@ -14938,6 +14938,134 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 100.9 part 1: R-024 (ensureColumns must not release the caller's lock), R-025 (nightly analytics races receipts) =================
+{
+  const stockWithSale = () => {
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.commitTransaction([{ article: 'A', quantity: 3, price: 100 }], 'Расход', 'Склад', '', 'tester', undefined, 'op-sale');
+    return h; // A: stock 7, sales over 120 days 3, turnover 7 / (3 / 120) = 280
+  };
+  // Runs recalculateDailyAnalytics; the first read of the whole stock sheet is followed by a receipt of 5 (the "mid-run" posting).
+  const runWithMidRunReceipt = (h) => {
+    const stock = h.getRegistrySheet('Остатки');
+    const origDR = stock.getDataRange.bind(stock);
+    const origRange = stock.getRange.bind(stock);
+    const info = { injected: false, receiptStatus: '', heldAtWrite: [], writes: [] };
+    let injecting = false;
+    stock.getDataRange = () => {
+      const r = origDR();
+      const gv = r.getValues.bind(r);
+      r.getValues = () => {
+        const v = gv();
+        if (!info.injected) {
+          info.injected = true;
+          injecting = true; // writes of the injected receipt are not the analytics' own writes
+          try { h.commitTransaction([{ article: 'A', quantity: 5, price: 100 }], 'Приход', 'Склад', '', 'tester', undefined, 'op-mid'); info.receiptStatus = 'success'; }
+          catch (e) { info.receiptStatus = 'error: ' + e.message; }
+          injecting = false;
+        }
+        return v;
+      };
+      return r;
+    };
+    stock.getRange = (...a) => {
+      const r = origRange(...a);
+      const sv = r.setValues.bind(r);
+      r.setValues = (vals) => { if (injecting) return sv(vals); info.heldAtWrite.push(h.isScriptLockHeld()); info.writes.push({ args: a, rows: vals.length, cols: (vals[0] || []).length }); return sv(vals); };
+      return r;
+    };
+    h.context.recalculateDailyAnalytics();
+    stock.getDataRange = origDR;
+    stock.getRange = origRange;
+    return info;
+  };
+
+  // --- R-025 ---
+  {
+    const h = stockWithSale();
+    const info = runWithMidRunReceipt(h);
+    const s = h.stockOf('A');
+    check('100.9 R-025: a receipt posted after the nightly analytics took its snapshot survives (stock 7+5=12, capitalization 1200)',
+      info.receiptStatus === 'success' && s.quantity === 12 && s.capitalization === 1200,
+      JSON.stringify({ receiptStatus: info.receiptStatus, stock: s }));
+  }
+  {
+    const h = stockWithSale();
+    const info = runWithMidRunReceipt(h);
+    check('100.9 R-025: the nightly analytics holds the script lock while it writes and releases it afterwards',
+      info.writes.length > 0 && info.heldAtWrite.every(x => x === true) && !h.isScriptLockHeld(),
+      JSON.stringify({ heldAtWrite: info.heldAtWrite, heldAfter: h.isScriptLockHeld() }));
+  }
+  {
+    // control: no concurrent posting at all
+    const h = stockWithSale();
+    h.context.recalculateDailyAnalytics();
+    const row = h.getRegistrySheet('Остатки').__dump()[1];
+    check('100.9 R-025 control: the nightly analytics writes sales 3 and turnover 280 into columns 5-6 and keeps columns 1-4',
+      row[0] === 'A' && row[1] === 7 && row[2] === 100 && row[3] === 700 && row[4] === 3 && row[5] === 280,
+      JSON.stringify(row));
+  }
+  {
+    const h = stockWithSale();
+    runWithMidRunReceipt(h);
+    const row = h.getRegistrySheet('Остатки').__dump()[1];
+    check('100.9 R-025: columns 1-4 hold the live values changed mid-run (A, 12, 100, 1200) and columns 5-6 still hold the analytics values',
+      row[0] === 'A' && row[1] === 12 && row[2] === 100 && row[3] === 1200 && row[4] === 3,
+      JSON.stringify(row));
+  }
+  {
+    const h = stockWithSale();
+    const info = runWithMidRunReceipt(h);
+    const only56 = info.writes.length > 0 && info.writes.every(w => w.args[1] >= 5 && w.args[1] + w.args[3] - 1 <= 6);
+    check('100.9 R-025: the analytics writes only columns 5-6 (never the quantity/avgCost/capitalization columns)',
+      only56, JSON.stringify(info.writes));
+  }
+
+  // --- R-024 ---
+  {
+    const h = freshHarness();
+    h.setNow('2026-10-20T07:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.makeSheet(h.TRANS_HEADERS, 'Транзакции'); // an old «История»: none of the service columns exist yet
+    h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    const stock = h.getRegistrySheet('Остатки');
+    const origRange = stock.getRange.bind(stock);
+    const heldAtStockRead = [];
+    stock.getRange = (...a) => {
+      const r = origRange(...a);
+      const gv = r.getValues.bind(r);
+      r.getValues = () => { heldAtStockRead.push(h.isScriptLockHeld()); return gv(); };
+      return r;
+    };
+    const lock = h.context.LockService.getScriptLock();
+    lock.waitLock(30000); // the caller (doPost 'commit') holds the script lock for the whole operation
+    h.commitTransaction([{ article: 'A', quantity: 6, price: 100 }], 'Расход', 'Склад', '', 'tester', undefined, 'op-1');
+    const heldAfter = h.isScriptLockHeld();
+    stock.getRange = origRange;
+    check('100.9 R-024: ensureColumns migrating an old «История» does not release the lock its caller holds (held at every stock read and after commit)',
+      heldAtStockRead.length > 0 && heldAtStockRead.every(x => x === true) && heldAfter === true,
+      JSON.stringify({ heldAtStockRead: heldAtStockRead, heldAfterCommit: heldAfter }));
+  }
+  {
+    const h = freshHarness();
+    const sheet = h.makeSheet(['Артикул'], 'Тест');
+    const before = h.lockRequests();
+    let heldDuringWrite = null;
+    const origRange = sheet.getRange.bind(sheet);
+    sheet.getRange = (...a) => { const r = origRange(...a); const sv = r.setValue.bind(r); r.setValue = (v) => { heldDuringWrite = h.isScriptLockHeld(); return sv(v); }; return r; };
+    h.context.ensureColumns(sheet, ['Артикул', 'Новая']);
+    sheet.getRange = origRange;
+    check('100.9 R-024 control: ensureColumns called with no lock held takes the lock for the header write and releases it afterwards',
+      h.lockRequests() === before + 1 && heldDuringWrite === true && !h.isScriptLockHeld() && h.headerRowOf(sheet).indexOf('Новая') !== -1,
+      JSON.stringify({ lockRequests: h.lockRequests() - before, heldDuringWrite: heldDuringWrite, heldAfter: h.isScriptLockHeld(), header: h.headerRowOf(sheet) }));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

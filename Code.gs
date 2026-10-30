@@ -1007,11 +1007,15 @@ function ensureColumns(sheet, requiredHeaders) {
   if (missing.length === 0) return;
 
   const lock = LockService.getScriptLock();
-  try {
-    lock.waitLock(30000);
-  } catch (e) {
-    // Another execution is adding these very columns and will finish the job.
-    return;
+  // The caller may already hold the script lock in this execution: do not wait for it again or release it.
+  const alreadyLocked = lock.hasLock();
+  if (!alreadyLocked) {
+    try {
+      lock.waitLock(30000);
+    } catch (e) {
+      // Another execution is adding these very columns and will finish the job.
+      return;
+    }
   }
   try {
     existingHeaders = readHeaderRow(sheet);
@@ -1025,7 +1029,7 @@ function ensureColumns(sheet, requiredHeaders) {
     // The header cache of the transactions sheet must not survive a widened header row.
     _transHeadersCache = null;
   } finally {
-    lock.releaseLock();
+    if (!alreadyLocked) lock.releaseLock();
   }
 }
 
@@ -4991,64 +4995,78 @@ function hardDeleteArchivedItems(archiveIds) {
 // ─── Вариант 2: Динамический перерасчет аналитики ────────────────────────────
 
 function recalculateDailyAnalytics() {
-  const ss = getSpreadsheet();
-  const transSheet = getTransactionSheet(ss);
-  const stockSheet = getSheetByNameRobust(ss, 'Остатки');
+  // Hold the script lock so a concurrent stock write cannot be overwritten by this nightly job.
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    Logger.log('recalculateDailyAnalytics skipped: script lock is busy, will retry tonight');
+    return;
+  }
+  try {
+    const ss = getSpreadsheet();
+    const transSheet = getTransactionSheet(ss);
+    const stockSheet = getSheetByNameRobust(ss, 'Остатки');
   
-  if (!transSheet || !stockSheet) return;
+    if (!transSheet || !stockSheet) return;
 
-  const stockData = stockSheet.getDataRange().getValues();
-  if (stockData.length <= 1) return;
+    const stockData = stockSheet.getDataRange().getValues();
+    if (stockData.length <= 1) return;
 
-  const transData = transSheet.getDataRange().getValues();
+    const transData = transSheet.getDataRange().getValues();
   
-  // Рассчитываем окно 120 дней
-  const cutoffLimit = new Date();
-  cutoffLimit.setDate(cutoffLimit.getDate() - 120);
-  const cutoffLimitMs = cutoffLimit.getTime();
+    // Рассчитываем окно 120 дней
+    const cutoffLimit = new Date();
+    cutoffLimit.setDate(cutoffLimit.getDate() - 120);
+    const cutoffLimitMs = cutoffLimit.getTime();
 
-  // Собираем продажи
-  const salesMap = {};
-  for (let i = 1; i < transData.length; i++) {
-    const row = transData[i];
-    if (row.join('').trim() === '') continue;
+    // Собираем продажи
+    const salesMap = {};
+    for (let i = 1; i < transData.length; i++) {
+      const row = transData[i];
+      if (row.join('').trim() === '') continue;
     
-    if (String(row[2]) === 'Расход') {
-      let rowMs = 0;
-      if (row[1] instanceof Date) {
-        rowMs = row[1].getTime();
-      } else {
-        const d = new Date(String(row[1]));
-        if (!isNaN(d.getTime())) rowMs = d.getTime();
-      }
+      if (String(row[2]) === 'Расход') {
+        let rowMs = 0;
+        if (row[1] instanceof Date) {
+          rowMs = row[1].getTime();
+        } else {
+          const d = new Date(String(row[1]));
+          if (!isNaN(d.getTime())) rowMs = d.getTime();
+        }
 
-      if (rowMs >= cutoffLimitMs) {
-        const sku = String(row[3]);
-        const qty = Number(row[4]) || 0;
-        salesMap[sku] = (salesMap[sku] || 0) + qty;
+        if (rowMs >= cutoffLimitMs) {
+          const sku = String(row[3]);
+          const qty = Number(row[4]) || 0;
+          salesMap[sku] = (salesMap[sku] || 0) + qty;
+        }
       }
     }
-  }
 
-  // Обновляем лист остатков
-  for (let i = 1; i < stockData.length; i++) {
-    const sku = String(stockData[i][0]);
-    const currentQty = Number(stockData[i][1]) || 0;
+    // Обновляем лист остатков
+    for (let i = 1; i < stockData.length; i++) {
+      const sku = String(stockData[i][0]);
+      const currentQty = Number(stockData[i][1]) || 0;
     
-    const sales120 = salesMap[sku] || 0;
+      const sales120 = salesMap[sku] || 0;
     
-    let turnoverDays = 0;
-    if (sales120 > 0 && currentQty > 0) {
-      const salesPerDay = sales120 / 120;
-      turnoverDays = currentQty / salesPerDay;
+      let turnoverDays = 0;
+      if (sales120 > 0 && currentQty > 0) {
+        const salesPerDay = sales120 / 120;
+        turnoverDays = currentQty / salesPerDay;
+      }
+    
+      stockData[i][4] = sales120; // Продажи
+      stockData[i][5] = Number(turnoverDays.toFixed(1)); // Оборачиваемость
     }
-    
-    stockData[i][4] = sales120; // Продажи
-    stockData[i][5] = Number(turnoverDays.toFixed(1)); // Оборачиваемость
-  }
 
-  stockSheet.getRange(1, 1, stockData.length, Math.max(stockData[0].length, 6)).setValues(stockData);
-  Logger.log('recalculateDailyAnalytics completed successfully');
+    // Write only our own columns (5-6) of the data rows: columns 1-4 and the header are never touched.
+    const analyticsColumns = stockData.slice(1).map(function(row) { return [row[4], row[5]]; });
+    stockSheet.getRange(2, 5, analyticsColumns.length, 2).setValues(analyticsColumns);
+    Logger.log('recalculateDailyAnalytics completed successfully');
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function cleanExpiredSessions() {

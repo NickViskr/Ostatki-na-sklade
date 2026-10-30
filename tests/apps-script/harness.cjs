@@ -319,7 +319,9 @@ const sandbox = {
           scriptLockHeld = true;
           return true;
         },
-        releaseLock: () => { scriptLockHeld = false; }
+        releaseLock: () => { scriptLockHeld = false; },
+        // As the real Lock has it (item 100.9, R-024): true while this execution holds the script lock.
+        hasLock: () => scriptLockHeld
       };
     }
   },
