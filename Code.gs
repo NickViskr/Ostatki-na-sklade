@@ -11018,6 +11018,16 @@ function scheduledOzonCheck() {
   sessionsSheet.appendRow([token, 'Автоопрос Ozon', 'admin', expiresAt]);
   SpreadsheetApp.flush();
 
+  // Item 97 t02 B: tell the light status poll that the full poll is running; removed in the finally below.
+  // If a light poll is running right now, wait (at most 90 s) so the two do not hit /api/ozon/check together.
+  const fullProps = PropertiesService.getScriptProperties();
+  fullProps.setProperty('ozon_fullPollRunning', String(Date.now()));
+  for (let waited = 0; waited < 90000; waited += 5000) {
+    const lightStamp = Number(fullProps.getProperty('ozon_statusPollRunning'));
+    if (!lightStamp || Date.now() - lightStamp >= 5 * 60 * 1000) break;
+    Utilities.sleep(5000);
+  }
+
   // Шаг 3: Прочитать Script Property 'ozon_autoSyncTarget'
   const props = PropertiesService.getScriptProperties();
   const targetProperty = props.getProperty('ozon_autoSyncTarget');
@@ -11213,6 +11223,7 @@ function scheduledOzonCheck() {
     result.ok = false;
     result.message = globalErr.toString();
   } finally {
+    fullProps.deleteProperty('ozon_fullPollRunning');
     // Шаг 6: Удалить временную сессию из листа «Сессии»
     try {
       const finalData = sessionsSheet.getDataRange().getValues();
@@ -11230,6 +11241,143 @@ function scheduledOzonCheck() {
 
   saveOzonSyncResult(result);
   return result;
+}
+
+// ===== Item 97 ticket 02 part B: light Ozon status polls =====
+// Only /api/ozon/check (no stocks/sales/clusters). Own bookkeeping: never touches ozon_lastAutoSync,
+// ozon_syncHistory or the full poll's retry trigger.
+
+function pushOzonStatusPollHistory(entry) {
+  const props = PropertiesService.getScriptProperties();
+  let list = [];
+  try {
+    const parsed = JSON.parse(props.getProperty('ozon_statusPollHistory') || '[]');
+    if (Array.isArray(parsed)) list = parsed;
+  } catch (e) {
+    list = [];
+  }
+  list.unshift(entry);
+  props.setProperty('ozon_statusPollHistory', JSON.stringify(list.slice(0, 30)));
+}
+
+function runOzonStatusPoll(reason) {
+  const props = PropertiesService.getScriptProperties();
+  const startedAt = Date.now();
+  const entry = { time: new Date(startedAt).toISOString(), reason: reason, ok: false, durationMs: 0, found: 0, message: '' };
+
+  const fullStamp = Number(props.getProperty('ozon_fullPollRunning'));
+  if (fullStamp && startedAt - fullStamp < 15 * 60 * 1000) {
+    entry.skipped = 'full poll running';
+    entry.message = 'Пропуск: идёт полный автоопрос Ozon';
+    Logger.log('Опрос статусов Ozon: ' + entry.message);
+    pushOzonStatusPollHistory(entry);
+    return entry;
+  }
+
+  // Sessions live in the active (production) spreadsheet, same as in scheduledOzonCheck.
+  const sessionsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Сессии');
+  if (!sessionsSheet) {
+    throw new Error('Лист «Сессии» не найден в активной таблице.');
+  }
+  const label = 'Опрос статусов Ozon';
+  const token = Utilities.getUuid();
+  props.setProperty('ozon_statusPollRunning', String(startedAt));
+  try {
+    // Remove only this poll's own stale rows: the full poll's row must survive.
+    const rows = sessionsSheet.getDataRange().getValues();
+    for (let i = rows.length - 1; i >= 1; i--) {
+      if (String(rows[i][1]).trim() === label) sessionsSheet.deleteRow(i + 1);
+    }
+    sessionsSheet.appendRow([token, label, 'admin', Date.now() + 10 * 60 * 1000]);
+    SpreadsheetApp.flush();
+
+    const devMode = props.getProperty('ozon_autoSyncTarget') !== 'prod';
+    try {
+      const response = UrlFetchApp.fetch(PROXY_URL + '/api/ozon/check', {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({ sessionToken: token, devMode: devMode }),
+        muteHttpExceptions: true
+      });
+      const code = response.getResponseCode();
+      const content = response.getContentText();
+      if (code >= 200 && code < 300) {
+        const parsed = JSON.parse(content);
+        if (parsed.status === 'success') {
+          entry.ok = true;
+          entry.found = (parsed.data && parsed.data.found) || 0;
+          entry.message = (parsed.data && parsed.data.message) || 'Статусы опрошены';
+        } else {
+          entry.message = parsed.message || 'Ошибка API: статус неуспешен';
+        }
+      } else {
+        entry.message = 'HTTP ' + code + ': ' + content.slice(0, 200);
+      }
+    } catch (fetchErr) {
+      entry.message = 'Ошибка опроса статусов: ' + fetchErr.toString();
+    }
+  } finally {
+    props.deleteProperty('ozon_statusPollRunning');
+    try {
+      const finalRows = sessionsSheet.getDataRange().getValues();
+      for (let i = finalRows.length - 1; i >= 1; i--) {
+        if (String(finalRows[i][0]).trim() === token) {
+          sessionsSheet.deleteRow(i + 1);
+          break;
+        }
+      }
+      SpreadsheetApp.flush();
+    } catch (cleanupErr) {
+      Logger.log('Ошибка при удалении временной сессии: ' + cleanupErr.toString());
+    }
+  }
+  entry.durationMs = Date.now() - startedAt;
+  pushOzonStatusPollHistory(entry);
+  return entry;
+}
+
+// Hourly trigger handler: polls only 09:00-22:59 Yekaterinburg time (23:00+ is covered by the evening one-offs).
+function scheduledOzonStatusCheck() {
+  // Hour taken from a full timestamp: 'yyyy-MM-dd HH:mm:ss' -> characters 11..12.
+  const hour = Number(Utilities.formatDate(new Date(), 'Asia/Yekaterinburg', 'yyyy-MM-dd HH:mm:ss').slice(11, 13));
+  if (hour < 9 || hour > 22) return;
+  ensureEveningStatusPolls();
+  runOzonStatusPoll('hourly');
+}
+
+// Once per Ekb day: one-off triggers for 23:00, 23:30, 23:45 (those still >= 1 minute ahead).
+function ensureEveningStatusPolls() {
+  const props = PropertiesService.getScriptProperties();
+  const today = Utilities.formatDate(new Date(), 'Asia/Yekaterinburg', 'yyyy-MM-dd');
+  if (props.getProperty('ozon_eveningPollsDate') === today) return;
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'runOzonStatusPollAt') ScriptApp.deleteTrigger(triggers[i]);
+  }
+  const times = ['23:00', '23:30', '23:45'];
+  for (let i = 0; i < times.length; i++) {
+    // Yekaterinburg has no DST, so a fixed +05:00 offset is exact.
+    const instant = new Date(today + 'T' + times[i] + ':00+05:00');
+    if (instant.getTime() - Date.now() >= 60 * 1000) {
+      ScriptApp.newTrigger('runOzonStatusPollAt').timeBased().at(instant).create();
+    }
+  }
+  props.setProperty('ozon_eveningPollsDate', today);
+}
+
+// Handler of the evening one-offs: delete only the trigger that fired, then poll.
+function runOzonStatusPollAt(e) {
+  const uid = e && e.triggerUid;
+  if (uid) {
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getUniqueId() === uid) {
+        ScriptApp.deleteTrigger(triggers[i]);
+        break;
+      }
+    }
+  }
+  runOzonStatusPoll('evening');
 }
 
 function runOzonSyncOnce() {
@@ -11260,15 +11408,22 @@ function setupOzonSyncTriggers() {
     .atHour(20)
     .inTimezone('Europe/Moscow')
     .create();
+  ScriptApp.newTrigger('scheduledOzonStatusCheck')
+    .timeBased()
+    .everyHours(1)
+    .create();
 }
 
 function removeOzonSyncTriggers() {
   const triggers = ScriptApp.getProjectTriggers();
   for (let i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === 'scheduledOzonCheck') {
+    const handler = triggers[i].getHandlerFunction();
+    if (handler === 'scheduledOzonCheck' || handler === 'scheduledOzonStatusCheck' || handler === 'runOzonStatusPollAt') {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
+  // The evening one-offs are gone: let the next hourly run recreate them the same day.
+  PropertiesService.getScriptProperties().deleteProperty('ozon_eveningPollsDate');
 }
 
 function getOzonSyncStatusInfo() {
@@ -11306,12 +11461,21 @@ function getOzonSyncStatusInfo() {
     }
   }
 
+  let statusPollHistory = [];
+  try {
+    const parsedStatus = JSON.parse(props.getProperty('ozon_statusPollHistory') || '[]');
+    if (Array.isArray(parsedStatus)) statusPollHistory = parsedStatus;
+  } catch (e) {
+    Logger.log('Error parsing ozon_statusPollHistory property: ' + e.toString());
+  }
+
   return {
     enabled: enabled,
     triggersCount: triggersCount,
     target: target,
     lastRun: lastRun,
-    history: history
+    history: history,
+    statusPollHistory: statusPollHistory
   };
 }
 

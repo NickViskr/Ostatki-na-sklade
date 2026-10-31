@@ -245,6 +245,9 @@ let nestedLockTakes = 0;
 // .create(), the chain setupKanCostWatchTrigger builds; doPost also builds `.timeBased().after(100)` triggers,
 // which the fake does not model. Every created trigger is kept so a test can read it back.
 let projectTriggers = [];
+let triggerUidCounter = 0;
+// Item 97 ticket 02 B: every Utilities.sleep(ms) call; the fake advances the fake clock by ms.
+const sleepCalls = [];
 
 // ---------- Свойства скрипта и ЧУЖАЯ таблица платёжного календаря ----------
 let scriptProperties = {};
@@ -282,6 +285,7 @@ const sandbox = {
   Utilities: {
     formatDate: (date, tz, fmt) => formatDateImpl(date, tz, fmt),
     getUuid: () => 'uuid-' + (++uuidCounter),
+    sleep: (ms) => { sleepCalls.push(ms); FakeDate.__now += ms; },
     // hashPassword: Apps Script returns the digest as SIGNED bytes (-128..127).
     computeDigest: (algorithm, value, charset) => {
       if (algorithm !== 'SHA_256' || charset !== 'UTF_8') throw new Error('Стенд: computeDigest умеет только SHA_256 / UTF_8');
@@ -300,12 +304,19 @@ const sandbox = {
     getProjectTriggers: () => projectTriggers.slice(),
     deleteTrigger: (trigger) => { projectTriggers = projectTriggers.filter((t) => t !== trigger); },
     newTrigger: (handler) => {
-      const spec = { handler, kind: null, minutes: null };
+      const spec = { handler, kind: null, minutes: null, hours: null, days: null, atHour: null, tz: null, at: null, afterMs: null, uid: 'trigger-uid-' + (++triggerUidCounter) };
       const builder = {
         timeBased() { spec.kind = 'time'; return builder; },
         everyMinutes(n) { spec.minutes = n; return builder; },
+        // Item 97 ticket 02 B: the rest of the time-based chain, kept as plain data for tests.
+        everyHours(n) { spec.hours = n; return builder; },
+        everyDays(n) { spec.days = n; return builder; },
+        atHour(n) { spec.atHour = n; return builder; },
+        inTimezone(z) { spec.tz = z; return builder; },
+        at(date) { spec.at = new Date(date).getTime(); return builder; },
+        after(ms) { spec.afterMs = ms; return builder; },
         create() {
-          const trigger = { getHandlerFunction: () => handler, spec };
+          const trigger = { getHandlerFunction: () => handler, getUniqueId: () => spec.uid, spec };
           projectTriggers.push(trigger);
           return trigger;
         }
@@ -870,6 +881,9 @@ module.exports = {
   setSheetAutoDates(zone) { sheetAutoDateZone = zone || null; },
   // The triggers as plain data: { handler, kind, minutes }.
   scriptTriggers() { return projectTriggers.map((t) => ({ handler: t.spec.handler, kind: t.spec.kind, minutes: t.spec.minutes })); },
+  // Item 97 ticket 02 B: full trigger data { handler, kind, minutes, hours, days, atHour, tz, at (epoch ms), afterMs, uid }.
+  triggerSpecs() { return projectTriggers.map((t) => Object.assign({}, t.spec)); },
+  sleepCalls() { return sleepCalls.slice(); },
   // A real doPost call; the answer is the parsed JSON text the browser would get.
   callDoPost(payload) {
     const out = context.doPost({ postData: { contents: JSON.stringify(payload) } });

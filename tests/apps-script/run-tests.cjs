@@ -15541,6 +15541,204 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 02 part B: light status polls =================
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const LIGHT = 'Опрос статусов Ozon';
+  const FULL = 'Автоопрос Ozon';
+  const HEAD = ['Token', 'Username', 'Role', 'ExpiresAt'];
+  const CHECK = '/api/ozon/check';
+  // Fake "now" given as Ekb wall time on 2026-10-21 (UTC+5, no DST).
+  const ekb = (hhmm) => new Date('2026-10-21T' + hhmm + ':00+05:00').toISOString();
+  const mk = (hhmm, sessionRows) => {
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow(ekb(hhmm));
+    h.setRegistrySheet('Сессии', [HEAD].concat(sessionRows || []));
+    h.setFetchHandler(() => ({ body: { status: 'success', data: { found: 2, message: 'ok' } } }));
+    return h;
+  };
+  const urls = (h) => h.fetchLog.map((f) => f.url.replace(/^.*?(\/api\/)/, '/api/'));
+  const sessionLabels = (h) => h.sheetByName('Сессии').__dump().slice(1).map((r) => r[1]);
+  const hist = (h) => JSON.parse(h.getScriptProperty('ozon_statusPollHistory') || '[]');
+  const evening = (h) => h.triggerSpecs().filter((t) => t.handler === 'runOzonStatusPollAt');
+  const D = '2026-10-21';
+  const EVE = [0, 1, 2].map((i) => new Date(D + 'T' + ['23:00', '23:30', '23:45'][i] + ':00+05:00').getTime());
+  const now = (h) => h.FakeDate.__now;
+  // A missing or throwing function must fail a check, not crash the whole stand.
+  const call = (h, name, ...a) => { const f = h.context[name]; if (typeof f !== 'function') return 'MISSING ' + name; try { return f(...a); } catch (e) { return 'THROWS: ' + e.message; } };
+
+  // 1. Hours gate
+  {
+    let h = mk('08:30'); call(h, 'scheduledOzonStatusCheck');
+    const early = urls(h);
+    h = mk('09:05'); call(h, 'scheduledOzonStatusCheck');
+    const nine = urls(h);
+    h = mk('22:40'); call(h, 'scheduledOzonStatusCheck');
+    const late = urls(h);
+    check('Item 97 ticket 02 B1: the hourly handler does nothing at 08:30 Ekb and makes exactly one /api/ozon/check fetch at 09:05 and at 22:40 Ekb',
+      early.length === 0 && nine.length === 1 && nine[0] === CHECK && late.length === 1 && late[0] === CHECK, JSON.stringify({ early, nine, late }));
+  }
+  // 2. Evening one-offs created once per day
+  {
+    const h = mk('21:10'); call(h, 'scheduledOzonStatusCheck');
+    const first = evening(h);
+    const uids = first.map((t) => t.uid).join(',');
+    h.setNow(ekb('22:10')); call(h, 'scheduledOzonStatusCheck');
+    const second = evening(h);
+    check('Item 97 ticket 02 B2: at 21:10 Ekb three runOzonStatusPollAt one-offs appear for 23:00, 23:30, 23:45 Ekb of that day, ozon_eveningPollsDate is set, a second run the same day creates none',
+      first.length === 3 && first.map((t) => t.at).sort().join() === EVE.join() && h.getScriptProperty('ozon_eveningPollsDate') === D
+        && second.length === 3 && second.map((t) => t.uid).join(',') === uids, JSON.stringify({ first: first.map((t) => t.at), date: h.getScriptProperty('ozon_eveningPollsDate'), second: second.length }));
+  }
+  // 3. Only future one-offs
+  {
+    const h = mk('23:35'); call(h, 'ensureEveningStatusPolls');
+    const t = evening(h);
+    check('Item 97 ticket 02 B3: ensureEveningStatusPolls at 23:35 Ekb creates only the 23:45 one-off (the others are not at least 1 minute ahead)',
+      t.length === 1 && t[0].at === EVE[2], JSON.stringify(t.map((x) => x.at)));
+  }
+  // 4. One-off handler deletes only its own trigger
+  {
+    const h = mk('21:10'); call(h, 'ensureEveningStatusPolls');
+    h.context.ScriptApp.newTrigger('unrelatedJob').timeBased().everyMinutes(30).create();
+    const mid = evening(h).find((t) => t.at === EVE[1]) || { uid: 'none' };
+    h.setNow(ekb('23:30')); h.setFetchHandler(() => ({ body: { status: 'success', data: { found: 1 } } }));
+    call(h, 'runOzonStatusPollAt', { triggerUid: mid.uid });
+    const left = evening(h).map((t) => t.at).sort();
+    const hs = hist(h);
+    check('Item 97 ticket 02 B4: runOzonStatusPollAt({triggerUid}) deletes only that trigger (other one-offs and unrelated triggers stay) and runs one poll with reason "evening"',
+      left.join() === [EVE[0], EVE[2]].join() && h.triggerSpecs().some((t) => t.handler === 'unrelatedJob')
+        && urls(h).length === 1 && urls(h)[0] === CHECK && hs.length === 1 && hs[0].reason === 'evening', JSON.stringify({ left, urls: urls(h), hs }));
+  }
+  // 5. Skip while a full poll runs
+  {
+    let h = mk('12:00'); h.setScriptProperty('ozon_fullPollRunning', String(now(h) - 5 * 60000));
+    call(h, 'scheduledOzonStatusCheck');
+    const skipped = urls(h).length === 0 && hist(h).length === 1 && !!hist(h)[0].skipped;
+    h = mk('12:00'); h.setScriptProperty('ozon_fullPollRunning', String(now(h) - 20 * 60000));
+    call(h, 'scheduledOzonStatusCheck');
+    check('Item 97 ticket 02 B5: a full-poll stamp 5 minutes old skips the light poll (no fetch, history entry with "skipped"); a 20-minute-old stamp does not',
+      skipped && urls(h).length === 1 && urls(h)[0] === CHECK, JSON.stringify({ skipped, urls: urls(h) }));
+  }
+  // 6. Session rows
+  {
+    const far = String(Date.parse('2030-01-01T00:00:00Z'));
+    const h = mk('12:00', [['t-full', FULL, 'admin', far], ['t-light-old', LIGHT, 'admin', far], ['t-user', 'boss', 'admin', far]]);
+    let during = [];
+    h.setFetchHandler(() => { during = sessionLabels(h); return { body: { status: 'success', data: { found: 0 } } }; });
+    call(h, 'scheduledOzonStatusCheck');
+    const after = sessionLabels(h);
+    check('Item 97 ticket 02 B6a: the light poll signs in as "Опрос статусов Ozon" (its stale rows replaced by one), leaves the "Автоопрос Ozon" row alone, and removes its own row at the end',
+      during.filter((x) => x === LIGHT).length === 1 && during.indexOf(FULL) >= 0 && after.indexOf(LIGHT) === -1 && after.indexOf(FULL) >= 0 && after.indexOf('boss') >= 0,
+      JSON.stringify({ during, after }));
+    const h2 = mk('12:00', [['t-full', FULL, 'admin', far], ['t-light', LIGHT, 'admin', far]]);
+    let during2 = [];
+    h2.setFetchHandler(() => { during2 = sessionLabels(h2); return { body: { status: 'success', data: { found: 0 } } }; });
+    call(h2, 'scheduledOzonCheck');
+    check('Item 97 ticket 02 B6b: the full poll still removes only "Автоопрос Ozon" rows: a "Опрос статусов Ozon" row survives it',
+      during2.indexOf(LIGHT) >= 0 && sessionLabels(h2).indexOf(LIGHT) >= 0 && h2.sheetByName('Сессии').__dump().slice(1).filter((r) => r[0] === 't-full').length === 0, JSON.stringify({ during2, after: sessionLabels(h2) }));
+  }
+  // 7. History record
+  {
+    const h = mk('12:00');
+    const seed = []; for (let i = 0; i < 30; i++) seed.push({ time: 'seed-' + i, reason: 'hourly', ok: true, durationMs: 1, found: 0, message: '' });
+    h.setScriptProperty('ozon_statusPollHistory', JSON.stringify(seed));
+    h.setFetchHandler(() => { h.FakeDate.__now += 28000; return { body: { status: 'success', data: { found: 4, message: 'done' } } }; });
+    call(h, 'scheduledOzonStatusCheck');
+    const hs = hist(h), e = hs[0] || {};
+    check('Item 97 ticket 02 B7: a run prepends {time, reason, ok, durationMs, found, message} to ozon_statusPollHistory (newest first) and the list stays capped at 30',
+      hs.length === 30 && Object.keys(e).sort().join() === 'durationMs,found,message,ok,reason,time' && e.ok === true && e.found === 4 && e.durationMs === 28000
+        && typeof e.reason === 'string' && e.reason !== '' && String(e.time).indexOf('seed-') !== 0 && hs[1].time === 'seed-0' && hs[29].time === 'seed-28', JSON.stringify({ n: hs.length, e, second: hs[1] }));
+  }
+  // 8. Running flag
+  {
+    const h = mk('12:00');
+    let during = null;
+    h.setFetchHandler(() => { during = h.getScriptProperty('ozon_statusPollRunning'); return { body: { status: 'success', data: { found: 0 } } }; });
+    call(h, 'scheduledOzonStatusCheck');
+    const okAfter = h.getScriptProperty('ozon_statusPollRunning');
+    const h2 = mk('12:00');
+    let during2 = null;
+    h2.setFetchHandler(() => { during2 = h2.getScriptProperty('ozon_statusPollRunning'); throw new Error('boom'); });
+    let thrown = '';
+    try { call(h2, 'scheduledOzonStatusCheck'); } catch (e) { thrown = e.message; }
+    check('Item 97 ticket 02 B8: ozon_statusPollRunning holds the current time during the fetch and is deleted after it, also when the fetch throws',
+      during !== null && Math.abs(Number(during) - ekbMs('12:00')) <= 1000 && okAfter === null && during2 !== null && h2.getScriptProperty('ozon_statusPollRunning') === null,
+      JSON.stringify({ during, okAfter, during2, after2: h2.getScriptProperty('ozon_statusPollRunning'), thrown }));
+  }
+  function ekbMs(hhmm) { return Date.parse(ekb(hhmm)); }
+  // 9. Full poll coordination
+  {
+    const h = mk('12:00');
+    const seen = [];
+    h.setFetchHandler((url) => { seen.push([url.replace(/^.*?(\/api\/)/, '/api/'), h.getScriptProperty('ozon_fullPollRunning')]); return { body: { status: 'success', data: { found: 0 } } }; });
+    call(h, 'scheduledOzonCheck');
+    const flagged = seen.length >= 2 && seen.every((s) => s[1] !== null);
+    check('Item 97 ticket 02 B9a: the full poll holds ozon_fullPollRunning during all its fetches and deletes it at the end',
+      flagged && h.getScriptProperty('ozon_fullPollRunning') === null, JSON.stringify({ seen, after: h.getScriptProperty('ozon_fullPollRunning') }));
+    const g = mk('12:00');
+    g.setScriptProperty('ozon_statusPollRunning', String(now(g)));
+    const t0 = now(g);
+    call(g, 'scheduledOzonCheck');
+    const sl = g.sleepCalls(), total = sl.reduce((a, b) => a + b, 0);
+    check('Item 97 ticket 02 B9b: with a fresh ozon_statusPollRunning the full poll waits in Utilities.sleep(5000) steps, gives up after at most 90 s in total, then still calls /api/ozon/check',
+      sl.length >= 2 && sl.every((x) => x === 5000) && total <= 90000 && total >= 60000 && urls(g).indexOf(CHECK) >= 0, JSON.stringify({ sleeps: sl.length, total, urls: urls(g), t0 }));
+  }
+  // 10. Triggers installed / removed
+  {
+    const h = mk('12:00');
+    h.context.ScriptApp.newTrigger('unrelatedJob').timeBased().everyMinutes(30).create();
+    h.context.ScriptApp.newTrigger('runOzonStatusPollAt').timeBased().at(new Date(ekb('23:00'))).create();
+    h.context.setupOzonSyncTriggers();
+    const t = h.triggerSpecs();
+    const full = t.filter((x) => x.handler === 'scheduledOzonCheck').map((x) => x.atHour).sort((a, b) => a - b).join();
+    const light = t.filter((x) => x.handler === 'scheduledOzonStatusCheck');
+    const ok1 = full === '11,20' && light.length === 1 && light[0].hours === 1;
+    h.context.setupOzonSyncTriggers();
+    const twice = h.triggerSpecs().filter((x) => x.handler === 'scheduledOzonStatusCheck').length;
+    h.context.removeOzonSyncTriggers();
+    const left = h.triggerSpecs().map((x) => x.handler);
+    check('Item 97 ticket 02 B10: setupOzonSyncTriggers creates the two full-poll triggers plus ONE hourly scheduledOzonStatusCheck (also when run twice); removeOzonSyncTriggers removes them and every runOzonStatusPollAt, keeping unrelated ones',
+      ok1 && twice === 1 && left.join() === 'unrelatedJob', JSON.stringify({ full, light: light.length, twice, left }));
+  }
+  // 11. Status info
+  {
+    const h = mk('12:00');
+    const empty = (call(h, 'getOzonSyncStatusInfo') || {}).statusPollHistory;
+    const rec = [{ time: 'x', reason: 'hourly', ok: true, durationMs: 5, found: 1, message: 'm' }];
+    h.setScriptProperty('ozon_statusPollHistory', JSON.stringify(rec));
+    const got = (call(h, 'getOzonSyncStatusInfo') || {}).statusPollHistory;
+    check('Item 97 ticket 02 B11: getOzonSyncStatusInfo returns statusPollHistory as the parsed array ([] when nothing is stored)',
+      Array.isArray(empty) && empty.length === 0 && JSON.stringify(got) === JSON.stringify(rec), JSON.stringify({ empty, got }));
+  }
+  // 12. No retry trigger
+  {
+    const bad = [() => ({ code: 500, body: 'fail' }), () => { throw new Error('timeout'); }, () => ({ body: { status: 'error', message: 'no' } })];
+    const res = bad.map((fn) => {
+      const h = mk('12:00'); h.setFetchHandler(fn);
+      try { call(h, 'scheduledOzonStatusCheck'); } catch (e) { /* a throw is allowed, a retry trigger is not */ }
+      return urls(h).length === 1 ? h.triggerSpecs().filter((t) => t.handler === 'runOzonSyncRetry').length : -1; // -1: the poll did not even try the fetch
+    });
+    check('Item 97 ticket 02 B12: a failed light poll (HTTP 500, thrown fetch, error answer) never creates a runOzonSyncRetry trigger',
+      res.join() === '0,0,0', JSON.stringify(res));
+  }
+  // 13. Evening one-offs: re-creation after autopoll off/on, and the 1-minute-ahead boundary
+  {
+    const h = mk('21:10'); call(h, 'scheduledOzonStatusCheck');
+    const created = evening(h).length;
+    h.context.setupOzonSyncTriggers();
+    const afterSetup = evening(h).length;
+    h.setNow(ekb('21:40')); call(h, 'scheduledOzonStatusCheck');
+    const again = evening(h);
+    check('Item 97 ticket 02 B13a: after the evening one-offs exist, setupOzonSyncTriggers (remove + create) and a same-day hourly run at 21:40 Ekb create three runOzonStatusPollAt one-offs again',
+      created === 3 && afterSetup === 0 && again.length === 3 && again.map((t) => t.at).sort().join() === EVE.join(), JSON.stringify({ created, afterSetup, again: again.map((t) => t.at) }));
+    const g = mk('12:00'); g.setNow(new Date(D + 'T23:44:30+05:00').toISOString()); call(g, 'ensureEveningStatusPolls');
+    const g2 = mk('12:00'); g2.setNow(new Date(D + 'T23:44:00+05:00').toISOString()); call(g2, 'ensureEveningStatusPolls');
+    check('Item 97 ticket 02 B13b: at 23:44:30 Ekb (15 s ahead) no 23:45 one-off is created; at 23:44:00 (exactly 1 minute ahead) it is',
+      evening(g).length === 0 && evening(g2).length === 1 && evening(g2)[0].at === EVE[2], JSON.stringify({ a: evening(g).map((t) => t.at), b: evening(g2).map((t) => t.at) }));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
