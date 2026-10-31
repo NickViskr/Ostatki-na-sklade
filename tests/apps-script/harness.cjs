@@ -738,6 +738,17 @@ module.exports = {
       .filter(r => r.some(v => String(v).trim() !== ''))
       .map(r => { const o = {}; headers.forEach((h, i) => o[h] = r[i]); return o; });
   },
+  // Item 97 ticket 02: any sheet of the active spreadsheet read back as objects keyed by header ([] when it does not exist).
+  dumpSheetByName(name) {
+    const sheet = sheetRegistry[name];
+    if (!sheet) return [];
+    const data = sheet.__dump();
+    const headers = data[0].map(h => String(h).trim());
+    return data.slice(1)
+      .filter(r => r.some(v => String(v).trim() !== ''))
+      .map(r => { const o = {}; headers.forEach((h, i) => o[h] = r[i]); return o; });
+  },
+  sheetByName(name) { return sheetRegistry[name] || null; },
   commitUnshippedReturn: (...args) => context.commitUnshippedReturn(...args),
   ozonCabinetFromDestination: (...args) => context.ozonCabinetFromDestination(...args),
   appendOzonCostForShipment: (...args) => context.appendOzonCostForShipment(...args),

@@ -458,7 +458,7 @@ function doPost(e) {
         result = deleteKit(payload.kitSku);
         break;
       case 'saveExternalShipments':
-        result = saveExternalShipments(data.shipments);
+        result = saveExternalShipments(data.shipments, data.polledAt);
         break;
       case 'applyCancelledOzonOrders':
         result = applyCancelledOzonOrders(data);
@@ -594,8 +594,18 @@ function getSpreadsheet() {
 
 const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
-  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON'
+  'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON',
+  // Item 97 ticket 02: when the goods left our warehouse and the ISO week of that moment
+  'Передача с', 'Передача по', 'Передача тип', 'Неделя', 'Неделя вручную'
 ];
+const OZON_STATUS_LOG_SHEET_NAME = 'Журнал статусов Ozon';
+const OZON_STATUS_LOG_HEADERS = ['Время опроса', 'PostingID', 'OrderID', 'Кабинет', 'Было', 'Стало', 'Статус заявки', 'Дата статуса Ozon'];
+// Twin of STOCK_DEPARTED_STATUSES in src/lib/ozonStatus.ts: statuses after the goods left our warehouse.
+const OZON_DEPARTED_STATUSES = [
+  'ACCEPTED_AT_SUPPLY_WAREHOUSE', 'IN_TRANSIT', 'ACCEPTANCE_AT_STORAGE_WAREHOUSE',
+  'REPORTS_CONFIRMATION_AWAITING', 'REPORT_REJECTED', 'COMPLETED'
+];
+const EKB_ZONE = 'Asia/Yekaterinburg'; // fixed UTC+5, no DST
 
 const OZON_STOCKS_HEADERS = [
   'Кабинет', 'SKU', 'Артикул', 'Название', 'Склад', 'Кластер',
@@ -9202,7 +9212,57 @@ function getOzonStocks() {
   return rows;
 }
 
-function saveExternalShipments(shipments) {
+function isOzonDepartedStatus(status) {
+  return OZON_DEPARTED_STATUSES.indexOf(String(status || '').toUpperCase().trim()) >= 0;
+}
+
+function formatEkbText(ms) {
+  return Utilities.formatDate(new Date(ms), EKB_ZONE, 'yyyy-MM-dd HH:mm:ss');
+}
+
+// Ekb text 'yyyy-MM-dd HH:mm:ss' -> epoch ms (NaN when it is not such a text).
+function parseEkbText(text) {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/.exec(String(text || '').trim());
+  return m ? Date.parse(m[1] + 'T' + m[2] + '+05:00') : NaN;
+}
+
+// ISO week label 'YYYY-Www' (ISO week-year) of an instant, counted in Ekb.
+function isoWeekLabelEkb(ms) {
+  const local = new Date(ms + 5 * 3600000); // UTC getters now read Ekb wall-clock fields
+  const day = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()));
+  const weekday = day.getUTCDay() || 7;
+  day.setUTCDate(day.getUTCDate() + 4 - weekday); // the Thursday of this ISO week
+  const weekYear = day.getUTCFullYear();
+  const yearStart = Date.UTC(weekYear, 0, 1);
+  const week = Math.ceil(((day.getTime() - yearStart) / 86400000 + 1) / 7);
+  return weekYear + '-W' + (week < 10 ? '0' : '') + week;
+}
+
+function ozonStatusPollStampKey() {
+  return _devModeSpreadsheet ? 'ozon_lastStatusPollAt_test' : 'ozon_lastStatusPollAt';
+}
+
+// Item 97 ticket 02: first-detection handover of one posting. Returns null (nothing) or { from, to, kind }
+// with epoch ms; 'exact' has no from. Caller passes storedStatus = null for a new row.
+function decideExternalHandover(s, storedStatus, prevStampMs, polledMs) {
+  if (s.isVirtual === true || !isOzonDepartedStatus(s.ozonStatus)) return null;
+  if (storedStatus !== null && isOzonDepartedStatus(storedStatus)) return null;
+  const stateMs = Date.parse(String(s.ozonStatusDate || ''));
+  const exact = String(s.orderState || '') === 'ACCEPTED_AT_SUPPLY_WAREHOUSE' && isFinite(stateMs)
+    && stateMs <= polledMs && (prevStampMs === null || stateMs > prevStampMs);
+  if (exact) return { from: null, to: stateMs, kind: 'точно' };
+  if (prevStampMs === null) return null;
+  return { from: prevStampMs, to: polledMs, kind: 'окно' };
+}
+
+function appendOzonStatusLog(rows) {
+  if (rows.length === 0) return;
+  const sheet = getOrCreateSheet(getSpreadsheet(), OZON_STATUS_LOG_SHEET_NAME, OZON_STATUS_LOG_HEADERS);
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, OZON_STATUS_LOG_HEADERS.length).setValues(rows);
+}
+
+// polledAt (ISO text) is the instant the proxy polled Ozon; absent from an old proxy -> now.
+function saveExternalShipments(shipments, polledAt) {
   if (!shipments || !Array.isArray(shipments)) {
     throw new Error('Invalid shipments data: must be an array');
   }
@@ -9229,10 +9289,27 @@ function saveExternalShipments(shipments) {
   // Пункт 31. Виртуальная заявка создана самим Ozon, наш склад в ней не участвует.
   const colIsVirtual = headers.indexOf('Виртуальная');
   const colOriginalSupply = headers.indexOf('ИсходнаяПоставка');
+  const colHandoverFrom = headers.indexOf('Передача с');
+  const colHandoverTo = headers.indexOf('Передача по');
+  const colHandoverKind = headers.indexOf('Передача тип');
+  const colWeek = headers.indexOf('Неделя');
   
   if (postingIdIdx === -1) {
     throw new Error('PostingID column not found in Внешние отгрузки');
   }
+
+  const props = PropertiesService.getScriptProperties();
+  const stampKey = ozonStatusPollStampKey();
+  const prevStampRaw = props.getProperty(stampKey);
+  const prevStampMs = (prevStampRaw && isFinite(Number(prevStampRaw))) ? Number(prevStampRaw) : null;
+  const parsedPolledMs = polledAt ? Date.parse(String(polledAt)) : NaN;
+  const polledMs = isFinite(parsedPolledMs) ? parsedPolledMs : Date.now();
+  const polledText = formatEkbText(polledMs);
+  const statusLogRows = [];
+  const logStatus = function(s, postingId, was) {
+    statusLogRows.push([polledText, postingId, s.orderId || '', s.cabinet || '', was, s.ozonStatus || '',
+      s.orderState || '', s.ozonStatusDate || '']);
+  };
   
   // Нормализация значения ячейки для сравнения: даты приводятся к строке, остальное — trim
   const normCell = function(v) {
@@ -9283,6 +9360,8 @@ function saveExternalShipments(shipments) {
       const currentStatus = statusIdx >= 0 ? String(data[rowIndex][statusIdx]).trim() : '';
       
       let rowChanged = false;
+      const storedOzonStatus = ozonStatusIdx >= 0 ? String(data[rowIndex][ozonStatusIdx] || '').trim() : '';
+      const hasHandover = colHandoverTo >= 0 && String(data[rowIndex][colHandoverTo] || '').trim() !== '';
       
       // Записывает значение в ячейку только если оно реально отличается от текущего
       const setIfChanged = function(colIdx, newValue) {
@@ -9340,6 +9419,18 @@ function saveExternalShipments(shipments) {
         }
       }
       
+      if (String(s.ozonStatus || '').trim() !== storedOzonStatus) logStatus(s, postingId, storedOzonStatus);
+      if (!hasHandover) {
+        const handover = decideExternalHandover(s, storedOzonStatus, prevStampMs, polledMs);
+        if (handover) {
+          const texts = handoverCellTexts(handover);
+          [[colHandoverFrom, texts.from], [colHandoverTo, texts.to], [colHandoverKind, texts.kind], [colWeek, texts.week]].forEach(function(pair) {
+            if (pair[0] >= 0) sheet.getRange(sheetRow, pair[0] + 1).setValue(pair[1]);
+          });
+          rowChanged = true;
+        }
+      }
+      
       if (rowChanged) {
         updatedCount++;
       } else {
@@ -9366,6 +9457,16 @@ function saveExternalShipments(shipments) {
       if (colIsVirtual >= 0) newRow[colIsVirtual] = (s.isVirtual === true ? 'ДА' : '');
       if (colOriginalSupply >= 0) newRow[colOriginalSupply] = String(s.originalSupplyId || '').trim();
       
+      logStatus(s, postingId, '');
+      const newHandover = decideExternalHandover(s, null, prevStampMs, polledMs);
+      if (newHandover) {
+        const texts = handoverCellTexts(newHandover);
+        if (colHandoverFrom >= 0) newRow[colHandoverFrom] = texts.from;
+        if (colHandoverTo >= 0) newRow[colHandoverTo] = texts.to;
+        if (colHandoverKind >= 0) newRow[colHandoverKind] = texts.kind;
+        if (colWeek >= 0) newRow[colWeek] = texts.week;
+      }
+      
       rowsToAdd.push(newRow);
       addedCount++;
     }
@@ -9375,8 +9476,21 @@ function saveExternalShipments(shipments) {
     sheet.getRange(data.length + 1, 1, rowsToAdd.length, headers.length).setValues(rowsToAdd);
   }
   
+  appendOzonStatusLog(statusLogRows);
+  props.setProperty(stampKey, String(polledMs));
+  
   SpreadsheetApp.flush();
   return { addedCount: addedCount, updatedCount: updatedCount, unchangedCount: unchangedCount };
+}
+
+// Sheet texts of a handover: Ekb times, empty 'from' for an exact one, ISO week of the 'to' moment.
+function handoverCellTexts(handover) {
+  return {
+    from: handover.from === null ? '' : formatEkbText(handover.from),
+    to: formatEkbText(handover.to),
+    kind: handover.kind,
+    week: isoWeekLabelEkb(handover.to)
+  };
 }
 
 function getExternalShipments() {
@@ -9407,6 +9521,11 @@ function getExternalShipments() {
   const colIsVirtual = headers.indexOf('Виртуальная');
   const colOriginalSupply = headers.indexOf('ИсходнаяПоставка');
   const colShippedJson = headers.indexOf('ОтгруженоJSON');
+  const colHandoverFrom = headers.indexOf('Передача с');
+  const colHandoverTo = headers.indexOf('Передача по');
+  const colHandoverKind = headers.indexOf('Передача тип');
+  const colWeek = headers.indexOf('Неделя');
+  const colManualWeek = headers.indexOf('Неделя вручную');
   
   if (postingIdIdx === -1) return [];
   
@@ -9425,13 +9544,23 @@ function getExternalShipments() {
       const val = row[idx];
       if (isDate && val instanceof Date) {
         try {
-          return Utilities.formatDate(val, idx === detectedAtIdx ? detectedTz : tz, dateFormat);
+          return Utilities.formatDate(val, (idx === detectedAtIdx || idx === colHandoverFrom || idx === colHandoverTo) ? detectedTz : tz, dateFormat);
         } catch (e) {
           return String(val);
         }
       }
       return val !== undefined && val !== null ? String(val) : '';
     };
+    
+    const handoverFrom = getVal(colHandoverFrom, true, "yyyy-MM-dd HH:mm:ss");
+    const handoverTo = getVal(colHandoverTo, true, "yyyy-MM-dd HH:mm:ss");
+    const handoverKind = getVal(colHandoverKind, false).trim();
+    const week = getVal(colWeek, false).trim();
+    const manualWeek = getVal(colManualWeek, false).trim();
+    // A window that straddles an ISO-week boundary needs a human look, unless a week was set by hand
+    const checkWeek = handoverKind === 'окно' && manualWeek === '' && isFinite(parseEkbText(handoverFrom))
+      && isFinite(parseEkbText(handoverTo))
+      && isoWeekLabelEkb(parseEkbText(handoverFrom)) !== isoWeekLabelEkb(parseEkbText(handoverTo));
     
     shipments.push({
       postingId: postingIdVal,
@@ -9454,7 +9583,14 @@ function getExternalShipments() {
       clusterId: getVal(colClusterId, false).trim(),
       isVirtual: getVal(colIsVirtual, false).trim().toUpperCase() === 'ДА',
       originalSupplyId: getVal(colOriginalSupply, false).trim(),
-      shippedJSON: getVal(colShippedJson, false)
+      shippedJSON: getVal(colShippedJson, false),
+      handoverFrom: handoverFrom,
+      handoverTo: handoverTo,
+      handoverKind: handoverKind,
+      week: week,
+      manualWeek: manualWeek,
+      effectiveWeek: manualWeek || week,
+      checkWeek: checkWeek
     });
   }
   return shipments;

@@ -15255,6 +15255,292 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 02 part A: handover detection, week, status log =================
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const SHEET = 'Внешние отгрузки';
+  const LOG = 'Журнал статусов Ozon';
+  const NEW_COLS = ['Передача с', 'Передача по', 'Передача тип', 'Неделя', 'Неделя вручную'];
+  const OLD_HEADERS = ['PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
+    'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет',
+    'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON'];
+  const STAMP_KEY = 'ozon_lastStatusPollAt';
+  const ms = (iso) => Date.parse(iso);
+  const mkHarness = (nowIso) => {
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow(nowIso || '2026-10-21T10:01:00Z');
+    return h;
+  };
+  const ship = (o) => Object.assign({ postingId: 'P-1', orderId: 'O-1', orderNumber: '111', shipmentDate: '2026-10-21', itemsJSON: '[]', cabinet: 'K1',
+    ozonStatus: 'IN_TRANSIT', ozonStatusDate: '', orderState: '', isDirect: false }, o || {});
+  const run = (h, shipments, polledAt) => {
+    try { h.context.saveExternalShipments(shipments, polledAt); return ''; } catch (e) { return 'THROWS: ' + e.message; }
+  };
+  const row = (h, pid) => h.dumpExternalShipments().find((r) => r['PostingID'] === (pid || 'P-1')) || {};
+  const val = (r, k) => (r[k] === undefined || r[k] === null ? '' : String(r[k]));
+  const fields = (r) => ({ from: val(r, 'Передача с'), to: val(r, 'Передача по'), kind: val(r, 'Передача тип'), week: val(r, 'Неделя') });
+  const seedStamp = (h, iso) => h.setScriptProperty(STAMP_KEY, String(ms(iso)));
+  const get = (h, pid) => h.context.getExternalShipments().find((s) => s.postingId === (pid || 'P-1')) || {};
+  // Prev poll 13:00 Ekb, this poll 15:00 Ekb on 2026-10-21 (Wednesday, week 2026-W43).
+  const PREV = '2026-10-21T08:00:00Z';
+  const POLLED = '2026-10-21T10:00:00Z';
+  const INSIDE = '2026-10-21T09:10:00Z'; // 14:10:00 Ekb
+
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    const err = run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: INSIDE })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A1: caught in ACCEPTED_AT_SUPPLY_WAREHOUSE with state_updated_date inside the poll window -> exact, "Передача по" = that time as Ekb text, "Передача с" empty, week W43',
+      f.kind === 'точно' && f.to === '2026-10-21 14:10:00' && f.from === '' && f.week === '2026-W43', JSON.stringify(f) + ' ' + err);
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: '2026-10-21T06:00:00Z' })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A2: ACCEPTED_AT_SUPPLY_WAREHOUSE whose state_updated_date is BEFORE the previous poll falls back to the window (13:00-15:00 Ekb)',
+      f.kind === 'окно' && f.from === '2026-10-21 13:00:00' && f.to === '2026-10-21 15:00:00' && f.week === '2026-W43', JSON.stringify(f));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: '2026-10-21T10:30:00Z' })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A2b: state_updated_date AFTER polledAt is not exact -> window',
+      f.kind === 'окно' && f.to === '2026-10-21 15:00:00', JSON.stringify(f));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: PREV })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A2d: boundary - state_updated_date exactly equal to the previous poll stamp is NOT exact (window), the exact range is (prev, polled]',
+      f.kind === 'окно' && f.from === '2026-10-21 13:00:00' && f.to === '2026-10-21 15:00:00', JSON.stringify(f));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: INSIDE })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A2c: exact detection with NO previous stamp still works when state_updated_date <= polledAt',
+      f.kind === 'точно' && f.to === '2026-10-21 14:10:00' && f.from === '' && f.week === '2026-W43', JSON.stringify(f));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT', ozonStatusDate: INSIDE })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A3: a posting first seen IN_TRANSIT (new row) with a previous stamp gets a window from the previous poll to polledAt, Ekb text',
+      f.kind === 'окно' && f.from === '2026-10-21 13:00:00' && f.to === '2026-10-21 15:00:00' && f.week === '2026-W43', JSON.stringify(f));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([{ postingId: 'P-1', cabinet: 'K1', status: 'new', ozonStatus: 'READY_TO_SUPPLY' }]);
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: INSIDE })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A3b: an EXISTING row whose stored status was pre-departure (READY_TO_SUPPLY) and now departed gets the exact handover',
+      f.kind === 'точно' && f.to === '2026-10-21 14:10:00' && f.week === '2026-W43', JSON.stringify(f));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    run(h, [ship({ postingId: 'D-1', isDirect: true, ozonStatus: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', orderState: 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', ozonStatusDate: INSIDE }),
+      ship({ postingId: 'D-2', isDirect: true, ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: INSIDE })], POLLED);
+    const a = fields(row(h, 'D-1'));
+    const b = fields(row(h, 'D-2'));
+    check('Item 97 ticket 02 A4: DIRECT caught in ACCEPTANCE_AT_STORAGE_WAREHOUSE -> window; DIRECT caught in ACCEPTED_AT_SUPPLY_WAREHOUSE with in-window date -> exact',
+      a.kind === 'окно' && a.from === '2026-10-21 13:00:00' && a.to === '2026-10-21 15:00:00'
+        && b.kind === 'точно' && b.to === '2026-10-21 14:10:00' && b.from === '', JSON.stringify({ a, b }));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    run(h, [ship({ isVirtual: true, ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: INSIDE }),
+      ship({ postingId: 'P-2', isVirtual: true, ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], POLLED);
+    const f1 = fields(row(h, 'P-1'));
+    const f2 = fields(row(h, 'P-2'));
+    check('Item 97 ticket 02 A5: a virtual order that departed gets no handover columns (exact or window)',
+      row(h, 'P-1')['PostingID'] === 'P-1' && Object.keys(f1).every((k) => f1[k] === '') && Object.keys(f2).every((k) => f2[k] === ''), JSON.stringify({ f1, f2 }));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([{ postingId: 'P-1', cabinet: 'K1', status: 'new', ozonStatus: 'IN_TRANSIT' }]);
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A6: a pre-ticket row (stored status already IN_TRANSIT, no handover) stays without a handover after a poll',
+      row(h)['PostingID'] === 'P-1' && Object.keys(f).every((k) => f[k] === ''), JSON.stringify(f));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], POLLED);
+    const first = fields(row(h));
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], '2026-10-21T12:00:00Z');
+    run(h, [ship({ ozonStatus: 'COMPLETED', orderState: 'COMPLETED', ozonStatusDate: '2026-10-21T11:00:00Z' })], '2026-10-21T14:00:00Z');
+    const second = fields(row(h));
+    check('Item 97 ticket 02 A7: later polls (same status, then a further status) never overwrite an existing handover',
+      first.kind === 'окно' && first.to === '2026-10-21 15:00:00' && JSON.stringify(first) === JSON.stringify(second), JSON.stringify({ first, second }));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT', ozonStatusDate: INSIDE })], POLLED);
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A8: no previous stamp and not exact -> handover and week stay empty; the stamp is written after the call (= polledAt epoch ms)',
+      row(h)['PostingID'] === 'P-1' && Object.keys(f).every((k) => f[k] === '') && h.getScriptProperty(STAMP_KEY) === String(ms(POLLED)),
+      JSON.stringify({ f, stamp: h.getScriptProperty(STAMP_KEY), wanted: String(ms(POLLED)) }));
+  }
+  {
+    const h = mkHarness('2026-10-21T10:01:00Z');
+    h.setExternalShipmentsSheet([]);
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT' })]); // an old proxy: no polledAt
+    check('Item 97 ticket 02 A8b: without polledAt (old proxy) the stamp is Date.now()',
+      h.getScriptProperty(STAMP_KEY) === String(ms('2026-10-21T10:01:00Z')), String(h.getScriptProperty(STAMP_KEY)));
+  }
+  {
+    // Sunday 23:50 Ekb = 18:50Z (week of 2026-10-25 = W43); Monday 00:10 Ekb = 19:10Z (W44).
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, '2026-10-25T18:00:00Z');
+    run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: '2026-10-25T18:50:00Z' })], '2026-10-25T19:00:00Z');
+    const sun = fields(row(h));
+    const h2 = mkHarness();
+    h2.setExternalShipmentsSheet([]);
+    seedStamp(h2, '2026-10-25T19:00:00Z');
+    run(h2, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: '2026-10-25T19:10:00Z' })], '2026-10-25T19:30:00Z');
+    const mon = fields(row(h2));
+    check('Item 97 ticket 02 A9: exact handover Sunday 23:50 Ekb -> week 2026-W43; Monday 00:10 Ekb -> week 2026-W44 (the week follows Ekb, not UTC/Moscow)',
+      sun.to === '2026-10-25 23:50:00' && sun.week === '2026-W43' && mon.to === '2026-10-26 00:10:00' && mon.week === '2026-W44', JSON.stringify({ sun, mon }));
+  }
+  {
+    // Window Sunday 23:00 Ekb (18:00Z) .. Monday 01:00 Ekb (20:00Z): the week is that of "Передача по" and the row needs a check.
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, '2026-10-25T18:00:00Z');
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], '2026-10-25T20:00:00Z');
+    const f = fields(row(h));
+    const s = get(h);
+    check('Item 97 ticket 02 A10: a window across the Sunday/Monday boundary -> week 2026-W44 and getExternalShipments().checkWeek === true',
+      f.kind === 'окно' && f.from === '2026-10-25 23:00:00' && f.to === '2026-10-26 01:00:00' && f.week === '2026-W44'
+        && s.week === '2026-W44' && s.checkWeek === true && s.handoverKind === 'окно' && s.handoverFrom === '2026-10-25 23:00:00' && s.handoverTo === '2026-10-26 01:00:00',
+      JSON.stringify({ f, s: [s.week, s.checkWeek, s.handoverKind, s.handoverFrom, s.handoverTo] }));
+    const hb = mkHarness();
+    hb.setExternalShipmentsSheet([]);
+    seedStamp(hb, PREV);
+    run(hb, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], POLLED);
+    const sb = get(hb);
+    check('Item 97 ticket 02 A10b: a window inside one ISO week -> checkWeek === false, effectiveWeek = the week',
+      sb.handoverKind === 'окно' && sb.checkWeek === false && sb.effectiveWeek === '2026-W43' && sb.manualWeek === '', JSON.stringify([sb.handoverKind, sb.checkWeek, sb.effectiveWeek, sb.manualWeek]));
+    // The manual week: written into the sheet by hand (Part C does it through an admin action).
+    const sheet = h.sheetByName(SHEET);
+    const d = sheet.__dump();
+    const mi = d[0].indexOf('Неделя вручную');
+    if (mi >= 0) { d[1][mi] = '2026-W43'; sheet.__setData(d); }
+    const sm = get(h);
+    check('Item 97 ticket 02 A10c: with "Неделя вручную" filled -> checkWeek === false and effectiveWeek = the manual week (the poll week stays 2026-W44)',
+      mi >= 0 && sm.manualWeek === '2026-W43' && sm.checkWeek === false && sm.effectiveWeek === '2026-W43' && sm.week === '2026-W44',
+      JSON.stringify({ mi, manual: sm.manualWeek, check: sm.checkWeek, eff: sm.effectiveWeek, week: sm.week }));
+    run(h, [ship({ ozonStatus: 'COMPLETED', orderState: 'COMPLETED' })], '2026-10-26T06:00:00Z');
+    check('Item 97 ticket 02 A10d: a poll never touches "Неделя вручную"',
+      mi >= 0 && val(row(h), 'Неделя вручную') === '2026-W43', val(row(h), 'Неделя вручную'));
+  }
+  {
+    const cases = [
+      ['2027-01-01T07:00:00Z', '2027-01-01T05:00:00Z', '2026-W53', '2027-01-01 12:00:00'],
+      ['2026-12-28T07:00:00Z', '2026-12-28T05:00:00Z', '2026-W53', '2026-12-28 12:00:00'],
+      ['2027-01-04T07:00:00Z', '2027-01-04T05:00:00Z', '2027-W01', '2027-01-04 12:00:00']
+    ];
+    const got = cases.map((c) => {
+      const h = mkHarness();
+      h.setExternalShipmentsSheet([]);
+      seedStamp(h, c[1]);
+      run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: '2026-01-01T00:00:00Z'.replace('2026-01-01', c[0].slice(0, 10)).replace('00:00:00', '07:00:00') })], c[0].slice(0, 10) + 'T08:00:00Z');
+      const f = fields(row(h));
+      return { week: f.week, to: f.to };
+    });
+    check('Item 97 ticket 02 A11: the week uses the ISO week-year: 2027-01-01 -> 2026-W53, 2026-12-28 -> 2026-W53, 2027-01-04 -> 2027-W01',
+      got.every((g, i) => g.week === cases[i][2] && g.to === cases[i][3]), JSON.stringify(got));
+  }
+  {
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    seedStamp(h, PREV);
+    // 1) a new posting -> one row with empty "Было"
+    run(h, [ship({ ozonStatus: 'READY_TO_SUPPLY', orderState: 'ORDER_STATE_DATA_FILLING', ozonStatusDate: '2026-10-21T07:00:00Z' })], POLLED);
+    const afterNew = h.dumpSheetByName(LOG);
+    // 2) the same status -> nothing appended
+    run(h, [ship({ ozonStatus: 'READY_TO_SUPPLY', orderState: 'ORDER_STATE_DATA_FILLING', ozonStatusDate: '2026-10-21T07:00:00Z' })], '2026-10-21T11:00:00Z');
+    const afterSame = h.dumpSheetByName(LOG);
+    // 3) a changed status -> exactly one more row
+    run(h, [ship({ ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: '2026-10-21T11:30:00Z' })], '2026-10-21T12:00:00Z');
+    const afterChange = h.dumpSheetByName(LOG);
+    const n = afterNew[0] || {};
+    const c = afterChange[1] || {};
+    check('Item 97 ticket 02 A12: status log "Журнал статусов Ozon": a new posting appends one row with empty "Было"; the polledAt is the Ekb text; the other columns are filled',
+      afterNew.length === 1 && val(n, 'Было') === '' && val(n, 'Стало') === 'READY_TO_SUPPLY' && val(n, 'PostingID') === 'P-1' && val(n, 'OrderID') === 'O-1'
+        && val(n, 'Кабинет') === 'K1' && val(n, 'Время опроса') === '2026-10-21 15:00:00' && val(n, 'Статус заявки') === 'ORDER_STATE_DATA_FILLING'
+        && val(n, 'Дата статуса Ozon') === '2026-10-21T07:00:00Z', JSON.stringify(afterNew));
+    check('Item 97 ticket 02 A12b: an unchanged status appends nothing to the status log',
+      afterSame.length === 1, 'rows=' + afterSame.length);
+    check('Item 97 ticket 02 A12c: a changed status appends exactly one row with Было/Стало/Статус заявки/Дата статуса Ozon',
+      afterChange.length === 2 && val(c, 'Было') === 'READY_TO_SUPPLY' && val(c, 'Стало') === 'ACCEPTED_AT_SUPPLY_WAREHOUSE'
+        && val(c, 'Статус заявки') === 'ACCEPTED_AT_SUPPLY_WAREHOUSE' && val(c, 'Дата статуса Ozon') === '2026-10-21T11:30:00Z' && val(c, 'Время опроса') === '2026-10-21 17:00:00',
+      JSON.stringify(afterChange));
+  }
+  {
+    // Text read-back: the spreadsheet parses date-like texts in UTC while the script zone is Ekb.
+    const h = mkHarness();
+    h.setExternalShipmentsSheet([]);
+    h.setSheetAutoDates('UTC');
+    h.setTargetSpreadsheetTimeZone('UTC');
+    seedStamp(h, PREV);
+    run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' }), ship({ postingId: 'P-2', orderId: 'O-2', ozonStatus: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', orderState: 'ACCEPTED_AT_SUPPLY_WAREHOUSE', ozonStatusDate: INSIDE })], POLLED);
+    const w = get(h, 'P-1');
+    const x = get(h, 'P-2');
+    check('Item 97 ticket 02 A13: with spreadsheet zone UTC (cells parsed as dates) getExternalShipments returns exactly the Ekb text written in "Передача с"/"Передача по"',
+      w.handoverFrom === '2026-10-21 13:00:00' && w.handoverTo === '2026-10-21 15:00:00' && x.handoverTo === '2026-10-21 14:10:00' && x.handoverFrom === '',
+      JSON.stringify([w.handoverFrom, w.handoverTo, x.handoverFrom, x.handoverTo]));
+  }
+  {
+    // An old-shaped sheet (21 headers): the five columns are added INSIDE the lock the caller holds, and the lock is still held after.
+    const h = mkHarness();
+    h.makeSheet(OLD_HEADERS, SHEET);
+    seedStamp(h, PREV);
+    h.context.LockService.getScriptLock().waitLock(30000);
+    const err = run(h, [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], POLLED);
+    const heads = h.sheetByName(SHEET).__dump()[0];
+    const nested = h.nestedLockTakes();
+    const held = h.isScriptLockHeld();
+    check('Item 97 ticket 02 A14: the five new columns are added to a 21-column sheet while the caller holds the script lock; no nested lock is taken and the lock is still held after',
+      NEW_COLS.every((c) => heads.indexOf(c) >= 0) && nested === 0 && held === true && fields(row(h)).kind === 'окно', JSON.stringify({ heads: heads.length, nested, held, err }));
+  }
+  {
+    // The same through doPost (which holds the lock itself).
+    const h = mkHarness();
+    h.makeSheet(OLD_HEADERS, SHEET);
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'], ['tok-admin', 'boss', 'admin', String(Date.parse('2030-01-01T00:00:00Z'))]]);
+    seedStamp(h, PREV);
+    const out = h.callDoPost({ action: 'saveExternalShipments', sessionToken: 'tok-admin', data: { shipments: [ship({ ozonStatus: 'IN_TRANSIT', orderState: 'IN_TRANSIT' })], polledAt: POLLED } });
+    const heads = h.sheetByName(SHEET).__dump()[0];
+    const f = fields(row(h));
+    check('Item 97 ticket 02 A14b: doPost saveExternalShipments passes polledAt on (window 13:00-15:00 Ekb), adds the new columns on the old sheet, takes no nested lock and releases it at the end',
+      out.status === 'success' && NEW_COLS.every((c) => heads.indexOf(c) >= 0) && f.kind === 'окно' && f.from === '2026-10-21 13:00:00' && f.to === '2026-10-21 15:00:00'
+        && h.nestedLockTakes() === 0 && h.isScriptLockHeld() === false, JSON.stringify({ out, f, nested: h.nestedLockTakes(), held: h.isScriptLockHeld() }));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

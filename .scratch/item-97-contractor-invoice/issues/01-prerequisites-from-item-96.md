@@ -9,7 +9,7 @@ Money tier: whole path, 3–5 mutations per part, a separate tester agent.
 
 **Blocked by:** —
 
-**Status:** done 2026-10-27 — built and tested, NOT deployed (see «Result»)
+**Status:** done 2026-10-27 — deployed 2026-10-27 (Code.gs @206 + Cloud Run sklad-00109-666; see «Result»)
 
 ## Part A — 96.1 (P1-04): the services gear on «Отгрузка» double-charges
 

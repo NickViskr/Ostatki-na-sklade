@@ -987,6 +987,9 @@ async function startServer() {
         console.error("Не удалось прочитать журнал «Заявки Ozon» при опросе:", e?.message || e);
       }
 
+      // Item 97 ticket 02: the instant of this poll; the handover window of a newly departed posting ends here.
+      const polledAt = new Date().toISOString();
+
       // Step 4. Details of orders — ключами соответствующего кабинета
       const ordersDetailsList: Array<{ order: any; cabinetIndex: number }> = [];
       const batchSize = 50;
@@ -1141,6 +1144,8 @@ async function startServer() {
             orderNumber,
             ozonStatus,
             ozonStatusDate,
+            orderState: String(order.state || ''),
+            isDirect: supply.is_crossdock === false,
             dropOffWarehouse,
             storageWarehouse,
             timeslot: timeslotStr,
@@ -1224,6 +1229,8 @@ async function startServer() {
           orderNumber: s.orderNumber,
           ozonStatus: s.ozonStatus,
           ozonStatusDate: s.ozonStatusDate,
+          orderState: s.orderState,
+          isDirect: s.isDirect === true,
           dropOffWarehouse: s.dropOffWarehouse,
           storageWarehouse: s.storageWarehouse,
           timeslot: s.timeslot,
@@ -1243,7 +1250,8 @@ async function startServer() {
           sessionToken: token,
           ...(devMode ? { devMode: true } : {}),
           data: {
-            shipments: shipmentsForGas
+            shipments: shipmentsForGas,
+            polledAt
           }
         })
       }).finally(() => noteGasWrite('saveExternalShipments'));
