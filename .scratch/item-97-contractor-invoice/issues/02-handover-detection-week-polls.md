@@ -15,13 +15,33 @@ No money moves here.
 
 **Blocked by:** —
 
-**Status:** ready-for-agent
+**Status:** done 2026-10-31 — built and tested, NOT deployed (see «Result»)
 
-- [ ] Exact time from `state_updated_date` only when caught in ACCEPTED_AT_SUPPLY_WAREHOUSE; window otherwise
-- [ ] A posting first seen already IN_TRANSIT / later; a DIRECT supply; a virtual order (ignored)
-- [ ] Sunday 23:50 vs Monday 00:10 Yekaterinburg; a window across midnight → «проверьте неделю»
-- [ ] Existing rows (before this ticket) get no invented handover time
-- [ ] Two polls never run at once; the evening runs fire at the exact minutes; a run's duration measured
-- [ ] `ensureColumns` outside any locked section (it releases the lock)
+- [x] Exact time from `state_updated_date` only when caught in ACCEPTED_AT_SUPPLY_WAREHOUSE; window otherwise
+- [x] A posting first seen already IN_TRANSIT / later; a DIRECT supply; a virtual order (ignored)
+- [x] Sunday 23:50 vs Monday 00:10 Yekaterinburg; a window across midnight → «проверьте неделю»
+- [x] Existing rows (before this ticket) get no invented handover time
+- [x] Two polls never run at once; the evening runs fire at the exact minutes; a run's duration measured
+- [x] ~~`ensureColumns` outside any locked section (it releases the lock)~~ — obsolete since 100.9 R-024: it neither waits for nor releases a lock the caller holds; checked instead that the new columns are added inside the held doPost lock and the lock survives (A14, A14b)
 
 ## Comments
+
+## Result (2026-10-31)
+
+Owner's answers: light poll hourly 09:00–22:00 Asia/Yekaterinburg plus exact 23:00/23:30/23:45; supplies
+departed before the deploy get no handover and an empty week (set by hand); only an admin sets the manual week.
+Measured `/api/ozon/check` (Cloud Run log, 27 runs over 7 days): 18–43 s, median 28 s → ≈21 min/day of the
+90 min trigger quota. Contract: `../ticket-02-design.md`.
+
+- Part A `7bfd091`: handover rule, ISO week (Ekb, ISO week-year), five columns at the end of «Внешние
+  отгрузки», sheet «Журнал статусов Ozon», previous-poll stamp; proxy sends `polledAt`, `orderState`, `isDirect`.
+- Part B `844a65f`: `scheduledOzonStatusCheck` (hourly), `ensureEveningStatusPolls` + `runOzonStatusPollAt`
+  (one-offs), `runOzonStatusPoll` (own session label, skips during the full poll; the full poll waits ≤ 90 s for
+  a running light poll), history with durations in `ozon_statusPollHistory`.
+- Part C: action `setExternalShipmentWeek` (admin), `src/lib/isoWeek.ts`, «Неделя» label/filter, «проверьте
+  неделю» mark, admin week select in «Поставки Озон».
+- Tests: tester wrote every check first (stand A1–A14b + A2d, B1–B13b, C1–C6; vitest `isoWeek.test.ts`);
+  mutations 5 + 5 + 3, all killed (two survivors fixed by new checks A2d, B13a/B13b). Final: stand 1726/0 and
+  vitest 2845 (1 expected fail) under default, Asia/Yekaterinburg and UTC; tsc clean. No UI component tests exist.
+- Going live: Code.gs then Cloud Run; afterwards one `setupOzonSyncTriggers` run (or the «Автоопрос» switch)
+  installs the hourly trigger. Check on the live sheet that «Неделя» stays text and the handover times read back.

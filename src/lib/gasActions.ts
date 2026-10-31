@@ -127,6 +127,7 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   saveOzonStocks: write('getOzonStocks', 'getOzonInitialData', 'getOzonStockHistory'),
   saveExternalShipments: write('getExternalShipments'),
   updateExternalShipmentStatus: write('getExternalShipments'),
+  setExternalShipmentWeek: write('getExternalShipments'),
   saveOzonSupplyRequest: write('getOzonSupplyRequests', 'getExternalShipments'),
   addUser: write('getUsers'),
   deleteUser: write('getUsers'),

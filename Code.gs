@@ -469,6 +469,10 @@ function doPost(e) {
       case 'updateExternalShipmentStatus':
         result = updateExternalShipmentStatus(data.postingId, data.status, data.transGroupInfo);
         break;
+      case 'setExternalShipmentWeek':
+        assertAdmin(currentUser);
+        result = setExternalShipmentWeek(data.postingId, data.week);
+        break;
       case 'saveExternalShipmentAcceptance':
         result = saveExternalShipmentAcceptance(data.postingId, data.acceptedJSON);
         break;
@@ -9673,6 +9677,34 @@ function updateExternalShipmentStatus(postingId, status, transGroupInfo) {
       if (transGroupInfo !== undefined && transGroupInfo !== null && transGroupInfoIdx >= 0) {
         sheet.getRange(i + 1, transGroupInfoIdx + 1).setValue(String(transGroupInfo));
       }
+      SpreadsheetApp.flush();
+      return { success: true };
+    }
+  }
+  throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+
+/** Item 97 ticket 02 part C: admin sets (or clears with '') the manual ISO week of one posting. Writes only «Неделя вручную». */
+function setExternalShipmentWeek(postingId, week) {
+  if (!postingId) {
+    throw new Error('PostingID is required');
+  }
+  const weekText = week === undefined || week === null ? '' : String(week);
+  if (weekText !== '' && !/^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/.test(weekText)) {
+    throw new Error('Invalid week. Expected YYYY-Www or empty');
+  }
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const manualWeekIdx = headers.indexOf('Неделя вручную');
+  if (postingIdIdx === -1 || manualWeekIdx === -1) {
+    throw new Error('Required columns not found in Внешние отгрузки');
+  }
+  const targetId = String(postingId).trim().toLowerCase();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][postingIdIdx]).trim().toLowerCase() === targetId) {
+      sheet.getRange(i + 1, manualWeekIdx + 1).setValue(weekText);
       SpreadsheetApp.flush();
       return { success: true };
     }

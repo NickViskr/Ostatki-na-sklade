@@ -20,6 +20,7 @@ import { buildUnshippedLines, canReturnToNew, parseShippedRecord, returnGroupToN
 import { formatCurrency } from '../lib/utils';
 import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
+import { isoWeekLabel, selectableWeeks } from '../lib/isoWeek';
 
 
 const formatStatusDate = (dateStr?: string) => {
@@ -1345,6 +1346,11 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandedPostings, setExpandedPostings] = useState<Set<string>>(new Set());
   const [cabinetFilter, setCabinetFilter] = useState<string>('all');
+  // Item 97 ticket 02 part C: week filter ('all' | 'none' | 'YYYY-Www') and the posting whose week is being edited.
+  const [weekFilter, setWeekFilter] = useState<string>('all');
+  const [editingWeekPostingId, setEditingWeekPostingId] = useState<string | null>(null);
+  const fetchGasAction = useWarehouseStore((state) => state.fetchGas);
+  const isWeekAdmin = ['admin', 'администратор'].includes(String(currentUser?.role || '').toLowerCase());
   const [showProcessed, setShowProcessed] = useState(false);
   // Item 56: заявки, отмеченные галочками для списания одной партией
   const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set());
@@ -1598,10 +1604,32 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
     return Array.from(set).sort();
   }, [groupedShipments]);
 
+  // Weeks present among the postings, newest first (ISO labels sort as text).
+  const availableWeeks = useMemo(() => {
+    const set = new Set<string>();
+    groupedShipments.forEach(g => g.items.forEach((i: any) => { if (i.effectiveWeek) set.add(i.effectiveWeek); }));
+    return Array.from(set).sort().reverse();
+  }, [groupedShipments]);
+
   const filteredGroups = useMemo(() => {
-    if (cabinetFilter === 'all') return sortedGroups;
-    return sortedGroups.filter(g => g.cabinet === cabinetFilter);
-  }, [sortedGroups, cabinetFilter]);
+    let list = sortedGroups;
+    if (cabinetFilter !== 'all') list = list.filter(g => g.cabinet === cabinetFilter);
+    if (weekFilter === 'none') list = list.filter(g => g.items.some((i: any) => !i.effectiveWeek));
+    else if (weekFilter !== 'all') list = list.filter(g => g.items.some((i: any) => i.effectiveWeek === weekFilter));
+    return list;
+  }, [sortedGroups, cabinetFilter, weekFilter]);
+
+  // Admin: set (or clear with '') the manual week of one posting, then re-read the shipments.
+  const setPostingWeek = async (postingId: string, week: string) => {
+    setEditingWeekPostingId(null);
+    try {
+      const res = await fetchGasAction('setExternalShipmentWeek', { data: { postingId, week } });
+      if (res.status !== 'success') toast.error(res.message || 'Не удалось сохранить неделю');
+    } catch (e: any) {
+      toast.error('Ошибка сети при сохранении недели: ' + e.message);
+    }
+    await fetchExternalShipments();
+  };
 
   // Заявка целиком отменена в Ozon Seller: действий по ней не требуется.
   const isFullyCancelled = (g: any) =>
@@ -1739,6 +1767,24 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
               {name}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* Item 97: фильтр по неделе передачи */}
+      {!isLoading && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-bold text-slate-500">Неделя</span>
+          <select
+            value={weekFilter}
+            onChange={(e) => setWeekFilter(e.target.value)}
+            className="px-3 py-2 rounded-xl text-sm font-bold border border-slate-200 bg-white text-slate-600"
+          >
+            <option value="all">Все недели</option>
+            <option value="none">Без недели</option>
+            {availableWeeks.map((w) => (
+              <option key={w} value={w}>{isoWeekLabel(w)}</option>
+            ))}
+          </select>
         </div>
       )}
 
@@ -2090,6 +2136,46 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                 </div>
                                 
                                 <div className="flex items-center gap-4 min-w-0 lg:max-w-[50%] justify-between lg:justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-50">
+                                  {/* Item 97: week of the handover; admin may change it by hand */}
+                                  <div className="text-left lg:text-right min-w-0" onClick={(e) => e.stopPropagation()}>
+                                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Неделя</div>
+                                    <div className="flex flex-wrap items-center lg:justify-end gap-2">
+                                      {isWeekAdmin && editingWeekPostingId === s.postingId ? (
+                                        <select
+                                          autoFocus
+                                          value={s.manualWeek || ''}
+                                          onChange={(e) => setPostingWeek(s.postingId, e.target.value)}
+                                          onBlur={() => setEditingWeekPostingId(null)}
+                                          className="px-2 py-1 rounded-lg text-xs font-bold border border-slate-200 bg-white text-slate-700"
+                                        >
+                                          <option value="">Авто</option>
+                                          {selectableWeeks(Date.now()).map((w) => (
+                                            <option key={w} value={w}>{isoWeekLabel(w)}</option>
+                                          ))}
+                                        </select>
+                                      ) : isWeekAdmin ? (
+                                        <button
+                                          onClick={() => setEditingWeekPostingId(s.postingId)}
+                                          className="text-xs font-bold text-slate-700 hover:text-indigo-700 underline decoration-dotted"
+                                          title="Изменить неделю"
+                                        >
+                                          {s.effectiveWeek ? isoWeekLabel(s.effectiveWeek) : '—'}
+                                        </button>
+                                      ) : (
+                                        <span className="text-xs font-bold text-slate-700">
+                                          {s.effectiveWeek ? isoWeekLabel(s.effectiveWeek) : '—'}
+                                        </span>
+                                      )}
+                                      {s.checkWeek && (
+                                        <span
+                                          className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-amber-100 text-amber-800"
+                                          title={`Передана между ${s.handoverFrom || '—'} и ${s.handoverTo || '—'}`}
+                                        >
+                                          проверьте неделю
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
                                   <div className="text-left lg:text-right min-w-0">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Статус Ozon</div>
                                     <div className="flex flex-wrap items-center lg:justify-end gap-2">

@@ -129,6 +129,16 @@ export interface ExternalShipment {
   originalSupplyId?: string;
   /** Item 68 stage 2. The return of the unshipped part: lines, receipt ids, when and by whom. Empty = never returned. */
   shippedJSON?: string;
+  /** Item 97. Handover window start/end (Ekb text) and its kind: 'точно' or 'окно'. */
+  handoverFrom?: string;
+  handoverTo?: string;
+  handoverKind?: string;
+  /** Item 97. Auto ISO week (YYYY-Www), manual override, and the effective one (manual wins). */
+  week?: string;
+  manualWeek?: string;
+  effectiveWeek?: string;
+  /** Item 97. True when the handover window spans two ISO weeks and no manual week is set. */
+  checkWeek?: boolean;
 }
 
 export interface OzonStockRow {

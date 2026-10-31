@@ -15739,6 +15739,80 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 02 part C: admin action setExternalShipmentWeek =================
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const MANUAL = 'Неделя вручную';
+  const farFuture = String(Date.parse('2030-01-01T00:00:00Z'));
+  // P-1: window across Sunday 23:00 .. Monday 01:00 Ekb -> auto week 2026-W44 and checkWeek true. P-2: another posting that must stay untouched.
+  const seed = () => {
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-10-26T10:00:00Z');
+    h.setExternalShipmentsSheet([]);
+    h.setScriptProperty('ozon_lastStatusPollAt', String(Date.parse('2026-10-25T18:00:00Z')));
+    const mkShip = (pid, oid) => ({ postingId: pid, orderId: oid, orderNumber: oid, shipmentDate: '2026-10-26', itemsJSON: '[]', cabinet: 'K1',
+      ozonStatus: 'IN_TRANSIT', ozonStatusDate: '', orderState: '', isDirect: false });
+    h.context.saveExternalShipments([mkShip('P-1', 'O-1'), mkShip('P-2', 'O-2')], '2026-10-25T20:00:00Z');
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+      ['tok-user', 'Кладовщик', 'user', farFuture], ['tok-admin', 'boss', 'admin', farFuture]]);
+    return h;
+  };
+  const rows = (h) => h.dumpExternalShipments().map((r) => Object.assign({}, r));
+  const without = (r) => { const c = Object.assign({}, r); delete c[MANUAL]; return JSON.stringify(c); };
+  const act = (h, token, pid, week) => h.callDoPost({ action: 'setExternalShipmentWeek', sessionToken: token, data: { postingId: pid, week: week } });
+  const get = (h, pid) => h.context.getExternalShipments().find((s) => s.postingId === pid) || {};
+  const val = (r) => (r[MANUAL] === undefined || r[MANUAL] === null ? '' : String(r[MANUAL]));
+
+  {
+    const h = seed();
+    const before = rows(h);
+    const base = get(h, 'P-1');
+    const out = act(h, 'tok-admin', 'P-1', '2026-W43');
+    const after = rows(h);
+    const s = get(h, 'P-1');
+    check('Item 97 ticket 02 C1: admin sets 2026-W43 -> only «Неделя вручную» of that posting changes (all other cells and the other row are byte-equal)',
+      base.week === '2026-W44' && base.checkWeek === true && out.status === 'success' && before.length === 2 && after.length === 2
+        && val(after[0]) === '2026-W43' && without(after[0]) === without(before[0]) && JSON.stringify(after[1]) === JSON.stringify(before[1]),
+      JSON.stringify({ out, base: [base.week, base.checkWeek], m: after.map(val) }));
+    check('Item 97 ticket 02 C2: after a manual week getExternalShipments gives manualWeek and effectiveWeek = the manual week, week stays auto, checkWeek false',
+      s.manualWeek === '2026-W43' && s.effectiveWeek === '2026-W43' && s.week === '2026-W44' && s.checkWeek === false,
+      JSON.stringify([s.manualWeek, s.effectiveWeek, s.week, s.checkWeek]));
+    const out2 = act(h, 'tok-admin', 'P-1', '');
+    const cleared = get(h, 'P-1');
+    check('Item 97 ticket 02 C3: an empty week clears the manual week -> effectiveWeek is the auto week again, checkWeek true again, other cells unchanged',
+      out2.status === 'success' && val(rows(h)[0]) === '' && cleared.effectiveWeek === '2026-W44' && cleared.checkWeek === true
+        && JSON.stringify(rows(h)) === JSON.stringify(before),
+      JSON.stringify([out2, cleared.manualWeek, cleared.effectiveWeek, cleared.checkWeek]));
+  }
+  {
+    const h = seed();
+    const before = JSON.stringify(rows(h));
+    const out = act(h, 'tok-user', 'P-1', '2026-W43');
+    const anon = act(h, 'nobody', 'P-1', '2026-W43');
+    check('Item 97 ticket 02 C4: a non-admin user (and a missing session) is refused and the sheet is unchanged',
+      out.status === 'error' && anon.status === 'error' && JSON.stringify(rows(h)) === before, JSON.stringify([out, anon]));
+  }
+  {
+    const h = seed();
+    const before = JSON.stringify(rows(h));
+    const bad = ['2026-W54', '2026-W00', '2026-44', 'abc'];
+    const outs = bad.map((w) => act(h, 'tok-admin', 'P-1', w));
+    check('Item 97 ticket 02 C5: invalid weeks 2026-W54, 2026-W00, 2026-44, abc are refused and the sheet is unchanged',
+      outs.every((o) => o.status === 'error') && JSON.stringify(rows(h)) === before, JSON.stringify(outs));
+    const ok = ['2026-W01', '2026-W53'].map((w) => act(h, 'tok-admin', 'P-2', w).status);
+    check('Item 97 ticket 02 C5b: boundary weeks 2026-W01 and 2026-W53 are accepted',
+      ok.join() === 'success,success' && val(rows(h)[1]) === '2026-W53', JSON.stringify(ok));
+  }
+  {
+    const h = seed();
+    const before = JSON.stringify(rows(h));
+    const out = act(h, 'tok-admin', 'NO-SUCH', '2026-W43');
+    check('Item 97 ticket 02 C6: an unknown postingId returns an error and the sheet is unchanged',
+      out.status === 'error' && JSON.stringify(rows(h)) === before, JSON.stringify(out));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

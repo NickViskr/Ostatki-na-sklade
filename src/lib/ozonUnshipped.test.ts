@@ -205,7 +205,7 @@ describe('подключение этапа 2 к экрану, хранилищ�
   });
 
   it('Code.gs: колонка «ОтгруженоJSON» в заголовках, действие только для администратора, приход помечен «Корректировка»', () => {
-    expect(gas).toMatch(/'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON'\n\];/);
+    expect(gas).toMatch(/'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON',\n(?:\s*\/\/[^\n]*\n)?\s*'Передача с', 'Передача по', 'Передача тип', 'Неделя', 'Неделя вручную'\n\];/);
     expect(gas).toMatch(/case 'commitUnshippedReturn':\s*assertAdmin\(currentUser\);\s*result = commitUnshippedReturn\(data\.postingId, data\.shipped, currentUser\.username, data\.opId\);/);
     expect(gas).toContain("const destination = 'Корректировка: возврат неотгруженного, поставка № '");
     expect(gas).toContain("shippedJSON: getVal(colShippedJson, false)");
