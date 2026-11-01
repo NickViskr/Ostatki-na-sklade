@@ -26,6 +26,7 @@ export const SettingsTab: React.FC = React.memo(() => {
   const ozonSyncStatus = useWarehouseStore((state) => state.ozonSyncStatus);
   const fetchOzonSyncStatus = useWarehouseStore((state) => state.fetchOzonSyncStatus);
   const setOzonSyncEnabled = useWarehouseStore((state) => state.setOzonSyncEnabled);
+  const setOzonAutoWriteOff = useWarehouseStore((state) => state.setOzonAutoWriteOff);
   const runOzonSyncNow = useWarehouseStore((state) => state.runOzonSyncNow);
   const isProcessing = useWarehouseStore((state) => state.isProcessing);
   
@@ -550,6 +551,31 @@ export const SettingsTab: React.FC = React.memo(() => {
                   </div>
                 ) : (
                   <p className="text-[10px] text-sky-600 font-medium">Управлять автоопросом Ozon может только администратор.</p>
+                )}
+
+                {isAdmin && (
+                  <div className="space-y-2 p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                      Автосписание товара при передаче
+                    </label>
+                    {ozonSyncStatus.autoWriteOffSince ? (
+                      <span className="text-emerald-600 font-semibold text-sm block">
+                        включено с {new Date(ozonSyncStatus.autoWriteOffSince).toLocaleString('ru-RU')}
+                      </span>
+                    ) : (
+                      <span className="text-slate-500 font-semibold text-sm block">выключено</span>
+                    )}
+                    <p className="text-[11px] text-slate-500 leading-normal">
+                      Товар поставки списывается сам, когда Ozon покажет, что поставка принята на точке отгрузки. Передачи до включения не списываются.
+                    </p>
+                    <button
+                      onClick={() => setOzonAutoWriteOff(!ozonSyncStatus.autoWriteOffSince)}
+                      disabled={isProcessing}
+                      className={`w-full text-white py-2.5 rounded-xl font-bold disabled:opacity-50 transition-all ${ozonSyncStatus.autoWriteOffSince ? 'bg-slate-600 hover:bg-slate-700' : 'bg-sky-500 hover:bg-sky-600'}`}
+                    >
+                      {ozonSyncStatus.autoWriteOffSince ? 'Выключить автосписание' : 'Включить автосписание'}
+                    </button>
+                  </div>
                 )}
 
                 <p className="text-[11px] text-slate-500 text-center leading-normal">

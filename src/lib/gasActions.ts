@@ -125,7 +125,9 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   markOzonClustersNotified: write('getOzonClusters', 'getOzonInitialData'),
   saveOzonSales: write('getOzonSales', 'getOzonInitialData'),
   saveOzonStocks: write('getOzonStocks', 'getOzonInitialData', 'getOzonStockHistory'),
-  saveExternalShipments: write('getExternalShipments'),
+  // Item 97 T3: saving postings can now also write stock, «История» and the cost journal (automatic
+  // write-off at handover), so it is deliberately NOT listed — like `commit`, it wipes the whole cache.
+  setOzonAutoWriteOff: write('getOzonSyncStatus'),
   updateExternalShipmentStatus: write('getExternalShipments'),
   setExternalShipmentWeek: write('getExternalShipments'),
   saveOzonSupplyRequest: write('getOzonSupplyRequests', 'getExternalShipments'),

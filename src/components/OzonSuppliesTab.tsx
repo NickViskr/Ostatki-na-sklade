@@ -2174,6 +2174,19 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                           проверьте неделю
                                         </span>
                                       )}
+                                      {s.autoWriteOff === 'ждёт счёта' && (
+                                        <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-slate-100 text-slate-600">
+                                          ждёт счёта
+                                        </span>
+                                      )}
+                                      {s.autoWriteOff?.startsWith('спишите вручную') && (
+                                        <span
+                                          className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-red-100 text-red-700"
+                                          title={s.autoWriteOff.replace(/^спишите вручную:?\s*/, '')}
+                                        >
+                                          спишите вручную
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                   <div className="text-left lg:text-right min-w-0">

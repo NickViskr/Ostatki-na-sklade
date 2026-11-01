@@ -238,7 +238,8 @@ interface WarehouseState {
   getEffectiveAvgCost: (article: string) => number;
   devMode: boolean;
   setDevMode: (v: boolean) => void;
-  ozonSyncStatus: { enabled: boolean; triggersCount: number; target: string; lastRun: any | null; history?: any[] } | null;
+  ozonSyncStatus: { enabled: boolean; triggersCount: number; target: string; lastRun: any | null; history?: any[]; autoWriteOffSince?: number | null } | null;
+  setOzonAutoWriteOff: (enabled: boolean) => Promise<void>;
   fetchOzonSyncStatus: () => Promise<void>;
   setOzonSyncEnabled: (enabled: boolean) => Promise<void>;
   runOzonSyncNow: () => Promise<void>;
@@ -1866,6 +1867,24 @@ export const useWarehouseStore = create<WarehouseState>()(
     } catch (e: any) {
       console.error(e);
       toast.error('Ошибка сети при настройке автоопроса: ' + e.message);
+    } finally {
+      set({ isProcessing: false });
+    }
+  },
+
+  setOzonAutoWriteOff: async (enabled) => {
+    set({ isProcessing: true });
+    try {
+      const result = await get().fetchGas('setOzonAutoWriteOff', { enabled });
+      if (result.status === 'success') {
+        set({ ozonSyncStatus: result.data });
+        toast.success(enabled ? 'Автосписание при передаче включено' : 'Автосписание при передаче выключено');
+      } else {
+        toast.error(result.message || 'Ошибка управления автосписанием');
+      }
+    } catch (e: any) {
+      console.error(e);
+      toast.error('Ошибка сети при настройке автосписания: ' + e.message);
     } finally {
       set({ isProcessing: false });
     }

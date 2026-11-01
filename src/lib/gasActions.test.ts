@@ -119,4 +119,16 @@ describe('item 89 C: the rules of the table', () => {
       expect(gasReadsInvalidatedBy(a), a).toEqual(mainAndChina);
     }
   });
+  // Item 97 T3: saving postings may also write stock, History and the cost journal (automatic
+  // write-off at handover), so it must wipe the whole proxy cache (null), not just the postings read.
+  it('saveExternalShipments is unlisted, so it wipes the whole cache including stock and history reads', () => {
+    expect(Object.prototype.hasOwnProperty.call(GAS_ACTIONS, 'saveExternalShipments')).toBe(false);
+    expect(isGasRead('saveExternalShipments')).toBe(false);
+    expect(gasReadsInvalidatedBy('saveExternalShipments')).toBeNull();
+  });
+
+  it('setOzonAutoWriteOff is a write that drops getOzonSyncStatus', () => {
+    expect(isGasRead('setOzonAutoWriteOff')).toBe(false);
+    expect(gasReadsInvalidatedBy('setOzonAutoWriteOff')).toEqual(['getOzonSyncStatus']);
+  });
 });

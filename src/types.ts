@@ -133,6 +133,8 @@ export interface ExternalShipment {
   handoverFrom?: string;
   handoverTo?: string;
   handoverKind?: string;
+  /** Item 97 T3. Automatic write-off state: '' | 'ждёт счёта' | 'спишите вручную: <reason>'. */
+  autoWriteOff?: string;
   /** Item 97. Auto ISO week (YYYY-Www), manual override, and the effective one (manual wins). */
   week?: string;
   manualWeek?: string;
