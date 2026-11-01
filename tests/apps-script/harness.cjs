@@ -72,6 +72,12 @@ let sheetAutoDateZone = null;
 // starts there); setScriptTimeZone(zone) switches it for the instance.
 let scriptTimeZone = 'Europe/Moscow';
 
+// Item 97 ticket 03 part B: MailApp.sendEmail is recorded ({ to, subject, body }); mailThrow, when set, makes it throw once per call.
+// Session.getEffectiveUser().getEmail() is the address the refusal mail goes to.
+let mailLog = [];
+let mailThrow = null;
+let effectiveUserEmail = 'owner@example.test';
+
 // ---------- Item «faster saveChinaBatch»: a global counter of Spreadsheet service calls ----------
 // Real Apps Script bills time for EVERY Spreadsheet service call (openById, getSheetByName,
 // getRange().getValues()/setValues, getLastRow, flush), 0.1-1 s each — the measurement this
@@ -295,7 +301,14 @@ const sandbox = {
     Charset: { UTF_8: 'UTF_8' }
   },
   Session: {
-    getScriptTimeZone: () => scriptTimeZone
+    getScriptTimeZone: () => scriptTimeZone,
+    getEffectiveUser: () => ({ getEmail: () => effectiveUserEmail })
+  },
+  MailApp: {
+    sendEmail: (to, subject, body) => {
+      if (mailThrow) throw new Error(mailThrow);
+      mailLog.push({ to, subject, body });
+    }
   },
   Logger: {
     log: (msg) => { logs.push(String(msg)); }
@@ -878,6 +891,10 @@ module.exports = {
   // unless the cell is formatted '@'; setSheetAutoDates(null) turns it off again.
   // Sets the zone Session.getScriptTimeZone returns (only zones tzOffsetMs knows); default Europe/Moscow.
   setScriptTimeZone(zone) { tzOffsetMs(zone); scriptTimeZone = zone; },
+  // Item 97 ticket 03 part B: mails recorded by the MailApp stub; setMailThrow(text) makes sendEmail throw, setMailThrow(null) restores it.
+  sentMails() { return mailLog.map((m) => Object.assign({}, m)); },
+  setMailThrow(text) { mailThrow = text || null; },
+  setEffectiveUserEmail(email) { effectiveUserEmail = email; },
   setSheetAutoDates(zone) { sheetAutoDateZone = zone || null; },
   // The triggers as plain data: { handler, kind, minutes }.
   scriptTriggers() { return projectTriggers.map((t) => ({ handler: t.spec.handler, kind: t.spec.kind, minutes: t.spec.minutes })); },

@@ -460,6 +460,10 @@ function doPost(e) {
       case 'saveExternalShipments':
         result = saveExternalShipments(data.shipments, data.polledAt);
         break;
+      case 'setOzonAutoWriteOff':
+        assertAdmin(currentUser);
+        result = setOzonAutoWriteOff(data && data.enabled === true);
+        break;
       case 'applyCancelledOzonOrders':
         result = applyCancelledOzonOrders(data);
         break;
@@ -600,8 +604,11 @@ const EXTERNAL_SHIPMENTS_HEADERS = [
   'PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
   'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет', 'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON',
   // Item 97 ticket 02: when the goods left our warehouse and the ISO week of that moment
-  'Передача с', 'Передача по', 'Передача тип', 'Неделя', 'Неделя вручную'
+  'Передача с', 'Передача по', 'Передача тип', 'Неделя', 'Неделя вручную',
+  // Item 97 ticket 03: '' | 'ждёт счёта' | 'спишите вручную: <reason>'; the poll's row writes never touch it
+  'Автосписание'
 ];
+const OZON_AUTO_WRITE_OFF_SINCE_KEY = 'ozon_autoWriteOffSince';
 const OZON_STATUS_LOG_SHEET_NAME = 'Журнал статусов Ozon';
 const OZON_STATUS_LOG_HEADERS = ['Время опроса', 'PostingID', 'OrderID', 'Кабинет', 'Было', 'Стало', 'Статус заявки', 'Дата статуса Ozon'];
 // Twin of STOCK_DEPARTED_STATUSES in src/lib/ozonStatus.ts: statuses after the goods left our warehouse.
@@ -9493,7 +9500,85 @@ function saveExternalShipments(shipments, polledAt) {
   props.setProperty(stampKey, String(polledMs));
   
   SpreadsheetApp.flush();
-  return { addedCount: addedCount, updatedCount: updatedCount, unchangedCount: unchangedCount };
+  const autoWriteOff = runOzonAutoWriteOff_();
+  return { addedCount: addedCount, updatedCount: updatedCount, unchangedCount: unchangedCount, autoWriteOff: autoWriteOff };
+}
+
+/** Item 97 ticket 03: epoch ms the auto write-off was switched on, or null when it is off. */
+function getOzonAutoWriteOffSince() {
+  const raw = PropertiesService.getScriptProperties().getProperty(OZON_AUTO_WRITE_OFF_SINCE_KEY);
+  const ms = raw === null || raw === '' ? NaN : Number(raw);
+  return isFinite(ms) ? ms : null;
+}
+
+/** Admin switch of the auto write-off: on sets «since» to now only if absent, off deletes it. Returns the sync status info. */
+function setOzonAutoWriteOff(enabled) {
+  const props = PropertiesService.getScriptProperties();
+  if (enabled === true) {
+    if (getOzonAutoWriteOffSince() === null) props.setProperty(OZON_AUTO_WRITE_OFF_SINCE_KEY, String(Date.now()));
+  } else {
+    props.deleteProperty(OZON_AUTO_WRITE_OFF_SINCE_KEY);
+  }
+  return getOzonSyncStatusInfo();
+}
+
+/**
+ * Item 97 ticket 03 part B. Called at the end of saveExternalShipments (script lock held): when the switch is on, writes off
+ * every posting that is new, handed over at/after the switch moment and not flagged yet, plus every posting with an
+ * interrupted auto write-off (retry). One sheet re-read; each posting in its own try/catch; never throws.
+ * Refusals get the «спишите вручную: ...» flag and ONE mail per call (production only).
+ */
+function runOzonAutoWriteOff_() {
+  const result = { written: [], refused: [], failed: [] };
+  try {
+    const since = getOzonAutoWriteOffSince();
+    if (since === null) return result;
+    const memoPrefix = pendingOpPrefix() + 'ozonAuto:';
+    const memoIds = {};
+    PropertiesService.getScriptProperties().getKeys().forEach(function(key) {
+      if (key.indexOf(memoPrefix) === 0 && /:0$/.test(key)) memoIds[key.slice(memoPrefix.length, -2)] = true;
+    });
+    const candidates = getExternalShipments().filter(function(row) {
+      if (memoIds[row.postingId]) return true;
+      return String(row.status).trim().toLowerCase() === 'new' && String(row.autoWriteOff).trim() === ''
+        && parseEkbText(row.handoverTo) >= since;
+    });
+    candidates.forEach(function(row) {
+      const entry = { postingId: row.postingId, orderNumber: row.orderNumber, cabinet: row.cabinet, handoverTo: row.handoverTo };
+      try {
+        const out = autoWriteOffPosting(row);
+        if (out.outcome === 'written') {
+          result.written.push(entry);
+        } else if (out.outcome === 'refused') {
+          entry.reason = out.reason;
+          autoWriteOffCellWrite_(row.postingId, AUTO_WRITE_OFF_REFUSAL_PREFIX + ': ' + out.reason);
+          result.refused.push(entry);
+        } else if (out.outcome === 'failed') {
+          entry.reason = out.reason;
+          Logger.log('Auto write-off of ' + row.postingId + ' failed: ' + out.reason);
+          result.failed.push(entry);
+        }
+      } catch (e) {
+        entry.reason = String((e && e.message) || e);
+        Logger.log('Auto write-off of ' + row.postingId + ' failed: ' + entry.reason);
+        result.failed.push(entry);
+      }
+    });
+    if (result.refused.length > 0 && !_devModeSpreadsheet) {
+      try {
+        const body = result.refused.map(function(r) {
+          return 'Кабинет: ' + r.cabinet + '\nЗаявка: ' + r.orderNumber + '\nPosting: ' + r.postingId
+            + '\nПередача по: ' + r.handoverTo + '\nПричина: ' + r.reason;
+        }).join('\n\n');
+        MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Склад: спишите вручную — поставок Ozon: ' + result.refused.length, body);
+      } catch (mailError) {
+        Logger.log('Auto write-off mail failed: ' + ((mailError && mailError.message) || mailError));
+      }
+    }
+  } catch (e) {
+    Logger.log('Auto write-off run failed: ' + ((e && e.message) || e));
+  }
+  return result;
 }
 
 // Sheet texts of a handover: Ekb times, empty 'from' for an exact one, ISO week of the 'to' moment.
@@ -9539,6 +9624,7 @@ function getExternalShipments() {
   const colHandoverKind = headers.indexOf('Передача тип');
   const colWeek = headers.indexOf('Неделя');
   const colManualWeek = headers.indexOf('Неделя вручную');
+  const colAutoWriteOff = headers.indexOf(AUTO_WRITE_OFF_COLUMN);
   
   if (postingIdIdx === -1) return [];
   
@@ -9603,7 +9689,8 @@ function getExternalShipments() {
       week: week,
       manualWeek: manualWeek,
       effectiveWeek: manualWeek || week,
-      checkWeek: checkWeek
+      checkWeek: checkWeek,
+      autoWriteOff: getVal(colAutoWriteOff, false).trim()
     });
   }
   return shipments;
@@ -11661,7 +11748,8 @@ function getOzonSyncStatusInfo() {
     target: target,
     lastRun: lastRun,
     history: history,
-    statusPollHistory: statusPollHistory
+    statusPollHistory: statusPollHistory,
+    autoWriteOffSince: getOzonAutoWriteOffSince()
   };
 }
 

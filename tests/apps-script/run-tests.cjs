@@ -16139,6 +16139,393 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 03 part B: the poll runs the write-off — switch, flag column, retry, mail =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/ticket-03-design.md, Part B. The whole path goes through
+// saveExternalShipments (two or three polls), never through autoWriteOffPosting directly.
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const SHEET = 'Внешние отгрузки';
+  const AUTO_COL = 'Автосписание';
+  const SINCE_KEY = 'ozon_autoWriteOffSince';
+  const OPID = 'ozonAuto:P-1';
+  const OLD_HEADERS = ['PostingID', 'Дата обнаружения', 'Дата отгрузки', 'Статус', 'ПозицииJSON', 'TransGroupInfo',
+    'OrderID', 'Номер заявки', 'Статус Ozon', 'Дата статуса Ozon', 'Пункт отгрузки', 'Склад хранения', 'Таймслот', 'Кабинет',
+    'ПринятоJSON', 'ПерерасчётJSON', 'ПересортJSON', 'КластерID', 'Виртуальная', 'ИсходнаяПоставка', 'ОтгруженоJSON'];
+  // Poll 1 = 23:30 Ekb on 27 Oct; poll 2 = 01:00 Ekb on 28 Oct (the handover window ends there, the Ekb day is the 28th, the UTC day the 27th).
+  const POLL1 = '2026-10-27T18:30:00Z';
+  const POLL2 = '2026-10-27T20:00:00Z';
+  const POLL3 = '2026-10-27T21:00:00Z';
+  const SINCE_BEFORE = String(Date.parse('2026-10-27T18:00:00Z'));
+  const toNote = (x) => JSON.stringify(x);
+  const stand = (o) => {
+    const opts = o || {};
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-10-27T20:00:00Z');
+    h.ensureTransSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet(opts.stock || [{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], [['A', 10, '111']]);
+    h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'A', available: 500, sku: '111' }]);
+    h.setKitSheet([]);
+    h.setExternalShipmentsSheet([]);
+    const far = String(Date.parse('2030-01-01T00:00:00Z'));
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+      ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+    if (opts.since !== null) h.setScriptProperty(SINCE_KEY, opts.since || SINCE_BEFORE);
+    return h;
+  };
+  const ship = (pid, status, extra) => Object.assign({ postingId: pid, orderId: 'O-' + pid.replace(/\D/g, ''), orderNumber: String(pid.replace(/\D/g, '')).repeat(3),
+    shipmentDate: '2026-10-27', itemsJSON: JSON.stringify([{ offerId: 'A', quantity: 2 }]), cabinet: 'MaxiStore',
+    ozonStatus: status, ozonStatusDate: '', orderState: status, isDirect: false }, extra || {});
+  const PRE = 'READY_TO_SUPPLY';
+  const OUT = 'IN_TRANSIT';
+  const poll = (h, shipments, at) => {
+    try { return { res: JSON.parse(JSON.stringify(h.context.saveExternalShipments(shipments, at) || null)), err: '' }; }
+    catch (e) { return { res: null, err: String((e && e.message) || e) }; }
+  };
+  const dumpRow = (h, pid) => h.dumpExternalShipments().find((r) => r['PostingID'] === (pid || 'P-1')) || {};
+  const hasAuto = (h) => h.dumpExternalShipments().length === 0 ? false : Object.prototype.hasOwnProperty.call(h.dumpExternalShipments()[0], AUTO_COL);
+  const autoOf = (h, pid) => { const v = dumpRow(h, pid)[AUTO_COL]; return v === undefined || v === null ? '' : String(v); };
+  const setAuto = (h, pid, value) => {
+    const sheet = h.getRegistrySheet(SHEET);
+    const heads = sheet.__dump()[0].map((x) => String(x).trim());
+    const col = heads.indexOf(AUTO_COL) + 1;
+    const rowNo = sheet.__dump().findIndex((r, i) => i > 0 && String(r[heads.indexOf('PostingID')]) === pid) + 1;
+    if (col < 1 || rowNo < 2) return false;
+    sheet.getRange(rowNo, col).setValue(value);
+    return true;
+  };
+  const opRows = (h, opId) => h.getTransactions().rows.filter((t) => t.opId === opId);
+  const journal = (h, opId) => h.dumpOzonCost().filter((r) => r['OpID'] === opId);
+  const stockStr = (h) => { const s = h.stockOf('A'); return s.quantity + '/' + s.capitalization; };
+  const snap = (h) => JSON.stringify([h.dumpStockSheet(), h.getTransactions().rows.length, h.dumpOzonCost().length]);
+  const memoKeys = (h) => Object.keys(h.context.PropertiesService.getScriptProperties().getProperties()).filter((k) => k.indexOf('pendingOp:') === 0);
+  const aw = (r) => (r.res && r.res.autoWriteOff) || {};
+  const listHas = (list, pid) => Array.isArray(list) && JSON.stringify(list).indexOf(pid) !== -1;
+  const t03bCheck = (name, build) => {
+    let conds = {}; let note = '';
+    try { const r = build(); conds = r.conds; note = r.note || ''; } catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+    const failed = Object.keys(conds).filter((k) => !conds[k]);
+    check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+  };
+  // Poll 1 (pre-departure) then poll 2 (departed, window handover ending 01:00 Ekb on 28 Oct).
+  const twoPolls = (h, shipmentsOf) => {
+    const p1 = poll(h, shipmentsOf(PRE), POLL1);
+    const p2 = poll(h, shipmentsOf(OUT), POLL2);
+    return { p1, p2 };
+  };
+  const one = (status) => [ship('P-1', status)];
+
+  t03bCheck('Item 97 ticket 03 B1: column «Автосписание» is the LAST header after «Неделя вручную» (also added to an old 21-column sheet); a poll never overwrites a value already in it', () => {
+    const old = freshHarness();
+    old.setScriptTimeZone(EKB);
+    old.setNow('2026-10-27T20:00:00Z');
+    old.makeSheet(OLD_HEADERS, SHEET);
+    poll(old, one(PRE), POLL1);
+    const heads = old.getRegistrySheet(SHEET).__dump()[0].map((x) => String(x).trim());
+    const h = stand({ since: null });
+    poll(h, [ship('P-1', PRE), ship('P-2', PRE)], POLL1);
+    const set1 = setAuto(h, 'P-1', 'спишите вручную: тест');
+    const set2 = setAuto(h, 'P-2', 'ждёт счёта');
+    poll(h, [ship('P-1', OUT), ship('P-2', OUT)], POLL2);
+    return {
+      conds: {
+        'old sheet: last header «Автосписание», the one before is «Неделя вручную»': heads[heads.length - 1] === AUTO_COL && heads[heads.length - 2] === 'Неделя вручную',
+        'old sheet: the column appears exactly once': heads.filter((x) => x === AUTO_COL).length === 1,
+        'fresh sheet: the column exists and the flags could be set': hasAuto(h) && set1 && set2,
+        'a refusal text survives a status-changing poll': autoOf(h, 'P-1') === 'спишите вручную: тест',
+        'ждёт счёта survives a status-changing poll': autoOf(h, 'P-2') === 'ждёт счёта',
+        'the polls did change the statuses (the rows were rewritten)': dumpRow(h, 'P-1')['Статус Ozon'] === OUT && dumpRow(h, 'P-2')['Статус Ozon'] === OUT
+      },
+      note: toNote({ heads: heads.slice(-3), p1: autoOf(h, 'P-1'), p2: autoOf(h, 'P-2') })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B2: switch off (no ozon_autoWriteOffSince) — a poll that detects a handover writes nothing (stock, «История», journal), status stays new, column empty, no mail', () => {
+    const h = stand({ since: null });
+    const before = snap(h);
+    const r = twoPolls(h, one);
+    return {
+      conds: {
+        'the save succeeded': r.p1.err === '' && r.p2.err === '',
+        'the column exists (added by the poll) and is empty': hasAuto(h) && autoOf(h) === '',
+        'the handover was detected (Передача по filled)': String(dumpRow(h)['Передача по']) === '2026-10-28 01:00:00',
+        'status new': dumpRow(h)['Статус'] === 'new',
+        'stock, «История», journal unchanged': snap(h) === before && stockStr(h) === '10/1000',
+        'no mail': h.sentMails().length === 0
+      },
+      note: toNote(r.p2)
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B3: setOzonAutoWriteOff by admin — on sets the property to now (kept if already set), off deletes it, getOzonSyncStatusInfo().autoWriteOffSince is the number or null; a non-admin is refused', () => {
+    const h = stand({ since: null });
+    const act = (token, enabled) => h.callDoPost({ action: 'setOzonAutoWriteOff', sessionToken: token, data: { enabled: enabled } });
+    const nowMs = Date.parse('2026-10-27T20:00:00Z');
+    const infoOff = h.context.getOzonSyncStatusInfo().autoWriteOffSince;
+    const refusedOn = act('tok-user', true);
+    const afterRefusedOn = h.getScriptProperty(SINCE_KEY);
+    const on = act('tok-admin', true);
+    const stored = h.getScriptProperty(SINCE_KEY);
+    const infoOn = h.context.getOzonSyncStatusInfo().autoWriteOffSince;
+    h.setNow('2026-10-27T22:00:00Z');
+    const onAgain = act('tok-admin', true);
+    const keptStored = h.getScriptProperty(SINCE_KEY);
+    const refusedOff = act('tok-user', false);
+    const afterRefusedOff = h.getScriptProperty(SINCE_KEY);
+    const off = act('tok-admin', false);
+    const afterOff = h.getScriptProperty(SINCE_KEY);
+    const infoAfterOff = h.context.getOzonSyncStatusInfo().autoWriteOffSince;
+    return {
+      conds: {
+        'initially no property and info.autoWriteOffSince === null': infoOff === null && afterRefusedOn === null,
+        'non-admin enabling is refused and sets nothing': refusedOn.status === 'error',
+        'admin enabling succeeds and sets the property to now (epoch ms)': on.status === 'success' && stored === String(nowMs),
+        'the action returns the status info with autoWriteOffSince = the number': !!on.data && on.data.autoWriteOffSince === nowMs && infoOn === nowMs,
+        'enabling again keeps the original moment': onAgain.status === 'success' && keptStored === String(nowMs),
+        'non-admin disabling is refused and the property stays': refusedOff.status === 'error' && afterRefusedOff === String(nowMs),
+        'admin disabling deletes the property and info.autoWriteOffSince is null': off.status === 'success' && afterOff === null && infoAfterOff === null && !!off.data && off.data.autoWriteOffSince === null
+      },
+      note: toNote({ refusedOn, on: on.status, stored, keptStored, refusedOff: refusedOff.status, afterOff })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B4: whole path, switch on — poll 1 pre-departure, poll 2 departed: stock 8/800, one «История» row (delivery date = the Ekb handover day 2026-10-28), column «ждёт счёта», one journal row, posting processed, save result autoWriteOff.written holds P-1', () => {
+    const h = stand();
+    const r = twoPolls(h, one);
+    const rows = opRows(h, OPID);
+    return {
+      conds: {
+        'both saves succeeded': r.p1.err === '' && r.p2.err === '',
+        'poll 1 wrote nothing off': aw(r.p1).written === undefined || aw(r.p1).written.length === 0,
+        'poll 2 result: autoWriteOff.written contains P-1, nothing refused or failed': listHas(aw(r.p2).written, 'P-1') && (aw(r.p2).refused || []).length === 0 && (aw(r.p2).failed || []).length === 0,
+        'stock 8/800': stockStr(h) === '8/800',
+        'exactly one «История» row of ozonAuto:P-1, Расход, Ozon (MaxiStore), 2 pcs, user «Автосписание»': rows.length === 1 && rows[0].type === 'Расход' && rows[0].destination === 'Ozon (MaxiStore)' && rows[0].quantity === 2 && rows[0].user === 'Автосписание',
+        'delivery date = Ekb handover day 2026-10-28 (not the UTC day)': rows.length === 1 && rows[0].deliveryDate === '2026-10-28',
+        'column «ждёт счёта», status processed': autoOf(h) === 'ждёт счёта' && dumpRow(h)['Статус'] === 'processed',
+        'one journal row of the opId': journal(h, OPID).length === 1,
+        'no mail': h.sentMails().length === 0
+      },
+      note: toNote(r.p2) + ' | ' + stockStr(h)
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B5: a repeat poll (poll 3, same status) writes nothing more — same stock, one «История» row, one journal row, nothing in written/failed', () => {
+    const h = stand();
+    twoPolls(h, one);
+    const before = snap(h);
+    const p3 = poll(h, one(OUT), POLL3);
+    return {
+      conds: {
+        'save succeeded': p3.err === '',
+        'stock, «История», journal unchanged (8/800)': snap(h) === before && stockStr(h) === '8/800',
+        'still one «История» row and one journal row': opRows(h, OPID).length === 1 && journal(h, OPID).length === 1,
+        'column stays «ждёт счёта»': autoOf(h) === 'ждёт счёта',
+        'poll 3 reports nothing written': (aw(p3).written || []).length === 0 && (aw(p3).failed || []).length === 0,
+        'no mail': h.sentMails().length === 0
+      },
+      note: toNote(p3)
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B6: a handover earlier than ozon_autoWriteOffSince is never written off (column empty, status new, no mail); a handover exactly AT the switch moment is written off', () => {
+    const handoverMs = Date.parse(POLL2); // the window ends at poll 2
+    const h = stand({ since: String(handoverMs + 3600 * 1000) });
+    const before = snap(h);
+    twoPolls(h, one);
+    const p3 = poll(h, one(OUT), POLL3);
+    const edge = stand({ since: String(handoverMs) });
+    twoPolls(edge, one);
+    return {
+      conds: {
+        'handover detected': String(dumpRow(h)['Передача по']) === '2026-10-28 01:00:00',
+        'nothing written, status new, column empty': snap(h) === before && dumpRow(h)['Статус'] === 'new' && hasAuto(h) && autoOf(h) === '',
+        'a later poll (poll 3) still writes nothing and sends no mail': p3.err === '' && snap(h) === before && h.sentMails().length === 0,
+        'boundary: handover instant == since -> written off (>=)': stockStr(edge) === '8/800' && autoOf(edge) === 'ждёт счёта'
+      },
+      note: stockStr(h) + ' / edge ' + stockStr(edge)
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B7: a technical failure at the «История» stage in poll 2 — the save still succeeds (rows saved), autoWriteOff.failed lists P-1, column empty; poll 3 completes it: exactly one operation, column «ждёт счёта»', () => {
+    const h = stand();
+    poll(h, one(PRE), POLL1);
+    t0cFailHistory(h);
+    const p2 = poll(h, one(OUT), POLL2);
+    const autoAfterFail = autoOf(h);
+    const rowAfterFail = dumpRow(h);
+    const p3 = poll(h, one(OUT), POLL3);
+    const rows = opRows(h, OPID);
+    return {
+      conds: {
+        'poll 2 did not throw': p2.err === '',
+        'the posting row and the handover were saved despite the failure': rowAfterFail['Статус Ozon'] === OUT && String(rowAfterFail['Передача по']) === '2026-10-28 01:00:00',
+        'autoWriteOff.failed lists P-1 (not written, not refused)': listHas(aw(p2).failed, 'P-1') && !listHas(aw(p2).written, 'P-1') && !listHas(aw(p2).refused, 'P-1'),
+        'column empty after the failure, posting not processed': hasAuto(h) && autoAfterFail === '' && rowAfterFail['Статус'] === 'new',
+        'poll 3 (no new handover) completes it': p3.err === '' && listHas(aw(p3).written, 'P-1'),
+        'exactly one «История» row of the opId, stock 8/800, one journal row, no memo left': rows.length === 1 && stockStr(h) === '8/800' && journal(h, OPID).length === 1 && memoKeys(h).length === 0,
+        'column «ждёт счёта», status processed': autoOf(h) === 'ждёт счёта' && dumpRow(h)['Статус'] === 'processed',
+        'a technical failure sends no mail': h.sentMails().length === 0
+      },
+      note: toNote({ p2: p2.res && p2.res.autoWriteOff, p3: p3.res && p3.res.autoWriteOff, err2: p2.err, err3: p3.err })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B8: refusal (unknown offer) — column «спишите вручную: неизвестный товар GHOST», ONE mail to the effective user with cabinet, order number, posting id, handover «по» and reason; a later poll sends no second mail and writes nothing', () => {
+    const h = stand();
+    const ghost = (status) => [ship('P-1', status, { itemsJSON: JSON.stringify([{ offerId: 'GHOST', quantity: 1 }]) })];
+    const before = snap(h);
+    const r = twoPolls(h, ghost);
+    const mails = h.sentMails();
+    const m = mails[0] || { to: '', subject: '', body: '' };
+    const colAfter = autoOf(h);
+    const p3 = poll(h, ghost(OUT), POLL3);
+    return {
+      conds: {
+        'save succeeded and autoWriteOff.refused lists P-1': r.p2.err === '' && listHas(aw(r.p2).refused, 'P-1'),
+        'column holds the refusal text': colAfter === 'спишите вручную: неизвестный товар GHOST',
+        'nothing written, status new': snap(h) === before && dumpRow(h)['Статус'] === 'new' && memoKeys(h).length === 0,
+        'exactly one mail, to Session.getEffectiveUser().getEmail()': mails.length === 1 && m.to === 'owner@example.test',
+        'subject starts with «Склад: спишите вручную — »': String(m.subject).indexOf('Склад: спишите вручную — ') === 0,
+        'body: cabinet, order number, posting id, handover «по», reason': ['MaxiStore', '111', 'P-1', '2026-10-28 01:00:00', 'неизвестный товар GHOST'].every((x) => String(m.body).indexOf(x) !== -1),
+        'poll 3: no second mail, column unchanged, nothing written': p3.err === '' && h.sentMails().length === 1 && autoOf(h) === colAfter && snap(h) === before
+      },
+      note: toNote({ mails: mails.length, subject: m.subject, body: m.body, col: colAfter })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B8b: two refusals in one poll make ONE mail listing both postings', () => {
+    const h = stand();
+    const bad = (status) => [ship('P-1', status, { itemsJSON: JSON.stringify([{ offerId: 'GHOST', quantity: 1 }]) }),
+      ship('P-2', status, { itemsJSON: JSON.stringify([{ offerId: 'GHOST-2', quantity: 1 }]) })];
+    const r = twoPolls(h, bad);
+    const mails = h.sentMails();
+    const body = mails[0] ? String(mails[0].body) : '';
+    return {
+      conds: {
+        'save succeeded': r.p2.err === '',
+        'both columns carry their own refusal': autoOf(h, 'P-1') === 'спишите вручную: неизвестный товар GHOST' && autoOf(h, 'P-2') === 'спишите вручную: неизвестный товар GHOST-2',
+        'exactly one mail': mails.length === 1,
+        'it lists both postings, both order numbers and both reasons': ['P-1', 'P-2', '111', '222', 'GHOST-2'].every((x) => body.indexOf(x) !== -1)
+      },
+      note: toNote({ mails: mails.length, body: body })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B9: MailApp throws — the refusal flag is still written and the save succeeds (no exception out of saveExternalShipments)', () => {
+    const h = stand();
+    h.setMailThrow('Service invoked too many times');
+    const ghost = (status) => [ship('P-1', status, { itemsJSON: JSON.stringify([{ offerId: 'GHOST', quantity: 1 }]) })];
+    const r = twoPolls(h, ghost);
+    return {
+      conds: {
+        'the save did not throw': r.p2.err === '',
+        'the flag is written': autoOf(h) === 'спишите вручную: неизвестный товар GHOST',
+        'the posting row is saved with its handover': dumpRow(h)['Статус Ozon'] === OUT && String(dumpRow(h)['Передача по']) === '2026-10-28 01:00:00',
+        'the result still reports the refusal': listHas(aw(r.p2).refused, 'P-1'),
+        'no mail was recorded': h.sentMails().length === 0
+      },
+      note: toNote({ err: r.p2.err, col: autoOf(h) })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B10: dev mode (_devModeSpreadsheet set to the stand\'s spreadsheet) — the column gets «спишите вручную: режим разработки», no mail, nothing written', () => {
+    const h = stand();
+    poll(h, one(PRE), POLL1);
+    // In dev mode the poll stamp has its own key (ozon_lastStatusPollAt_test): seed it so the window handover is detected.
+    h.setScriptProperty('ozon_lastStatusPollAt_test', String(Date.parse(POLL1)));
+    h.vm.runInContext('_devModeSpreadsheet = SpreadsheetApp.getActiveSpreadsheet()', h.context);
+    const before = snap(h);
+    let p2;
+    try { p2 = poll(h, one(OUT), POLL2); } finally { h.vm.runInContext('_devModeSpreadsheet = null', h.context); }
+    return {
+      conds: {
+        'save succeeded': p2.err === '',
+        'the handover was detected': String(dumpRow(h)['Передача по']) === '2026-10-28 01:00:00',
+        'column = спишите вручную: режим разработки': autoOf(h) === 'спишите вручную: режим разработки',
+        'nothing written (stock, «История», journal), status new': snap(h) === before && dumpRow(h)['Статус'] === 'new',
+        'no mail in dev mode': h.sentMails().length === 0
+      },
+      note: toNote({ err: p2.err, col: autoOf(h), res: p2.res && p2.res.autoWriteOff })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B11: only the posting\'s own cluster — an order with P-1 departed and P-2 still READY_TO_SUPPLY: only P-1 is written off (stock 8/800); P-2 stays new, column empty, keeps its reserve', () => {
+    const h = stand();
+    const both = (s1) => [ship('P-1', s1, { orderId: 'O-1', orderState: 'IN_TRANSIT' }), ship('P-2', PRE, { orderId: 'O-1', orderState: 'IN_TRANSIT' })];
+    poll(h, both(PRE), POLL1);
+    const reserveBefore = (h.context.supplyReservesByArticle(h.context.getExternalShipments(), [], h.context.getSkus(), Date.parse(POLL2)) || {}).A || 0;
+    const p2 = poll(h, both(OUT), POLL2);
+    const reserveAfter = (h.context.supplyReservesByArticle(h.context.getExternalShipments(), [], h.context.getSkus(), Date.parse(POLL2)) || {}).A || 0;
+    return {
+      conds: {
+        'save succeeded': p2.err === '',
+        'P-1 written off: processed, ждёт счёта': dumpRow(h, 'P-1')['Статус'] === 'processed' && autoOf(h, 'P-1') === 'ждёт счёта',
+        'stock 8/800 (only P-1\'s 2 pcs)': stockStr(h) === '8/800',
+        'one «История» row of ozonAuto:P-1, none of ozonAuto:P-2': opRows(h, OPID).length === 1 && opRows(h, 'ozonAuto:P-2').length === 0,
+        'P-2 stays new with an empty column': dumpRow(h, 'P-2')['Статус'] === 'new' && autoOf(h, 'P-2') === '',
+        'the reserve fell from 4 to 2: P-2 keeps its 2 pcs': reserveBefore === 4 && reserveAfter === 2
+      },
+      note: toNote({ reserveBefore, reserveAfter, aw: p2.res && p2.res.autoWriteOff })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B12: an interrupted write-off (memo left) is retried even when the switch was re-armed LATER than the handover — the memo candidate does not depend on «since»', () => {
+    const h = stand();
+    poll(h, one(PRE), POLL1);
+    t0cFailHistory(h);
+    const p2 = poll(h, one(OUT), POLL2);
+    const memoAfterFail = memoKeys(h).length;
+    // The owner switched the feature off and on again after the handover: since is now later than the handover (01:00 Ekb on 28 Oct).
+    h.context.setOzonAutoWriteOff(false);
+    h.setScriptProperty(SINCE_KEY, String(Date.parse('2026-10-27T20:30:00Z')));
+    const p3 = poll(h, one(OUT), POLL3);
+    return {
+      conds: {
+        'poll 2 failed technically and left a memo': listHas(aw(p2).failed, 'P-1') && memoAfterFail > 0,
+        'poll 3 completes the interrupted operation although handover < since': p3.err === '' && listHas(aw(p3).written, 'P-1'),
+        'exactly one «История» row, stock 8/800, column «ждёт счёта», no memo left': opRows(h, OPID).length === 1 && stockStr(h) === '8/800' && autoOf(h) === 'ждёт счёта' && memoKeys(h).length === 0
+      },
+      note: toNote({ p2: p2.res && p2.res.autoWriteOff, p3: p3.res && p3.res.autoWriteOff, memoAfterFail })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B13: a throwing autoWriteOffPosting for one posting does not fail the save and does not stop the next posting; it is listed in failed', () => {
+    const h = stand();
+    const two = (status) => [ship('P-1', status), ship('P-2', status)];
+    poll(h, two(PRE), POLL1);
+    const real = h.context.autoWriteOffPosting;
+    h.context.autoWriteOffPosting = function (row) { if (row.postingId === 'P-1') throw new Error('boom'); return real(row); };
+    const p2 = poll(h, two(OUT), POLL2);
+    h.context.autoWriteOffPosting = real;
+    return {
+      conds: {
+        'the save did not throw': p2.err === '',
+        'P-1 listed in failed with the reason': listHas(aw(p2).failed, 'P-1') && listHas(aw(p2).failed, 'boom'),
+        'P-2 was still written off (stock 8/800, column «ждёт счёта»)': listHas(aw(p2).written, 'P-2') && stockStr(h) === '8/800' && autoOf(h, 'P-2') === 'ждёт счёта',
+        'P-1 untouched: new, empty column': dumpRow(h, 'P-1')['Статус'] === 'new' && autoOf(h, 'P-1') === ''
+      },
+      note: toNote({ err: p2.err, res: p2.res && p2.res.autoWriteOff })
+    };
+  });
+
+  t03bCheck('Item 97 ticket 03 B14: an exception outside the per-posting loop (the switch read throws) does not fail the save; the poll rows are saved and an empty result is returned', () => {
+    const h = stand();
+    poll(h, one(PRE), POLL1);
+    h.context.getOzonAutoWriteOffSince = function () { throw new Error('props down'); };
+    const p2 = poll(h, one(OUT), POLL2);
+    return {
+      conds: {
+        'the save did not throw': p2.err === '',
+        'the poll row was saved with its handover': dumpRow(h)['Статус Ozon'] === OUT && String(dumpRow(h)['Передача по']) === '2026-10-28 01:00:00',
+        'nothing written, no mail': stockStr(h) === '10/1000' && h.sentMails().length === 0 && autoOf(h) === ''
+      },
+      note: toNote({ err: p2.err, res: p2.res && p2.res.autoWriteOff })
+    };
+  });
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
