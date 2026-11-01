@@ -3388,6 +3388,46 @@ function resolvePendingOperation(data) {
   throw new Error('Неизвестное действие: ' + action);
 }
 
+/**
+ * Item 97 ticket 03: the shortage check of a «Расход», shared by commitTransaction and autoWriteOffPosting.
+ * requestedQty: article -> pieces; stockMap: article -> { quantity }. Returns the error lines ([] = enough stock).
+ */
+function stockShortageErrors_(requestedQty, stockMap) {
+  // Validate main kits components
+  const errors = [];
+  const componentDemand = {};
+  for (const article in requestedQty) {
+    const kitData = getKitComponents(article);
+    const isKit = kitData.components && kitData.components.length > 0;
+    if (isKit) {
+      for (const comp of kitData.components) {
+        const needed = comp.quantity * requestedQty[article];
+        componentDemand[comp.componentSku] = (componentDemand[comp.componentSku] || 0) + needed;
+      }
+      if (kitData.type === 'legacy') {
+        const available = stockMap[article] ? stockMap[article].quantity : 0;
+        if (requestedQty[article] > available) {
+          errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
+        }
+      }
+    } else {
+      const available = stockMap[article] ? stockMap[article].quantity : 0;
+      if (requestedQty[article] > available) {
+        errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
+      }
+    }
+  }
+
+  for (const compSku in componentDemand) {
+    const needed = componentDemand[compSku];
+    const available = stockMap[compSku] ? stockMap[compSku].quantity : 0;
+    if (available < needed) {
+      errors.push('Нет ' + compSku + ': нужно ' + needed + ' шт., есть ' + available + ' шт.');
+    }
+  }
+  return errors;
+}
+
 // Item 93: `skipOzonCost` is set by the callers that delete and re-write rows of an Ozon shipment
 // (a pencil edit, a re-sort): they follow «История» in the journal themselves, afterwards, by the
 // OpID of the rows — a commit with no OpID would write an OpID-less «отгрузка» row as if the
@@ -3576,38 +3616,7 @@ function commitTransaction(data, type, destination, deliveryDate, username, orig
       requestedQty[item.article] = (requestedQty[item.article] || 0) + Number(item.quantity);
     });
     
-    // Validate main kits components
-    const errors = [];
-    const componentDemand = {};
-    for (const article in requestedQty) {
-      const kitData = getKitComponents(article);
-      const isKit = kitData.components && kitData.components.length > 0;
-      if (isKit) {
-        for (const comp of kitData.components) {
-          const needed = comp.quantity * requestedQty[article];
-          componentDemand[comp.componentSku] = (componentDemand[comp.componentSku] || 0) + needed;
-        }
-        if (kitData.type === 'legacy') {
-          const available = stockMap[article] ? stockMap[article].quantity : 0;
-          if (requestedQty[article] > available) {
-            errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
-          }
-        }
-      } else {
-        const available = stockMap[article] ? stockMap[article].quantity : 0;
-        if (requestedQty[article] > available) {
-          errors.push('Недостаточно товара "' + article + '". Доступно: ' + available + ', требуется: ' + requestedQty[article]);
-        }
-      }
-    }
-    
-    for (const compSku in componentDemand) {
-      const needed = componentDemand[compSku];
-      const available = stockMap[compSku] ? stockMap[compSku].quantity : 0;
-      if (available < needed) {
-        errors.push('Нет ' + compSku + ': нужно ' + needed + ' шт., есть ' + available + ' шт.');
-      }
-    }
+    const errors = stockShortageErrors_(requestedQty, stockMap);
     if (errors.length > 0) {
       throw new Error('Недостаточно наличия на складе:\n' + errors.join('\n'));
     }
@@ -9649,6 +9658,151 @@ function linkPostingsToCommit(postingIds, newTransactions) {
 
   const notFound = Object.keys(pending).map(function(k) { return pending[k]; });
   return { linked: linked, notFound: notFound, txIds: txIds };
+}
+
+// ===== Item 97 ticket 03, part A: the goods of ONE Ozon posting written off at its handover =====
+const AUTO_WRITE_OFF_COLUMN = 'Автосписание';
+const AUTO_WRITE_OFF_WAITING = 'ждёт счёта';
+const AUTO_WRITE_OFF_REFUSAL_PREFIX = 'спишите вручную';
+
+/** Reads the CURRENT «Статус» and «Автосписание» of a posting from the sheet (a row passed in may be stale); null when absent. */
+function autoWritePostingState_(postingId) {
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const statusIdx = headers.indexOf('Статус');
+  const colIdx = headers.indexOf(AUTO_WRITE_OFF_COLUMN);
+  if (postingIdIdx === -1) return null;
+  const target = String(postingId).trim().toLowerCase();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][postingIdIdx]).trim().toLowerCase() === target) {
+      return {
+        status: statusIdx === -1 ? '' : String(data[i][statusIdx]).trim().toLowerCase(),
+        flag: colIdx === -1 ? '' : String(data[i][colIdx] || '').trim()
+      };
+    }
+  }
+  return null;
+}
+
+/** Writes the «Автосписание» cell of a posting by header lookup; does nothing when the column is absent. */
+function autoWriteOffCellWrite_(postingId, value) {
+  const sheet = getExternalShipmentsSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const postingIdIdx = headers.indexOf('PostingID');
+  const colIdx = headers.indexOf(AUTO_WRITE_OFF_COLUMN);
+  if (postingIdIdx === -1 || colIdx === -1) return;
+  const target = String(postingId).trim().toLowerCase();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][postingIdIdx]).trim().toLowerCase() === target) {
+      sheet.getRange(i + 1, colIdx + 1).setValue(value);
+      SpreadsheetApp.flush();
+      return;
+    }
+  }
+}
+
+/**
+ * Writes off the goods of one posting («Внешние отгрузки» row as getExternalShipments returns it) as an expense to
+ * its Ozon cabinet, dated by the handover. Returns { postingId, outcome: 'written' | 'skipped' | 'refused' | 'failed',
+ * reason?, opId?, result? }. A refusal is a business rule (final); 'failed' is technical and is retried by the next call
+ * with the same opId. Nothing is written for 'skipped' and 'refused'. Never throws. The caller holds the script lock.
+ */
+function autoWriteOffPosting(row) {
+  const postingId = String((row && row.postingId) || '').trim();
+  const opId = 'ozonAuto:' + postingId;
+  const outcome = function(name, reason, result) {
+    const o = { postingId: postingId, outcome: name, opId: opId };
+    if (reason) o.reason = reason;
+    if (result) o.result = result;
+    return o;
+  };
+  try {
+    // Dev mode is judged before any sheet is touched: the test database never writes off automatically.
+    if (_devModeSpreadsheet) return outcome('refused', 'режим разработки');
+
+    // The row passed in may be stale (a hand write-off in between), so the status is read from the sheet again.
+    const ss = getSpreadsheet();
+    const state = autoWritePostingState_(postingId) || { status: String((row && row.status) || '').trim().toLowerCase(), flag: '' };
+    // A memo of an interrupted attempt (96.10), or «История» rows of the opId on a posting still 'new' (written, not linked):
+    // the commit runs again with the same opId and completes it, whatever the status says.
+    const memo = pendingOpRead(opId);
+    const completing = !!memo
+      || (state.status === 'new' && findTransactionsByOpId(getTransactionSheet(ss), opId).length > 0);
+    if (memo && memo.damaged) return outcome('failed', pendingOpRefusal(memo));
+
+    const handoverTo = String((row && row.handoverTo) || '').trim();
+    if (!completing) {
+      if (state.status !== 'new') return outcome('skipped');
+      if (!handoverTo) return outcome('skipped');
+      if (state.flag.indexOf(AUTO_WRITE_OFF_REFUSAL_PREFIX) === 0) return outcome('skipped');
+    }
+
+    const handoverDay = handoverTo.substring(0, 10);
+    const cabinet = String((row && row.cabinet) || '').trim();
+    const destination = 'Ozon (' + cabinet + ')';
+    let items = [];
+
+    if (!completing) {
+      // Refusals, checked before any write, in the order of the contract.
+      let parsed = [];
+      try { parsed = JSON.parse(String((row && row.itemsJSON) || '')); } catch (e) { parsed = []; }
+      const lines = (Array.isArray(parsed) ? parsed : []).filter(function(it) { return it && Number(it.quantity) > 0; });
+      if (lines.length === 0) return outcome('refused', 'нет состава поставки');
+
+      const skus = getSkus();
+      const known = {};
+      skus.forEach(function(s) { known[s.sku] = true; });
+      const requestedQty = {};
+      for (let i = 0; i < lines.length; i++) {
+        const article = supplyReserveArticle_(skus, lines[i].offerId, lines[i].barcode);
+        if (!known[article]) {
+          return outcome('refused', 'неизвестный товар ' + (String(lines[i].offerId || '').trim() || String(lines[i].barcode || '').trim()));
+        }
+        requestedQty[article] = (requestedQty[article] || 0) + Number(lines[i].quantity);
+      }
+
+      // «Комплекты» is read raw: getKits drops a row whose component is empty.
+      const kits = getKits();
+      const kitRows = getKitSheet(ss).getDataRange().getValues();
+      for (const article in requestedQty) {
+        const hasComponents = kits[article] && kits[article].components.length > 0;
+        const hasEmptyEntry = kitRows.slice(1).some(function(r) { return String(r[0]).trim() === article; });
+        if (!hasComponents && hasEmptyEntry) return outcome('refused', 'комплект без компонентов ' + article);
+      }
+
+      const stockData = getSheetByNameRobust(ss, 'Остатки').getDataRange().getValues();
+      const stockMap = {};
+      for (let i = 1; i < stockData.length; i++) {
+        stockMap[String(stockData[i][0])] = { quantity: parseNumber(stockData[i][1]), avgCost: parseNumber(stockData[i][2]) };
+      }
+      const shortage = stockShortageErrors_(requestedQty, stockMap);
+      if (shortage.length > 0) return outcome('refused', 'не хватает остатка: ' + shortage.join('\n'));
+
+      // The price the client would send; the server costs a «Расход» at avgCost anyway.
+      items = Object.keys(requestedQty).map(function(article) {
+        return { article: article, quantity: requestedQty[article], price: stockMap[article] ? roundToTwo(stockMap[article].avgCost) : 0 };
+      });
+    }
+
+    // The same commit-origin setup as the doPost 'commit' action, so the admin popup can complete / re-link this operation.
+    _commitAction = { postingIds: [postingId], expectedQuantities: null };
+    // A completing run replays the memo of the interrupted attempt, as resolvePendingOperation does.
+    const result = memo
+      ? commitTransaction(memo.items, memo.type, memo.destination, memo.deliveryDate, memo.username, memo.originalDate,
+        opId, memo.explicitAdditionalCosts, memo.totalQtyOverride, memo.comment, memo.shipmentId, memo.skipOzonCost)
+      : commitTransaction(items, 'Расход', destination, handoverDay, 'Автосписание', null, opId, 0, undefined, '', '');
+    // The goods are off the shelf, so the posting is linked even when the cost journal failed.
+    linkPostingsToCommit([postingId], result.newTransactions);
+    if (result.costJournalError) return outcome('failed', result.costJournalError);
+    autoWriteOffCellWrite_(postingId, AUTO_WRITE_OFF_WAITING);
+    return outcome('written', '', { newTransactions: result.newTransactions });
+  } catch (e) {
+    _commitAction = null;
+    return outcome('failed', String((e && e.message) || e));
+  }
 }
 
 function updateExternalShipmentStatus(postingId, status, transGroupInfo) {

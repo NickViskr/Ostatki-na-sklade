@@ -15813,6 +15813,332 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 03 part A: autoWriteOffPosting(row) — the goods of ONE posting written off at its handover =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/ticket-03-design.md, Part A. Every check except the legacy one
+// (A12) is red until `autoWriteOffPosting` exists. The row is passed as getExternalShipments returns it (itemsJSON, status,
+// handoverTo, cabinet, postingId); the «Автосписание» column is added to the stand sheet with ensureColumns, exactly as Part B will.
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const AUTO_COL = 'Автосписание';
+  const OFFER_SKU_HEADERS = ['SKU', 'ШТ/КОР', 'ШК Ozon'];
+  const t03aStand = (opts) => {
+    const o = opts || {};
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-10-27T17:00:00Z');
+    h.ensureTransSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet(o.stock || [{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.setSkuSheet(OFFER_SKU_HEADERS, o.skus || [['A', 10, '111'], ['B', 10, '222']]);
+    h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'A', available: 500, sku: '111' }]);
+    h.setKitSheet(o.kits || []);
+    const postings = o.postings || [{ postingId: 'P-1', cabinet: 'MaxiStore', status: 'new', ozonStatus: 'IN_TRANSIT', items: [{ offerId: 'A', quantity: 2 }] }];
+    const sheet = h.setExternalShipmentsSheet(postings);
+    h.ensureColumns(sheet, [AUTO_COL]);
+    const headers = sheet.__dump()[0].map((x) => String(x).trim());
+    postings.forEach((p, n) => {
+      sheet.getRange(n + 2, headers.indexOf('Передача по') + 1).setValue(p.handoverTo === undefined ? '2026-10-27 21:15:00' : p.handoverTo);
+      if (p.itemsJSON !== undefined) sheet.getRange(n + 2, headers.indexOf('ПозицииJSON') + 1).setValue(p.itemsJSON);
+    });
+    return h;
+  };
+  const rowOf = (h, pid) => h.context.getExternalShipments().find((s) => s.postingId === (pid || 'P-1'));
+  const dumpRow = (h, pid) => h.dumpExternalShipments().find((r) => r['PostingID'] === (pid || 'P-1')) || {};
+  const call = (h, row) => {
+    try { return { out: JSON.parse(JSON.stringify(h.context.autoWriteOffPosting(row))), err: '' }; }
+    catch (e) { return { out: null, err: String((e && e.message) || e) }; }
+  };
+  const callFresh = (h, pid) => call(h, rowOf(h, pid || 'P-1'));
+  const opRows = (h, opId) => h.getTransactions().rows.filter((t) => t.opId === opId);
+  const journal = (h, opId) => h.dumpOzonCost().filter((r) => r['OpID'] === opId);
+  const stockStr = (h, a) => { const s = h.stockOf(a || 'A'); return s.quantity + '/' + s.capitalization; };
+  const snap = (h) => JSON.stringify([h.dumpStockSheet(), h.getTransactions().rows.length, h.dumpOzonCost().length, dumpRow(h)['Статус'], dumpRow(h)[AUTO_COL] || '']);
+  const memoKeys = (h) => Object.keys(h.context.PropertiesService.getScriptProperties().getProperties()).filter((k) => k.indexOf('pendingOp:') === 0);
+  const reserveA = (h) => (h.context.supplyReservesByArticle(h.context.getExternalShipments(), [], h.context.getSkus(), Date.parse('2026-10-27T17:00:00Z')) || {}).A || 0;
+  const t03aCheck = (name, build) => {
+    let conds = {}; let note = '';
+    try { const r = build(); conds = r.conds; note = r.note || ''; } catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+    const failed = Object.keys(conds).filter((k) => !conds[k]);
+    check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+  };
+
+  t03aCheck('Item 97 ticket 03 A1: whole path — 2 pcs of A @100 written off at the handover: outcome written, stock 8/800, one «История» row (ozonAuto:P-1, Расход, Ozon (MaxiStore), 2026-10-27, «Автосписание», no extras, sum 200), posting processed + TransGroupInfo, column «ждёт счёта», one journal row, reserve released', () => {
+    const h = t03aStand();
+    const reserveBefore = reserveA(h);
+    const c = call(h, rowOf(h));
+    const rows = opRows(h, 'ozonAuto:P-1');
+    const d = dumpRow(h);
+    const ids = JSON.stringify(rows.map((r) => r.id));
+    return {
+      conds: {
+        'the reserve counted the posting before (2)': reserveBefore === 2,
+        'no exception': c.err === '',
+        'outcome written, postingId P-1, opId ozonAuto:P-1': !!c.out && c.out.outcome === 'written' && c.out.postingId === 'P-1' && c.out.opId === 'ozonAuto:P-1',
+        'stock 8/800': stockStr(h) === '8/800',
+        'exactly one «История» row of the opId': rows.length === 1,
+        'row: type Расход, destination Ozon (MaxiStore), delivery date 2026-10-27, user «Автосписание»': rows.length === 1 && rows[0].type === 'Расход' && rows[0].destination === 'Ozon (MaxiStore)' && rows[0].deliveryDate === '2026-10-27' && rows[0].user === 'Автосписание',
+        'row: 2 pcs, no additional costs, total 200 = avg x qty': rows.length === 1 && rows[0].quantity === 2 && !rows[0].additionalCosts && rows[0].total === 200,
+        'posting Статус processed, TransGroupInfo = the operation rows': d['Статус'] === 'processed' && d['TransGroupInfo'] === ids && ids !== '[]',
+        'column «Автосписание» = ждёт счёта': d[AUTO_COL] === 'ждёт счёта',
+        'exactly one journal row of the opId, 2 pcs': journal(h, 'ozonAuto:P-1').length === 1 && journal(h, 'ozonAuto:P-1')[0]['Отгружено'] === 2,
+        'the supply reserve of A no longer counts the posting': reserveA(h) === 0
+      },
+      note: JSON.stringify(c) + ' | stock ' + stockStr(h) + ' | rows ' + rows.length + ' | reserve ' + reserveBefore + '->' + reserveA(h)
+    };
+  });
+
+  t03aCheck('Item 97 ticket 03 A2: the owner\'s example — 100 @ 300, A (50) = 15 000.00, receipt 100 @ 100, B (100) = 16 667.00, 50 pcs left worth 8 333.00', () => {
+    const h = t03aStand({
+      stock: [{ article: 'A', quantity: 100, avgCost: 300, capitalization: 30000 }],
+      postings: [
+        { postingId: 'P-A', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 50 }] },
+        { postingId: 'P-B', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 100 }] }]
+    });
+    const a = callFresh(h, 'P-A');
+    const afterA = stockStr(h);
+    h.commitTransaction([{ article: 'A', quantity: 100, price: 100 }], 'Приход', 'Поставщик', '2026-10-27', 'tester', null, 'op-receipt', null);
+    const afterReceipt = stockStr(h);
+    const b = callFresh(h, 'P-B');
+    const rowA = opRows(h, 'ozonAuto:P-A')[0] || {};
+    const rowB = opRows(h, 'ozonAuto:P-B')[0] || {};
+    return {
+      conds: {
+        'A written': !!a.out && a.out.outcome === 'written',
+        'A costs 15 000.00': rowA.total === 15000,
+        'after A: 50/15000': afterA === '50/15000',
+        'after the receipt: 150/25000': afterReceipt === '150/25000',
+        'B written': !!b.out && b.out.outcome === 'written',
+        'B costs 16 667.00 (avg 166.67 rounded to kopecks x 100)': rowB.total === 16667,
+        '50 pcs left worth 8 333.00': stockStr(h) === '50/8333'
+      },
+      note: 'A ' + JSON.stringify(a) + ' B ' + JSON.stringify(b) + ' | ' + afterA + ' | ' + afterReceipt + ' | A=' + rowA.total + ' B=' + rowB.total + ' | final ' + stockStr(h)
+    };
+  });
+
+  t03aCheck('Item 97 ticket 03 A3: a repeat call for the same posting writes nothing — outcome skipped; stock, «История», journal unchanged', () => {
+    const h = t03aStand();
+    const first = callFresh(h);
+    const before = snap(h);
+    const again = callFresh(h);
+    const stale = call(h, rowOf(h)); // the row as read AFTER linking: status processed
+    return {
+      conds: {
+        'the first call wrote': !!first.out && first.out.outcome === 'written',
+        'the second call: outcome skipped': !!again.out && again.out.outcome === 'skipped',
+        'a third call: skipped': !!stale.out && stale.out.outcome === 'skipped',
+        'nothing changed (stock, «История» count, journal count, status, column)': snap(h) === before,
+        'still one operation and stock 8/800': opRows(h, 'ozonAuto:P-1').length === 1 && stockStr(h) === '8/800' && journal(h, 'ozonAuto:P-1').length === 1
+      },
+      note: JSON.stringify(first) + ' / ' + JSON.stringify(again) + ' | ' + stockStr(h)
+    };
+  });
+
+  const stages = [
+    ['stock flush', (h) => t0cFailStock(h)],
+    ['«История» append', (h) => t0cFailHistory(h)],
+    ['cost journal', (h) => t0cFailJournal(h)]
+  ];
+  stages.forEach(([label, inject]) => {
+    t03aCheck('Item 97 ticket 03 A4: a failure at the ' + label + ' write, then a second call — exactly ONE operation (stock 8/800, one «История» row, one journal row), the posting linked, no memo left', () => {
+      const h = t03aStand();
+      const staleRow = rowOf(h); // as the poll read it before the first attempt
+      inject(h);
+      const first = call(h, staleRow);
+      const snapAfterFailure = stockStr(h) + ' rows ' + opRows(h, 'ozonAuto:P-1').length + ' journal ' + journal(h, 'ozonAuto:P-1').length + ' status ' + dumpRow(h)['Статус'];
+      const second = label === 'cost journal' ? call(h, staleRow) : callFresh(h);
+      const d = dumpRow(h);
+      return {
+        conds: {
+          'the second call did not throw': second.err === '',
+          'the second call: outcome written': !!second.out && second.out.outcome === 'written',
+          'stock 8/800 (not 6/600)': stockStr(h) === '8/800',
+          'exactly one «История» row of the opId': opRows(h, 'ozonAuto:P-1').length === 1,
+          'exactly one journal row of the opId': journal(h, 'ozonAuto:P-1').length === 1,
+          'the posting is processed and linked to the operation row': d['Статус'] === 'processed' && d['TransGroupInfo'] === JSON.stringify(opRows(h, 'ozonAuto:P-1').map((r) => r.id)),
+          'column «Автосписание» = ждёт счёта': d[AUTO_COL] === 'ждёт счёта',
+          'no memo left': memoKeys(h).length === 0
+        },
+        note: 'first ' + JSON.stringify(first) + ' | after failure: ' + snapAfterFailure + ' | second ' + JSON.stringify(second) + ' | final ' + stockStr(h)
+      };
+    });
+  });
+
+  t03aCheck('Item 97 ticket 03 A5: manual write-off first — the posting is already processed through the normal commit path -> skipped, nothing written, the manual operation stays alone', () => {
+    const h = t03aStand();
+    const staleRow = rowOf(h);
+    // the browser path: commitTransaction + linkPostingsToCommit, as the doPost "commit" action does
+    const manual = h.commitTransaction([{ article: 'A', quantity: 2, price: 100 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-27', 'Кладовщик', null, 'manual-op', null);
+    h.context.linkPostingsToCommit(['P-1'], manual.newTransactions);
+    const before = snap(h);
+    const c = call(h, rowOf(h));
+    const cStale = call(h, staleRow);
+    return {
+      conds: {
+        'the posting is processed after the manual write-off': dumpRow(h)['Статус'] === 'processed',
+        'fresh row: outcome skipped': !!c.out && c.out.outcome === 'skipped',
+        'stale row (status new at read time): no second write-off': snap(h) === before && stockStr(h) === '8/800' && opRows(h, 'ozonAuto:P-1').length === 0,
+        'nothing changed': snap(h) === before
+      },
+      note: JSON.stringify(c) + ' / ' + JSON.stringify(cStale) + ' | ' + stockStr(h)
+    };
+  });
+
+  const refusal = (name, opts, expectReason, mutate) => {
+    t03aCheck('Item 97 ticket 03 A6: refusal — ' + name + ': outcome refused with the reason, nothing written, status stays new', () => {
+      const h = t03aStand(opts);
+      const row = rowOf(h);
+      const before = snap(h);
+      if (mutate) mutate(h);
+      const c = call(h, row);
+      if (mutate && mutate.undo) mutate.undo(h);
+      const reason = c.out && c.out.reason ? String(c.out.reason) : '';
+      return {
+        conds: {
+          'no exception': c.err === '',
+          'outcome refused': !!c.out && c.out.outcome === 'refused',
+          ['reason: ' + expectReason.join(' + ')]: expectReason.every((t) => reason.indexOf(t) !== -1),
+          'nothing written (stock, «История», journal, Статус) and Статус new': snap(h) === before && dumpRow(h)['Статус'] === 'new',
+          'no memo, no «История» row of the opId': memoKeys(h).length === 0 && opRows(h, 'ozonAuto:P-1').length === 0
+        },
+        note: JSON.stringify(c)
+      };
+    });
+  };
+  const P = (items, extra) => [Object.assign({ postingId: 'P-1', cabinet: 'MaxiStore', status: 'new', ozonStatus: 'IN_TRANSIT', items: items }, extra || {})];
+  refusal('empty itemsJSON', { postings: P([], { itemsJSON: '[]' }) }, ['нет состава поставки']);
+  refusal('unparsable itemsJSON', { postings: P([], { itemsJSON: 'not json' }) }, ['нет состава поставки']);
+  refusal('unknown offer', { postings: P([{ offerId: 'GHOST', quantity: 1 }]) }, ['неизвестный товар', 'GHOST']);
+  refusal('a kit entry in «Комплекты» without components', {
+    postings: P([{ offerId: 'KIT', quantity: 1 }]),
+    skus: [['A', 10, '111'], ['KIT', 10, '333']],
+    stock: [{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }, { article: 'KIT', quantity: 10, avgCost: 100, capitalization: 1000 }],
+    kits: [{ kitSku: 'KIT', componentSku: '', quantity: 0, kitType: 'virtual' }]
+  }, ['комплект без компонентов', 'KIT']);
+  refusal('short stock (5 wanted, 2 in stock)', {
+    stock: [{ article: 'A', quantity: 2, avgCost: 100, capitalization: 200 }],
+    postings: P([{ offerId: 'A', quantity: 5 }])
+  }, ['не хватает остатка', 'Недостаточно товара "A". Доступно: 2, требуется: 5']);
+  const devOn = (h) => h.vm.runInContext('_devModeSpreadsheet = ({})', h.context);
+  devOn.undo = (h) => h.vm.runInContext('_devModeSpreadsheet = null', h.context);
+  refusal('dev mode (_devModeSpreadsheet set)', {}, ['режим разработки'], devOn);
+
+  t03aCheck('Item 97 ticket 03 A7: a posting whose handover is missing or whose column «Автосписание» already holds a refusal is skipped, nothing written', () => {
+    const h1 = t03aStand({ postings: P([{ offerId: 'A', quantity: 2 }], { handoverTo: '' }) });
+    const before1 = snap(h1);
+    const c1 = callFresh(h1);
+    const h2 = t03aStand();
+    const sh = h2.getRegistrySheet('Внешние отгрузки');
+    const col = sh.__dump()[0].map((x) => String(x).trim()).indexOf(AUTO_COL) + 1;
+    sh.getRange(2, col).setValue('спишите вручную: тест');
+    const before2 = snap(h2);
+    const c2 = callFresh(h2);
+    const h3 = t03aStand({ postings: P([{ offerId: 'A', quantity: 2 }], { status: 'ignored' }) });
+    const before3 = snap(h3);
+    const c3 = callFresh(h3);
+    return {
+      conds: {
+        'no «Передача по»: skipped, nothing written': !!c1.out && c1.out.outcome === 'skipped' && snap(h1) === before1,
+        'a refusal already in the column: skipped, nothing written, the flag kept': !!c2.out && c2.out.outcome === 'skipped' && snap(h2) === before2 && dumpRow(h2)[AUTO_COL] === 'спишите вручную: тест',
+        'status ignored: skipped, nothing written': !!c3.out && c3.out.outcome === 'skipped' && snap(h3) === before3
+      },
+      note: JSON.stringify([c1, c2, c3])
+    };
+  });
+
+  t03aCheck('Item 97 ticket 03 A8: items are mapped by barcode as well as by offer id — an item with offerId "ozon-alias" and barcode 111 writes off article A; two items of different articles make one operation with two rows', () => {
+    const h = t03aStand({
+      stock: [{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }, { article: 'B', quantity: 10, avgCost: 50, capitalization: 500 }],
+      postings: P([{ offerId: 'ozon-alias', barcode: '111', quantity: 3 }, { offerId: 'B', quantity: 4 }])
+    });
+    const c = callFresh(h);
+    const rows = opRows(h, 'ozonAuto:P-1');
+    return {
+      conds: {
+        'outcome written': !!c.out && c.out.outcome === 'written',
+        'A 7/700 (3 by barcode), B 6/300': stockStr(h, 'A') === '7/700' && stockStr(h, 'B') === '6/300',
+        'two «История» rows, one per article': rows.length === 2 && rows.map((r) => r.article).sort().join() === 'A,B',
+        'two journal rows of the opId': journal(h, 'ozonAuto:P-1').length === 2
+      },
+      note: JSON.stringify(c) + ' | ' + stockStr(h, 'A') + ' ' + stockStr(h, 'B')
+    };
+  });
+
+  t03aCheck('Item 97 ticket 03 A13: a failed cost journal write — the first call returns failed, the posting is linked (goods are off the shelf) but the column is NOT «ждёт счёта» until the retry succeeds', () => {
+    const h = t03aStand();
+    const staleRow = rowOf(h);
+    t0cFailJournal(h);
+    const first = call(h, staleRow);
+    const afterFirst = dumpRow(h);
+    const second = call(h, staleRow);
+    return {
+      conds: {
+        'first call: outcome failed': !!first.out && first.out.outcome === 'failed',
+        'after the failed first call the column is not «ждёт счёта»': afterFirst[AUTO_COL] !== 'ждёт счёта',
+        'the posting is already processed (linked) after the first call': afterFirst['Статус'] === 'processed',
+        'the retry: written and the column «ждёт счёта»': !!second.out && second.out.outcome === 'written' && dumpRow(h)[AUTO_COL] === 'ждёт счёта'
+      },
+      note: JSON.stringify(first) + ' / ' + JSON.stringify(second)
+    };
+  });
+
+  t03aCheck('Item 97 ticket 03 A14: completing without a memo — stock and «История» already written under the opId, posting still new and unlinked: the call links it, writes no second row and does not touch the stock again', () => {
+    const h = t03aStand({ stock: [{ article: 'A', quantity: 2, avgCost: 100, capitalization: 200 }] }); // the stock is emptied by the first write, so a fresh shortage pre-check would wrongly refuse
+    h.commitTransaction([{ article: 'A', quantity: 2, price: 100 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-27', 'Автосписание', null, 'ozonAuto:P-1', 0, undefined, '', '');
+    const pre = dumpRow(h)['Статус'];
+    const rowsBefore = opRows(h, 'ozonAuto:P-1').length;
+    const c = callFresh(h);
+    const d = dumpRow(h);
+    return {
+      conds: {
+        'precondition: posting still new, one row, no memo': pre === 'new' && rowsBefore === 1 && memoKeys(h).length === 0,
+        'outcome written': !!c.out && c.out.outcome === 'written',
+        'stock stays 0/0 (not negative)': stockStr(h) === '0/0',
+        'still exactly one «История» row of the opId': opRows(h, 'ozonAuto:P-1').length === 1,
+        'the posting is processed and linked to that row': d['Статус'] === 'processed' && d['TransGroupInfo'] === JSON.stringify(opRows(h, 'ozonAuto:P-1').map((r) => r.id)),
+        'column «ждёт счёта»': d[AUTO_COL] === 'ждёт счёта',
+        'one journal row of the opId': journal(h, 'ozonAuto:P-1').length === 1
+      },
+      note: JSON.stringify(c) + ' | ' + stockStr(h) + ' | journal ' + journal(h, 'ozonAuto:P-1').length
+    };
+  });
+
+  t03aCheck('Item 97 ticket 03 A15: a kit with components — 2 KIT (2 COMP each) are written off as component rows, COMP stock 6/60, one journal row, posting processed', () => {
+    const h = t03aStand({
+      stock: [{ article: 'COMP', quantity: 10, avgCost: 10, capitalization: 100 }],
+      skus: [['COMP', 10, '9'], ['KIT', 10, '8']],
+      kits: [{ kitSku: 'KIT', componentSku: 'COMP', quantity: 2, kitType: 'virtual' }],
+      postings: P([{ offerId: 'KIT', quantity: 2 }])
+    });
+    const c = callFresh(h);
+    const rows = opRows(h, 'ozonAuto:P-1');
+    return {
+      conds: {
+        'outcome written': !!c.out && c.out.outcome === 'written',
+        'COMP stock 6/60 (10 - 2x2)': stockStr(h, 'COMP') === '6/60',
+        'the «История» rows carry the component (4 pcs) ': rows.length >= 1 && rows.some((r) => r.article === 'COMP' && r.quantity === 4),
+        'at least one journal row of the opId': journal(h, 'ozonAuto:P-1').length >= 1,
+        'posting processed, column «ждёт счёта»': dumpRow(h)['Статус'] === 'processed' && dumpRow(h)[AUTO_COL] === 'ждёт счёта'
+      },
+      note: JSON.stringify(c) + ' | ' + stockStr(h, 'COMP') + ' | ' + JSON.stringify(rows.map((r) => [r.article, r.quantity])) + ' | journal ' + journal(h, 'ozonAuto:P-1').length
+    };
+  });
+
+  // Legacy guard (green before and after the helper extraction): commitTransaction keeps its own shortage error text.
+  {
+    const h = t03aStand({ stock: [{ article: 'A', quantity: 2, avgCost: 100, capitalization: 200 }] });
+    let msg = '';
+    try { h.commitTransaction([{ article: 'A', quantity: 5, price: 100 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-27', 'tester', null, 'op-short', null); } catch (e) { msg = String(e.message || e); }
+    check('Item 97 ticket 03 A12: commitTransaction\'s shortage error text is unchanged (legacy)',
+      msg === 'Недостаточно наличия на складе:\nНедостаточно товара "A". Доступно: 2, требуется: 5' && stockStr(h) === '2/200', JSON.stringify(msg));
+    const k = t03aStand({ stock: [{ article: 'COMP', quantity: 3, avgCost: 10, capitalization: 30 }], skus: [['COMP', 10, '9'], ['KIT', 10, '8']],
+      kits: [{ kitSku: 'KIT', componentSku: 'COMP', quantity: 2, kitType: 'virtual' }] });
+    let kmsg = '';
+    try { k.commitTransaction([{ article: 'KIT', quantity: 2, price: 0 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-27', 'tester', null, 'op-short-kit', null); } catch (e) { kmsg = String(e.message || e); }
+    check('Item 97 ticket 03 A12: commitTransaction\'s kit-component shortage text is unchanged (legacy)',
+      kmsg === 'Недостаточно наличия на складе:\nНет COMP: нужно 4 шт., есть 3 шт.', JSON.stringify(kmsg));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
