@@ -11,12 +11,14 @@ price»). Money tier.
 
 **Blocked by:** 01 (96.10 — the automatic path retries by itself), 02.
 
-**Status:** ready-for-agent
+**Status:** done 2026-11-01 — not deployed (commits `2ae8b20`, `77c7e9b`, `a048668`; contract `../ticket-03-design.md`)
 
-- [ ] Whole path on the stand: detection → write-off → journal row; stock, «История», reserve released
-- [ ] A repeat (next poll, retry after an injected failure) writes nothing twice
-- [ ] Each refusal case flagged and mailed, nothing written
-- [ ] The receipt-in-between example (100 @ 300, A 50, receipt 100 @ 100, B 100) gives A 15 000, B 16 666.67
-- [ ] A manual write-off of the same order before the poll → the poll does not write it again
+- [x] Whole path on the stand: detection → write-off → journal row; stock, «История», reserve released
+- [x] A repeat (next poll, retry after an injected failure) writes nothing twice
+- [x] Each refusal case flagged and mailed, nothing written
+- [x] The receipt-in-between example (100 @ 300, A 50, receipt 100 @ 100, B 100) gives A 15 000, B 16 666.67 (owner 2026-11-01: B = 16 667.00, the manual write-off's rounding)
+- [x] A manual write-off of the same order before the poll → the poll does not write it again
 
 ## Comments
+
+- 2026-11-01 (orchestrator): done. Per posting, not per order; switch «Автосписание» OFF after deployment; refusals flagged and mailed once; technical failures retried by every later poll. Stand 1761/0 (Ekb and UTC), vitest 2846 + 1 expected fail; mutations: part A 7 of 8 killed (1 equivalent), part B 6 of 6, part C 2 of 2.
