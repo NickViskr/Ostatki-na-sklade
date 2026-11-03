@@ -29,12 +29,16 @@ describe('selectableWeeks', () => {
 
 describe('weekFilterOptions', () => {
   const now = Date.parse('2026-11-03T10:00:00Z');
-  it('with no weeks on postings returns the full selectable range W46..W43, newest first', () => {
-    expect(weekFilterOptions([], now)).toEqual(['2026-W46', '2026-W45', '2026-W44', '2026-W43']);
+  it('with no weeks on postings returns W45..W43 up to the current week, newest first', () => {
+    expect(weekFilterOptions([], now)).toEqual(['2026-W45', '2026-W44', '2026-W43']);
   });
-  it('adds a posting week outside the range and lists a duplicate only once, newest first', () => {
-    expect(weekFilterOptions(['2026-W42', '2026-W44'], now)).toEqual([
-      '2026-W46', '2026-W45', '2026-W44', '2026-W43', '2026-W42',
+  it('keeps an earlier posting week once, lists duplicates once and drops weeks after the current one', () => {
+    expect(weekFilterOptions(['2026-W42', '2026-W44', '2026-W46'], now)).toEqual([
+      '2026-W45', '2026-W44', '2026-W43', '2026-W42',
     ]);
+  });
+  it('switches the newest option at the Ekaterinburg Monday boundary', () => {
+    expect(weekFilterOptions([], Date.parse('2026-11-08T18:59:59Z'))[0]).toBe('2026-W45');
+    expect(weekFilterOptions([], Date.parse('2026-11-08T19:00:00Z'))[0]).toBe('2026-W46');
   });
 });

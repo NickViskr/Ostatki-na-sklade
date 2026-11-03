@@ -49,7 +49,11 @@ export function selectableWeeks(nowMs: number): string[] {
   return result;
 }
 
-/** «Неделя» filter options: every selectable week plus any week present on postings, newest first. */
+/** «Неделя» filter options: 2026-W43 up to the current Ekb week plus any earlier week present on postings, newest first. */
 export function weekFilterOptions(present: string[], nowMs: number): string[] {
-  return Array.from(new Set([...selectableWeeks(nowMs), ...present])).sort().reverse();
+  const current = weekOfDay(Math.floor((nowMs + EKB_OFFSET_MS) / DAY_MS) * DAY_MS);
+  return Array.from(new Set([...selectableWeeks(nowMs), ...present]))
+    .filter((w) => w <= current)
+    .sort()
+    .reverse();
 }
