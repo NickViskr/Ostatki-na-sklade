@@ -16526,6 +16526,176 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   });
 }
 
+// ================= Item 97 ticket 04 part A: week files on Drive (listWeekFiles / uploadWeekFile / getWeekFile / deleteWeekFile) =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/ticket-04-design.md, Part A. Every check is red until the actions exist.
+// All checks go through doPost with a session token (whole path). Drive is the fake DriveApp of the stand.
+{
+  const farFuture = String(Date.parse('2030-01-01T00:00:00Z'));
+  const WEEK = '2026-W44';
+  const MB10 = 10485760;
+  const sha = (buf) => require('crypto').createHash('sha256').update(buf).digest('hex');
+  // Non-trivial binary payload: every byte value 0..255 several times, so 0x00 and 0xFF are certainly inside.
+  const binary = () => { const b = Buffer.alloc(3000); for (let i = 0; i < b.length; i++) b[i] = (i * 7 + (i >> 8)) & 255; b[0] = 0x00; b[1] = 0xFF; b[2] = 0x00; return b; };
+  const stand = (withPath) => {
+    const h = freshHarness();
+    h.setNow('2026-10-28T10:00:00Z');
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+      ['tok-user', 'Кладовщик', 'user', farFuture], ['tok-admin', 'boss', 'admin', farFuture]]);
+    h.setScriptProperty('test_dbSpreadsheetId', h.targetSpreadsheetId);
+    h.resetFakeDrive();
+    let storage = null;
+    if (withPath !== false) { storage = h.myDriveRoot().createFolder('Разработка').createFolder('Складской учет'); }
+    return { h, storage };
+  };
+  const call = (h, token, action, data, extra) => h.callDoPost(Object.assign({ action, sessionToken: token, data }, extra || {}));
+  const upload = (h, token, week, name, buf, extra) => call(h, token, 'uploadWeekFile', { week, name, mimeType: 'application/octet-stream', base64: buf.toString('base64') }, extra);
+  const names = (folder) => folder.__folders.map((f) => f.__name);
+  const ok = (o) => !!o && o.status === 'success';
+  const msg = (o) => String((o && o.message) || '');
+  const j = (v) => JSON.stringify(v);
+
+  {
+    const { h } = stand();
+    const buf = binary();
+    const up = upload(h, 'tok-user', WEEK, 'акт.bin', buf);
+    const id = ok(up) && up.data ? up.data.id : '';
+    const got = call(h, 'tok-user', 'getWeekFile', { week: WEEK, fileId: id });
+    const back = ok(got) && got.data ? Buffer.from(got.data.base64, 'base64') : Buffer.alloc(0);
+    check('T04A 1: upload then getWeekFile returns the same bytes (sha256 equal, 0x00 and 0xFF inside), name and mimeType kept',
+      ok(up) && !!id && ok(got) && sha(back) === sha(buf) && back.length === buf.length && got.data.name === 'акт.bin' && got.data.mimeType === 'application/octet-stream',
+      j({ up: up.status === 'success' ? 'ok' : up, got: ok(got) ? { name: got.data.name, len: back.length } : got }));
+  }
+  {
+    const { h } = stand();
+    const first = upload(h, 'tok-user', WEEK, 'first.txt', Buffer.from('one'));
+    h.setNow('2026-10-28T11:00:00Z');
+    const second = upload(h, 'tok-admin', WEEK, 'second.txt', Buffer.from('twelve bytes'));
+    const third = upload(h, 'tok-user', WEEK, 'third.txt', Buffer.from('x'));
+    const list = call(h, 'tok-user', 'listWeekFiles', { week: WEEK });
+    const rows = ok(list) && Array.isArray(list.data) ? list.data : [];
+    const firstRow = rows.find((r) => r.name === 'first.txt') || {};
+    const secondRow = rows.find((r) => r.name === 'second.txt') || {};
+    check('T04A 2a: listWeekFiles lists name, size, uploadedBy (uploader login), newest first (second before first)',
+      ok(first) && ok(second) && ok(third) && rows.length === 3 && rows.findIndex((r) => r.name === 'second.txt') < rows.findIndex((r) => r.name === 'first.txt')
+        && firstRow.size === 3 && firstRow.uploadedBy === 'Кладовщик' && secondRow.size === 12 && secondRow.uploadedBy === 'boss' && !!firstRow.id && !!firstRow.uploadedAt,
+      j(list));
+    const thirdItem = ok(third) ? h.driveItem(third.data.id) : null;
+    if (thirdItem) thirdItem.setTrashed(true);
+    const list2 = call(h, 'tok-user', 'listWeekFiles', { week: WEEK });
+    check('T04A 2b: a trashed file is not listed',
+      ok(list2) && !!thirdItem && list2.data.length === 2 && !list2.data.some((r) => r.name === 'third.txt'), j(list2));
+  }
+  {
+    const { h, storage } = stand();
+    const noProp = h.getScriptProperty('weekFiles_folderId');
+    const up1 = upload(h, 'tok-user', WEEK, 'a.txt', Buffer.from('a'));
+    const parents1 = storage.__folders.filter((f) => f.__name === 'Файлы недель');
+    const prop1 = h.getScriptProperty('weekFiles_folderId');
+    const root1 = parents1[0];
+    const up2 = upload(h, 'tok-user', WEEK, 'b.txt', Buffer.from('b'));
+    const parents2 = storage.__folders.filter((f) => f.__name === 'Файлы недель');
+    const weekDirs = root1 ? root1.__folders.filter((f) => f.__name === WEEK) : [];
+    check('T04A 3: first upload creates «Файлы недели» under Мой диск / Разработка / Складской учет, stores weekFiles_folderId and a 2026-W44 subfolder; the second upload reuses all of them',
+      noProp === null && ok(up1) && ok(up2) && parents1.length === 1 && parents2.length === 1 && prop1 === root1.getId()
+        && h.getScriptProperty('weekFiles_folderId') === prop1 && weekDirs.length === 1 && weekDirs[0].__files.length === 2 && root1.__folders.length === 1,
+      j({ noProp, up1: up1.status, up2: up2.status, n1: parents1.length, n2: parents2.length, weekDirs: weekDirs.length }));
+  }
+  {
+    const { h, storage } = stand();
+    const up = upload(h, 'tok-admin', WEEK, 'dev.txt', Buffer.from('dev'), { devMode: true });
+    const devRoot = storage.__folders.filter((f) => f.__name === 'Файлы недель (тест)');
+    const list = call(h, 'tok-admin', 'listWeekFiles', { week: WEEK }, { devMode: true });
+    check('T04A 4: dev mode uses «Файлы недель (тест)» and weekFiles_folderId_test; the production folder and property are untouched',
+      ok(up) && devRoot.length === 1 && h.getScriptProperty('weekFiles_folderId_test') === devRoot[0].getId()
+        && h.getScriptProperty('weekFiles_folderId') === null && !names(storage).includes('Файлы недель')
+        && devRoot[0].__folders.some((f) => f.__name === WEEK && f.__files.length === 1) && ok(list) && list.data.length === 1,
+      j({ up, names: names(storage), prod: h.getScriptProperty('weekFiles_folderId') }));
+  }
+  {
+    const { h, storage } = stand(false);
+    const up = upload(h, 'tok-user', WEEK, 'a.txt', Buffer.from('a'));
+    // also a half path: «Разработка» without «Складской учет»
+    const h2 = stand(false);
+    h2.h.myDriveRoot().createFolder('Разработка');
+    const up2 = upload(h2.h, 'tok-user', WEEK, 'a.txt', Buffer.from('a'));
+    check('T04A 5: path Мой диск / Разработка / Складской учет missing (entirely or half) -> error naming «Складской учет», no property stored',
+      up.status === 'error' && msg(up).indexOf('Складской учет') !== -1 && up2.status === 'error' && msg(up2).indexOf('Складской учет') !== -1
+        && h.getScriptProperty('weekFiles_folderId') === null && h2.h.getScriptProperty('weekFiles_folderId') === null,
+      j([up, up2]));
+  }
+  {
+    const { h, storage } = stand();
+    const list = call(h, 'tok-user', 'listWeekFiles', { week: WEEK });
+    check('T04A 6: listWeekFiles with no property returns [] and creates no folder and no property',
+      ok(list) && Array.isArray(list.data) && list.data.length === 0 && storage.__folders.length === 0 && h.getScriptProperty('weekFiles_folderId') === null,
+      j({ list, folders: storage.__folders.length }));
+  }
+  {
+    const { h } = stand();
+    const exact = upload(h, 'tok-user', WEEK, 'exact.bin', Buffer.alloc(MB10, 5));
+    const over = upload(h, 'tok-user', WEEK, 'over.bin', Buffer.alloc(MB10 + 1, 5));
+    const empty = call(h, 'tok-user', 'uploadWeekFile', { week: WEEK, name: 'empty.bin', mimeType: 'text/plain', base64: '' });
+    const listed = call(h, 'tok-user', 'listWeekFiles', { week: WEEK });
+    check('T04A 7: exactly 10 485 760 decoded bytes accepted; 10 485 761 -> «Файл больше 10 МБ»; empty -> «Файл пустой»; only the exact file is stored',
+      ok(exact) && over.status === 'error' && msg(over).indexOf('Файл больше 10 МБ') !== -1 && empty.status === 'error' && msg(empty).indexOf('Файл пустой') !== -1
+        && ok(listed) && listed.data.length === 1 && listed.data[0].name === 'exact.bin' && listed.data[0].size === MB10,
+      j({ exact: exact.status, over, empty, listed: ok(listed) ? listed.data.length : listed }));
+  }
+  {
+    const { h } = stand();
+    const bad = ['2026-W54', 'abc', '2026-W00', ''];
+    const outs = [];
+    bad.forEach((w) => {
+      outs.push(call(h, 'tok-admin', 'listWeekFiles', { week: w }));
+      outs.push(upload(h, 'tok-admin', w, 'a.txt', Buffer.from('a')));
+      outs.push(call(h, 'tok-admin', 'getWeekFile', { week: w, fileId: 'x' }));
+      outs.push(call(h, 'tok-admin', 'deleteWeekFile', { week: w, fileId: 'x' }));
+    });
+    check('T04A 8: invalid week (2026-W54, abc, 2026-W00, empty) -> «Неверная неделя» from all four actions; nothing created on Drive',
+      outs.every((o) => o.status === 'error' && msg(o).indexOf('Неверная неделя') !== -1) && h.getScriptProperty('weekFiles_folderId') === null, j(outs.map(msg)));
+  }
+  {
+    const { h, storage } = stand();
+    const a = upload(h, 'tok-user', '2026-W44', 'w44.txt', Buffer.from('44'));
+    const b = upload(h, 'tok-user', '2026-W45', 'w45.txt', Buffer.from('45'));
+    const foreign = storage.__addFile('foreign.txt');
+    const idB = ok(b) ? b.data.id : 'none';
+    const getOther = call(h, 'tok-user', 'getWeekFile', { week: '2026-W44', fileId: idB });
+    const getForeign = call(h, 'tok-user', 'getWeekFile', { week: '2026-W44', fileId: foreign.getId() });
+    const delOther = call(h, 'tok-admin', 'deleteWeekFile', { week: '2026-W44', fileId: idB });
+    const delForeign = call(h, 'tok-admin', 'deleteWeekFile', { week: '2026-W44', fileId: foreign.getId() });
+    const refused = [getOther, getForeign, delOther, delForeign].every((o) => o.status === 'error' && msg(o).indexOf('Файл не найден в этой неделе') !== -1);
+    const getOwn = call(h, 'tok-user', 'getWeekFile', { week: '2026-W44', fileId: ok(a) ? a.data.id : 'none' });
+    check('T04A 9: getWeekFile / deleteWeekFile with a file id of another week or an arbitrary Drive file -> «Файл не найден в этой неделе», nothing trashed; the own-week file still reads',
+      ok(a) && ok(b) && refused && !h.driveItem(idB).isTrashed() && !foreign.isTrashed() && ok(getOwn), j({ getOther, getForeign, delOther, delForeign }));
+  }
+  {
+    const { h } = stand();
+    const up = upload(h, 'tok-user', WEEK, 'keep.txt', Buffer.from('keep'));
+    const id = ok(up) ? up.data.id : 'none';
+    const byUser = call(h, 'tok-user', 'deleteWeekFile', { week: WEEK, fileId: id });
+    const afterUser = h.driveItem(id) ? h.driveItem(id).isTrashed() : null;
+    const byAdmin = call(h, 'tok-admin', 'deleteWeekFile', { week: WEEK, fileId: id });
+    const item = h.driveItem(id);
+    const list = call(h, 'tok-user', 'listWeekFiles', { week: WEEK });
+    check('T04A 10: deleteWeekFile by a non-admin is refused (file not trashed); by an admin it is trashed (isTrashed true, still exists in Drive) and disappears from the list',
+      ok(up) && byUser.status === 'error' && afterUser === false && ok(byAdmin) && !!item && item.isTrashed() === true && ok(list) && list.data.length === 0,
+      j({ byUser, afterUser, byAdmin, list }));
+  }
+  {
+    const { h, storage } = stand();
+    const good = upload(h, 'tok-user', WEEK, 'good.txt', Buffer.from('g'));
+    const filesNow = () => { const r = storage.__folders[0]; return r ? r.__folders.reduce((n, f) => n + f.__files.length, 0) : -1; };
+    const before = filesNow();
+    const anon = upload(h, '', WEEK, 'anon.txt', Buffer.from('a'));
+    const bogus = upload(h, 'no-such-token', WEEK, 'anon2.txt', Buffer.from('a'));
+    const anonList = call(h, '', 'listWeekFiles', { week: WEEK });
+    check('T04A 11: without a valid session token upload and list are refused and no file is created (a logged-in upload works)',
+      ok(good) && before === 1 && anon.status === 'error' && bogus.status === 'error' && anonList.status === 'error' && filesNow() === 1,
+      j({ good: good.status, anon, bogus, anonList, files: filesNow() }));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

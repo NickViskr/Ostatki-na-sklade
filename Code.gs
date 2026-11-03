@@ -208,6 +208,14 @@ function doPost(e) {
     // reads has an assertAdmin of its own. getOzonSyncStatus stays out: the sidebar polls it on its
     // own schedule. getLastPurchasePrices stays out too: it still goes through the switch and takes
     // the lock, and moving it here would silently change that.
+    // Item 97 ticket 04: week files are pure Drive reads, answered before the global lock like the other reads.
+    if (action === 'listWeekFiles' || action === 'getWeekFile') {
+      const weekData = payload.data || {};
+      const weekResult = action === 'listWeekFiles' ? listWeekFiles(weekData.week) : getWeekFile(weekData.week, weekData.fileId);
+      return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: weekResult }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // Item 78a: a pure read of «KAN дни» and «Снимки склада» for the turnover tab.
     if (action === 'getTurnoverData') {
       return ContentService.createTextOutput(JSON.stringify({ status: 'success', data: getTurnoverData(payload.data || {}) }))
@@ -463,6 +471,14 @@ function doPost(e) {
       case 'setOzonAutoWriteOff':
         assertAdmin(currentUser);
         result = setOzonAutoWriteOff(data && data.enabled === true);
+        break;
+      // Item 97 ticket 04: upload creates folders, so it runs under the lock; delete is admin-only.
+      case 'uploadWeekFile':
+        result = uploadWeekFile(data, currentUser.username);
+        break;
+      case 'deleteWeekFile':
+        assertAdmin(currentUser);
+        result = deleteWeekFile(data.week, data.fileId);
         break;
       case 'applyCancelledOzonOrders':
         result = applyCancelledOzonOrders(data);
@@ -9923,6 +9939,116 @@ function updateExternalShipmentStatus(postingId, status, transGroupInfo) {
     }
   }
   throw new Error('Shipment with PostingID ' + postingId + ' not found');
+}
+
+// Item 97 ticket 04: contractor/week files kept on Drive, one subfolder per ISO week.
+const WEEK_FILE_MAX_BYTES = 10485760;
+
+function assertWeekFilesWeek(week) {
+  if (!/^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/.test(String(week === undefined || week === null ? '' : week))) {
+    throw new Error('Неверная неделя');
+  }
+}
+
+/** Root folder of the week files; the id lives in a Script Property (never in code). Null when absent and not `create`. */
+function getWeekFilesRootFolder(create) {
+  const props = PropertiesService.getScriptProperties();
+  const propName = _devModeSpreadsheet ? 'weekFiles_folderId_test' : 'weekFiles_folderId';
+  const storedId = props.getProperty(propName);
+  if (storedId) return DriveApp.getFolderById(storedId);
+  if (!create) return null;
+  const findChild = function(parent, name) {
+    const it = parent.getFoldersByName(name);
+    while (it.hasNext()) {
+      const f = it.next();
+      if (!f.isTrashed || !f.isTrashed()) return f;
+    }
+    return null;
+  };
+  const dev = findChild(DriveApp.getRootFolder(), 'Разработка');
+  const storage = dev ? findChild(dev, 'Складской учет') : null;
+  if (!storage) throw new Error('Не найдена папка «Мой диск / Разработка / Складской учет» на Google Диске');
+  const rootName = _devModeSpreadsheet ? 'Файлы недель (тест)' : 'Файлы недель';
+  const root = findChild(storage, rootName) || storage.createFolder(rootName);
+  props.setProperty(propName, root.getId());
+  return root;
+}
+
+function getWeekFolder(week, create) {
+  const root = getWeekFilesRootFolder(create);
+  if (!root) return null;
+  const it = root.getFoldersByName(week);
+  return it.hasNext() ? it.next() : (create ? root.createFolder(week) : null);
+}
+
+function weekFileInfo(file) {
+  return {
+    id: file.getId(),
+    name: file.getName(),
+    size: file.getSize(),
+    mimeType: file.getMimeType(),
+    uploadedBy: file.getDescription() || '',
+    uploadedAt: file.getDateCreated().toISOString()
+  };
+}
+
+/** The file must be non-trashed and sit directly in the week's folder, otherwise it is never read or trashed by id. */
+function findWeekFile(week, fileId) {
+  const folder = getWeekFolder(week, false);
+  let file = null;
+  if (folder && fileId) {
+    try { file = DriveApp.getFileById(String(fileId)); } catch (e) { file = null; }
+  }
+  let inWeek = false;
+  if (file && !file.isTrashed()) {
+    const parents = file.getParents();
+    while (parents.hasNext()) {
+      if (parents.next().getId() === folder.getId()) inWeek = true;
+    }
+  }
+  if (!inWeek) throw new Error('Файл не найден в этой неделе');
+  return file;
+}
+
+function listWeekFiles(week) {
+  assertWeekFilesWeek(week);
+  const folder = getWeekFolder(week, false);
+  if (!folder) return [];
+  const rows = [];
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    if (!f.isTrashed()) rows.push({ created: f.getDateCreated().getTime(), info: weekFileInfo(f) });
+  }
+  rows.sort(function(a, b) { return b.created - a.created; });
+  return rows.map(function(r) { return r.info; });
+}
+
+function uploadWeekFile(data, username) {
+  const input = data || {};
+  assertWeekFilesWeek(input.week);
+  const name = sanitizeDriveName(input.name);
+  if (!name) throw new Error('Не передано имя файла');
+  const bytes = Utilities.base64Decode(String(input.base64 || ''));
+  if (bytes.length === 0) throw new Error('Файл пустой');
+  if (bytes.length > WEEK_FILE_MAX_BYTES) throw new Error('Файл больше 10 МБ');
+  const folder = getWeekFolder(input.week, true);
+  const file = folder.createFile(Utilities.newBlob(bytes, String(input.mimeType || 'application/octet-stream'), name));
+  file.setDescription(username || '');
+  return weekFileInfo(file);
+}
+
+function getWeekFile(week, fileId) {
+  assertWeekFilesWeek(week);
+  const file = findWeekFile(week, fileId);
+  const blob = file.getBlob();
+  return { name: file.getName(), mimeType: file.getMimeType(), base64: Utilities.base64Encode(blob.getBytes()) };
+}
+
+function deleteWeekFile(week, fileId) {
+  assertWeekFilesWeek(week);
+  findWeekFile(week, fileId).setTrashed(true);
+  return { deleted: true };
 }
 
 /** Item 97 ticket 02 part C: admin sets (or clears with '') the manual ISO week of one posting. Writes only «Неделя вручную». */

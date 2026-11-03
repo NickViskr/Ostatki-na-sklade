@@ -489,40 +489,75 @@ function makeFakeIterator(items) {
   let i = 0;
   return { hasNext: () => i < items.length, next: () => items[i++] };
 }
-function makeFakeDriveFile(name, blob) {
+// Item 97 ticket 04: ids, parents, byte contents, descriptions and creation dates, as real Drive has them.
+// Blob bytes are SIGNED (-128..127) like Utilities.base64Decode / Blob.getBytes in Apps Script.
+let driveSeq = 0;
+let driveById = {};
+function makeFakeDriveFile(name, blob, parent) {
   const file = {
-    __name: name, __trashed: false, __blob: blob || null,
+    __name: name, __trashed: false, __blob: blob || null, __parent: parent || null, __desc: '',
+    __id: 'file-' + (++driveSeq), __created: new FakeDate(),
+    getId: () => file.__id,
     getName: () => file.__name,
     setTrashed(v) { file.__trashed = !!v; return file; },
     isTrashed: () => file.__trashed,
-    getBlob: () => file.__blob || makeFakeDriveBlob(file.__name)
+    getBlob: () => file.__blob || makeFakeDriveBlob(file.__name),
+    getSize: () => (file.__blob && file.__blob.__bytes ? file.__blob.__bytes.length : 0),
+    getMimeType: () => (file.__blob ? file.__blob.getContentType() : 'application/pdf'),
+    setDescription(d) { file.__desc = String(d); return file; },
+    getDescription: () => file.__desc,
+    getDateCreated: () => file.__created,
+    getParents: () => makeFakeIterator(file.__parent ? [file.__parent] : [])
   };
+  driveById[file.__id] = file;
   return file;
 }
-function makeFakeDriveBlob(name) {
-  const blob = { __name: name || '', setName(n) { blob.__name = n; return blob; }, getContentType: () => 'application/pdf' };
+function makeFakeDriveBlob(name, bytes, mime) {
+  const blob = {
+    __name: name || '', __bytes: bytes || null, __mime: mime || 'application/pdf',
+    setName(n) { blob.__name = n; return blob; },
+    getName: () => blob.__name,
+    getContentType: () => blob.__mime,
+    getBytes: () => (blob.__bytes ? blob.__bytes.slice() : [])
+  };
   return blob;
 }
-function makeFakeDriveFolder(name) {
+function makeFakeDriveFolder(name, parent) {
   const folder = {
-    __name: name, __files: [], __folders: [],
+    __name: name, __files: [], __folders: [], __parent: parent || null, __id: 'folder-' + (++driveSeq),
+    getId: () => folder.__id,
     getName: () => folder.__name,
     getUrl: () => 'https://drive.fake/folders/' + name,
+    getParents: () => makeFakeIterator(folder.__parent ? [folder.__parent] : []),
+    getFolders: () => makeFakeIterator(folder.__folders.slice()),
     getFoldersByName: (n) => makeFakeIterator(folder.__folders.filter(f => f.__name === n)),
-    createFolder(n) { const f = makeFakeDriveFolder(n); folder.__folders.push(f); return f; },
+    createFolder(n) { const f = makeFakeDriveFolder(n, folder); folder.__folders.push(f); return f; },
     getFiles: () => makeFakeIterator(folder.__files.slice()),
     getFilesByName: (n) => makeFakeIterator(folder.__files.filter(f => f.__name === n)),
-    createFile(blob) { const f = makeFakeDriveFile(blob.__name, blob); folder.__files.push(f); return f; },
-    __addFile(n) { const f = makeFakeDriveFile(n); folder.__files.push(f); return f; }
+    createFile(blob) { const f = makeFakeDriveFile(blob.__name, blob, folder); folder.__files.push(f); return f; },
+    __addFile(n) { const f = makeFakeDriveFile(n, null, folder); folder.__files.push(f); return f; }
   };
+  driveById[folder.__id] = folder;
   return folder;
 }
+// Fake Utilities byte helpers (Apps Script: base64Decode returns signed bytes; newBlob(bytes, mime, name)).
+context.Utilities.base64Decode = (text) => Array.from(Buffer.from(String(text), 'base64')).map(b => (b > 127 ? b - 256 : b));
+context.Utilities.base64Encode = (v) => (typeof v === 'string' ? Buffer.from(v, 'utf8') : Buffer.from(v.map(b => b & 255))).toString('base64');
+context.Utilities.newBlob = (bytes, mime, name) => makeFakeDriveBlob(name, typeof bytes === 'string' ? Array.from(Buffer.from(bytes, 'utf8')).map(b => (b > 127 ? b - 256 : b)) : bytes.slice(), mime);
 let fakeDriveRoot = makeFakeDriveFolder('root');
+// «My Drive» root of the script owner (DriveApp.getRootFolder); distinct from the supply-docs ROOT-ID folder.
+let fakeMyDriveRoot = makeFakeDriveFolder('Мой диск');
 context.DriveApp = {
   getFolderById(id) {
-    if (id !== 'ROOT-ID') throw new Error('Стенд: неизвестная папка ' + id);
-    return fakeDriveRoot;
-  }
+    if (id === 'ROOT-ID') return fakeDriveRoot;
+    if (driveById[id] && driveById[id].createFile) return driveById[id];
+    throw new Error('Стенд: неизвестная папка ' + id);
+  },
+  getFileById(id) {
+    if (driveById[id] && !driveById[id].createFile) return driveById[id];
+    throw new Error('Стенд: неизвестный файл ' + id);
+  },
+  getRootFolder: () => fakeMyDriveRoot
 };
 
 let historySheet = makeFakeSheet(context.OZON_STOCK_HISTORY_HEADERS);
@@ -540,8 +575,11 @@ module.exports = {
   logs,
   setNow(isoUtc) { FakeDate.__now = Date.parse(isoUtc); },
   // Item 101 ticket 02: fake Drive. Returns the root folder; the order folder is created by Code.gs.
-  resetFakeDrive() { fakeDriveRoot = makeFakeDriveFolder('root'); ozonSettingsStore.supplyDocsFolderId = 'ROOT-ID'; return fakeDriveRoot; },
+  resetFakeDrive() { fakeDriveRoot = makeFakeDriveFolder('root'); fakeMyDriveRoot = makeFakeDriveFolder('Мой диск'); ozonSettingsStore.supplyDocsFolderId = 'ROOT-ID'; return fakeDriveRoot; },
   makeFakeDriveBlob,
+  // Item 97 ticket 04: «My Drive» root and id lookup for the week-files checks.
+  myDriveRoot: () => fakeMyDriveRoot,
+  driveItem: (id) => driveById[id] || null,
   saveSupplyDocsToDrive: (...args) => context.saveSupplyDocsToDrive(...args),
   setRetentionWeeks(n) { ozonSettingsStore.stockHistoryRetentionWeeks = n; },
   resetHistorySheet() { historySheet = makeFakeSheet(context.OZON_STOCK_HISTORY_HEADERS); },
