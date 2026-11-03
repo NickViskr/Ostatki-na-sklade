@@ -48,3 +48,8 @@ export function selectableWeeks(nowMs: number): string[] {
   }
   return result;
 }
+
+/** «Неделя» filter options: every selectable week plus any week present on postings, newest first. */
+export function weekFilterOptions(present: string[], nowMs: number): string[] {
+  return Array.from(new Set([...selectableWeeks(nowMs), ...present])).sort().reverse();
+}

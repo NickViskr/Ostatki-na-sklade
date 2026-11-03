@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isoWeekLabel, selectableWeeks } from './isoWeek';
+import { isoWeekLabel, selectableWeeks, weekFilterOptions } from './isoWeek';
 
 // Expected values are fixed strings and must not depend on the machine zone (TZ=UTC and TZ=Asia/Yekaterinburg).
 describe('isoWeekLabel', () => {
@@ -24,5 +24,17 @@ describe('selectableWeeks', () => {
   });
   it('in the first week of the range (W43) the list is W44 then W43', () => {
     expect(selectableWeeks(ms('2026-10-21T10:00:00Z'))).toEqual(['2026-W44', '2026-W43']);
+  });
+});
+
+describe('weekFilterOptions', () => {
+  const now = Date.parse('2026-11-03T10:00:00Z');
+  it('with no weeks on postings returns the full selectable range W46..W43, newest first', () => {
+    expect(weekFilterOptions([], now)).toEqual(['2026-W46', '2026-W45', '2026-W44', '2026-W43']);
+  });
+  it('adds a posting week outside the range and lists a duplicate only once, newest first', () => {
+    expect(weekFilterOptions(['2026-W42', '2026-W44'], now)).toEqual([
+      '2026-W46', '2026-W45', '2026-W44', '2026-W43', '2026-W42',
+    ]);
   });
 });

@@ -20,7 +20,7 @@ import { buildUnshippedLines, canReturnToNew, parseShippedRecord, returnGroupToN
 import { formatCurrency } from '../lib/utils';
 import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
-import { isoWeekLabel, selectableWeeks } from '../lib/isoWeek';
+import { isoWeekLabel, selectableWeeks, weekFilterOptions } from '../lib/isoWeek';
 
 
 const formatStatusDate = (dateStr?: string) => {
@@ -1681,7 +1681,8 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const availableWeeks = useMemo(() => {
     const set = new Set<string>();
     groupedShipments.forEach(g => g.items.forEach((i: any) => { if (i.effectiveWeek) set.add(i.effectiveWeek); }));
-    return Array.from(set).sort().reverse();
+    // Item 97 ticket 04: every week is offered, so «Файлы недели» opens even before any posting has a week
+    return weekFilterOptions(Array.from(set), Date.now());
   }, [groupedShipments]);
 
   const filteredGroups = useMemo(() => {
