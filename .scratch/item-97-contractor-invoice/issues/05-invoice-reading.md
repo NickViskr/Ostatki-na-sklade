@@ -11,10 +11,12 @@ again → «это замена ранее загруженного счёта?�
 
 **Blocked by:** 04.
 
-**Status:** ready-for-agent
+**Status:** done (live 2026-11-03, owner's live check pending)
 
-- [ ] Pure checks unit-tested on SYNTHETIC invoices (incl. a kopeck line like 9022.74, a wrong sum, a missing line)
-- [ ] The four real invoices read correctly — checked locally only, never committed (INNs, bank accounts)
-- [ ] Duplicate number+date → confirmation; replacement keeps one invoice
+- [x] Pure checks unit-tested on SYNTHETIC invoices (incl. a kopeck line like 9022.74, a wrong sum, a missing line)
+- [ ] (owner's live check via «Распознать») The four real invoices read correctly — checked locally only, never committed (INNs, bank accounts)
+- [x] Duplicate number+date → confirmation; replacement keeps one invoice
 
 ## Comments
+
+2026-11-03 (orchestrator): DONE in four parts — A `18fc809` (pure checks + service week), B `7a8d9e8` (Code.gs sheets/actions, twin parity), C `cf7445b` (proxy `/api/contractor-invoice/read` + store), D `cf9dad7` (screen). Contract with the owner's answers: `../ticket-05-design.md`. Mutations: A 5/5 killed; B 6 (two survivors got checks 1c, 1d). Full set: vitest 2917 + 1 expected fail (default, Yekaterinburg, UTC), stand 1788/0, tsc clean. LIVE: Code.gs @215 + Cloud Run `sklad-00120-hvc`. Real invoices: the Gemini key exists only in Script Properties, so they are checked live by the owner (`../real-invoice-check.ts` is the local alternative with GEMINI_API_KEY in the environment). Known edge for ticket 06: editing the NUMBER of a saved invoice makes a new key, so saving offers «добавить ещё один» instead of replacing.
