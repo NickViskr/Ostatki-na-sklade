@@ -480,6 +480,17 @@ function doPost(e) {
         assertAdmin(currentUser);
         result = deleteWeekFile(data.week, data.fileId);
         break;
+      // Item 97 ticket 05: contractor invoices; any user saves a new one, only an admin replaces or deletes.
+      case 'saveContractorInvoice':
+        result = saveContractorInvoice(data, currentUser);
+        break;
+      case 'listContractorInvoices':
+        result = listContractorInvoices(data.week);
+        break;
+      case 'deleteContractorInvoice':
+        assertAdmin(currentUser);
+        result = deleteContractorInvoice(data.id);
+        break;
       case 'applyCancelledOzonOrders':
         result = applyCancelledOzonOrders(data);
         break;
@@ -10048,6 +10059,227 @@ function getWeekFile(week, fileId) {
 function deleteWeekFile(week, fileId) {
   assertWeekFilesWeek(week);
   findWeekFile(week, fileId).setTrashed(true);
+  return { deleted: true };
+}
+
+// ===== Item 97 ticket 05 part B: contractor invoices read from the weekly PDF =====
+// The checks below are the Code.gs twin of src/lib/contractorInvoice.ts (checkContractorInvoice);
+// twinRulesParity.test.ts keeps both in step, message texts included. Money is integer kopecks.
+
+const CONTRACTOR_INVOICE_HEADERS = ['ID счёта', 'Неделя', 'Поставщик', 'Номер', 'Дата счёта', 'Покупатель', 'Всего к оплате', 'НДС', 'Всего наименований', 'Файл ID', 'Файл', 'Загрузил', 'Загружено', 'Заменён'];
+const CONTRACTOR_INVOICE_LINE_HEADERS = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма'];
+// 1-based columns kept as text (a number «0045» or a date must not be coerced by Sheets).
+const CONTRACTOR_INVOICE_TEXT_COLS = [1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14];
+const CONTRACTOR_INVOICE_LINE_TEXT_COLS = [1, 3, 4, 5];
+const CONTRACTOR_INVOICE_FIRST_WEEK = '2026-W43';
+
+function parseKopecksGs(text) {
+  const compact = String(text === undefined || text === null ? '' : text)
+    .replace(/[\s   ]/g, '').replace(/(₽|руб\.?|р\.)$/i, '');
+  const m = /^(\d+)(?:[.,](\d{1,2}))?$/.exec(compact);
+  if (!m) return null;
+  return Number(m[1]) * 100 + Number(((m[2] || '') + '00').slice(0, 2));
+}
+
+function parseQtyMilliGs(text) {
+  const compact = String(text === undefined || text === null ? '' : text)
+    .replace(/[\s   ]/g, '').replace(/(₽|руб\.?|р\.)$/i, '');
+  const m = /^(\d+)(?:[.,](\d{1,3}))?$/.exec(compact);
+  if (!m) return null;
+  const milli = Number(m[1]) * 1000 + Number(((m[2] || '') + '000').slice(0, 3));
+  return milli > 0 ? milli : null;
+}
+
+function formatKopecksGs(kop) {
+  return Math.floor(kop / 100) + ',' + ('0' + (kop % 100)).slice(-2);
+}
+
+function isRealInvoiceDateGs(ddMMyyyy) {
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(ddMMyyyy);
+  if (!m) return false;
+  const d = new Date(Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1])));
+  return d.getUTCDate() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1;
+}
+
+function checkContractorInvoiceGs(draft) {
+  const header = draft.header;
+  const lines = draft.lines;
+  const headerErrors = [];
+  const lineErrors = [];
+  const notes = [];
+
+  if (!header.number.trim()) headerErrors.push('Не указан номер счёта');
+  if (!isRealInvoiceDateGs(header.date.trim())) headerErrors.push('Дата счёта должна быть настоящей датой в виде дд.мм.гггг');
+  if (!header.supplier.trim()) headerErrors.push('Не указан поставщик');
+  const totalKop = parseKopecksGs(header.total);
+  if (totalKop === null) headerErrors.push('Не удалось прочитать сумму «Всего к оплате»');
+  if (lines.length === 0) headerErrors.push('В счёте нет ни одной строки');
+
+  let linesSumKop = 0;
+  let allLinesReadable = true;
+  lines.forEach(function(l, index) {
+    const n = index + 1;
+    const qtyMilli = parseQtyMilliGs(l.qty);
+    const priceKop = parseKopecksGs(l.price);
+    const sumKop = parseKopecksGs(l.sum);
+    if (!l.name.trim()) lineErrors.push({ index: index, message: 'Строка ' + n + ': нет наименования' });
+    if (qtyMilli === null) lineErrors.push({ index: index, message: 'Строка ' + n + ': не удалось прочитать количество «' + l.qty + '»' });
+    if (priceKop === null) lineErrors.push({ index: index, message: 'Строка ' + n + ': не удалось прочитать цену «' + l.price + '»' });
+    if (sumKop === null) lineErrors.push({ index: index, message: 'Строка ' + n + ': не удалось прочитать сумму «' + l.sum + '»' });
+    if (sumKop === null) { allLinesReadable = false; return; }
+    linesSumKop += sumKop;
+    if (qtyMilli === null || priceKop === null) return;
+    // The printed sum is the product rounded half-up to the kopeck (integers only).
+    const expectedKop = Math.floor((qtyMilli * priceKop + 500) / 1000);
+    if (sumKop !== expectedKop) {
+      lineErrors.push({
+        index: index,
+        message: 'Строка ' + n + ': ' + l.qty + ' × ' + formatKopecksGs(priceKop) + ' = ' + formatKopecksGs(expectedKop) + ', а в счёте ' + formatKopecksGs(sumKop)
+      });
+    }
+  });
+
+  if (totalKop !== null && allLinesReadable && lines.length > 0 && linesSumKop !== totalKop) {
+    headerErrors.push('Сумма строк ' + formatKopecksGs(linesSumKop) + ' не равна «Всего к оплате» ' + formatKopecksGs(totalKop));
+  }
+
+  if (header.itemCount.trim() === '') {
+    notes.push('В счёте нет строки «Всего наименований» — проверка числа строк пропущена');
+  } else if (Number(header.itemCount) !== lines.length || !/^\d+$/.test(header.itemCount.trim())) {
+    headerErrors.push('В счёте указано наименований: ' + header.itemCount + ', а строк: ' + lines.length);
+  }
+
+  return { ok: headerErrors.length === 0 && lineErrors.length === 0, headerErrors: headerErrors, lineErrors: lineErrors, notes: notes };
+}
+
+/** Duplicate key, the twin of contractorInvoiceKey: supplier (lower case, quotes dropped, spaces collapsed) + number + date. */
+function contractorInvoiceKeyGs(supplier, number, date) {
+  const s = String(supplier).toLowerCase().replace(/[«»"']/g, '').replace(/\s+/g, ' ').trim();
+  return s + '|' + String(number).trim() + '|' + String(date).trim();
+}
+
+/** Every value to trimmed text, the shape checkContractorInvoiceGs expects. */
+function contractorInvoiceDraftFromInput(input) {
+  const text = function(v) { return v === undefined || v === null ? '' : String(v).trim(); };
+  const h = input.header && typeof input.header === 'object' ? input.header : {};
+  const lines = Array.isArray(input.lines) ? input.lines : [];
+  return {
+    header: { number: text(h.number), date: text(h.date), supplier: text(h.supplier), buyer: text(h.buyer), total: text(h.total), vat: text(h.vat), itemCount: text(h.itemCount) },
+    lines: lines.map(function(item) {
+      const l = item && typeof item === 'object' ? item : {};
+      return { name: text(l.name), qty: text(l.qty), unit: text(l.unit), price: text(l.price), sum: text(l.sum) };
+    })
+  };
+}
+
+/** Writes a block of rows at once; the text columns are formatted '@' first so Sheets keeps «0045» and dates as typed. */
+function writeInvoiceRows(sheet, startRow, rows, textCols) {
+  const width = rows[0].length;
+  textCols.forEach(function(col) { sheet.getRange(startRow, col, rows.length, 1).setNumberFormat('@'); });
+  sheet.getRange(startRow, 1, rows.length, width).setValues(rows);
+}
+
+function readInvoiceSheet(sheet) {
+  const last = sheet.getLastRow();
+  return last < 2 ? [] : sheet.getRange(2, 1, last - 1, sheet.getLastColumn()).getValues();
+}
+
+function saveContractorInvoice(data, user) {
+  const input = data || {};
+  const week = String(input.week === undefined || input.week === null ? '' : input.week);
+  assertWeekFilesWeek(week);
+  if (week < CONTRACTOR_INVOICE_FIRST_WEEK) throw new Error('Счета считаются с недели ' + CONTRACTOR_INVOICE_FIRST_WEEK);
+  const draft = contractorInvoiceDraftFromInput(input);
+  const check = checkContractorInvoiceGs(draft);
+  if (!check.ok) throw new Error(check.lineErrors.map(function(e) { return e.message; }).concat(check.headerErrors)[0]);
+  if (input.replace === true) assertAdmin(user);
+  const fileId = input.fileId ? String(input.fileId) : '';
+  const fileWeek = String(input.fileWeek || week);
+  if (fileId) assertWeekFilesWeek(fileWeek);
+  const file = fileId ? findWeekFile(fileWeek, fileId) : null;
+
+  const ss = getSpreadsheet();
+  const headSheet = getOrCreateSheet(ss, 'Счета подрядчика', CONTRACTOR_INVOICE_HEADERS);
+  const lineSheet = getOrCreateSheet(ss, 'Строки счетов', CONTRACTOR_INVOICE_LINE_HEADERS);
+  const stored = readInvoiceSheet(headSheet);
+  const h = draft.header;
+  const key = contractorInvoiceKeyGs(h.supplier, h.number, h.date);
+  let sameRow = -1;
+  const others = [];
+  stored.forEach(function(r, i) {
+    if (contractorInvoiceKeyGs(r[2], r[3], r[4]) === key) { sameRow = i; return; }
+    if (String(r[1]) === week) others.push({ number: String(r[3]), date: String(r[4]), total: r[6] });
+  });
+  if (sameRow >= 0 && input.replace !== true) {
+    const r = stored[sameRow];
+    return { needsConfirm: 'replace', existing: { id: String(r[0]), week: String(r[1]), number: String(r[3]), date: String(r[4]), total: r[6] } };
+  }
+  if (sameRow < 0 && others.length > 0 && input.addAnother !== true) {
+    return { needsConfirm: 'another', existing: others };
+  }
+
+  if (file && fileWeek !== week) file.moveTo(getWeekFolder(week, true));
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const id = sameRow >= 0 ? String(stored[sameRow][0]) : Utilities.getUuid();
+  const itemCount = h.itemCount === '' ? '' : Number(h.itemCount);
+  const headRow = [id, week, h.supplier, h.number, h.date, h.buyer, parseKopecksGs(h.total) / 100, h.vat, itemCount,
+    fileId, file ? file.getName() : '',
+    sameRow >= 0 ? String(stored[sameRow][11]) : user.username, sameRow >= 0 ? String(stored[sameRow][12]) : stamp,
+    sameRow >= 0 ? stamp : ''];
+  const lineRows = draft.lines.map(function(l, i) {
+    return [id, String(i + 1), l.name, l.qty, l.unit, parseKopecksGs(l.price) / 100, parseKopecksGs(l.sum) / 100];
+  });
+
+  if (sameRow >= 0) {
+    removeInvoiceLines(lineSheet, id);
+    writeInvoiceRows(headSheet, sameRow + 2, [headRow], CONTRACTOR_INVOICE_TEXT_COLS);
+  } else {
+    writeInvoiceRows(headSheet, headSheet.getLastRow() + 1, [headRow], CONTRACTOR_INVOICE_TEXT_COLS);
+  }
+  writeInvoiceRows(lineSheet, lineSheet.getLastRow() + 1, lineRows, CONTRACTOR_INVOICE_LINE_TEXT_COLS);
+  SpreadsheetApp.flush();
+  return { saved: true, id: id };
+}
+
+/** Deletes the line rows of one invoice, bottom-up so the row numbers stay valid. */
+function removeInvoiceLines(lineSheet, id) {
+  const rows = readInvoiceSheet(lineSheet);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (String(rows[i][0]) === id) lineSheet.deleteRow(i + 2);
+  }
+}
+
+function listContractorInvoices(week) {
+  assertWeekFilesWeek(week);
+  const ss = getSpreadsheet();
+  const headSheet = ss.getSheetByName('Счета подрядчика');
+  const lineSheet = ss.getSheetByName('Строки счетов');
+  if (!headSheet) return [];
+  const lines = lineSheet ? readInvoiceSheet(lineSheet) : [];
+  return readInvoiceSheet(headSheet)
+    .filter(function(r) { return String(r[1]) === String(week); })
+    .map(function(r) {
+      const id = String(r[0]);
+      return {
+        id: id, week: String(r[1]), supplier: String(r[2]), number: String(r[3]), date: String(r[4]), buyer: String(r[5]),
+        total: r[6], vat: String(r[7]), itemCount: r[8], fileId: String(r[9]), fileName: String(r[10]),
+        uploadedBy: String(r[11]), uploadedAt: String(r[12]), replacedAt: String(r[13]),
+        lines: lines.filter(function(l) { return String(l[0]) === id; })
+          .map(function(l) { return { n: Number(l[1]), name: String(l[2]), qty: String(l[3]), unit: String(l[4]), price: l[5], sum: l[6] }; })
+      };
+    });
+}
+
+function deleteContractorInvoice(id) {
+  const ss = getSpreadsheet();
+  const headSheet = ss.getSheetByName('Счета подрядчика');
+  const lineSheet = ss.getSheetByName('Строки счетов');
+  const rows = headSheet ? readInvoiceSheet(headSheet) : [];
+  const idx = rows.findIndex(function(r) { return String(r[0]) === String(id); });
+  if (idx < 0) throw new Error('Счёт не найден');
+  if (lineSheet) removeInvoiceLines(lineSheet, String(id));
+  headSheet.deleteRow(idx + 2);
+  SpreadsheetApp.flush();
   return { deleted: true };
 }
 

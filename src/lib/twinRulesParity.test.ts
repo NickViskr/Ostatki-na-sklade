@@ -18,6 +18,7 @@ import {
 } from './wholeShipment';
 import { factoryOnOrderByArticle, resolveOzonArticle } from './ozonCoverage';
 import { isOzonShipmentRow } from './kanCostSend';
+import { checkContractorInvoice, type ContractorInvoiceDraft } from './contractorInvoice';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import type { FactoryOrder, SKUItem } from '../types';
 
@@ -570,7 +571,48 @@ const shipmentRowTwin: Twin<ShipmentRowInput> = {
   gs: (row) => pure.isOzonShipmentHistoryRow(row.type, row.destination, row.isComponent)
 };
 
-const TWINS: Twin<any>[] = [...destinationTwins, rebuildTwin, pipelineTwin, articleTwin, availabilityTwin, editTwin, combinedTwin, shipmentRowTwin];
+// ── Item 97 ticket 05: the contractor-invoice checks (screen form vs the server re-check before the sheet write) ──
+
+const okLine = { name: 'Услуга', qty: '1', unit: 'шт', price: '9 022,74', sum: '9 022,74' };
+const okHeader = { number: '0045', date: '02.11.2026', supplier: 'ООО Ромашка', buyer: 'ИП Тестов', total: '9 022,74', vat: 'Без НДС', itemCount: '1' };
+const draftOf = (h: Partial<ContractorInvoiceDraft['header']>, lines: ContractorInvoiceDraft['lines']): ContractorInvoiceDraft =>
+  ({ header: { ...okHeader, ...h }, lines });
+const MONEY_TEXTS = ['9 022,74', '9022.74', '1 299,00', '55,00', '0,01', '100', '110,00', '0', '-5,00', '12,345', 'abc', '', '12 руб.', '55,00 ₽', '1\u00a0299,00'];
+const QTY_TEXTS = ['1', '2', '0,5', '1,25', '0,0005', '0', '-1', 'x', '', '3'];
+const NAMES = ['Услуга', 'Маркировка', '', ' '];
+
+const contractorInvoiceTwin: Twin<ContractorInvoiceDraft> = {
+  name: 'contractor invoice check: the screen and Code.gs give the same ok, header errors, line errors and notes',
+  cases: [
+    draftOf({}, [okLine]),
+    draftOf({ total: '9 000,00' }, [okLine]),
+    draftOf({ total: '9 132,74', itemCount: '2' }, [okLine, { name: 'Маркировка', qty: '2', unit: 'шт', price: '55,00', sum: '100,00' }]),
+    draftOf({ itemCount: '' }, [okLine]),
+    draftOf({ itemCount: '3' }, [okLine]),
+    draftOf({ total: '55,00', itemCount: '1' }, [{ name: 'Маркировка', qty: '1,5', unit: 'шт', price: '55,00', sum: '82,50' }]),
+    draftOf({ total: 'не число' }, [{ name: 'Услуга', qty: 'много', unit: '', price: '??', sum: '1,2,3' }]),
+    draftOf({ number: '', supplier: ' ', date: '31.02.2026' }, [okLine]),
+    draftOf({}, [])
+  ],
+  generated: 300,
+  generate: (r) => {
+    const n = r.int(0, 4);
+    const lines = Array.from({ length: n }, () => ({
+      name: r.pick(NAMES), qty: r.pick(QTY_TEXTS), unit: 'шт', price: r.pick(MONEY_TEXTS), sum: r.pick(MONEY_TEXTS)
+    }));
+    return draftOf({
+      number: r.pick(['0045', '', '12']),
+      date: r.pick(['02.11.2026', '31.02.2026', '2026-11-02', '']),
+      supplier: r.pick(['ООО Ромашка', '', ' ']),
+      total: r.pick(MONEY_TEXTS),
+      itemCount: r.pick(['', String(n), String(n + 1), 'x'])
+    }, lines);
+  },
+  ts: (d) => checkContractorInvoice(d),
+  gs: (d) => pure.checkContractorInvoiceGs(d)
+};
+
+const TWINS: Twin<any>[] = [...destinationTwins, rebuildTwin, pipelineTwin, articleTwin, availabilityTwin, editTwin, combinedTwin, shipmentRowTwin, contractorInvoiceTwin];
 
 describe('item 89 B: every twin rule gives the same answer in TS and in Code.gs', () => {
   for (const twin of TWINS) {

@@ -507,7 +507,12 @@ function makeFakeDriveFile(name, blob, parent) {
     setDescription(d) { file.__desc = String(d); return file; },
     getDescription: () => file.__desc,
     getDateCreated: () => file.__created,
-    getParents: () => makeFakeIterator(file.__parent ? [file.__parent] : [])
+    getParents: () => makeFakeIterator(file.__parent ? [file.__parent] : []),
+    // Drive File.moveTo(folder): the file leaves its old folder and joins the new one.
+    moveTo(folder) {
+      if (file.__parent) file.__parent.__files = file.__parent.__files.filter(f => f !== file);
+      file.__parent = folder; folder.__files.push(file); return file;
+    }
   };
   driveById[file.__id] = file;
   return file;

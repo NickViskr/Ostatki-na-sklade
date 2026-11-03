@@ -16696,6 +16696,189 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 05 part B: contractor invoices (saveContractorInvoice / listContractorInvoices / deleteContractorInvoice) =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/ticket-05-design.md, Part B. Every check is red until the actions exist.
+// Synthetic invoices only (invented supplier). All checks go through doPost with a session token.
+{
+  const farFuture = String(Date.parse('2030-01-01T00:00:00Z'));
+  const W44 = '2026-W44';
+  const W45 = '2026-W45';
+  const stand = () => {
+    const h = freshHarness();
+    h.setNow('2026-11-03T10:00:00Z');
+    h.setScriptTimeZone('Asia/Yekaterinburg');
+    h.setSheetAutoDates('Asia/Yekaterinburg');
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+      ['tok-user', 'Кладовщик', 'user', farFuture], ['tok-admin', 'boss', 'admin', farFuture]]);
+    h.setScriptProperty('test_dbSpreadsheetId', h.targetSpreadsheetId);
+    h.resetFakeDrive();
+    h.myDriveRoot().createFolder('Разработка').createFolder('Складской учет');
+    return h;
+  };
+  const call = (h, token, action, data) => h.callDoPost({ action, sessionToken: token, data });
+  const ok = (o) => !!o && o.status === 'success';
+  const msg = (o) => String((o && o.message) || '');
+  const j = (v) => JSON.stringify(v);
+  const SUP = 'ООО Ромашка';
+  const invoice = (over) => {
+    const o = over || {};
+    return {
+      week: o.week === undefined ? W44 : o.week,
+      fileWeek: o.fileWeek || (o.week === undefined ? W44 : o.week),
+      fileId: o.fileId === undefined ? '' : o.fileId,
+      header: Object.assign({ number: '0045', date: '02.11.2026', supplier: SUP, buyer: 'ИП Тестов', total: '9 132,74', vat: 'Без НДС', itemCount: '2' }, o.header || {}),
+      lines: o.lines || [
+        { name: 'Услуга приёмки', qty: '1', unit: 'шт', price: '9 022,74', sum: '9 022,74' },
+        { name: 'Маркировка', qty: '2', unit: 'шт', price: '55,00', sum: '110,00' }
+      ],
+      replace: o.replace, addAnother: o.addAnother
+    };
+  };
+  const save = (h, token, inv) => call(h, token, 'saveContractorInvoice', inv);
+  const heads = (h) => h.dumpSheetByName('Счета подрядчика');
+  const lineRows = (h) => h.dumpSheetByName('Строки счетов');
+  const upload = (h, week, name) => call(h, 'tok-user', 'uploadWeekFile', { week, name, mimeType: 'application/pdf', base64: Buffer.from('%PDF-1.4 ' + name).toString('base64') });
+  const untouched = (h) => heads(h).length === 0 && lineRows(h).length === 0;
+
+  {
+    const h = stand();
+    const r = save(h, 'tok-user', invoice());
+    const hd = heads(h);
+    const ln = lineRows(h);
+    const row = hd[0] || {};
+    check('T05B 1a: valid invoice -> one header row and N line rows; number «0045», date «02.11.2026» and week stay exact text (not a Date, no leading zero lost)',
+      ok(r) && r.data && r.data.saved === true && !!r.data.id && hd.length === 1 && ln.length === 2
+        && row['ID счёта'] === r.data.id && row['Номер'] === '0045' && row['Дата счёта'] === '02.11.2026' && row['Неделя'] === W44
+        && typeof row['Номер'] === 'string' && typeof row['Дата счёта'] === 'string' && typeof row['Неделя'] === 'string'
+        && row['Поставщик'] === SUP && row['Загрузил'] === 'Кладовщик',
+      j({ r, hd, ln }));
+    check('T05B 1b: money cells are numbers with 2 decimals made from kopecks (9022.74, 9132.74, 110, 55), line ids and order kept, itemCount stored',
+      hd.length === 1 && row['Всего к оплате'] === 9132.74 && ln.length === 2
+        && ln[0]['Сумма'] === 9022.74 && ln[0]['Цена'] === 9022.74 && ln[1]['Сумма'] === 110 && ln[1]['Цена'] === 55
+        && ln.every((l) => l['ID счёта'] === row['ID счёта']) && Number(ln[0]['№']) === 1 && Number(ln[1]['№']) === 2
+        && ln[0]['Наименование'] === 'Услуга приёмки' && Number(row['Всего наименований']) === 2,
+      j({ row, ln }));
+    const hs = h.getRegistrySheet('Счета подрядчика');
+    const ls = h.getRegistrySheet('Строки счетов');
+    check('T05B 1c: text columns are formatted «@» (header 1-6, 8, 10-14; lines 1, 3-5) and money/count columns are NOT',
+      [1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14].every((c) => hs.__getFormat(2, c) === '@')
+        && [7, 9].every((c) => hs.__getFormat(2, c) !== '@')
+        && [1, 3, 4, 5].every((c) => ls.__getFormat(2, c) === '@') && [2, 6, 7].every((c) => ls.__getFormat(2, c) !== '@'),
+      j({ hd: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map((c) => hs.__getFormat(2, c)), ln: [1, 2, 3, 4, 5, 6, 7].map((c) => ls.__getFormat(2, c)) }));
+    const half = stand();
+    const rh = save(half, 'tok-user', invoice({ header: { total: '0,01', itemCount: '1' }, lines: [{ name: 'Полкопейки', qty: '0,5', unit: 'шт', price: '0,01', sum: '0,01' }] }));
+    check('T05B 1d: line check rounds half a kopeck UP (0,5 x 0,01 = 0,01): such an invoice is accepted',
+      ok(rh) && heads(half).length === 1 && lineRows(half).length === 1, j(rh));
+  }
+  {
+    const h = stand();
+    const badLine = invoice({ lines: [
+      { name: 'Услуга приёмки', qty: '1', unit: 'шт', price: '9 022,74', sum: '9 022,74' },
+      { name: 'Маркировка', qty: '2', unit: 'шт', price: '55,00', sum: '100,00' }] });
+    const r1 = save(h, 'tok-user', badLine);
+    const r2 = save(h, 'tok-user', invoice({ header: { total: '9 200,00' } }));
+    check('T05B 2: server re-check: a wrong line sum -> error containing «Строка»; Σ lines ≠ total -> error; nothing written',
+      r1.status === 'error' && msg(r1).indexOf('Строка') !== -1 && r2.status === 'error' && msg(r2) !== '' && untouched(h),
+      j({ r1, r2, heads: heads(h).length }));
+  }
+  {
+    const h = stand();
+    const outs = ['2026-W42', 'bad', '', '2026-W54'].map((w) => save(h, 'tok-user', invoice({ week: w, fileWeek: W44 })));
+    const wrote = untouched(h);
+    const edge = save(h, 'tok-user', invoice({ week: '2026-W43', fileWeek: '2026-W43' }));
+    check('T05B 3: week 2026-W42 (before W43), «bad», empty or 2026-W54 -> error, nothing written; the boundary week 2026-W43 is accepted',
+      outs.every((o) => o.status === 'error') && wrote && ok(edge) && heads(h).length === 1, j({ outs: outs.map(msg), edge }));
+  }
+  {
+    const h = stand();
+    const first = save(h, 'tok-user', invoice());
+    const id = ok(first) ? first.data.id : 'none';
+    const again = save(h, 'tok-user', invoice({ header: { supplier: '«ооо  РОМАШКА»' } }));
+    check('T05B 4a: same supplier (case, quotes, spaces differ) + number + date without replace -> needsConfirm «replace» with the existing id; nothing changed',
+      ok(first) && ok(again) && again.data && again.data.needsConfirm === 'replace' && again.data.existing && again.data.existing.id === id
+        && !again.data.saved && heads(h).length === 1 && lineRows(h).length === 2, j(again));
+    const byUser = save(h, 'tok-user', invoice({ replace: true, lines: [{ name: 'Другое', qty: '1', unit: 'шт', price: '9 132,74', sum: '9 132,74' }], header: { itemCount: '1' } }));
+    check('T05B 4b: replace as a NON-admin -> error, the stored invoice and its lines are unchanged',
+      byUser.status === 'error' && heads(h).length === 1 && lineRows(h).length === 2 && lineRows(h)[0]['Наименование'] === 'Услуга приёмки', j(byUser));
+    h.setNow('2026-11-03T11:00:00Z');
+    const byAdmin = save(h, 'tok-admin', invoice({ replace: true, lines: [{ name: 'Другое', qty: '1', unit: 'шт', price: '9 132,74', sum: '9 132,74' }], header: { itemCount: '1' } }));
+    const hd = heads(h);
+    const ln = lineRows(h);
+    check('T05B 4c: replace as admin -> still one header row with the SAME id, old lines gone and replaced, «Заменён» filled',
+      ok(byAdmin) && byAdmin.data.saved === true && byAdmin.data.id === id && hd.length === 1 && hd[0]['ID счёта'] === id
+        && ln.length === 1 && ln[0]['Наименование'] === 'Другое' && String(hd[0]['Заменён']) !== '' && hd[0]['Заменён'] !== undefined,
+      j({ byAdmin, hd, ln }));
+  }
+  {
+    const h = stand();
+    const first = save(h, 'tok-user', invoice());
+    const other = invoice({ header: { number: '0046' } });
+    const ask = save(h, 'tok-user', other);
+    const askedOk = ok(ask) && ask.data.needsConfirm === 'another' && Array.isArray(ask.data.existing)
+      && ask.data.existing.length === 1 && ask.data.existing[0].number === '0045' && heads(h).length === 1;
+    other.addAnother = true;
+    const done = save(h, 'tok-user', other);
+    check('T05B 5: a different number in the same week without addAnother -> needsConfirm «another» listing the existing number (nothing written); with addAnother -> two invoices with different ids',
+      ok(first) && askedOk && ok(done) && done.data.saved === true && heads(h).length === 2 && lineRows(h).length === 4 && heads(h)[0]['ID счёта'] !== heads(h)[1]['ID счёта'],
+      j({ ask, done, heads: heads(h).length }));
+  }
+  {
+    const h = stand();
+    const up = upload(h, W45, 'inv.pdf');
+    const fid = ok(up) ? up.data.id : 'none';
+    const r = save(h, 'tok-user', invoice({ week: W44, fileWeek: W45, fileId: fid }));
+    const l44 = call(h, 'tok-user', 'listWeekFiles', { week: W44 });
+    const l45 = call(h, 'tok-user', 'listWeekFiles', { week: W45 });
+    check('T05B 6a: fileWeek 2026-W45 ≠ week 2026-W44 -> after save the PDF is in the W44 folder and no longer in W45; the header stores the file id',
+      ok(up) && ok(r) && ok(l44) && ok(l45) && l44.data.some((f) => f.id === fid) && !l45.data.some((f) => f.id === fid) && heads(h).length === 1
+        && heads(h)[0]['Файл ID'] === fid,
+      j({ r, l44: l44.data, l45: l45.data }));
+  }
+  {
+    const h = stand();
+    const up44 = upload(h, W44, 'in44.pdf');
+    const bad = save(h, 'tok-user', invoice({ week: W44, fileWeek: W45, fileId: ok(up44) ? up44.data.id : 'none' }));
+    const bogus = save(h, 'tok-user', invoice({ week: W44, fileWeek: W44, fileId: 'no-such-file' }));
+    const l44 = call(h, 'tok-user', 'listWeekFiles', { week: W44 });
+    const none = save(h, 'tok-user', invoice({ fileId: '' }));
+    check('T05B 6b: a fileId that is not in fileWeek (or unknown) -> error, nothing written, the file stays where it was; an empty fileId is allowed',
+      bad.status === 'error' && bogus.status === 'error' && ok(l44) && l44.data.length === 1 && ok(none) && heads(h).length === 1,
+      j({ bad, bogus, none: none.status, l44: ok(l44) ? l44.data.length : l44 }));
+  }
+  {
+    const h = stand();
+    const r = save(h, 'tok-user', invoice());
+    const id = ok(r) ? r.data.id : 'none';
+    const list = call(h, 'tok-user', 'listContractorInvoices', { week: W44 });
+    const empty = call(h, 'tok-user', 'listContractorInvoices', { week: W45 });
+    const it = ok(list) && Array.isArray(list.data) ? list.data[0] : null;
+    check('T05B 7: listContractorInvoices {week} returns the invoice with its lines; another week returns []',
+      ok(r) && !!it && list.data.length === 1 && Array.isArray(it.lines) && it.lines.length === 2 && j(it).indexOf('0045') !== -1 && j(it).indexOf(id) !== -1
+        && ok(empty) && Array.isArray(empty.data) && empty.data.length === 0, j({ list, empty }));
+  }
+  {
+    const h = stand();
+    const up = upload(h, W44, 'keep.pdf');
+    const r = save(h, 'tok-user', invoice({ fileId: ok(up) ? up.data.id : 'none' }));
+    const id = ok(r) ? r.data.id : 'none';
+    const byUser = call(h, 'tok-user', 'deleteContractorInvoice', { id });
+    const keep = heads(h).length === 1 && lineRows(h).length === 2;
+    const byAdmin = call(h, 'tok-admin', 'deleteContractorInvoice', { id });
+    const files = call(h, 'tok-user', 'listWeekFiles', { week: W44 });
+    check('T05B 8: deleteContractorInvoice as a user -> error and nothing removed; as admin -> header and lines gone, the PDF is still listed',
+      ok(r) && byUser.status === 'error' && keep && ok(byAdmin) && heads(h).length === 0 && lineRows(h).length === 0 && ok(files) && files.data.length === 1,
+      j({ byUser, byAdmin, files }));
+  }
+  {
+    const h = stand();
+    const anon = save(h, '', invoice());
+    const bogus = save(h, 'no-such-token', invoice());
+    const wrote = untouched(h);
+    const good = save(h, 'tok-user', invoice());
+    check('T05B 9: without a valid session save is refused and nothing is written (a logged-in save works)', anon.status === 'error' && bogus.status === 'error' && wrote && ok(good) && heads(h).length === 1, j([anon, bogus, good]));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
