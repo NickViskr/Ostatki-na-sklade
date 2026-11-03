@@ -818,4 +818,5 @@ export interface ContractorInvoicePayload {
 /** The `data` of a saveContractorInvoice answer. */
 export type SaveContractorInvoiceResult =
   | { saved: true; id: string }
-  | { needsConfirm: 'replace' | 'another'; existing: ContractorInvoice };
+  | { needsConfirm: 'replace'; existing: { id: string; week: string; number: string; date: string; total: number } }
+  | { needsConfirm: 'another'; existing: { number: string; date: string; total: number }[] };

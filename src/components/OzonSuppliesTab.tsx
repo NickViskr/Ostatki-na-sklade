@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { ExternalShipment, WeekFile } from '../types';
+import { ContractorInvoice, ExternalShipment, WeekFile } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Package, 
@@ -20,6 +20,7 @@ import { buildUnshippedLines, canReturnToNew, parseShippedRecord, returnGroupToN
 import { formatCurrency } from '../lib/utils';
 import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
+import { ContractorInvoiceModal } from './ContractorInvoiceModal';
 import { isoWeekLabel, selectableWeeks, weekFilterOptions } from '../lib/isoWeek';
 
 
@@ -1335,9 +1336,25 @@ const WeekFilesBlock: React.FC<{ week: string }> = ({ week }) => {
   const isAdmin = role === 'admin' || role === 'администратор';
   const [files, setFiles] = useState<WeekFile[]>([]);
   const [uploading, setUploading] = useState(false);
+  // Item 97 ticket 05: contractor invoices of the week and the invoice modal state.
+  const listContractorInvoices = useWarehouseStore((s) => s.listContractorInvoices);
+  const deleteContractorInvoice = useWarehouseStore((s) => s.deleteContractorInvoice);
+  const [invoices, setInvoices] = useState<ContractorInvoice[]>([]);
+  const [invoiceModal, setInvoiceModal] = useState<{ file: WeekFile | null; saved: ContractorInvoice | null } | null>(null);
 
-  const reload = useCallback(async () => setFiles(await listWeekFiles(week)), [listWeekFiles, week]);
-  useEffect(() => { setFiles([]); reload(); }, [reload]);
+  const reload = useCallback(async () => {
+    const [list, inv] = await Promise.all([listWeekFiles(week), listContractorInvoices(week)]);
+    setFiles(list);
+    setInvoices(inv);
+  }, [listWeekFiles, listContractorInvoices, week]);
+  useEffect(() => { setFiles([]); setInvoices([]); reload(); }, [reload]);
+
+  const handleDeleteInvoice = async (inv: ContractorInvoice) => {
+    if (!window.confirm(`Удалить счёт № ${inv.number} от ${inv.date}? PDF-файл останется в неделе.`)) return;
+    const res = await deleteContractorInvoice(inv.id);
+    if (res.status === 'success') { toast.success('Счёт удалён'); await reload(); }
+    else toast.error(res.message || 'Не удалось удалить счёт');
+  };
 
   const handlePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1378,11 +1395,42 @@ const WeekFilesBlock: React.FC<{ week: string }> = ({ week }) => {
           <span className="font-bold text-slate-700 break-all">{f.name}</span>
           <span className="text-slate-400">{formatFileSize(f.size)} · {f.uploadedBy} · {formatFileDate(f.uploadedAt)}</span>
           <button onClick={() => handleDownload(f)} className="text-indigo-600 font-bold hover:underline cursor-pointer">Скачать</button>
+          {(f.mimeType === 'application/pdf' || /\.pdf$/i.test(f.name)) && (
+            <button onClick={() => setInvoiceModal({ file: f, saved: null })} className="text-emerald-600 font-bold hover:underline cursor-pointer">Распознать</button>
+          )}
           {isAdmin && (
             <button onClick={() => handleDelete(f)} className="text-red-600 font-bold hover:underline cursor-pointer">Удалить</button>
           )}
         </div>
       ))}
+      <div className="pt-2 border-t border-slate-100 space-y-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-bold text-slate-500">Счета недели</span>
+          <button onClick={() => setInvoiceModal({ file: null, saved: null })} className="text-sm text-indigo-600 font-bold hover:underline cursor-pointer">Ввести счёт вручную</button>
+        </div>
+        {invoices.length === 0 ? (
+          <div className="text-sm text-slate-400">Счетов нет</div>
+        ) : invoices.map((inv) => (
+          <div key={inv.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+            <span className="font-bold text-slate-700">№ {inv.number} от {inv.date}</span>
+            <span className="text-slate-400">{inv.supplier}</span>
+            <span className="font-bold text-slate-700">{formatCurrency(Number(inv.total))} ₽</span>
+            <button onClick={() => setInvoiceModal({ file: null, saved: inv })} className="text-indigo-600 font-bold hover:underline cursor-pointer">Открыть</button>
+            {isAdmin && (
+              <button onClick={() => handleDeleteInvoice(inv)} className="text-red-600 font-bold hover:underline cursor-pointer">Удалить</button>
+            )}
+          </div>
+        ))}
+      </div>
+      {invoiceModal && (
+        <ContractorInvoiceModal
+          week={week}
+          file={invoiceModal.file}
+          saved={invoiceModal.saved}
+          onClose={() => setInvoiceModal(null)}
+          onSaved={reload}
+        />
+      )}
     </div>
   );
 };
