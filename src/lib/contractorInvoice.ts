@@ -23,6 +23,8 @@ export interface ContractorInvoiceLine {
   unit: string;
   price: string;
   sum: string;
+  /** false = the line's service does not go to supplies; undefined counts as true. */
+  toSupply?: boolean;
 }
 
 export interface ContractorInvoiceDraft {
@@ -102,8 +104,20 @@ export function parseQtyMilli(text: string): number | null {
 }
 
 /** Kopecks -> '9 022,74' style text without grouping: '9022,74'. */
-const formatKopecks = (kop: number): string =>
+export const formatKopecks = (kop: number): string =>
   `${Math.floor(kop / 100)},${pad2(kop % 100)}`;
+
+/** Kopecks of the lines that go to supplies; null when such a line's sum is unreadable, 0 when none is ticked. */
+export function supplyTotalKopecks(draft: ContractorInvoiceDraft): number | null {
+  let total = 0;
+  for (const l of draft.lines) {
+    if (l.toSupply === false) continue;
+    const kop = parseKopecks(l.sum);
+    if (kop === null) return null;
+    total += kop;
+  }
+  return total;
+}
 
 function isRealDate(ddMMyyyy: string): boolean {
   const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(ddMMyyyy);

@@ -44,6 +44,20 @@ describe('contractor invoice store actions', () => {
     expect(result.data).toEqual({ saved: true, id: 'INV-1' });
   });
 
+  it('saveContractorInvoice sends every line toSupply flag unchanged under data.lines (false, true and absent)', async () => {
+    respond({ status: 'success', data: { saved: true, id: 'INV-2' } });
+    const lines = [
+      { name: 'Поставка', qty: '1', unit: 'шт', price: '100,00', sum: '100,00', toSupply: true },
+      { name: 'Хранение', qty: '1', unit: 'шт', price: '50,00', sum: '50,00', toSupply: false },
+      { name: 'Возврат', qty: '1', unit: 'шт', price: '25,00', sum: '25,00' }
+    ];
+    await useWarehouseStore.getState().saveContractorInvoice({ ...PAYLOAD, lines } as never);
+    const { body } = sent();
+    expect(body.data.lines.map((l: { toSupply?: boolean }) => l.toSupply)).toEqual([true, false, undefined]);
+    expect('toSupply' in body.data.lines[2]).toBe(false);
+    expect(body.data.lines[1]).toEqual(lines[1]);
+  });
+
   it('listContractorInvoices posts data.week and returns the array from data', async () => {
     const rows = [{ id: 'INV-1', number: '0045', lines: [] }];
     respond({ status: 'success', data: rows });

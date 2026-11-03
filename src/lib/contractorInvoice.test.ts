@@ -6,6 +6,7 @@ import {
   contractorInvoicePrompt,
   parseKopecks,
   parseQtyMilli,
+  supplyTotalKopecks,
   type ContractorInvoiceDraft,
   type ContractorInvoiceLine,
 } from './contractorInvoice';
@@ -149,5 +150,72 @@ describe('contractorInvoicePrompt', () => {
     const p = contractorInvoicePrompt();
     expect(p.length).toBeGreaterThan(0);
     expect(p).toContain('JSON');
+  });
+});
+
+describe('supplyTotalKopecks (item 97 ticket 05: ticked lines only)', () => {
+  const five = () => [
+    line({ sum: '100,00' }), line({ sum: '200,50' }), line({ sum: '300,00' }), line({ sum: '1 000,00' }), line({ sum: '0,25' }),
+  ];
+  it('equals the sum of all lines when every line is ticked or toSupply is absent', () => {
+    const lines = five();
+    lines[1].toSupply = true;
+    expect(supplyTotalKopecks(draft(lines))).toBe(160075);
+  });
+  it('skips two unticked lines out of five', () => {
+    const lines = five();
+    lines[3].toSupply = false;
+    lines[1].toSupply = false;
+    expect(supplyTotalKopecks(draft(lines))).toBe(10000 + 30000 + 25);
+  });
+  it('is 0 when no line is ticked', () => {
+    expect(supplyTotalKopecks(draft(five().map((l) => ({ ...l, toSupply: false }))))).toBe(0);
+  });
+  it('is null when a ticked line has an unparseable sum', () => {
+    const lines = five();
+    lines[2].sum = 'abc';
+    expect(supplyTotalKopecks(draft(lines))).toBeNull();
+  });
+  it('ignores an unparseable sum on an UNticked line', () => {
+    const lines = five();
+    lines[2] = { ...lines[2], sum: 'abc', toSupply: false };
+    expect(supplyTotalKopecks(draft(lines))).toBe(10000 + 20050 + 100000 + 25);
+  });
+});
+
+describe('checkContractorInvoice with unticked lines (toSupply is ignored)', () => {
+  it('is ok when the whole invoice sums and counts, though some lines are unticked', () => {
+    const d = draft(
+      [line({ sum: '100,00' }), line({ price: '50,00', sum: '50,00', toSupply: false }), line({ price: '25,00', sum: '25,00', toSupply: false })],
+      { total: '175,00' },
+    );
+    const r = checkContractorInvoice(d);
+    expect(r.ok).toBe(true);
+    expect(r.headerErrors).toEqual([]);
+  });
+  it('still fails when the total equals only the sum of all lines together with the unticked ones removed', () => {
+    const d = draft(
+      [line({ price: '20 000,00', sum: '20 000,00' }), line({ price: '715,07', sum: '715,07', toSupply: false })],
+      { total: '20 000,00' },
+    );
+    expect(checkContractorInvoice(d).ok).toBe(false);
+  });
+  it('still fails when the item count counts only ticked lines', () => {
+    const d = draft([line(), line({ toSupply: false })], { total: '200,00', itemCount: '1' });
+    expect(checkContractorInvoice(d).ok).toBe(false);
+  });
+  it('gives the same answer for the same invoice with and without toSupply flags', () => {
+    const base = [line({ sum: '100,00' }), line({ price: '50,00', sum: '50,00' })];
+    const flagged = base.map((l, i) => ({ ...l, toSupply: i === 0 }));
+    expect(checkContractorInvoice(draft(flagged, { total: '150,00' }))).toEqual(checkContractorInvoice(draft(base, { total: '150,00' })));
+  });
+});
+
+describe('contractorInvoiceNormalise and toSupply', () => {
+  it('never sets toSupply on AI-read lines', () => {
+    const out = contractorInvoiceNormalise({ header: { number: '1' }, lines: [{ name: 'Услуга', qty: 1, unit: 'шт', price: 100, sum: 100 }] } as never);
+    expect(out).not.toBeNull();
+    expect(out!.lines.length).toBeGreaterThan(0);
+    for (const l of out!.lines) expect('toSupply' in l && l.toSupply !== undefined).toBe(false);
   });
 });

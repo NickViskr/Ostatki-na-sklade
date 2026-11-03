@@ -3,7 +3,8 @@ import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { ContractorInvoice, WeekFile } from '../types';
 import {
-  checkContractorInvoice, contractorInvoiceNormalise, ContractorInvoiceDraft, ContractorInvoiceLine
+  checkContractorInvoice, contractorInvoiceNormalise, ContractorInvoiceDraft, ContractorInvoiceLine,
+  formatKopecks, parseKopecks, supplyTotalKopecks
 } from '../lib/contractorInvoice';
 import { invoiceWeekOptions, isoWeekLabel, serviceWeekOfInvoice } from '../lib/isoWeek';
 import { formatCurrency } from '../lib/utils';
@@ -26,7 +27,8 @@ export function draftFromSavedInvoice(inv: ContractorInvoice): ContractorInvoice
       total: moneyText(inv.total), vat: String(inv.vat ?? ''), itemCount: String(inv.itemCount ?? '')
     },
     lines: inv.lines.map((l) => ({
-      name: l.name, qty: String(l.qty), unit: l.unit, price: moneyText(l.price), sum: moneyText(l.sum)
+      name: l.name, qty: String(l.qty), unit: l.unit, price: moneyText(l.price), sum: moneyText(l.sum),
+      toSupply: l.toSupply
     }))
   };
 }
@@ -44,6 +46,9 @@ interface Props {
 }
 
 const inputCls = 'w-full border border-slate-200 rounded-lg px-2 py-1 text-sm';
+// A line outside edit mode: the same input, styled as plain text.
+const readOnlyCls = 'w-full border border-transparent bg-transparent px-2 py-1 text-sm text-slate-800';
+const LINE_GRID = 'sm:grid-cols-[2rem_1fr_5rem_4rem_6rem_6rem_5rem]';
 
 export const ContractorInvoiceModal: React.FC<Props> = ({ week, file, saved, onClose, onSaved }) => {
   const fetchGas = useWarehouseStore((s) => s.fetchGas);
@@ -59,6 +64,19 @@ export const ContractorInvoiceModal: React.FC<Props> = ({ week, file, saved, onC
   const [reading, setReading] = useState(!!file && !saved);
   const [saving, setSaving] = useState(false);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  // Indexes of lines shown as editable inputs (by default a line is read-only) and the row with an open «⋯» menu.
+  const [editing, setEditing] = useState<Set<number>>(new Set());
+  const [menuRow, setMenuRow] = useState<number | null>(null);
+
+  // Close the «⋯» menu on a click anywhere outside it.
+  useEffect(() => {
+    if (menuRow === null) return;
+    const close = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-line-menu]')) setMenuRow(null);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [menuRow]);
 
   const weekOptions = useMemo(() => {
     const opts = invoiceWeekOptions(Date.now());
@@ -117,10 +135,23 @@ export const ContractorInvoiceModal: React.FC<Props> = ({ week, file, saved, onC
       setServiceWeek(s && weekOptions.includes(s) ? s : '');
     }
   };
-  const setLine = (i: number, key: keyof ContractorInvoiceLine, value: string) =>
+  const setLine = (i: number, key: 'name' | 'qty' | 'unit' | 'price' | 'sum', value: string) =>
     setDraft((d) => ({ ...d, lines: d.lines.map((l, idx) => (idx === i ? { ...l, [key]: value } : l)) }));
-  const addLine = () => setDraft((d) => ({ ...d, lines: [...d.lines, { ...EMPTY_LINE }] }));
-  const removeLine = (i: number) => setDraft((d) => ({ ...d, lines: d.lines.filter((_, idx) => idx !== i) }));
+  const setToSupply = (i: number, value: boolean) =>
+    setDraft((d) => ({ ...d, lines: d.lines.map((l, idx) => (idx === i ? { ...l, toSupply: value } : l)) }));
+  // A new line opens in edit mode.
+  const addLine = () => {
+    setEditing((prev) => new Set(prev).add(draft.lines.length));
+    setDraft((d) => ({ ...d, lines: [...d.lines, { ...EMPTY_LINE }] }));
+  };
+  const setEditingRow = (i: number, on: boolean) =>
+    setEditing((prev) => { const next = new Set(prev); if (on) next.add(i); else next.delete(i); return next; });
+  const removeLine = (i: number) => {
+    if (!window.confirm('Удалить строку из счёта?')) return;
+    setDraft((d) => ({ ...d, lines: d.lines.filter((_, idx) => idx !== i) }));
+    // Later rows move up by one: shift their edit flags too.
+    setEditing((prev) => new Set([...prev].filter((k) => k !== i).map((k) => (k > i ? k - 1 : k))));
+  };
 
   const handleSave = async () => {
     const basePayload = { week: serviceWeek, fileWeek: week, fileId, header: draft.header, lines: draft.lines };
@@ -163,6 +194,8 @@ export const ContractorInvoiceModal: React.FC<Props> = ({ week, file, saved, onC
   };
 
   const lineErrors = (i: number) => check.lineErrors.filter((e) => e.index === i);
+  const supplyKop = supplyTotalKopecks(draft);
+  const totalKop = parseKopecks(draft.header.total);
   const canSave = check.ok && !!serviceWeek && !saving && !reading;
 
   return (
@@ -210,28 +243,64 @@ export const ContractorInvoiceModal: React.FC<Props> = ({ week, file, saved, onC
             </div>
 
             <div className="space-y-2">
-              <div className="hidden sm:grid grid-cols-[1fr_5rem_4rem_6rem_6rem_2rem] gap-1 text-xs font-bold text-slate-500">
-                <span>Наименование</span><span>Кол-во</span><span>Ед.</span><span>Цена</span><span>Сумма</span><span />
+              <div className={`hidden sm:grid ${LINE_GRID} gap-1 text-xs font-bold text-slate-500`}>
+                <span title="На поставку">Пост.</span><span>Наименование</span><span>Кол-во</span><span>Ед.</span><span>Цена</span><span>Сумма</span><span />
               </div>
-              {draft.lines.map((l, i) => (
-                <div key={i}>
-                  <div className="grid grid-cols-2 sm:grid-cols-[1fr_5rem_4rem_6rem_6rem_2rem] gap-1">
-                    <input className={`${inputCls} col-span-2 sm:col-span-1`} placeholder="Наименование" value={l.name} onChange={(e) => setLine(i, 'name', e.target.value)} />
-                    <input className={inputCls} placeholder="Кол-во" value={l.qty} onChange={(e) => setLine(i, 'qty', e.target.value)} />
-                    <input className={inputCls} placeholder="Ед." value={l.unit} onChange={(e) => setLine(i, 'unit', e.target.value)} />
-                    <input className={inputCls} placeholder="Цена" value={l.price} onChange={(e) => setLine(i, 'price', e.target.value)} />
-                    <input className={inputCls} placeholder="Сумма" value={l.sum} onChange={(e) => setLine(i, 'sum', e.target.value)} />
-                    <button onClick={() => removeLine(i)} title="Удалить строку" className="text-red-600 font-bold cursor-pointer">×</button>
+              {draft.lines.map((l, i) => {
+                const isEditing = editing.has(i);
+                const fieldCls = isEditing ? inputCls : readOnlyCls;
+                return (
+                  <div key={i} className={l.toSupply === false ? 'opacity-50' : ''}>
+                    <div className={`grid grid-cols-2 ${LINE_GRID} gap-1 items-center`}>
+                      <input
+                        type="checkbox"
+                        title="На поставку"
+                        className="justify-self-center cursor-pointer"
+                        checked={l.toSupply !== false}
+                        onChange={(e) => setToSupply(i, e.target.checked)}
+                      />
+                      <input className={`${fieldCls} col-span-2 sm:col-span-1`} placeholder="Наименование" readOnly={!isEditing} value={l.name} onChange={(e) => setLine(i, 'name', e.target.value)} />
+                      <input className={fieldCls} placeholder="Кол-во" readOnly={!isEditing} value={l.qty} onChange={(e) => setLine(i, 'qty', e.target.value)} />
+                      <input className={fieldCls} placeholder="Ед." readOnly={!isEditing} value={l.unit} onChange={(e) => setLine(i, 'unit', e.target.value)} />
+                      <input className={fieldCls} placeholder="Цена" readOnly={!isEditing} value={l.price} onChange={(e) => setLine(i, 'price', e.target.value)} />
+                      <input className={fieldCls} placeholder="Сумма" readOnly={!isEditing} value={l.sum} onChange={(e) => setLine(i, 'sum', e.target.value)} />
+                      {isEditing ? (
+                        <button onClick={() => setEditingRow(i, false)} className="text-sm text-indigo-600 font-bold cursor-pointer">Готово</button>
+                      ) : (
+                        <div className="relative" data-line-menu>
+                          <button
+                            onClick={() => setMenuRow(menuRow === i ? null : i)}
+                            title="Действия со строкой"
+                            className="px-2 text-slate-600 font-bold cursor-pointer"
+                          >⋯</button>
+                          {menuRow === i && (
+                            <div className="absolute right-0 z-10 mt-1 w-36 bg-white border border-slate-200 rounded-lg shadow-lg text-sm">
+                              <button
+                                onClick={() => { setMenuRow(null); setEditingRow(i, true); }}
+                                className="block w-full text-left px-3 py-1.5 hover:bg-slate-50 cursor-pointer"
+                              >Корректировка</button>
+                              <button
+                                onClick={() => { setMenuRow(null); removeLine(i); }}
+                                className="block w-full text-left px-3 py-1.5 text-red-600 hover:bg-slate-50 cursor-pointer"
+                              >Удалить</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {lineErrors(i).map((e, k) => <div key={k} className="text-xs text-red-600">{e.message}</div>)}
                   </div>
-                  {lineErrors(i).map((e, k) => <div key={k} className="text-xs text-red-600">{e.message}</div>)}
-                </div>
-              ))}
+                );
+              })}
               <button onClick={addLine} className="text-sm text-indigo-600 font-bold hover:underline cursor-pointer">+ Добавить строку</button>
             </div>
 
             <div className="space-y-1 text-sm">
               {check.headerErrors.map((m, i) => <div key={i} className="text-red-600">{m}</div>)}
               {check.notes.map((m, i) => <div key={i} className="text-slate-500">{m}</div>)}
+              {supplyKop !== null && totalKop !== null && (
+                <div className="text-slate-700 font-bold">На поставку: {formatKopecks(supplyKop)} ₽ из {formatKopecks(totalKop)} ₽</div>
+              )}
               {!serviceWeek && <div className="text-red-600">Выберите неделю оказания услуг</div>}
               <button
                 onClick={handleSave}

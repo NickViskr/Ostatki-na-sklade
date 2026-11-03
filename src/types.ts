@@ -780,6 +780,8 @@ export interface ContractorInvoiceLineRow {
   unit: string;
   price: number;
   sum: number;
+  /** false when the line's service does not go to supplies (empty cell = true). */
+  toSupply: boolean;
 }
 
 /** A saved contractor invoice as listContractorInvoices returns it (Code.gs). Money cells are numbers in roubles. */
@@ -810,7 +812,7 @@ export interface ContractorInvoicePayload {
     number: string; date: string; supplier: string; buyer: string;
     total: string; vat: string; itemCount: string;
   };
-  lines: { name: string; qty: string; unit: string; price: string; sum: string }[];
+  lines: { name: string; qty: string; unit: string; price: string; sum: string; toSupply?: boolean }[];
   replace?: boolean;
   addAnother?: boolean;
 }

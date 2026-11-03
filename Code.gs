@@ -10067,10 +10067,10 @@ function deleteWeekFile(week, fileId) {
 // twinRulesParity.test.ts keeps both in step, message texts included. Money is integer kopecks.
 
 const CONTRACTOR_INVOICE_HEADERS = ['ID счёта', 'Неделя', 'Поставщик', 'Номер', 'Дата счёта', 'Покупатель', 'Всего к оплате', 'НДС', 'Всего наименований', 'Файл ID', 'Файл', 'Загрузил', 'Загружено', 'Заменён'];
-const CONTRACTOR_INVOICE_LINE_HEADERS = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма'];
+const CONTRACTOR_INVOICE_LINE_HEADERS = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма', 'На поставку'];
 // 1-based columns kept as text (a number «0045» or a date must not be coerced by Sheets).
 const CONTRACTOR_INVOICE_TEXT_COLS = [1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14];
-const CONTRACTOR_INVOICE_LINE_TEXT_COLS = [1, 3, 4, 5];
+const CONTRACTOR_INVOICE_LINE_TEXT_COLS = [1, 3, 4, 5, 8];
 const CONTRACTOR_INVOICE_FIRST_WEEK = '2026-W43';
 
 function parseKopecksGs(text) {
@@ -10167,7 +10167,7 @@ function contractorInvoiceDraftFromInput(input) {
     header: { number: text(h.number), date: text(h.date), supplier: text(h.supplier), buyer: text(h.buyer), total: text(h.total), vat: text(h.vat), itemCount: text(h.itemCount) },
     lines: lines.map(function(item) {
       const l = item && typeof item === 'object' ? item : {};
-      return { name: text(l.name), qty: text(l.qty), unit: text(l.unit), price: text(l.price), sum: text(l.sum) };
+      return { name: text(l.name), qty: text(l.qty), unit: text(l.unit), price: text(l.price), sum: text(l.sum), toSupply: l.toSupply !== false };
     })
   };
 }
@@ -10201,6 +10201,8 @@ function saveContractorInvoice(data, user) {
   const ss = getSpreadsheet();
   const headSheet = getOrCreateSheet(ss, 'Счета подрядчика', CONTRACTOR_INVOICE_HEADERS);
   const lineSheet = getOrCreateSheet(ss, 'Строки счетов', CONTRACTOR_INVOICE_LINE_HEADERS);
+  // An older 7-column sheet gets «На поставку» added (ensureColumns reuses the lock we already hold).
+  ensureColumns(lineSheet, CONTRACTOR_INVOICE_LINE_HEADERS);
   const stored = readInvoiceSheet(headSheet);
   const h = draft.header;
   const key = contractorInvoiceKeyGs(h.supplier, h.number, h.date);
@@ -10227,7 +10229,8 @@ function saveContractorInvoice(data, user) {
     sameRow >= 0 ? String(stored[sameRow][11]) : user.username, sameRow >= 0 ? String(stored[sameRow][12]) : stamp,
     sameRow >= 0 ? stamp : ''];
   const lineRows = draft.lines.map(function(l, i) {
-    return [id, String(i + 1), l.name, l.qty, l.unit, parseKopecksGs(l.price) / 100, parseKopecksGs(l.sum) / 100];
+    return [id, String(i + 1), l.name, l.qty, l.unit, parseKopecksGs(l.price) / 100, parseKopecksGs(l.sum) / 100,
+      l.toSupply === false ? 'нет' : 'да'];
   });
 
   if (sameRow >= 0) {
@@ -10265,7 +10268,7 @@ function listContractorInvoices(week) {
         total: r[6], vat: String(r[7]), itemCount: r[8], fileId: String(r[9]), fileName: String(r[10]),
         uploadedBy: String(r[11]), uploadedAt: String(r[12]), replacedAt: String(r[13]),
         lines: lines.filter(function(l) { return String(l[0]) === id; })
-          .map(function(l) { return { n: Number(l[1]), name: String(l[2]), qty: String(l[3]), unit: String(l[4]), price: l[5], sum: l[6] }; })
+          .map(function(l) { return { n: Number(l[1]), name: String(l[2]), qty: String(l[3]), unit: String(l[4]), price: l[5], sum: l[6], toSupply: String(l[7]) !== 'нет' }; })
       };
     });
 }

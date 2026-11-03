@@ -16879,6 +16879,77 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 05 part B2: «На поставку» (toSupply) column of «Строки счетов» =================
+// Written TEST-FIRST. An invoice keeps ALL lines (checks run over the whole invoice); each line is ticked/unticked for supplies.
+{
+  const farFuture = String(Date.parse('2030-01-01T00:00:00Z'));
+  const W44 = '2026-W44';
+  const stand = () => {
+    const h = freshHarness();
+    h.setNow('2026-11-03T10:00:00Z');
+    h.setScriptTimeZone('Asia/Yekaterinburg');
+    h.setSheetAutoDates('Asia/Yekaterinburg');
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'], ['tok-user', 'Кладовщик', 'user', farFuture]]);
+    h.setScriptProperty('test_dbSpreadsheetId', h.targetSpreadsheetId);
+    h.resetFakeDrive();
+    h.myDriveRoot().createFolder('Разработка').createFolder('Складской учет');
+    return h;
+  };
+  const call = (h, action, data) => h.callDoPost({ action, sessionToken: 'tok-user', data });
+  const ok = (o) => !!o && o.status === 'success';
+  const j = (v) => JSON.stringify(v);
+  const L = (name, sum, over) => Object.assign({ name, qty: '1', unit: 'шт', price: sum, sum }, over || {});
+  const inv = (lines, total, over) => Object.assign({
+    week: W44, fileWeek: W44, fileId: '',
+    header: { number: '0045', date: '02.11.2026', supplier: 'ООО Ромашка', buyer: 'ИП Тестов', total, vat: 'Без НДС', itemCount: String(lines.length) },
+    lines
+  }, over || {});
+  const lineRows = (h) => h.dumpSheetByName('Строки счетов');
+
+  {
+    const h = stand();
+    const r = call(h, 'saveContractorInvoice', inv([
+      L('Поставка', '100,00', { toSupply: true }), L('Хранение', '50,00', { toSupply: false }), L('Возврат', '25,00')], '175,00'));
+    const ln = lineRows(h);
+    const ls = h.getRegistrySheet('Строки счетов');
+    check('T05C 1a: column 8 «На поставку» holds «да» for toSupply true or absent and «нет» for toSupply false; all 3 lines are stored',
+      ok(r) && ln.length === 3 && ln[0]['На поставку'] === 'да' && ln[1]['На поставку'] === 'нет' && ln[2]['На поставку'] === 'да', j({ r, ln }));
+    check('T05C 1b: column 8 of «Строки счетов» is formatted «@» (text)',
+      ls.__getFormat(2, 8) === '@' && ls.__getFormat(3, 8) === '@', j([ls.__getFormat(2, 8), ls.__getFormat(3, 8)]));
+  }
+  {
+    const h = stand();
+    // Unticked lines still count in the total and in the count: the same invoice with a smaller total is refused.
+    const bad = call(h, 'saveContractorInvoice', inv([L('Поставка', '100,00'), L('Хранение', '50,00', { toSupply: false })], '100,00'));
+    const wrote = lineRows(h).length === 0 && h.dumpSheetByName('Счета подрядчика').length === 0;
+    const badCount = call(h, 'saveContractorInvoice', inv([L('Поставка', '100,00'), L('Хранение', '50,00', { toSupply: false })], '150,00',
+      { header: { number: '0045', date: '02.11.2026', supplier: 'ООО Ромашка', buyer: '', total: '150,00', vat: '', itemCount: '1' } }));
+    const good = call(h, 'saveContractorInvoice', inv([L('Поставка', '100,00'), L('Хранение', '50,00', { toSupply: false })], '150,00'));
+    check('T05C 2: server check still runs over ALL lines: total equal only to the ticked lines -> error, itemCount counting only ticked lines -> error, nothing written; total of all lines -> saved',
+      bad.status === 'error' && wrote && badCount.status === 'error' && ok(good) && lineRows(h).length === 2, j({ bad, badCount, good }));
+  }
+  {
+    const h = stand();
+    const LINE7 = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма'];
+    const HEAD = ['ID счёта', 'Неделя', 'Поставщик', 'Номер', 'Дата счёта', 'Покупатель', 'Всего к оплате', 'НДС', 'Всего наименований', 'Файл ID', 'Файл', 'Загрузил', 'Загружено', 'Заменён'];
+    h.setRegistrySheet('Счета подрядчика', [HEAD, ['OLD-1', W44, 'ООО Ромашка', '0001', '01.11.2026', '', 30, '', 1, '', '', 'Кладовщик', '', '']]);
+    h.setRegistrySheet('Строки счетов', [LINE7, ['OLD-1', 1, 'Старая услуга', '1', 'шт', 30, 30]]);
+    const r = call(h, 'saveContractorInvoice', inv([L('Поставка', '100,00'), L('Хранение', '50,00', { toSupply: false })], '150,00', { addAnother: true }));
+    const ln = lineRows(h);
+    const old = ln.find((x) => x['ID счёта'] === 'OLD-1');
+    const fresh = ln.filter((x) => x['ID счёта'] !== 'OLD-1');
+    const list = call(h, 'listContractorInvoices', { week: W44 });
+    const oldInv = ok(list) ? list.data.find((x) => x.id === 'OLD-1') : null;
+    const newInv = ok(list) ? list.data.find((x) => x.id !== 'OLD-1') : null;
+    check('T05C 3a: a 7-column «Строки счетов» sheet from older code is upgraded on save: header «На поставку» added, the old row stays, new rows carry да/нет',
+      ok(r) && ln.length === 3 && !!old && old['Наименование'] === 'Старая услуга' && fresh.length === 2
+        && fresh[0]['На поставку'] === 'да' && fresh[1]['На поставку'] === 'нет', j({ r, ln }));
+    check('T05C 3b: list returns toSupply as a boolean: old row without the cell -> true; «да» -> true; «нет» -> false',
+      !!oldInv && !!newInv && oldInv.lines.length === 1 && oldInv.lines[0].toSupply === true
+        && newInv.lines.length === 2 && newInv.lines[0].toSupply === true && newInv.lines[1].toSupply === false, j(list));
+  }
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
