@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { ExternalShipment } from '../types';
+import { ExternalShipment, WeekFile } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Package, 
@@ -1314,6 +1314,79 @@ const UnshippedReturnModal: React.FC<UnshippedReturnModalProps> = ({ shipment, o
   );
 };
 
+// Item 97 ticket 04: files attached to a transfer week (contractor invoices etc.).
+function formatFileSize(bytes: number): string {
+  return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} МБ` : `${Math.max(1, Math.round(bytes / 1024))} КБ`;
+}
+
+function formatFileDate(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+const WeekFilesBlock: React.FC<{ week: string }> = ({ week }) => {
+  const listWeekFiles = useWarehouseStore((s) => s.listWeekFiles);
+  const uploadWeekFile = useWarehouseStore((s) => s.uploadWeekFile);
+  const downloadWeekFile = useWarehouseStore((s) => s.downloadWeekFile);
+  const deleteWeekFile = useWarehouseStore((s) => s.deleteWeekFile);
+  const role = (useWarehouseStore((s) => s.currentUser?.role) || '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'администратор';
+  const [files, setFiles] = useState<WeekFile[]>([]);
+  const [uploading, setUploading] = useState(false);
+
+  const reload = useCallback(async () => setFiles(await listWeekFiles(week)), [listWeekFiles, week]);
+  useEffect(() => { setFiles([]); reload(); }, [reload]);
+
+  const handlePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setUploading(true);
+    const res = await uploadWeekFile(week, file);
+    setUploading(false);
+    if (res.status === 'success') { toast.success(`Файл «${file.name}» загружен`); await reload(); }
+    else toast.error(res.message || 'Не удалось загрузить файл');
+  };
+
+  const handleDownload = async (f: WeekFile) => {
+    const res = await downloadWeekFile(week, f.id);
+    if (res.status !== 'success') toast.error(res.message || 'Не удалось скачать файл');
+  };
+
+  const handleDelete = async (f: WeekFile) => {
+    if (!window.confirm(`Удалить файл «${f.name}»? Он попадёт в корзину Google Диска.`)) return;
+    const res = await deleteWeekFile(week, f.id);
+    if (res.status === 'success') { toast.success('Файл удалён'); await reload(); }
+    else toast.error(res.message || 'Не удалось удалить файл');
+  };
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-bold text-slate-500">Файлы недели</span>
+        <label className={`px-3 py-1.5 rounded-xl text-sm font-bold ${uploading ? 'bg-slate-100 text-slate-400' : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer'}`}>
+          {uploading ? 'Загрузка…' : 'Загрузить файл'}
+          <input type="file" className="hidden" disabled={uploading} onChange={handlePick} />
+        </label>
+      </div>
+      {files.length === 0 ? (
+        <div className="text-sm text-slate-400">Файлов нет</div>
+      ) : files.map((f) => (
+        <div key={f.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span className="font-bold text-slate-700 break-all">{f.name}</span>
+          <span className="text-slate-400">{formatFileSize(f.size)} · {f.uploadedBy} · {formatFileDate(f.uploadedAt)}</span>
+          <button onClick={() => handleDownload(f)} className="text-indigo-600 font-bold hover:underline cursor-pointer">Скачать</button>
+          {isAdmin && (
+            <button onClick={() => handleDelete(f)} className="text-red-600 font-bold hover:underline cursor-pointer">Удалить</button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
 export const OzonSuppliesTab: React.FC = React.memo(() => {
   const fetchExternalShipments = useWarehouseStore((state) => state.fetchExternalShipments);
   const externalShipments = useWarehouseStore((state) => state.externalShipments);
@@ -1787,6 +1860,8 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
           </select>
         </div>
       )}
+
+      {!isLoading && weekFilter !== 'all' && weekFilter !== 'none' && <WeekFilesBlock week={weekFilter} />}
 
       {/* Показ обработанных заявок */}
       {!isLoading && processedGroupsCount > 0 && (

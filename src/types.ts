@@ -761,3 +761,13 @@ export interface PendingOperation {
   /** The operation's memo cannot be read; only the admin's «Разобрано, убрать уведомление» applies. */
   damaged?: boolean;
 }
+
+/** A file attached to a transfer week (Google Drive), item 97 ticket 04. */
+export interface WeekFile {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  uploadedBy: string;
+  uploadedAt: string;
+}

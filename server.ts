@@ -373,7 +373,7 @@ async function startServer() {
   app.post(
     WEEK_FILE_UPLOAD_PATH,
     express.json({ limit: "15mb" }),
-    async (req, res) => {
+    async (req: express.Request, res: express.Response) => {
       const token = req.body?.sessionToken;
       if (!token) return res.status(401).json({ status: "error", message: "Не авторизован" });
       const { week, name, mimeType, base64 } = req.body?.data ?? {};

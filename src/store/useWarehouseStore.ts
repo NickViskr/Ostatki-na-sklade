@@ -1,7 +1,7 @@
 import { commentPayload } from '../lib/operationComment';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation, WeekFile } from '../types';
 import { TurnoverData } from '../lib/turnoverData';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
@@ -70,6 +70,17 @@ const isAdminUser = (user: { role?: string; username?: string } | null | undefin
   const name = String(user.username || '').trim().toLowerCase();
   return role === 'admin' || ['admin', 'админ', 'администратор'].includes(name);
 };
+
+const MAX_WEEK_FILE_BYTES = 10_485_760;
+
+// Chunked so String.fromCharCode never gets a huge argument list (10 MB would overflow the stack).
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
 
 // The test fetchGas applies before it puts devMode on a request. The server refuses both KAN actions
 // for such a request, so the browser says so up front instead of sending.
@@ -174,6 +185,11 @@ interface WarehouseState {
   fetchMoreTransactions: () => Promise<void>;
   
   fetchGas: (action: string, extraPayload?: any) => Promise<any>;
+  // Item 97 ticket 04: per-week files (Google Drive). Results are `{ status, data?, message? }`, never thrown.
+  listWeekFiles: (week: string) => Promise<WeekFile[]>;
+  uploadWeekFile: (week: string, file: File) => Promise<{ status: string; data?: any; message?: string }>;
+  downloadWeekFile: (week: string, fileId: string) => Promise<{ status: string; data?: any; message?: string }>;
+  deleteWeekFile: (week: string, fileId: string) => Promise<{ status: string; data?: any; message?: string }>;
   fetchStock: () => Promise<void>;
   handleSetupDatabase: () => Promise<boolean>;
   handleSaveSku: (skuForm: SKUItem, editingSku: SKUItem | null) => Promise<boolean>;
@@ -476,6 +492,68 @@ export const useWarehouseStore = create<WarehouseState>()(
       return { status: 'error', message: `Ошибка сети: ${(e as Error).message}` };
     }
   },
+
+  listWeekFiles: async (week) => {
+    const res = await get().fetchGas('listWeekFiles', { data: { week } });
+    return res.status === 'success' && Array.isArray(res.data) ? res.data : [];
+  },
+
+  uploadWeekFile: async (week, file) => {
+    if (file.size > MAX_WEEK_FILE_BYTES) return { status: 'error', message: 'Файл больше 10 МБ' };
+    try {
+      const base64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+      const role = get().currentUser?.role?.toLowerCase() || '';
+      const isAdminRole = role === 'admin' || role === 'администратор';
+      const response = await fetch('/api/week-files/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionToken: get().sessionToken,
+          ...(get().devMode && isAdminRole ? { devMode: true } : {}),
+          data: { week, name: file.name, mimeType: file.type || 'application/octet-stream', base64 }
+        })
+      });
+      const text = await response.text();
+      let json: any = null;
+      try { json = JSON.parse(text); } catch { /* not JSON */ }
+      if (!response.ok) {
+        return { status: 'error', message: (json && typeof json.message === 'string' && json.message) || `Ошибка HTTP ${response.status}` };
+      }
+      if (!json) return { status: 'error', message: 'Ответ сервера не является JSON' };
+      if (json.status === 'error' && typeof json.message === 'string' && json.message.includes('Недействительная сессия')) {
+        sessionStorage.removeItem('sessionToken');
+        localStorage.removeItem('sessionToken');
+        set({ sessionToken: null, currentUser: null });
+      }
+      return json;
+    } catch (e) {
+      return { status: 'error', message: `Ошибка сети: ${(e as Error).message}` };
+    }
+  },
+
+  downloadWeekFile: async (week, fileId) => {
+    const res = await get().fetchGas('getWeekFile', { data: { week, fileId } });
+    if (res.status !== 'success' || !res.data) return res.status === 'success' ? { status: 'error', message: 'Пустой ответ сервера' } : res;
+    try {
+      const { name, mimeType, base64 } = res.data;
+      const bin = atob(base64);
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: mimeType || 'application/octet-stream' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = name;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      return { status: 'success' };
+    } catch (e) {
+      return { status: 'error', message: `Не удалось сохранить файл: ${(e as Error).message}` };
+    }
+  },
+
+  deleteWeekFile: async (week, fileId) => get().fetchGas('deleteWeekFile', { data: { week, fileId } }),
 
   fetchStock: async () => {
     const epoch = ++stockEpoch;
