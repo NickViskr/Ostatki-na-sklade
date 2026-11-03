@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isoWeekLabel, selectableWeeks, weekFilterOptions } from './isoWeek';
+import { invoiceWeekOptions, isoWeekLabel, selectableWeeks, serviceWeekOfInvoice, weekFilterOptions } from './isoWeek';
 
 // Expected values are fixed strings and must not depend on the machine zone (TZ=UTC and TZ=Asia/Yekaterinburg).
 describe('isoWeekLabel', () => {
@@ -40,5 +40,33 @@ describe('weekFilterOptions', () => {
   it('switches the newest option at the Ekaterinburg Monday boundary', () => {
     expect(weekFilterOptions([], Date.parse('2026-11-08T18:59:59Z'))[0]).toBe('2026-W45');
     expect(weekFilterOptions([], Date.parse('2026-11-08T19:00:00Z'))[0]).toBe('2026-W46');
+  });
+});
+
+describe('serviceWeekOfInvoice', () => {
+  it('takes the ISO week before the invoice day: Monday 02.11.2026 -> 2026-W44', () => {
+    expect(serviceWeekOfInvoice('02.11.2026')).toBe('2026-W44');
+  });
+  it('26.10.2026 -> 2026-W43', () => {
+    expect(serviceWeekOfInvoice('26.10.2026')).toBe('2026-W43');
+  });
+  it('05.01.2026 -> 2026-W01 (day 29.12.2025 belongs to the next ISO year)', () => {
+    expect(serviceWeekOfInvoice('05.01.2026')).toBe('2026-W01');
+  });
+  it('04.01.2027 -> 2026-W53', () => {
+    expect(serviceWeekOfInvoice('04.01.2027')).toBe('2026-W53');
+  });
+  it('returns empty text for a non-existent date and for garbage', () => {
+    expect(serviceWeekOfInvoice('31.02.2026')).toBe('');
+    expect(serviceWeekOfInvoice('abc')).toBe('');
+  });
+});
+
+describe('invoiceWeekOptions', () => {
+  it('lists W43 up to the current Ekb week, newest first', () => {
+    expect(invoiceWeekOptions(Date.parse('2026-11-03T12:00:00Z'))).toEqual(['2026-W45', '2026-W44', '2026-W43']);
+  });
+  it('starts with W45 on Monday 01:00 Ekb (still Sunday in UTC)', () => {
+    expect(invoiceWeekOptions(Date.parse('2026-11-01T20:00:00Z'))[0]).toBe('2026-W45');
   });
 });

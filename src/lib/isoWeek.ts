@@ -57,3 +57,24 @@ export function weekFilterOptions(present: string[], nowMs: number): string[] {
     .sort()
     .reverse();
 }
+
+/** Valid calendar day 'dd.MM.yyyy' -> UTC-midnight ms; null for garbage or a non-existent day. */
+function dayOfDdMmYyyy(text: string): number | null {
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(text.trim());
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  const back = new Date(ms);
+  const same = back.getUTCDate() === Number(m[1]) && back.getUTCMonth() === Number(m[2]) - 1;
+  return same ? ms : null;
+}
+
+/** Contractor invoice day 'dd.MM.yyyy' -> ISO week of the day 7 days earlier ('' for an invalid date). */
+export function serviceWeekOfInvoice(ddMMyyyy: string): string {
+  const day = dayOfDdMmYyyy(ddMMyyyy);
+  return day === null ? '' : weekOfDay(day - 7 * DAY_MS);
+}
+
+/** Weeks an invoice can belong to: 2026-W43 up to the current Ekb week, newest first. */
+export function invoiceWeekOptions(nowMs: number): string[] {
+  return weekFilterOptions([], nowMs);
+}
