@@ -132,3 +132,16 @@ describe('item 89 C: the rules of the table', () => {
     expect(gasReadsInvalidatedBy('setOzonAutoWriteOff')).toEqual(['getOzonSyncStatus']);
   });
 });
+
+// Item 97 T4 part B: week files. List and get are reads that are never cached (never stale after an
+// upload/delete, and a read may be retried); upload and delete are writes.
+describe('item 97 T4: week-file actions', () => {
+  it.each(['listWeekFiles', 'getWeekFile'])('%s is a read with no cache TTL', (a) => {
+    expect(isGasRead(a)).toBe(true);
+    expect(gasCacheTtlMs(a)).toBe(0);
+  });
+
+  it.each(['uploadWeekFile', 'deleteWeekFile'])('%s is not a read', (a) => {
+    expect(isGasRead(a)).toBe(false);
+  });
+});

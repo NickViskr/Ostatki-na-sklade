@@ -97,7 +97,12 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: "1mb" }));
+  // Item 97 T4: the week-file upload route has its own 15 MB parser (10 MB file as base64 is ~13.4 MB)
+  const WEEK_FILE_UPLOAD_PATH = "/api/week-files/upload";
+  const WEEK_FILE_MAX_BYTES = 10 * 1024 * 1024;
+  const WEEK_FILE_TOO_BIG = { status: "error", message: "Файл больше 10 МБ" };
+  const globalJson = express.json({ limit: "1mb" });
+  app.use((req, res, next) => (req.path === WEEK_FILE_UPLOAD_PATH ? next() : globalJson(req, res, next)));
 
   // ── CORS ──────────────────────────────────────────────────────────────────────
   const ALLOWED_ORIGIN = process.env.APP_ORIGIN || "http://localhost:3000";
@@ -364,6 +369,29 @@ async function startServer() {
       gasSlotsUsed--;
     }
   }
+
+  app.post(
+    WEEK_FILE_UPLOAD_PATH,
+    express.json({ limit: "15mb" }),
+    async (req, res) => {
+      const token = req.body?.sessionToken;
+      if (!token) return res.status(401).json({ status: "error", message: "Не авторизован" });
+      const { week, name, mimeType, base64 } = req.body?.data ?? {};
+      const b64 = typeof base64 === "string" ? base64 : "";
+      const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+      if (Math.floor(b64.length * 3 / 4) - padding > WEEK_FILE_MAX_BYTES) return res.status(413).json(WEEK_FILE_TOO_BIG);
+      try {
+        // callGasAction notes the write itself; the upload is never retried
+        const data = await callGasAction("uploadWeekFile", token, req.body?.devMode === true, { week, name, mimeType, base64: b64 });
+        res.json({ status: "success", data });
+      } catch (e: any) {
+        res.status(502).json({ status: "error", message: e?.message || String(e) });
+      }
+    },
+    // a body over the parser limit gets the same JSON message, not Express's HTML page
+    (err: any, _req: any, res: any, next: any) =>
+      err?.type === "entity.too.large" ? res.status(413).json(WEEK_FILE_TOO_BIG) : next(err)
+  );
 
   // API Endpoint to proxy GAS requests
   app.post("/api/gas", async (req, res) => {

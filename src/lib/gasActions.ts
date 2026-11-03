@@ -115,6 +115,10 @@ export const GAS_ACTIONS: Record<string, GasAction> = {
   // Item 101: the previous «Документы» record of an order and the file names in its Drive folder, read before a
   // docs build decides what to redo. Never cached: the build writes both right before the next press.
   getSupplyDocsState: read(),
+  // Item 97 T4: week files. Never cached, so nothing is stale after an upload or delete;
+  // uploadWeekFile and deleteWeekFile are unlisted writes (they wipe the whole cache).
+  listWeekFiles: read(),
+  getWeekFile: read(),
 
   // ── Writes with a narrow invalidation ──
   // Пункт 29, этап C: точечная очистка кэша. Сюда попали только действия, про которые точно
