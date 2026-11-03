@@ -771,3 +771,51 @@ export interface WeekFile {
   uploadedBy: string;
   uploadedAt: string;
 }
+
+/** One invoice line of a contractor invoice, item 97 ticket 05 (text as printed). */
+export interface ContractorInvoiceLineRow {
+  n: number;
+  name: string;
+  qty: string;
+  unit: string;
+  price: number;
+  sum: number;
+}
+
+/** A saved contractor invoice as listContractorInvoices returns it (Code.gs). Money cells are numbers in roubles. */
+export interface ContractorInvoice {
+  id: string;
+  week: string;
+  supplier: string;
+  number: string;
+  date: string;
+  buyer: string;
+  total: number;
+  vat: string;
+  itemCount: number | '';
+  fileId: string;
+  fileName: string;
+  uploadedBy: string;
+  uploadedAt: string;
+  replacedAt: string;
+  lines: ContractorInvoiceLineRow[];
+}
+
+/** What saveContractorInvoice sends. */
+export interface ContractorInvoicePayload {
+  week: string;
+  fileWeek?: string;
+  fileId?: string;
+  header: {
+    number: string; date: string; supplier: string; buyer: string;
+    total: string; vat: string; itemCount: string;
+  };
+  lines: { name: string; qty: string; unit: string; price: string; sum: string }[];
+  replace?: boolean;
+  addAnother?: boolean;
+}
+
+/** The `data` of a saveContractorInvoice answer. */
+export type SaveContractorInvoiceResult =
+  | { saved: true; id: string }
+  | { needsConfirm: 'replace' | 'another'; existing: ContractorInvoice };

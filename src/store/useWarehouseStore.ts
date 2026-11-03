@@ -1,7 +1,7 @@
 import { commentPayload } from '../lib/operationComment';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation, WeekFile } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation, WeekFile, ContractorInvoice, ContractorInvoicePayload } from '../types';
 import { TurnoverData } from '../lib/turnoverData';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
@@ -190,6 +190,10 @@ interface WarehouseState {
   uploadWeekFile: (week: string, file: File) => Promise<{ status: string; data?: any; message?: string }>;
   downloadWeekFile: (week: string, fileId: string) => Promise<{ status: string; data?: any; message?: string }>;
   deleteWeekFile: (week: string, fileId: string) => Promise<{ status: string; data?: any; message?: string }>;
+  readContractorInvoice: (week: string, fileId: string) => Promise<any>;
+  saveContractorInvoice: (payload: ContractorInvoicePayload) => Promise<{ status: string; data?: any; message?: string }>;
+  listContractorInvoices: (week: string) => Promise<ContractorInvoice[]>;
+  deleteContractorInvoice: (id: string) => Promise<{ status: string; data?: any; message?: string }>;
   fetchStock: () => Promise<void>;
   handleSetupDatabase: () => Promise<boolean>;
   handleSaveSku: (skuForm: SKUItem, editingSku: SKUItem | null) => Promise<boolean>;
@@ -554,6 +558,39 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   deleteWeekFile: async (week, fileId) => get().fetchGas('deleteWeekFile', { data: { week, fileId } }),
+
+  // Item 97 ticket 05: the proxy fetches the PDF itself, so only ids travel. Returns the raw AI JSON;
+  // throws an Error with a user-facing message on any failure (the screen then opens an empty form).
+  readContractorInvoice: async (week, fileId) => {
+    const role = get().currentUser?.role?.toLowerCase() || '';
+    const isAdminRole = role === 'admin' || role === 'администратор';
+    let response: Response;
+    try {
+      response = await fetch('/api/contractor-invoice/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionToken: get().sessionToken, devMode: get().devMode && isAdminRole, week, fileId })
+      });
+    } catch (e) {
+      throw new Error(`Ошибка сети: ${(e as Error).message}`);
+    }
+    const text = await response.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch { /* not JSON */ }
+    if (!response.ok || !json || json.status !== 'success') {
+      throw new Error((json && typeof json.message === 'string' && json.message) || `Ошибка HTTP ${response.status}`);
+    }
+    return json.data;
+  },
+
+  saveContractorInvoice: async (payload) => get().fetchGas('saveContractorInvoice', { data: payload }),
+
+  listContractorInvoices: async (week) => {
+    const res = await get().fetchGas('listContractorInvoices', { data: { week } });
+    return res.status === 'success' && Array.isArray(res.data) ? res.data : [];
+  },
+
+  deleteContractorInvoice: async (id) => get().fetchGas('deleteContractorInvoice', { data: { id } }),
 
   fetchStock: async () => {
     const epoch = ++stockEpoch;

@@ -8,6 +8,7 @@ import dotenv from "dotenv";
 import { buildCompositionXlsxBase64, readCargoIds } from "./src/lib/ozonComposition";
 import { compositionFileName, decideSupplyDocs, layoutFromBundle, parseSupplyDocs, SupplyDocsAction, SupplyDocsEntry } from "./src/lib/ozonSupplyDocs";
 import { parseOzonJson, ozonInt64, stringifyOzonBody } from "./src/lib/ozonJson";
+import { contractorInvoicePrompt } from "./src/lib/contractorInvoice";
 import { gasCacheTtlMs, gasReadsInvalidatedBy, isGasRead } from "./src/lib/gasActions";
 import { analyticsItemToStockRow } from "./src/lib/ozonStockRow";
 import { chooseDirectWarehouse, directWarehouseMessage, readDraftWarehouses } from "./src/lib/ozonDirectDraft";
@@ -150,6 +151,7 @@ async function startServer() {
   app.use("/api/gas", rateLimitMiddleware);
   app.use("/api/parse-invoice", rateLimitMiddleware);
   app.use("/api/china/ai-read", rateLimitMiddleware);
+  app.use("/api/contractor-invoice/read", rateLimitMiddleware);
   app.use("/api/models", rateLimitMiddleware);
   app.use("/api/ozon/check", rateLimitMiddleware);
 
@@ -3246,6 +3248,63 @@ ${wbDictStr}`;
           rawError
         }
       });
+    }
+  });
+
+  // Item 97 ticket 05: the AI reads a contractor invoice PDF stored in the week's Drive folder.
+  // The browser sends only ids (the global 1 MB JSON limit stays); the PDF is fetched from Apps
+  // Script with the caller's own session. The raw AI JSON goes back unchanged — nothing is computed here.
+  app.post("/api/contractor-invoice/read", async (req, res) => {
+    try {
+      const token = req.body?.sessionToken;
+      if (!token || !(await verifyGasSession(token))) {
+        return res.status(401).json({ status: "error", message: "Missing or invalid sessionToken" });
+      }
+
+      const { week, fileId, devMode } = req.body || {};
+      let file: any;
+      try {
+        file = await callGasAction("getWeekFile", token, devMode === true, { week, fileId });
+      } catch (e: any) {
+        return res.status(502).json({ status: "error", message: e?.message || String(e) });
+      }
+      if (!file || file.mimeType !== "application/pdf" || !file.base64) {
+        return res.status(400).json({ status: "error", message: "Распознать можно только PDF" });
+      }
+
+      const apiKey = await getApiKey();
+      if (!apiKey) {
+        return res.status(500).json({ status: "error", message: "GEMINI_API_KEY не настроен на сервере" });
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
+      let result: any;
+      try {
+        result = await ai.models.generateContent({
+          model: "gemini-flash-latest",
+          contents: [{ role: "user", parts: [
+            { inlineData: { mimeType: "application/pdf", data: file.base64 } },
+            { text: contractorInvoicePrompt() }
+          ] }],
+          config: { responseMimeType: "application/json" }
+        });
+      } catch (error: any) {
+        console.error("Contractor invoice read: Gemini call failed:", error?.message || error);
+        return res.status(500).json({ status: "error", message: "Не удалось получить ответ от ИИ" });
+      }
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(result?.text || "{}");
+      } catch (parseErr: any) {
+        console.error("Contractor invoice read: response was not JSON:", parseErr?.message || parseErr);
+        return res.status(500).json({ status: "error", message: "ИИ вернул ответ не в формате JSON" });
+      }
+
+      res.json({ status: "success", data: parsed });
+    } catch (error: any) {
+      console.error("Contractor invoice read failed:", error?.message || error);
+      res.status(500).json({ status: "error", message: error?.message || String(error) });
     }
   });
 
