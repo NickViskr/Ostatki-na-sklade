@@ -1875,7 +1875,7 @@ export const useWarehouseStore = create<WarehouseState>()(
   setOzonAutoWriteOff: async (enabled) => {
     set({ isProcessing: true });
     try {
-      const result = await get().fetchGas('setOzonAutoWriteOff', { enabled });
+      const result = await get().fetchGas('setOzonAutoWriteOff', { data: { enabled } });
       if (result.status === 'success') {
         set({ ozonSyncStatus: result.data });
         toast.success(enabled ? 'Автосписание при передаче включено' : 'Автосписание при передаче выключено');

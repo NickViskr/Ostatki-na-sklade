@@ -8,7 +8,8 @@ import {
   CheckCircle2, 
   Loader2,
   Save,
-  RefreshCw
+  RefreshCw,
+  PackageCheck
 } from 'lucide-react';
 import { useWarehouseStore } from '../store/useWarehouseStore';
 import { useSettingsStore, OzonCabinet } from '../store/useSettingsStore';
@@ -554,27 +555,43 @@ export const SettingsTab: React.FC = React.memo(() => {
                 )}
 
                 {isAdmin && (
-                  <div className="space-y-2 p-4 rounded-2xl bg-slate-50 border border-slate-100">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
-                      Автосписание товара при передаче
-                    </label>
+                  <div className="space-y-4 pt-2">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                        Статус автосписания
+                      </label>
+                      {ozonSyncStatus.autoWriteOffSince ? (
+                        <span className="text-emerald-600 font-semibold text-sm block">
+                          Автосписание включено с {new Date(ozonSyncStatus.autoWriteOffSince).toLocaleString('ru-RU')}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 font-semibold text-sm block">
+                          Автосписание выключено
+                        </span>
+                      )}
+                      <p className="text-[11px] text-slate-500 leading-normal">
+                        Товар поставки списывается сам, когда Ozon покажет, что поставка принята на точке отгрузки. Передачи до включения не списываются.
+                      </p>
+                    </div>
                     {ozonSyncStatus.autoWriteOffSince ? (
-                      <span className="text-emerald-600 font-semibold text-sm block">
-                        включено с {new Date(ozonSyncStatus.autoWriteOffSince).toLocaleString('ru-RU')}
-                      </span>
+                      <button
+                        onClick={() => setOzonAutoWriteOff(false)}
+                        disabled={isProcessing}
+                        className="w-full bg-slate-600 text-white py-3 rounded-xl font-bold hover:bg-slate-700 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                      >
+                        {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <PackageCheck size={18} />}
+                        Отключить автосписание
+                      </button>
                     ) : (
-                      <span className="text-slate-500 font-semibold text-sm block">выключено</span>
+                      <button
+                        onClick={() => setOzonAutoWriteOff(true)}
+                        disabled={isProcessing}
+                        className="w-full bg-sky-500 text-white py-3 rounded-xl font-bold hover:bg-sky-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                      >
+                        {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <PackageCheck size={18} />}
+                        Включить автосписание
+                      </button>
                     )}
-                    <p className="text-[11px] text-slate-500 leading-normal">
-                      Товар поставки списывается сам, когда Ozon покажет, что поставка принята на точке отгрузки. Передачи до включения не списываются.
-                    </p>
-                    <button
-                      onClick={() => setOzonAutoWriteOff(!ozonSyncStatus.autoWriteOffSince)}
-                      disabled={isProcessing}
-                      className={`w-full text-white py-2.5 rounded-xl font-bold disabled:opacity-50 transition-all ${ozonSyncStatus.autoWriteOffSince ? 'bg-slate-600 hover:bg-slate-700' : 'bg-sky-500 hover:bg-sky-600'}`}
-                    >
-                      {ozonSyncStatus.autoWriteOffSince ? 'Выключить автосписание' : 'Включить автосписание'}
-                    </button>
                   </div>
                 )}
 
