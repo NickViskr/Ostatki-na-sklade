@@ -782,6 +782,8 @@ export interface ContractorInvoiceLineRow {
   sum: number;
   /** false when the line's service does not go to supplies (empty cell = true). */
   toSupply: boolean;
+  /** Resolved «упаковка/стикеровка» mark (stored mark, else by name); item 97 ticket 06. */
+  packaging?: boolean;
 }
 
 /** A saved contractor invoice as listContractorInvoices returns it (Code.gs). Money cells are numbers in roubles. */
@@ -812,9 +814,11 @@ export interface ContractorInvoicePayload {
     number: string; date: string; supplier: string; buyer: string;
     total: string; vat: string; itemCount: string;
   };
-  lines: { name: string; qty: string; unit: string; price: string; sum: string; toSupply?: boolean }[];
+  lines: { name: string; qty: string; unit: string; price: string; sum: string; toSupply?: boolean; packaging?: boolean }[];
   replace?: boolean;
   addAnother?: boolean;
+  /** Item 97 ticket 06 part E: id of the saved invoice being corrected (admin; replaces that row). */
+  editId?: string;
 }
 
 /** The `data` of a saveContractorInvoice answer. */
@@ -822,3 +826,36 @@ export type SaveContractorInvoiceResult =
   | { saved: true; id: string }
   | { needsConfirm: 'replace'; existing: { id: string; week: string; number: string; date: string; total: number } }
   | { needsConfirm: 'another'; existing: { number: string; date: string; total: number }[] };
+
+/** One write-off operation of a week as getWeekPackaging returns it (item 97 ticket 06). */
+export interface WeekPackagingOperationInfo {
+  opId: string;
+  cabinet: string;
+  orderNumbers: string[];
+  postingIds: string[];
+  auto: boolean;
+  date: string;
+  rows: { id: number; article: string; quantity: number; isComponent: boolean; weekPackaging: number | null }[];
+  /** Roubles of an «Упаковка» tag in the extras text (0 if none). */
+  textPackaging: number;
+  weekConflict?: string[];
+}
+
+export interface WeekPackagingPrice { article: string; unit: string }
+export interface WeekPackagingOverride { opId: string; article: string; unit: string }
+
+/** The `data` of a getWeekPackaging answer. */
+export interface WeekPackagingState {
+  week: string;
+  operations: WeekPackagingOperationInfo[];
+  saved: { prices: WeekPackagingPrice[]; overrides: WeekPackagingOverride[]; savedBy: string; savedAt: string } | null;
+  /** Latest saved price (text) of an article from an earlier week. */
+  lastPrices: Record<string, string>;
+}
+
+/** What saveWeekPackaging sends. */
+export interface WeekPackagingPayload {
+  week: string;
+  prices: WeekPackagingPrice[];
+  overrides: WeekPackagingOverride[];
+}

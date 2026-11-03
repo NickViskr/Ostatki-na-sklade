@@ -17494,6 +17494,84 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
       note: j({ r: msg(r) || r.status, marks, flags })
     };
   });
+
+  // ---------- Part E: invoice correction keeps its identity (editId) ----------
+  const eInv = (over) => {
+    const o = over || {};
+    const L = (name, sum) => ({ name, qty: '1', unit: 'шт', price: sum, sum });
+    return Object.assign({ week: W44, fileWeek: W44, fileId: '',
+      header: Object.assign({ number: '0045', date: '02.11.2026', supplier: 'ООО Ромашка', buyer: 'ИП Тестов', total: '150,00', vat: 'Без НДС', itemCount: '2' }, o.header || {}),
+      lines: o.lines || [L('Услуга А', '100,00'), L('Услуга Б', '50,00')] }, o.top || {});
+  };
+  const eHeads = (h) => h.dumpSheetByName('Счета подрядчика');
+  const eLines = (h) => h.dumpSheetByName('Строки счетов');
+  const eSnap = (h) => j([eHeads(h), eLines(h)]);
+
+  t06Check('Item 97 ticket 06 E1: admin edits a saved invoice and changes its NUMBER -> the same row and id are replaced (one invoice in the week, lines replaced, no needsConfirm), «Заменён» stamped', () => {
+    const h = invStand();
+    const first = call(h, 'tok-user', 'saveContractorInvoice', eInv());
+    const id = first.data && first.data.id;
+    h.setNow('2026-11-03T11:00:00Z');
+    const r = call(h, 'tok-admin', 'saveContractorInvoice', eInv({ header: { number: '0046', total: '70,00', itemCount: '1' }, lines: [{ name: 'Исправлено', qty: '1', unit: 'шт', price: '70,00', sum: '70,00' }], top: { editId: id } }));
+    const hd = eHeads(h); const ln = eLines(h);
+    return {
+      conds: {
+        'first save ok': ok(first) && !!id,
+        'edit succeeded without needsConfirm': ok(r) && !(r.data && r.data.needsConfirm) && r.data && r.data.saved === true,
+        'same id returned': !!r.data && r.data.id === id,
+        'one header row with the same id and the new number': hd.length === 1 && hd[0]['ID счёта'] === id && hd[0]['Номер'] === '0046',
+        'lines replaced': ln.length === 1 && ln[0]['Наименование'] === 'Исправлено',
+        '«Заменён» stamped': hd.length === 1 && hd[0]['Заменён'] !== '' && hd[0]['Заменён'] !== undefined,
+        'one invoice listed in the week': listInv(h, W44).length === 1
+      },
+      note: j({ r: msg(r) || r.status, hd, ln })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 E2: a non-admin with editId is refused and nothing is written', () => {
+    const h = invStand();
+    const first = call(h, 'tok-user', 'saveContractorInvoice', eInv());
+    const before = eSnap(h);
+    const r = call(h, 'tok-user', 'saveContractorInvoice', eInv({ header: { number: '0046' }, top: { editId: first.data && first.data.id } }));
+    return {
+      conds: { 'first save ok': ok(first), 'refused': r.status === 'error', 'nothing written': eSnap(h) === before },
+      note: j({ r: msg(r) || r.status })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 E3: editing so that the key equals ANOTHER saved invoice is refused with «уже сохранён», nothing written', () => {
+    const h = invStand();
+    const a = call(h, 'tok-user', 'saveContractorInvoice', eInv());
+    const b = call(h, 'tok-user', 'saveContractorInvoice', eInv({ header: { number: '0046' }, top: { addAnother: true } }));
+    const before = eSnap(h);
+    const r = call(h, 'tok-admin', 'saveContractorInvoice', eInv({ header: { number: '0045' }, top: { editId: b.data && b.data.id } }));
+    return {
+      conds: { 'both saved': ok(a) && ok(b) && eHeads(h).length === 2, 'refused': r.status === 'error',
+        'message says already saved': msg(r).indexOf('уже сохранён') !== -1, 'nothing written': eSnap(h) === before },
+      note: j({ r: msg(r) || r.status })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 E4: an unknown editId is refused (nothing written); editing to another week moves the same invoice (week cell changes, still one row)', () => {
+    const h = invStand();
+    const first = call(h, 'tok-user', 'saveContractorInvoice', eInv());
+    const id = first.data && first.data.id;
+    const before = eSnap(h);
+    const unknown = call(h, 'tok-admin', 'saveContractorInvoice', eInv({ top: { editId: 'INV-NOPE' } }));
+    const afterUnknown = eSnap(h);
+    const moved = call(h, 'tok-admin', 'saveContractorInvoice', eInv({ top: { editId: id, week: W45, fileWeek: W45 } }));
+    const hd = eHeads(h);
+    return {
+      conds: {
+        'unknown editId refused': unknown.status === 'error',
+        'nothing written for unknown editId': afterUnknown === before,
+        'move succeeded': ok(moved),
+        'still one row with the same id': hd.length === 1 && hd[0]['ID счёта'] === id,
+        'week cell is now W45': hd.length === 1 && hd[0]['Неделя'] === W45
+      },
+      note: j({ unknown: msg(unknown) || unknown.status, moved: msg(moved) || moved.status, hd })
+    };
+  });
 }
 
 // ================= Итог =================

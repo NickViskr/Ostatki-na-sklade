@@ -28,7 +28,7 @@ export function draftFromSavedInvoice(inv: ContractorInvoice): ContractorInvoice
     },
     lines: inv.lines.map((l) => ({
       name: l.name, qty: String(l.qty), unit: l.unit, price: moneyText(l.price), sum: moneyText(l.sum),
-      toSupply: l.toSupply
+      toSupply: l.toSupply, packaging: l.packaging
     }))
   };
 }
@@ -156,10 +156,11 @@ export const ContractorInvoiceModal: React.FC<Props> = ({ week, file, saved, onC
   const handleSave = async () => {
     const basePayload = { week: serviceWeek, fileWeek: week, fileId, header: draft.header, lines: draft.lines };
     const needAdmin = () => { toast.error('Заменить счёт может только администратор'); };
-    let extra: { replace?: boolean; addAnother?: boolean } = {};
+    let extra: { replace?: boolean; addAnother?: boolean; editId?: string } = {};
     if (saved) {
       if (!isAdmin) return needAdmin();
-      extra = { replace: true };
+      // Item 97 ticket 06: a correction of a saved invoice replaces THAT invoice even if its number/date changed.
+      extra = { editId: saved.id };
     }
     setSaving(true);
     try {

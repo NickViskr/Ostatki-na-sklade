@@ -1,7 +1,7 @@
 import { commentPayload } from '../lib/operationComment';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation, WeekFile, ContractorInvoice, ContractorInvoicePayload } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation, WeekFile, ContractorInvoice, ContractorInvoicePayload, WeekPackagingState, WeekPackagingPayload } from '../types';
 import { TurnoverData } from '../lib/turnoverData';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
@@ -193,6 +193,9 @@ interface WarehouseState {
   readContractorInvoice: (week: string, fileId: string) => Promise<any>;
   saveContractorInvoice: (payload: ContractorInvoicePayload) => Promise<{ status: string; data?: any; message?: string }>;
   listContractorInvoices: (week: string) => Promise<ContractorInvoice[]>;
+  getWeekPackaging: (week: string) => Promise<WeekPackagingState>;
+  saveWeekPackaging: (payload: WeekPackagingPayload) => Promise<{ status: string; data?: any; message?: string }>;
+  setInvoiceLinePackaging: (payload: { invoiceId: string; lineNo: number; packaging: boolean }) => Promise<{ status: string; data?: any; message?: string }>;
   deleteContractorInvoice: (id: string) => Promise<{ status: string; data?: any; message?: string }>;
   fetchStock: () => Promise<void>;
   handleSetupDatabase: () => Promise<boolean>;
@@ -589,6 +592,16 @@ export const useWarehouseStore = create<WarehouseState>()(
     const res = await get().fetchGas('listContractorInvoices', { data: { week } });
     return res.status === 'success' && Array.isArray(res.data) ? res.data : [];
   },
+
+  getWeekPackaging: async (week) => {
+    const res = await get().fetchGas('getWeekPackaging', { data: { week } });
+    if (res.status !== 'success' || !res.data) throw new Error(res.message || 'Не удалось загрузить окно недели');
+    return res.data;
+  },
+
+  saveWeekPackaging: async (payload) => get().fetchGas('saveWeekPackaging', { data: payload }),
+
+  setInvoiceLinePackaging: async (payload) => get().fetchGas('setInvoiceLinePackaging', { data: payload }),
 
   deleteContractorInvoice: async (id) => get().fetchGas('deleteContractorInvoice', { data: { id } }),
 

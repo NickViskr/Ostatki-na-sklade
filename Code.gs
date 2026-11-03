@@ -10242,7 +10242,8 @@ function saveContractorInvoice(data, user) {
   const draft = contractorInvoiceDraftFromInput(input);
   const check = checkContractorInvoiceGs(draft);
   if (!check.ok) throw new Error(check.lineErrors.map(function(e) { return e.message; }).concat(check.headerErrors)[0]);
-  if (input.replace === true) assertAdmin(user);
+  const editId = input.editId ? String(input.editId) : '';
+  if (input.replace === true || editId) assertAdmin(user);
   const fileId = input.fileId ? String(input.fileId) : '';
   const fileWeek = String(input.fileWeek || week);
   if (fileId) assertWeekFilesWeek(fileWeek);
@@ -10258,11 +10259,22 @@ function saveContractorInvoice(data, user) {
   const key = contractorInvoiceKeyGs(h.supplier, h.number, h.date);
   let sameRow = -1;
   const others = [];
-  stored.forEach(function(r, i) {
-    if (contractorInvoiceKeyGs(r[2], r[3], r[4]) === key) { sameRow = i; return; }
-    if (String(r[1]) === week) others.push({ number: String(r[3]), date: String(r[4]), total: r[6] });
-  });
-  if (sameRow >= 0 && input.replace !== true) {
+  if (editId) {
+    // A correction of a saved invoice: it replaces THAT row even when the number/date/supplier changed.
+    stored.forEach(function(r, i) { if (String(r[0]) === editId) sameRow = i; });
+    if (sameRow < 0) throw new Error('Счёт для исправления не найден. Ничего не записано.');
+    stored.forEach(function(r, i) {
+      if (i !== sameRow && contractorInvoiceKeyGs(r[2], r[3], r[4]) === key) {
+        throw new Error('Счёт № ' + h.number + ' от ' + h.date + ' уже сохранён отдельно — исправление совпало с другим счётом. Ничего не записано.');
+      }
+    });
+  } else {
+    stored.forEach(function(r, i) {
+      if (contractorInvoiceKeyGs(r[2], r[3], r[4]) === key) { sameRow = i; return; }
+      if (String(r[1]) === week) others.push({ number: String(r[3]), date: String(r[4]), total: r[6] });
+    });
+  }
+  if (sameRow >= 0 && input.replace !== true && !editId) {
     const r = stored[sameRow];
     return { needsConfirm: 'replace', existing: { id: String(r[0]), week: String(r[1]), number: String(r[3]), date: String(r[4]), total: r[6] } };
   }

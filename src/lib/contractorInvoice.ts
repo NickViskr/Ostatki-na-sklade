@@ -25,6 +25,8 @@ export interface ContractorInvoiceLine {
   sum: string;
   /** false = the line's service does not go to supplies; undefined counts as true. */
   toSupply?: boolean;
+  /** «упаковка/стикеровка» mark (item 97 ticket 06); undefined = decided by the name. */
+  packaging?: boolean;
 }
 
 export interface ContractorInvoiceDraft {

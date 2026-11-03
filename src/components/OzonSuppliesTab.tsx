@@ -21,6 +21,7 @@ import { formatCurrency } from '../lib/utils';
 import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ContractorInvoiceModal } from './ContractorInvoiceModal';
+import { WeekWindowModal } from './WeekWindowModal';
 import { isoWeekLabel, selectableWeeks, weekFilterOptions } from '../lib/isoWeek';
 
 
@@ -1470,6 +1471,8 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   // Item 97 ticket 02 part C: week filter ('all' | 'none' | 'YYYY-Www') and the posting whose week is being edited.
   const [weekFilter, setWeekFilter] = useState<string>('all');
   const [editingWeekPostingId, setEditingWeekPostingId] = useState<string | null>(null);
+  // Item 97 ticket 06: the week window (step 1 packaging).
+  const [showWeekWindow, setShowWeekWindow] = useState(false);
   const fetchGasAction = useWarehouseStore((state) => state.fetchGas);
   const isWeekAdmin = ['admin', 'администратор'].includes(String(currentUser?.role || '').toLowerCase());
   const [showProcessed, setShowProcessed] = useState(false);
@@ -1907,8 +1910,15 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
               <option key={w} value={w}>{isoWeekLabel(w)}</option>
             ))}
           </select>
+          <button
+            onClick={() => setShowWeekWindow(true)}
+            className="px-3 py-2 rounded-xl text-sm font-bold border border-slate-200 bg-white text-indigo-600 hover:bg-slate-50 cursor-pointer"
+          >
+            Окно недели
+          </button>
         </div>
       )}
+      {showWeekWindow && <WeekWindowModal initialWeek={weekFilter} onClose={() => setShowWeekWindow(false)} />}
 
       {!isLoading && weekFilter !== 'all' && weekFilter !== 'none' && <WeekFilesBlock week={weekFilter} />}
 
