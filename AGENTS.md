@@ -5,6 +5,9 @@ accounting error is real money (01.08.2026: a double write-off of 118 pcs cost �
 These are the invariants; the current state (live revision, open items, test counts) lives in
 the «Очередь дальше» block at the end of `docs/OZON_PLAN.md` — read it first. History and
 dossiers of closed work are in `docs/HISTORY.md`, `docs/DEVLOG.md`, `docs/TEST_LOG.md`.
+Reference sheets: `docs/OZON_API.md` (Ozon Seller API recon), `docs/YANDEX_MARKET_API.md`
+(Yandex Market Partner API: official docs and OpenAPI links, third-party MCP servers; research
+only, nothing implemented).
 
 ## Language
 Russian only for answers to the owner and for text the end user sees in the app (UI labels,
