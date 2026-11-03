@@ -16950,6 +16950,552 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   }
 }
 
+// ================= Item 97 ticket 06 part B: week packaging, step 1 (getWeekPackaging / saveWeekPackaging / setInvoiceLinePackaging) =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/ticket-06-design.md, Part B. Every check is red until the actions and the
+// «История» column «Упаковка недели» exist. Synthetic data only. Money is compared in integer kopecks, expectations are computed from the
+// figures read back from the sheet BEFORE the save (never typed by hand). All calls go through doPost with a session token.
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const W43 = '2026-W43';
+  const W44 = '2026-W44';
+  const W45 = '2026-W45';
+  const EXT = 'Внешние отгрузки';
+  const PKS = 'Упаковка недели';
+  const PK_HEAD = ['Неделя', 'Артикул', 'OpID', '₽/шт', 'Сохранил', 'Сохранено'];
+  const far = String(Date.parse('2030-01-01T00:00:00Z'));
+  const j = (v) => JSON.stringify(v);
+  const kop = (v) => Math.round(Number(v) * 100);
+  const norm = (v) => String(v).replace(',', '.');
+
+  const stand = () => {
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-11-03T10:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet([
+      { article: 'A', quantity: 1000, avgCost: 100, capitalization: 100000 },
+      { article: 'B', quantity: 1000, avgCost: 250, capitalization: 250000 },
+      { article: 'P1', quantity: 1000, avgCost: 40, capitalization: 40000 },
+      { article: 'P2', quantity: 1000, avgCost: 30, capitalization: 30000 }
+    ]);
+    h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], [['A', 10, '111'], ['B', 10, '222']]);
+    const stocks = [];
+    ['MaxiStore', 'ShopTwo'].forEach((cab) => [['A', '111'], ['B', '222'], ['KIT', '333']].forEach((a) => stocks.push({ cabinet: cab, article: a[0], available: 900, sku: a[1] })));
+    h.setOzonStocksSheet(stocks);
+    h.setKitSheet([]);
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'],
+      ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+    h.setRegistrySheet(EXT, [h.context.EXTERNAL_SHIPMENTS_HEADERS.slice()]);
+    return h;
+  };
+  const call = (h, token, action, data) => h.callDoPost({ action, sessionToken: token, data });
+  const ok = (o) => !!o && o.status === 'success';
+  const msg = (o) => String((o && o.message) || '');
+
+  const addPosting = (h, o) => {
+    const sheet = h.sheetByName(EXT);
+    const heads = h.context.EXTERNAL_SHIPMENTS_HEADERS;
+    const line = new Array(heads.length).fill('');
+    const set = (n, v) => { line[heads.indexOf(n)] = v; };
+    set('PostingID', o.pid); set('Статус', o.status || 'processed'); set('Кабинет', o.cabinet); set('Номер заявки', o.order || '');
+    set('TransGroupInfo', JSON.stringify(o.ids || [])); set('Неделя', o.week || ''); set('Неделя вручную', o.weekManual || '');
+    set('Виртуальная', o.virtual ? 'ДА' : ''); set('Передача по', o.handover || '');
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, heads.length).setValues([line]);
+  };
+  const idsOf = (h, opId) => h.dumpTransSheet().filter((r) => r['OpID'] === opId).map((r) => String(r['ID']));
+  // An automatic write-off of ONE posting at its handover (as autoWriteOffPosting leaves it).
+  const addAuto = (h, o) => {
+    h.commitTransaction(o.items, 'Расход', 'Ozon (' + o.cabinet + ')', o.date, 'Автосписание', null, 'ozonAuto:' + o.pid, 0, undefined, '', '');
+    addPosting(h, { pid: o.pid, cabinet: o.cabinet, order: o.order, ids: idsOf(h, 'ozonAuto:' + o.pid), week: o.week, weekManual: o.weekManual, virtual: o.virtual, handover: o.date + ' 12:00:00' });
+  };
+  // A manual write-off of one Ozon order: one operation, one or several postings, no handover detected.
+  const addManual = (h, o) => {
+    h.commitTransaction(o.items, 'Расход', 'Ozon (' + o.cabinet + ')' + (o.extras ? ' ' + o.extras : ''), o.date, 'tester', '2026-10-30T07:00:00Z', o.opId, null);
+    (o.pids || []).forEach((pid, i) => addPosting(h, { pid, cabinet: o.cabinet, order: o.order, ids: idsOf(h, o.opId),
+      week: (o.weeks || [])[i] || '', weekManual: (o.weeksManual || [])[i] || '', virtual: o.virtual }));
+  };
+  // price = the stock average cost, as the app sends it (a «Расход» row is charged price x qty)
+  const A = (n) => ({ article: 'A', quantity: n, price: 100 });
+  const B = (n) => ({ article: 'B', quantity: n, price: 250 });
+
+  // The base world: W44 holds OP1 (auto, two articles), OP2 (manual, two postings, week by «Дата поставки»), OP4 (manual, «Неделя вручную»).
+  const baseWorld = () => {
+    const h = stand();
+    addAuto(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', date: '2026-10-28', week: W44, items: [A(3), B(2)] });
+    addManual(h, { opId: 'man-1', cabinet: 'ShopTwo', order: '555', pids: ['Q-1', 'Q-2'], date: '2026-11-01', items: [A(4)] });
+    addAuto(h, { pid: 'P-3', cabinet: 'MaxiStore', order: '3333', date: '2026-11-02', week: W45, items: [A(1)] });
+    addManual(h, { opId: 'man-4', cabinet: 'MaxiStore', order: '777', pids: ['R-1'], date: '2026-11-03', weeks: [W45], weeksManual: [W44], items: [B(1)] });
+    addAuto(h, { pid: 'P-5', cabinet: 'MaxiStore', order: '5555', date: '2026-10-29', week: W44, weekManual: W45, items: [A(1)] });
+    addManual(h, { opId: 'man-8', cabinet: 'MaxiStore', order: '888', pids: ['V-1'], date: '2026-10-29', items: [B(1)], virtual: true });
+    addManual(h, { opId: 'man-9', cabinet: 'MaxiStore', order: '999', pids: ['T-1'], date: '2026-11-02', items: [A(1)] });
+    return h;
+  };
+  const seedPrices = (h) => h.setRegistrySheet(PKS, [PK_HEAD,
+    [W43, 'A', '', 5.5, 'boss', '2026-10-27 10:00:00'], [W43, 'B', '', '12', 'boss', '2026-10-27 10:00:00'],
+    [W43, 'A', 'man-9', '77', 'boss', '2026-10-27 10:00:00'], [W45, 'A', '', '99', 'boss', '2026-11-03 09:00:00']]);
+  const W44_OPS = ['ozonAuto:P-1', 'man-1', 'man-4'];
+  const OTHER_OPS = ['ozonAuto:P-3', 'ozonAuto:P-5', 'man-8', 'man-9'];
+  const rowsOfOps = (h, ops) => h.dumpTransSheet().filter((r) => ops.indexOf(r['OpID']) !== -1 && String(r['isComponent']).toLowerCase() !== 'true');
+  const fixedOf = (r) => (r['Упаковка недели'] === '' || r['Упаковка недели'] === undefined ? 0 : kop(r['Упаковка недели']));
+  const snap = (h) => j([h.dumpTransSheet(), h.dumpOzonCostFull(), h.dumpSheetByName(PKS), h.dumpArchive()]);
+  const save = (h, token, week, prices, overrides) => call(h, token, 'saveWeekPackaging', { week, prices, overrides: overrides || [] });
+  const PRICES = [{ article: 'A', unit: '6,50' }, { article: 'B', unit: '12' }];
+  const OVER = [{ opId: 'man-1', article: 'A', unit: '7' }];
+  // unit (kopecks) a W44 row must carry: override of its operation + article, else the week price
+  const unitKop = (opId, article) => (opId === 'man-1' && article === 'A') ? 700 : (article === 'A' ? 650 : 1200);
+  const t06Check = (name, build) => {
+    let conds = {}; let note = '';
+    try { const r = build(); conds = r.conds; note = r.note || ''; } catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+    const failed = Object.keys(conds).filter((k) => !conds[k]);
+    check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+  };
+  // counts every write call on the given sheets (they must already exist)
+  const watch = (h, names) => {
+    const st = { n: 0 };
+    names.forEach((nm) => {
+      const s = h.sheetByName(nm);
+      if (!s) return;
+      const gr = s.getRange.bind(s);
+      s.getRange = function () {
+        const r = gr.apply(s, arguments);
+        ['setValue', 'setValues', 'clearContent', 'setNumberFormat'].forEach((f) => { const o = r[f]; if (o) r[f] = function () { st.n++; return o.apply(r, arguments); }; });
+        return r;
+      };
+      ['appendRow', 'deleteRow', 'clearContents', 'insertRowAfter'].forEach((f) => { const o = s[f]; if (o) s[f] = function () { st.n++; return o.apply(s, arguments); }; });
+    });
+    return st;
+  };
+
+  t06Check('Item 97 ticket 06 B1a: getWeekPackaging lists the operations of the week from both cabinets (auto by detected week, manual by «Дата поставки» Ekb, «Неделя вручную» wins) and leaves out other weeks, virtual postings and the manual-week override', () => {
+    const h = baseWorld();
+    seedPrices(h);
+    const r = call(h, 'tok-user', 'getWeekPackaging', { week: W44 });
+    const d = (r && r.data) || {};
+    const ops = d.operations || [];
+    const by = (id) => ops.find((o) => o.opId === id) || {};
+    const set = (a) => j((a || []).slice().sort());
+    const qtyOf = (o, art) => ((o.rows || []).find((x) => x.article === art) || {}).quantity;
+    return {
+      conds: {
+        'the call succeeded for any user': ok(r),
+        'week echoed': d.week === W44,
+        'exactly the three operations of the week': set(ops.map((o) => o.opId)) === set(W44_OPS),
+        'auto op: cabinet, order, posting, auto flag': by('ozonAuto:P-1').cabinet === 'MaxiStore' && set(by('ozonAuto:P-1').orderNumbers) === set(['1111']) && set(by('ozonAuto:P-1').postingIds) === set(['P-1']) && by('ozonAuto:P-1').auto === true,
+        'auto op rows: A 3 and B 2, not components, no saved packaging yet': qtyOf(by('ozonAuto:P-1'), 'A') === 3 && qtyOf(by('ozonAuto:P-1'), 'B') === 2
+          && (by('ozonAuto:P-1').rows || []).every((x) => x.isComponent === false && x.weekPackaging === null),
+        'manual op (week from «Дата поставки» 2026-11-01, Sunday of W44): second cabinet, one order, both postings, auto false': by('man-1').cabinet === 'ShopTwo' && set(by('man-1').orderNumbers) === set(['555']) && set(by('man-1').postingIds) === set(['Q-1', 'Q-2']) && by('man-1').auto === false && qtyOf(by('man-1'), 'A') === 4,
+        '«Неделя вручную» W44 beats the detected W45': !!by('man-4').opId && qtyOf(by('man-4'), 'B') === 1,
+        'row ids are History ids': ops.every((o) => (o.rows || []).every((x) => h.dumpTransSheet().some((t) => String(t['ID']) === String(x.id)))),
+        'W45 auto, manual-W45 override, virtual posting and the 2026-11-02 manual op are not listed': OTHER_OPS.every((id) => !by(id).opId),
+        'no saved set': d.saved === null,
+        'textPackaging is 0 without an «Упаковка» tag': ops.every((o) => o.textPackaging === 0)
+      },
+      note: j(r)
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B1b: kit component rows are flagged, textPackaging is read from an «Упаковка» tag, lastPrices come only from EARLIER weeks (week prices, not overrides, not later weeks)', () => {
+    const h = stand();
+    h.setKitSheet([{ kitSku: 'KIT', componentSku: 'P1', quantity: 1, kitType: 'virtual' }, { kitSku: 'KIT', componentSku: 'P2', quantity: 2, kitType: 'virtual' }]);
+    addAuto(h, { pid: 'P-6', cabinet: 'MaxiStore', order: '6666', date: '2026-10-28', week: W44, items: [{ article: 'KIT', quantity: 2, price: 0 }] });
+    addManual(h, { opId: 'man-t', cabinet: 'MaxiStore', order: '444', pids: ['U-1'], date: '2026-10-29', items: [A(196)], extras: '[Упаковка: 196 шт. x 5₽ = 980₽]' });
+    seedPrices(h);
+    const r = call(h, 'tok-user', 'getWeekPackaging', { week: W44 });
+    const d = (r && r.data) || {};
+    const kit = (d.operations || []).find((o) => o.opId === 'ozonAuto:P-6') || {};
+    const man = (d.operations || []).find((o) => o.opId === 'man-t') || {};
+    const kitMain = (kit.rows || []).filter((x) => x.article === 'KIT');
+    const comps = (kit.rows || []).filter((x) => x.article === 'P1' || x.article === 'P2');
+    const lp = d.lastPrices || {};
+    return {
+      conds: {
+        'the call succeeded': ok(r),
+        'the kit row is a normal row': kitMain.length === 1 && kitMain[0].isComponent === false && kitMain[0].quantity === 2,
+        'its component rows are listed and flagged isComponent': comps.length === 2 && comps.every((x) => x.isComponent === true),
+        'textPackaging of the tagged manual op is 980 roubles': man.textPackaging === 980,
+        'textPackaging of the kit op is 0': kit.textPackaging === 0,
+        'lastPrices A = 5.50 (week W43, not the override 77, not the later W45 99)': lp.A !== undefined && kop(norm(lp.A)) === 550,
+        'lastPrices B = 12': lp.B !== undefined && kop(norm(lp.B)) === 1200
+      },
+      note: j({ lp, kit: kit.rows, textPackaging: man.textPackaging })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B1c: an operation whose postings fall into two weeks is listed with weekConflict and saving that week is refused with a hint to set «Неделю вручную», nothing written', () => {
+    const h = stand();
+    addManual(h, { opId: 'man-c', cabinet: 'MaxiStore', order: '123', pids: ['C-1', 'C-2'], date: '2026-10-29', items: [A(5)], weeks: [W44, W45] });
+    addAuto(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', date: '2026-10-28', week: W44, items: [B(1)] });
+    const r = call(h, 'tok-user', 'getWeekPackaging', { week: W44 });
+    const op = (((r && r.data) || {}).operations || []).find((o) => o.opId === 'man-c') || {};
+    const before = snap(h);
+    const s = save(h, 'tok-user', W44, [{ article: 'A', unit: '6' }, { article: 'B', unit: '6' }]);
+    return {
+      conds: {
+        'the conflicting op is listed': !!op.opId,
+        'weekConflict names both weeks': j((op.weekConflict || []).slice().sort()) === j([W44, W45]),
+        'save is refused': s.status === 'error',
+        'the message points to «Неделю вручную»': msg(s).indexOf('Неделю вручную') !== -1,
+        'nothing written': snap(h) === before
+      },
+      note: j({ op, s })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B2a: saveWeekPackaging writes «Упаковка недели» = unit x qty per row, adds it to «Сумма», Цена = round2(Сумма/qty), override applies to one operation only, other weeks untouched, sheet «Упаковка недели» holds the set', () => {
+    const h = baseWorld();
+    seedPrices(h);
+    const seedOther = j(h.dumpSheetByName(PKS));
+    const before = {};
+    h.dumpTransSheet().forEach((r) => { before[r['ID']] = r; });
+    const otherBefore = j(rowsOfOps(h, OTHER_OPS));
+    const r = save(h, 'tok-user', W44, PRICES, OVER);
+    const rows = rowsOfOps(h, W44_OPS);
+    const wrong = [];
+    rows.forEach((row) => {
+      const q = Number(row['Количество']);
+      const fixed = unitKop(row['OpID'], row['Артикул']) * q;
+      const sumKop = kop(before[row['ID']]['Сумма']) + fixed;
+      const priceKop = Math.round(sumKop / q);
+      if (fixedOf(row) !== fixed || kop(row['Сумма']) !== sumKop || kop(row['Цена']) !== priceKop) {
+        wrong.push([row['OpID'], row['Артикул'], 'fixed ' + row['Упаковка недели'] + '/' + fixed, 'sum ' + row['Сумма'] + '/' + sumKop, 'price ' + row['Цена'] + '/' + priceKop].join(' '));
+      }
+    });
+    const sheetRows = h.dumpSheetByName(PKS);
+    const mine = sheetRows.filter((x) => x['Неделя'] === W44).map((x) => [x['Артикул'], x['OpID'], kop(norm(x['₽/шт']))].join('|')).sort();
+    return {
+      conds: {
+        'save succeeded': ok(r),
+        'four rows touched, every one kopeck-exact': rows.length === 4 && wrong.length === 0,
+        'A in man-1 got 4 x 7.00 = 28.00 (override), A in P-1 got 3 x 6.50 = 19.50': rows.length === 4 && fixedOf(rows.find((x) => x['OpID'] === 'man-1')) === 2800 && fixedOf(rows.find((x) => x['OpID'] === 'ozonAuto:P-1' && x['Артикул'] === 'A')) === 1950,
+        'rows of other weeks, virtual and unrelated operations are byte-equal': j(rowsOfOps(h, OTHER_OPS)) === otherBefore,
+        'sheet «Упаковка недели» holds week prices A 6.50, B 12 and the override man-1/A 7': j(mine) === j(['A||650', 'A|man-1|700', 'B||1200'].sort()),
+        'text columns Неделя and OpID are kept as text': sheetRows.filter((x) => x['Неделя'] === W44).every((x) => typeof x['Неделя'] === 'string' && typeof x['OpID'] === 'string'),
+        'saver is recorded': sheetRows.filter((x) => x['Неделя'] === W44).every((x) => x['Сохранил'] === 'Кладовщик'),
+        'result names the rows changed': !!r.data && r.data.changedRows === 4,
+        'rows of the other weeks in the sheet are kept as they were': j(sheetRows.filter((x) => x['Неделя'] !== W44)) === seedOther
+      },
+      note: j({ wrong, mine, r: r.data && { changedRows: r.data.changedRows, journalAppended: r.data.journalAppended, err: r.data.costJournalError } })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B2b: a missing price (names the article) or an unparsable price -> error, nothing written, week before 2026-W43 refused', () => {
+    const h = baseWorld();
+    seedPrices(h);
+    const before = snap(h);
+    const missing = save(h, 'tok-user', W44, [{ article: 'A', unit: '6,50' }]);
+    const afterMissing = snap(h);
+    const bad = save(h, 'tok-user', W44, [{ article: 'A', unit: '6,50' }, { article: 'B', unit: 'abc' }]);
+    const afterBad = snap(h);
+    const early = save(h, 'tok-user', '2026-W42', PRICES);
+    return {
+      conds: {
+        'missing price -> error naming article B': missing.status === 'error' && msg(missing).indexOf('B') !== -1,
+        'missing price -> nothing written': afterMissing === before,
+        'unparsable price -> error naming article B': bad.status === 'error' && msg(bad).indexOf('B') !== -1,
+        'unparsable price -> nothing written': afterBad === before,
+        'week 2026-W42 refused, nothing written': early.status === 'error' && snap(h) === before
+      },
+      note: j({ missing: msg(missing), bad: msg(bad), early: msg(early) })
+    };
+  });
+
+  const manualWorld = () => {
+    const h = stand();
+    addManual(h, { opId: 'man-p', cabinet: 'MaxiStore', order: '888', pids: ['M-1'], date: '2026-10-28', items: [A(196)],
+      extras: '[Упаковка: 196 шт. x 5₽ = 980₽ | Прочее: 196 шт. x 55₽ = 10780₽]' });
+    return h;
+  };
+  const manRow = (h) => h.dumpTransSheet().find((r) => r['OpID'] === 'man-p');
+
+  t06Check('Item 97 ticket 06 B3: a manual write-off with «Упаковка» 980 and «Прочее» 10780 in «Объект»: step 1 at 6 roubles REPLACES the packaging (tag gone, «Прочее» intact, Сумма = goods + Прочее + 6 x qty, ДопРасходы = Прочее only); a later price change replaces again', () => {
+    const h = manualWorld();
+    const row0 = manRow(h);
+    const goods = kop(row0['Себестоимость списания']);
+    const sum0 = kop(row0['Сумма']);
+    const r = save(h, 'tok-user', W44, [{ article: 'A', unit: '6' }]);
+    const row1 = manRow(h) || {};
+    const wantSum1 = sum0 - 98000 + 6 * 196 * 100;
+    const r2 = save(h, 'tok-admin', W44, [{ article: 'A', unit: '7' }]);
+    const row2 = manRow(h) || {};
+    const wantSum2 = wantSum1 - 117600 + 7 * 196 * 100;
+    return {
+      conds: {
+        'before: Сумма = goods + 980 + 10780': sum0 === goods + 98000 + 1078000,
+        'save succeeded': ok(r),
+        'the «Упаковка» tag is gone from «Объект»': String(row1['Объект']).indexOf('Упаковка') === -1,
+        '«Прочее» tag is intact': String(row1['Объект']).indexOf('Прочее: 196 шт. x 55₽ = 10780₽') !== -1,
+        'Сумма = goods + 10780 + 1176 (packaging replaced, NOT added)': kop(row1['Сумма']) === wantSum1 && wantSum1 === goods + 1078000 + 117600,
+        'Цена = Сумма / 196 rounded to the kopeck': kop(row1['Цена']) === Math.round(wantSum1 / 196),
+        'Упаковка недели = 1176': fixedOf(row1) === 117600,
+        'ДопРасходы = 10780 (Прочее only)': kop(row1['ДопРасходы']) === 1078000,
+        'second save at 7 (admin): Сумма = previous - 1176 + 1372, tag still absent, ДопРасходы unchanged': ok(r2) && kop(row2['Сумма']) === wantSum2 && fixedOf(row2) === 137200 && kop(row2['ДопРасходы']) === 1078000 && String(row2['Объект']).indexOf('Упаковка') === -1
+      },
+      note: j({ sum0, row1: [row1['Объект'], row1['Сумма'], row1['Цена'], row1['ДопРасходы'], row1['Упаковка недели']], r, r2: msg(r2) })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B3b: a manual operation with an «Упаковка» tag that belongs to a combined shipment («Отгрузка» number) with an operation of ANOTHER week is refused, nothing written', () => {
+    const h = stand();
+    const dest = 'Ozon (MaxiStore) [Упаковка: 10 шт. x 5₽ = 50₽ | Прочее: 10 шт. x 55₽ = 550₽]';
+    // W44 operation (delivery date 2026-10-28) and a W45 operation (2026-11-03) share the number SHIP-Z
+    h.commitTransaction([A(10)], 'Расход', dest, '2026-10-28', 'tester', '2026-10-30T07:00:00Z', 'man-z1', null, undefined, '', 'SHIP-Z');
+    h.commitTransaction([B(5)], 'Расход', 'Ozon (MaxiStore)', '2026-11-03', 'tester', '2026-10-30T07:00:00Z', 'man-z2', null, undefined, '', 'SHIP-Z');
+    addPosting(h, { pid: 'Z-1', cabinet: 'MaxiStore', order: '4141', ids: idsOf(h, 'man-z1') });
+    addPosting(h, { pid: 'Z-2', cabinet: 'MaxiStore', order: '4242', ids: idsOf(h, 'man-z2') });
+    const listed = ((call(h, 'tok-user', 'getWeekPackaging', { week: W44 }).data || {}).operations || []).map((o) => o.opId);
+    const before = snap(h);
+    const s = save(h, 'tok-user', W44, [{ article: 'A', unit: '6' }, { article: 'B', unit: '6' }]);
+    return {
+      conds: {
+        'the tagged operation is in W44 and its combined partner is not': listed.indexOf('man-z1') !== -1 && listed.indexOf('man-z2') === -1,
+        'save is refused': s.status === 'error',
+        'the message says the shipment includes an operation of another week': msg(s).indexOf('общую отгрузку') !== -1 && msg(s).indexOf('другой недели') !== -1,
+        'nothing written': snap(h) === before
+      },
+      note: j({ listed, s: msg(s) })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B4a: a repeat save with the same input writes NOTHING (no cell on «История», «Упаковка недели» and the journal, no journal row); getWeekPackaging then reports the saved set', () => {
+    const h = baseWorld();
+    const first = save(h, 'tok-user', W44, PRICES, OVER);
+    const before = snap(h);
+    const st = watch(h, ['Транзакции', 'История', PKS, 'Себестоимость Озон']);
+    const again = save(h, 'tok-user', W44, PRICES, OVER);
+    const g = call(h, 'tok-user', 'getWeekPackaging', { week: W44 });
+    const saved = ((g && g.data) || {}).saved || {};
+    const man = (((g && g.data) || {}).operations || []).find((o) => o.opId === 'man-1') || {};
+    return {
+      conds: {
+        'first save succeeded': ok(first),
+        'repeat save succeeded (same set, no admin needed)': ok(again),
+        'zero write calls on «История», «Упаковка недели», the journal': st.n === 0,
+        'all sheets identical': snap(h) === before,
+        'result reports no changed rows and no journal rows': !!again.data && again.data.changedRows === 0 && again.data.journalAppended === 0,
+        'saved block: 2 week prices, 1 override, saver': (saved.prices || []).length === 2 && (saved.overrides || []).length === 1 && saved.savedBy === 'Кладовщик',
+        'row weekPackaging comes back as a number (4 x 7 = 28)': (man.rows || []).length === 1 && man.rows[0].weekPackaging === 28
+      },
+      note: j({ writes: st.n, again: again.data, saved })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B4b: changing the prices of an already saved week is admin-only (non-admin refused, nothing written); admin passes', () => {
+    const h = baseWorld();
+    save(h, 'tok-user', W44, PRICES, OVER);
+    const before = snap(h);
+    const changed = [{ article: 'A', unit: '6,60' }, { article: 'B', unit: '12' }];
+    const user = save(h, 'tok-user', W44, changed, OVER);
+    const afterUser = snap(h);
+    const admin = save(h, 'tok-admin', W44, changed, OVER);
+    const a1 = h.dumpTransSheet().find((r) => r['OpID'] === 'ozonAuto:P-1' && r['Артикул'] === 'A');
+    return {
+      conds: {
+        'non-admin refused': user.status === 'error' && (msg(user).indexOf('Forbidden') !== -1 || msg(user).indexOf('администратор') !== -1),
+        'nothing written for the non-admin': afterUser === before,
+        'admin succeeds': ok(admin),
+        'A of P-1 now carries 3 x 6.60 = 19.80': fixedOf(a1) === 1980
+      },
+      note: j({ user: msg(user), admin: msg(admin) })
+    };
+  });
+
+  const latestJournal = (h, opId, article) => {
+    const rows = h.dumpOzonCost().filter((r) => r['OpID'] === opId && r['Артикул'] === article);
+    return rows.length ? kop(rows[rows.length - 1]['Себестоимость отгрузки']) : null;
+  };
+
+  // Latest «Себестоимость после» (the moving average after the link) of a chain link
+  const latestAfter = (h, opId, article) => {
+    const rows = h.dumpOzonCost().filter((r) => r['OpID'] === opId && r['Артикул'] === article);
+    return rows.length ? kop(rows[rows.length - 1]['Себестоимость после']) : null;
+  };
+  // Tails: the later links of the same cabinet + article chains. Ozon cost is a moving average (item 47
+  // stage 4), so correcting a week link re-states every LATER link of its chain: P-5, P-3, man-9 (MaxiStore/A
+  // after P-1) and man-8 (MaxiStore/B after P-1 and man-4). man-1 (ShopTwo/A) has no tail.
+  const TAILS = [['ozonAuto:P-5', 'A'], ['ozonAuto:P-3', 'A'], ['man-9', 'A'], ['man-8', 'B']];
+  // Expected appended rows = the week's non-component rows (each one is a link whose cost changes) + one row per tail
+  const expectedAppended = (h) => rowsOfOps(h, W44_OPS).length + TAILS.length;
+  // Independent moving average: base 900 pieces, 1 piece shipped at its own unit cost, rounded to kopecks each step
+  const avg = (prior, shippedCost) => Math.round((900 * prior + 1 * shippedCost) * 100 / 901) / 100;
+
+  t06Check('Item 97 ticket 06 B5a: after the save the latest journal cost of every touched row equals its «Цена»; the later links of the same chains are re-stated by the moving average; operations of no touched chain are not extended', () => {
+    const h = baseWorld();
+    const baseJournalLen = h.dumpOzonCost().length;
+    const r = save(h, 'tok-user', W44, PRICES, OVER);
+    const rows = rowsOfOps(h, W44_OPS);
+    const EXPECTED_APPENDED = expectedAppended(h);
+    const bad = rows.filter((row) => latestJournal(h, row['OpID'], row['Артикул']) !== kop(row['Цена'])).map((row) => row['OpID'] + '/' + row['Артикул'] + ' journal ' + latestJournal(h, row['OpID'], row['Артикул']) + ' price ' + row['Цена']);
+    return {
+      conds: {
+        'save succeeded without a journal error': ok(r) && !!r.data && r.data.costJournalError === '',
+        'four rows checked': rows.length === 4,
+        'latest journal cost = Цена on every row': bad.length === 0,
+        'journalAppended = week rows + chain tails (8)': !!r.data && EXPECTED_APPENDED === 8 && r.data.journalAppended === EXPECTED_APPENDED,
+        'journal grew by exactly the appended count': h.dumpOzonCost().length === baseJournalLen + EXPECTED_APPENDED,
+        'every tail got exactly one new row': TAILS.every((t) => h.dumpOzonCost().filter((x) => x['OpID'] === t[0] && x['Артикул'] === t[1]).length === 2),
+        'A chain: the first week link P-1/A is 106.50 (= (300 + 3 x 6.50) / 3), tails follow the moving average 106.49 -> 106.48 -> 106.47': latestAfter(h, 'ozonAuto:P-1', 'A') === 10650
+          && latestAfter(h, 'ozonAuto:P-3', 'A') === kop(avg(106.5, 100)) && latestAfter(h, 'ozonAuto:P-3', 'A') === 10649
+          && latestAfter(h, 'ozonAuto:P-5', 'A') === kop(avg(avg(106.5, 100), 100)) && latestAfter(h, 'man-9', 'A') === kop(avg(avg(avg(106.5, 100), 100), 100)),
+        'B chain tail man-8: (900 x 262 + 250) / 901 = 261.99': latestAfter(h, 'man-8', 'B') === kop(avg(262, 250)) && latestAfter(h, 'man-8', 'B') === 26199,
+        'tails keep their own shipment cost (only the average after moves)': TAILS.every((t) => latestJournal(h, t[0], t[1]) === (t[1] === 'A' ? 10000 : 25000)),
+        'ShopTwo/A (man-1, no tail) gets exactly its one week row': h.dumpOzonCost().filter((x) => x['OpID'] === 'man-1').length === 2
+      },
+      note: j({ bad, r: r.data && { journalAppended: r.data.journalAppended, err: r.data.costJournalError } })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B5b: a cut-off (History written, journal failed -> costJournalError) is healed by a repeat save: the missing journal rows are appended once, a third save appends nothing', () => {
+    const h = baseWorld();
+    const real = h.context.reissueOzonCostRows;
+    let calls = 0;
+    h.context.reissueOzonCostRows = function () { calls++; throw new Error('journal unavailable'); };
+    const cut = save(h, 'tok-user', W44, PRICES, OVER);
+    h.context.reissueOzonCostRows = real;
+    const rows = rowsOfOps(h, W44_OPS);
+    const journalAfterCut = h.dumpOzonCost().length;
+    const EXPECTED_APPENDED = expectedAppended(h);
+    const staleBefore = rows.filter((row) => latestJournal(h, row['OpID'], row['Артикул']) !== kop(row['Цена'])).length;
+    const retry = save(h, 'tok-user', W44, PRICES, OVER);
+    const journalAfterRetry = h.dumpOzonCost().length;
+    const staleAfter = rowsOfOps(h, W44_OPS).filter((row) => latestJournal(h, row['OpID'], row['Артикул']) !== kop(row['Цена'])).length;
+    const third = save(h, 'tok-user', W44, PRICES, OVER);
+    return {
+      conds: {
+        'the cut-off save still answers success with costJournalError set': ok(cut) && !!cut.data && String(cut.data.costJournalError).indexOf('journal unavailable') !== -1 && calls >= 1,
+        'History was written despite the journal failure': rows.length === 4 && rows.every((row) => fixedOf(row) > 0),
+        'journal stale on 4 rows after the cut-off': staleBefore === 4,
+        'retry succeeds with no error and appends exactly the chain-implied 8 rows (4 week rows + 4 tails)': ok(retry) && retry.data.costJournalError === '' && EXPECTED_APPENDED === 8 && retry.data.journalAppended === EXPECTED_APPENDED && journalAfterRetry === journalAfterCut + EXPECTED_APPENDED,
+        'journal now agrees with Цена everywhere': staleAfter === 0,
+        'the tails were healed too (man-8/B average after = 261.99, P-5/A = 106.48)': latestAfter(h, 'man-8', 'B') === kop(avg(262, 250)) && latestAfter(h, 'ozonAuto:P-5', 'A') === kop(avg(avg(106.5, 100), 100)),
+        'History untouched by the retry': !!retry.data && retry.data.changedRows === 0,
+        'third save appends nothing (no doubling)': ok(third) && third.data.journalAppended === 0 && h.dumpOzonCost().length === journalAfterRetry
+      },
+      note: j({ cut: cut.data && cut.data.costJournalError, retry: retry.data, third: third.data })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B6: updateShipmentExtras after step 1 keeps «Упаковка недели» inside Сумма (editing «Прочее» moves only the extras share)', () => {
+    const h = manualWorld();
+    save(h, 'tok-user', W44, [{ article: 'A', unit: '6' }]);
+    const row1 = manRow(h);
+    const sum1 = kop(row1['Сумма']);
+    h.updateShipmentExtras({ id: row1['ID'], packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 60, services: [] }, 'tester');
+    const row2 = manRow(h);
+    return {
+      conds: {
+        'Упаковка недели still 1176': fixedOf(row2) === 117600,
+        'Сумма moved only by the Прочее delta (196 x 5 = 980)': kop(row2['Сумма']) === sum1 + 196 * 500,
+        'ДопРасходы = 196 x 60': kop(row2['ДопРасходы']) === 196 * 6000,
+        'no «Упаковка» tag came back': String(row2['Объект']).indexOf('Упаковка') === -1
+      },
+      note: j({ sum1, sum2: row2['Сумма'], fixed: row2['Упаковка недели'] })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B7a: restoreTransaction carries «Упаковка недели» from the payload (RESTORED_LATE_CELLS)', () => {
+    const h = baseWorld();
+    save(h, 'tok-user', W44, PRICES, OVER);
+    const row = h.dumpTransSheet().find((r) => r['OpID'] === 'ozonAuto:P-1' && r['Артикул'] === 'A');
+    const fixed = fixedOf(row);
+    h.deleteTransaction(String(row['ID']), 'tester');
+    const archived = h.dumpArchive()[0].data;
+    h.restoreTransaction(Object.assign({}, archived, { weekPackaging: fixed / 100 }));
+    const back = h.dumpTransSheet().find((r) => String(r['ID']) === String(row['ID'])) || {};
+    return { conds: { 'the row is back': !!back['ID'], 'its «Упаковка недели» is 19.50': fixedOf(back) === 1950 && fixed === 1950 }, note: j({ back: back['Упаковка недели'], archivedKeys: Object.keys(archived) }) };
+  });
+
+  t06Check('Item 97 ticket 06 B7b: delete -> restore from «Удалённые» (the archive written by deleteTransaction) keeps «Упаковка недели», so the next save does not add it twice', () => {
+    const h = baseWorld();
+    save(h, 'tok-user', W44, PRICES, OVER);
+    const row = h.dumpTransSheet().find((r) => r['OpID'] === 'ozonAuto:P-1' && r['Артикул'] === 'B');
+    h.deleteTransaction(String(row['ID']), 'tester');
+    const archiveId = h.dumpArchive()[0].archiveId;
+    h.restoreArchivedItem(archiveId, 'tester');
+    const back = h.dumpTransSheet().find((r) => String(r['ID']) === String(row['ID'])) || {};
+    const again = save(h, 'tok-user', W44, PRICES, OVER);
+    const after = h.dumpTransSheet().find((r) => String(r['ID']) === String(row['ID'])) || {};
+    return {
+      conds: {
+        'the row is back with «Упаковка недели» = 2 x 12 = 24': !!back['ID'] && fixedOf(back) === 2400,
+        'a repeat save does not add the packaging twice (Сумма unchanged)': ok(again) && kop(after['Сумма']) === kop(back['Сумма'])
+      },
+      note: j({ back: back['Упаковка недели'], sum: back['Сумма'], afterSum: after['Сумма'] })
+    };
+  });
+
+  // ---------- invoice line packaging mark ----------
+  const LINE_HEAD = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма', 'На поставку'];
+  const INV_HEAD = ['ID счёта', 'Неделя', 'Поставщик', 'Номер', 'Дата счёта', 'Покупатель', 'Всего к оплате', 'НДС', 'Всего наименований', 'Файл ID', 'Файл', 'Загрузил', 'Загружено', 'Заменён'];
+  const invStand = () => {
+    const h = freshHarness();
+    h.setNow('2026-11-03T10:00:00Z');
+    h.setScriptTimeZone(EKB);
+    h.setSheetAutoDates(EKB);
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'], ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+    h.setScriptProperty('test_dbSpreadsheetId', h.targetSpreadsheetId);
+    h.resetFakeDrive();
+    h.myDriveRoot().createFolder('Разработка').createFolder('Складской учет');
+    return h;
+  };
+  const listInv = (h, week) => (call(h, 'tok-user', 'listContractorInvoices', { week }).data || []);
+
+  t06Check('Item 97 ticket 06 B8a: setInvoiceLinePackaging stores «да»/«нет» in the new column «Упаковка» of «Строки счетов» (any user); listContractorInvoices resolves `packaging`: stored mark wins, else by name «стикеровк…» / «упаковк…»', () => {
+    const h = invStand();
+    h.setRegistrySheet('Счета подрядчика', [INV_HEAD,
+      ['INV-1', W44, 'ООО Ромашка', '0001', '02.11.2026', '', 300, '', 3, '', '', 'Кладовщик', '', ''],
+      ['INV-2', W44, 'ООО Ромашка', '0002', '02.11.2026', '', 10, '', 1, '', '', 'Кладовщик', '', '']]);
+    h.setRegistrySheet('Строки счетов', [LINE_HEAD,
+      ['INV-1', 1, 'Стикеровка товара', '1', 'шт', 100, 100, 'да'],
+      ['INV-1', 2, 'УПАКОВКА коробов', '1', 'шт', 100, 100, 'да'],
+      ['INV-1', 3, 'Приёмка', '1', 'шт', 100, 100, 'да'],
+      ['INV-2', 1, 'Стикеровка', '1', 'шт', 10, 10, 'да']]);
+    const lines = () => (listInv(h, W44).find((x) => x.id === 'INV-1') || { lines: [] }).lines;
+    const byName = lines().map((l) => l.packaging);
+    const r1 = call(h, 'tok-user', 'setInvoiceLinePackaging', { invoiceId: 'INV-1', lineNo: 1, packaging: false });
+    const r3 = call(h, 'tok-user', 'setInvoiceLinePackaging', { invoiceId: 'INV-1', lineNo: 3, packaging: true });
+    const rows = h.dumpSheetByName('Строки счетов');
+    const cell = (id, n) => (rows.find((x) => x['ID счёта'] === id && Number(x['№']) === n) || {})['Упаковка'];
+    const after = lines().map((l) => l.packaging);
+    const bad = call(h, 'tok-user', 'setInvoiceLinePackaging', { invoiceId: 'INV-1', lineNo: 9, packaging: true });
+    const hdr = h.getRegistrySheet('Строки счетов').__dump()[0].map((x) => String(x).trim());
+    return {
+      conds: {
+        'by name before any mark: true, true, false': j(byName) === j([true, true, false]),
+        'both calls succeed for a plain user': ok(r1) && ok(r3),
+        'the column «Упаковка» is the 9th header': hdr[8] === 'Упаковка',
+        'line 1 stored «нет», line 3 stored «да»': cell('INV-1', 1) === 'нет' && cell('INV-1', 3) === 'да',
+        'line 2 (not marked) stays empty, the other invoice is untouched': (cell('INV-1', 2) === '' || cell('INV-1', 2) === undefined) && (cell('INV-2', 1) === '' || cell('INV-2', 1) === undefined),
+        'stored mark wins over the name: false, true, true': j(after) === j([false, true, true]),
+        'unknown line -> error, nothing marked': bad.status === 'error'
+      },
+      note: j({ byName, after, hdr, bad: msg(bad) })
+    };
+  });
+
+  t06Check('Item 97 ticket 06 B8b: saveContractorInvoice writes column 9 «Упаковка» from line.packaging (true «да», false «нет», absent empty) and list resolves it (absent -> by name)', () => {
+    const h = invStand();
+    const L = (name, sum, extra) => Object.assign({ name, qty: '1', unit: 'шт', price: sum, sum }, extra || {});
+    const inv = { week: W44, fileWeek: W44, fileId: '',
+      header: { number: '0045', date: '02.11.2026', supplier: 'ООО Ромашка', buyer: 'ИП Тестов', total: '175,00', vat: 'Без НДС', itemCount: '3' },
+      lines: [L('Услуга А', '100,00', { packaging: true }), L('Стикеровка плёнкой', '50,00', { packaging: false }), L('Упаковка паллет', '25,00')] };
+    const r = call(h, 'tok-user', 'saveContractorInvoice', inv);
+    const rows = h.dumpSheetByName('Строки счетов');
+    const marks = rows.map((x) => x['Упаковка']);
+    const listed = listInv(h, W44);
+    const flags = ((listed[0] || {}).lines || []).map((l) => l.packaging);
+    return {
+      conds: {
+        'save succeeded': ok(r),
+        'column «Упаковка»: да / нет / empty': j(marks) === j(['да', 'нет', '']),
+        'list: stored true, stored false (beats the name), absent -> by name true': j(flags) === j([true, false, true])
+      },
+      note: j({ r: msg(r) || r.status, marks, flags })
+    };
+  });
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
