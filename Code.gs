@@ -10081,6 +10081,32 @@ function parseKopecksGs(text) {
   return Number(m[1]) * 100 + Number(((m[2] || '') + '00').slice(0, 2));
 }
 
+// Item 97 ticket 06: week packaging targets. Twin of weekPackagingTargets in src/lib/weekPackaging.ts.
+function weekPackagingTargetsGs(operations, prices, overrides) {
+  var missing = [];
+  var invalid = [];
+  var rows = [];
+  operations.forEach(function (op) {
+    op.rows.forEach(function (r) {
+      if (r.isComponent) return;
+      var price = null;
+      overrides.forEach(function (o) { if (!price && o.opId === op.opId && o.article === r.article) price = o; });
+      if (!price) prices.forEach(function (p) { if (!price && p.article === r.article) price = p; });
+      if (!price) {
+        if (missing.indexOf(r.article) < 0) missing.push(r.article);
+        return;
+      }
+      var unitKop = parseKopecksGs(price.unit === undefined || price.unit === null ? '' : price.unit);
+      if (unitKop === null) {
+        if (invalid.indexOf(r.article) < 0) invalid.push(r.article);
+        return;
+      }
+      rows.push({ id: r.id, opId: op.opId, article: r.article, quantity: r.quantity, unitKop: unitKop, targetKop: unitKop * r.quantity });
+    });
+  });
+  return { ok: missing.length === 0 && invalid.length === 0, missing: missing, invalid: invalid, rows: rows };
+}
+
 function parseQtyMilliGs(text) {
   const compact = String(text === undefined || text === null ? '' : text)
     .replace(/[\s   ]/g, '').replace(/(₽|руб\.?|р\.)$/i, '');
