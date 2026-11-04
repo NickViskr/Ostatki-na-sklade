@@ -10138,6 +10138,75 @@ function parseQtyMilliGs(text) {
   return milli > 0 ? milli : null;
 }
 
+// Item 97 ticket 07: week spread (step 2). Twins of invoiceSelectionKop / splitKopByWeights / weekSpreadTargets
+// in src/lib/weekSpread.ts; weekSpreadParity.test.ts keeps them in step, message texts included. Integer kopecks only.
+function invoiceSelectionKopGs(lines, selections) {
+  var errors = [];
+  var totalKop = 0;
+  lines.forEach(function (l) { var k = parseKopecksGs(String(l.sum)); totalKop += k === null ? 0 : k; });
+  if (selections.length === 0) errors.push('Не выбрано ни одной строки счёта');
+  var seen = [];
+  var selectedKop = 0;
+  selections.forEach(function (s) {
+    var line = null;
+    lines.forEach(function (l) { if (!line && l.n === s.n) line = l; });
+    if (!line) { errors.push('Строки ' + s.n + ' нет в счёте'); return; }
+    if (seen.indexOf(s.n) >= 0) { errors.push('Строка ' + s.n + ' выбрана дважды'); return; }
+    seen.push(s.n);
+    if (!line.toSupply) { errors.push('Строка ' + s.n + ' не отмечена «На поставку»'); return; }
+    var qtyMilli = parseQtyMilliGs(String(s.qty));
+    var lineMilli = parseQtyMilliGs(String(line.qty));
+    if (qtyMilli === null) { errors.push('Строка ' + s.n + ': количество «' + s.qty + '» не подходит (нужно число больше 0, до 3 знаков)'); return; }
+    if (lineMilli === null || qtyMilli > lineMilli) { errors.push('Строка ' + s.n + ': количество «' + s.qty + '» больше, чем в счёте'); return; }
+    var sumKop = parseKopecksGs(String(line.sum));
+    var priceKop = parseKopecksGs(String(line.price));
+    if (qtyMilli === lineMilli && sumKop !== null) { selectedKop += sumKop; return; }
+    if (priceKop === null) { errors.push('Строка ' + s.n + ': не удалось прочитать цену'); return; }
+    selectedKop += Math.floor((qtyMilli * priceKop + 500) / 1000);
+  });
+  return { ok: errors.length === 0, errors: errors, selectedKop: selectedKop, unallocatedKop: totalKop - selectedKop, totalKop: totalKop };
+}
+
+function splitKopByWeightsGs(totalKop, weights) {
+  var sum = weights.reduce(function (a, w) { return a + w; }, 0);
+  if (sum <= 0) return weights.map(function () { return 0; });
+  var shares = weights.map(function (w) { return Math.floor((totalKop * w) / sum); });
+  var order = weights
+    .map(function (w, i) { return { i: i, rem: (totalKop * w) % sum }; })
+    .sort(function (a, b) { return b.rem - a.rem || a.i - b.i; });
+  var left = totalKop - shares.reduce(function (a, s) { return a + s; }, 0);
+  for (var k = 0; left > 0 && k < order.length; k++, left--) shares[order[k].i] += 1;
+  return shares;
+}
+
+function weekSpreadTargetsGs(totalKop, operations, pcsPerBox) {
+  var missing = [];
+  var opRows = operations.map(function (op) {
+    return op.rows.map(function (r) {
+      if (r.isComponent || !(r.quantity > 0)) return 0;
+      var norm = pcsPerBox[r.article];
+      if (!(typeof norm === 'number' && isFinite(norm) && norm > 0)) {
+        if (missing.indexOf(r.article) < 0) missing.push(r.article);
+        return 0;
+      }
+      return Math.ceil(r.quantity / norm);
+    });
+  });
+  if (missing.length > 0) return { ok: false, missing: missing.sort(), operations: [], byCabinet: {} };
+  var opBoxes = opRows.map(function (boxes) { return boxes.reduce(function (a, b) { return a + b; }, 0); });
+  var opShares = splitKopByWeightsGs(totalKop, opBoxes);
+  var byCabinet = {};
+  var result = operations.map(function (op, i) {
+    var rowShares = splitKopByWeightsGs(opShares[i], opRows[i]);
+    byCabinet[op.cabinet] = (byCabinet[op.cabinet] || 0) + opShares[i];
+    return {
+      opId: op.opId, cabinet: op.cabinet, boxes: opBoxes[i], shareKop: opShares[i],
+      rows: op.rows.map(function (r, j) { return { id: r.id, article: r.article, boxes: opRows[i][j], shareKop: rowShares[j] }; })
+    };
+  });
+  return { ok: true, missing: [], operations: result, byCabinet: byCabinet };
+}
+
 function formatKopecksGs(kop) {
   return Math.floor(kop / 100) + ',' + ('0' + (kop % 100)).slice(-2);
 }
