@@ -225,6 +225,9 @@ export interface ExtrasRow {
   writeOffCost?: number;
   /** The kit of a main row; the components with the same value hold its goods cost. */
   groupId?: string;
+  /** Item 97 tickets 06/07: fixed week packaging and contractor-invoice shares inside «Сумма» — goods-like, not extras. */
+  weekPackaging?: number | null;
+  weekInvoice?: number | null;
 }
 
 export interface ExtrasRowMoney {
@@ -268,7 +271,7 @@ export function rowMoneyAfterExtras(rows: ExtrasRow[], oldTotal: number, newTota
     if (typeof r.writeOffCost === 'number') {
       const goods = rows.reduce(
         (sum, c) => (c.isComponent === true && r.groupId && c.groupId === r.groupId ? sum + (Number(c.total) || 0) : sum),
-        Number(r.writeOffCost) || 0
+        (Number(r.writeOffCost) || 0) + (Number(r.weekPackaging) || 0) + (Number(r.weekInvoice) || 0)
       );
       const carried = round2((Number(r.total) || 0) - goods);
       const carriedKop = Math.round(carried * 100);

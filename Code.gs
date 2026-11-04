@@ -502,6 +502,14 @@ function doPost(e) {
       case 'setInvoiceLinePackaging':
         result = setInvoiceLinePackaging(data, currentUser);
         break;
+      // Item 97 ticket 07 part B: step 2 (the invoice spread). Any user reads and applies the first time;
+      // changing an applied spread is admin-only (checked inside applyInvoiceSpread, it depends on the stored input).
+      case 'getInvoiceSpread':
+        result = getInvoiceSpread(data.week);
+        break;
+      case 'applyInvoiceSpread':
+        result = applyInvoiceSpread(data, currentUser);
+        break;
       case 'applyCancelledOzonOrders':
         result = applyCancelledOzonOrders(data);
         break;
@@ -1225,7 +1233,11 @@ function parseTransactionRow(row, headers) {
     // Item 97 ticket 06: the fixed roubles of the week's packaging inside «Сумма»; null when the cell is empty
     weekPackaging: (headers && headers.indexOf('Упаковка недели') !== -1 && String(row[headers.indexOf('Упаковка недели')]).trim() !== '')
                      ? parseNumber(row[headers.indexOf('Упаковка недели')])
-                     : null
+                     : null,
+    // Item 97 ticket 07: the fixed roubles of ALL contractor-invoice shares inside «Сумма»; null when the cell is empty
+    weekInvoice: (headers && headers.indexOf('Счёт недели') !== -1 && String(row[headers.indexOf('Счёт недели')]).trim() !== '')
+                   ? parseNumber(row[headers.indexOf('Счёт недели')])
+                   : null
   };
 }
 
@@ -1290,7 +1302,7 @@ function getTransactionSheet(ss) {
   }
   if (finalSheet) {
     // 'Упаковка недели' sits before «Комментарий»: a fresh sheet keeps «Комментарий», «Отгрузка» as its last two headers (item 90).
-    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID', 'ДопРасходы', 'Упаковка недели', 'Комментарий', 'Отгрузка']);
+    ensureColumns(finalSheet, ['groupId', 'isComponent', 'OpID', 'ДопРасходы', 'Упаковка недели', 'Счёт недели', 'Комментарий', 'Отгрузка']);
   }
   return finalSheet;
 }
@@ -1774,6 +1786,7 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
   const opIdHeaderIdx = headers.indexOf('OpID');
   const addHeaderIdx = headers.indexOf('ДопРасходы');
   const weekPackagingHeaderIdx = headers.indexOf('Упаковка недели');
+  const weekInvoiceHeaderIdx = headers.indexOf('Счёт недели');
 
   let rowIndex = -1;
   let transData = null;
@@ -1836,7 +1849,9 @@ function deleteTransaction(id, deletedBy, isUpdate = false, replacementQty = nul
       opId: opIdHeaderIdx !== -1 ? String(transData[opIdHeaderIdx] || '').trim() : '',
       additionalCosts: (addHeaderIdx !== -1 && String(transData[addHeaderIdx]).trim() !== '') ? parseNumber(transData[addHeaderIdx]) : '',
       // Item 97 ticket 06: a restored row must keep its «Упаковка недели», or the next step-1 save adds it twice.
-      weekPackaging: (weekPackagingHeaderIdx !== -1 && String(transData[weekPackagingHeaderIdx]).trim() !== '') ? parseNumber(transData[weekPackagingHeaderIdx]) : ''
+      weekPackaging: (weekPackagingHeaderIdx !== -1 && String(transData[weekPackagingHeaderIdx]).trim() !== '') ? parseNumber(transData[weekPackagingHeaderIdx]) : '',
+      // Item 97 ticket 07: the same for «Счёт недели»
+      weekInvoice: (weekInvoiceHeaderIdx !== -1 && String(transData[weekInvoiceHeaderIdx]).trim() !== '') ? parseNumber(transData[weekInvoiceHeaderIdx]) : ''
     }, deletedBy);
   }
   
@@ -4502,7 +4517,7 @@ function restoreTransaction(payload) {
  * Item 93: the same for «OpID» and «ДопРасходы» (a NUMBER — the third element of the pair), which the
  * archive payload carries since then; without them a restored row lost its link to the cost journal.
  */
-const RESTORED_LATE_CELLS = [['Комментарий', 'comment'], ['Отгрузка', 'shipmentId'], ['OpID', 'opId'], ['ДопРасходы', 'additionalCosts', 'number'], ['Упаковка недели', 'weekPackaging', 'number']];
+const RESTORED_LATE_CELLS = [['Комментарий', 'comment'], ['Отгрузка', 'shipmentId'], ['OpID', 'opId'], ['ДопРасходы', 'additionalCosts', 'number'], ['Упаковка недели', 'weekPackaging', 'number'], ['Счёт недели', 'weekInvoice', 'number']];
 /** The value for one late cell of a restored row: '' when the payload holds nothing for it. */
 function restoredLateCellValue(pair, payload) {
   const raw = payload ? payload[pair[1]] : '';
@@ -4559,6 +4574,7 @@ function deleteMultipleTransactions(ids, deletedBy) {
   const opIdIdxBulk = headers.map(h => String(h).trim()).indexOf('OpID');
   const addIdxBulk = headers.map(h => String(h).trim()).indexOf('ДопРасходы');
   const weekPackagingIdxBulk = headers.map(h => String(h).trim()).indexOf('Упаковка недели');
+  const weekInvoiceIdxBulk = headers.map(h => String(h).trim()).indexOf('Счёт недели');
   // Item 93: the OpIDs of the Ozon shipment rows being deleted — one follow-up of the cost journal for all of them.
   const ozonOpIds = [];
   let ozonRowsWithoutOpId = 0;
@@ -4634,7 +4650,9 @@ function deleteMultipleTransactions(ids, deletedBy) {
         opId: opIdIdxBulk !== -1 ? String(transDataAll[i][opIdIdxBulk] || '').trim() : '',
         additionalCosts: (addIdxBulk !== -1 && String(transDataAll[i][addIdxBulk]).trim() !== '') ? parseNumber(transDataAll[i][addIdxBulk]) : '',
         // Item 97 ticket 06: see deleteTransaction.
-        weekPackaging: (weekPackagingIdxBulk !== -1 && String(transDataAll[i][weekPackagingIdxBulk]).trim() !== '') ? parseNumber(transDataAll[i][weekPackagingIdxBulk]) : ''
+        weekPackaging: (weekPackagingIdxBulk !== -1 && String(transDataAll[i][weekPackagingIdxBulk]).trim() !== '') ? parseNumber(transDataAll[i][weekPackagingIdxBulk]) : '',
+        // Item 97 ticket 07: see deleteTransaction.
+        weekInvoice: (weekInvoiceIdxBulk !== -1 && String(transDataAll[i][weekInvoiceIdxBulk]).trim() !== '') ? parseNumber(transDataAll[i][weekInvoiceIdxBulk]) : ''
       };
       rowsToArchive.push([Utilities.getUuid(), 'Transaction', deletedAt, JSON.stringify(archiveObj), deletedBy]);
       if (isOzonShipmentHistoryRow(type, dest, isComponentVal === true || String(isComponentVal).toLowerCase() === 'true')) {
@@ -10533,6 +10551,7 @@ function weekPackagingOperations(week) {
       deliveryDate: sheetCellText(row, headers, 'Дата поставки'),
       storedAdditional: additional === '' ? null : parseNumber(additional),
       weekPackaging: weekPackaging === '' ? null : parseNumber(weekPackaging),
+      shipmentId: String(sheetCellText(row, headers, 'Отгрузка')).trim(),
       isComponent: sheetCellText(row, headers, 'isComponent') === true
         || String(sheetCellText(row, headers, 'isComponent')).toLowerCase() === 'true'
     };
@@ -10829,6 +10848,422 @@ function saveWeekPackaging(data, user) {
   }
 
   return { changedRows: changedRows, journalAppended: appended, costJournalError: costJournalError, newTransactions: getTransactions().rows };
+}
+
+// ===== Item 97 ticket 07 part B: week window, step 2 (the contractor invoice spread over the week's supplies) =====
+// The invoice total is split (weekSpreadTargetsGs) over the ticked write-off operations by their boxes and over the
+// rows of an operation by the rows' boxes. The fixed roubles land in «История» column «Счёт недели» and inside
+// «Сумма» / «Цена»; the shares of every invoice are kept in «Доли счетов» and the applied input in
+// «Распределения счетов». Money is integer kopecks wherever it is summed or compared.
+
+const INVOICE_SHARES_SHEET = 'Доли счетов';
+const INVOICE_SHARES_HEADERS = ['ID счёта', 'Неделя', 'OpID', 'ID строки', 'Доля (₽)', 'Применил', 'Применено'];
+const INVOICE_SHARES_TEXT_COLS = [1, 2, 3, 4, 6, 7];
+const INVOICE_INPUTS_SHEET = 'Распределения счетов';
+const INVOICE_INPUTS_HEADERS = ['ID счёта', 'Неделя', 'Строки', 'Поставки', 'Применил', 'Применено'];
+const INVOICE_INPUTS_TEXT_COLS = [1, 2, 3, 4, 5, 6];
+const INVOICE_TAG_LABEL = 'Счёт № ';
+
+function invoiceSheetText(v) {
+  return v === undefined || v === null ? '' : String(v).trim();
+}
+
+/** Every row of «Доли счетов» (empty list when the sheet does not exist yet). */
+function readInvoiceSharesSheet() {
+  const sheet = getSpreadsheet().getSheetByName(INVOICE_SHARES_SHEET);
+  if (!sheet) return [];
+  return readInvoiceSheet(sheet).map(function(r, i) {
+    return { sheetRow: i + 2, invoiceId: invoiceSheetText(r[0]), week: invoiceSheetText(r[1]), opId: invoiceSheetText(r[2]),
+      rowId: invoiceSheetText(r[3]), shareKop: weekPackagingUnitKop(r[4]) || 0 };
+  });
+}
+
+/** Every row of «Распределения счетов»: the applied input of each invoice (lines and OpIDs as parsed JSON). */
+function readInvoiceInputsSheet() {
+  const sheet = getSpreadsheet().getSheetByName(INVOICE_INPUTS_SHEET);
+  if (!sheet) return [];
+  const parse = function(v) {
+    try { const a = JSON.parse(String(v)); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  };
+  return readInvoiceSheet(sheet).map(function(r, i) {
+    return { sheetRow: i + 2, invoiceId: invoiceSheetText(r[0]), week: invoiceSheetText(r[1]), lines: parse(r[2]), opIds: parse(r[3]),
+      appliedBy: invoiceSheetText(r[4]), appliedAt: invoiceSheetText(r[5]) };
+  });
+}
+
+/**
+ * «ШТ/КОР» of every SKU as the cell holds it: a positive number, else null (empty, 0, negative, text).
+ * getSkus reads an empty cell as 1, which would split money by a norm nobody entered.
+ */
+function readSkuBoxNormsRaw() {
+  const sheet = getSpreadsheet().getSheetByName('SKU');
+  const norms = {};
+  if (!sheet) return norms;
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return norms;
+  const headers = data[0].map(function(h) { return String(h).trim(); });
+  const skuIdx = headers.indexOf('SKU') !== -1 ? headers.indexOf('SKU') : 0;
+  const pcsIdx = headers.indexOf('ШТ/КОР') !== -1 ? headers.indexOf('ШТ/КОР') : 1;
+  data.slice(1).forEach(function(row) {
+    const sku = String(row[skuIdx] || '').trim();
+    if (sku === '' || Object.prototype.hasOwnProperty.call(norms, sku)) return;
+    const raw = row[pcsIdx];
+    const text = String(raw === undefined || raw === null ? '' : raw).trim().replace(',', '.');
+    const n = text === '' ? NaN : Number(text);
+    norms[sku] = isFinite(n) && n > 0 ? n : null;
+  });
+  return norms;
+}
+
+/** The roubles of «Услуги» + «Прочее» an operation carries now (the part a contractor invoice replaces). */
+function operationServicesRoubles(destination) {
+  const e = parseShipmentExtrasGs(destination);
+  return extrasTotalGs({ packaging: 0, other: e.other, services: e.services });
+}
+
+/** Screen data of step 2: the operations of the week with their rows and RAW box norms, and the applied inputs. */
+function getInvoiceSpread(week) {
+  assertWeekFilesWeek(week);
+  const norms = readSkuBoxNormsRaw();
+  const operations = weekPackagingOperations(String(week)).map(function(op) {
+    const out = {
+      opId: op.opId, cabinet: op.cabinet, orderNumbers: op.orderNumbers, auto: op.auto,
+      shipmentId: op.records.length > 0 ? op.records[0].shipmentId : '',
+      rows: op.rows.map(function(r) {
+        const norm = Object.prototype.hasOwnProperty.call(norms, r.article) ? norms[r.article] : null;
+        return { id: r.id, article: r.article, quantity: r.quantity, isComponent: r.isComponent, pcsPerBox: norm };
+      }),
+      services: op.records.length > 0 ? operationServicesRoubles(op.records[0].destination) : 0
+    };
+    if (op.weekConflict) out.weekConflict = op.weekConflict.slice();
+    return out;
+  });
+  const applied = readInvoiceInputsSheet().filter(function(r) { return r.week === String(week); }).map(function(r) {
+    return { invoiceId: r.invoiceId, lines: r.lines, opIds: r.opIds, appliedBy: r.appliedBy, appliedAt: r.appliedAt };
+  });
+  return { operations: operations, applied: applied };
+}
+
+/** «Объект» with this invoice's tag set to `tagText` (replaced in place, else appended) or dropped when `tagText` is null. */
+function setInvoiceTagGs(destination, prefix, tagText) {
+  let replaced = false;
+  let out = String(destination || '').replace(/(\s*)\[([^\]]*)\]/g, function(whole, space, inner) {
+    if (inner.trim().indexOf(prefix) !== 0) return whole;
+    if (tagText === null || replaced) return '';
+    replaced = true;
+    return space + '[' + tagText + ']';
+  });
+  if (tagText !== null && !replaced) out = out.replace(/\s+$/, '') + (out.trim() === '' ? '' : ' ') + '[' + tagText + ']';
+  return out;
+}
+
+/** The input of an apply as one comparable text: lines by number with their quantity in thousandths, and the OpIDs. */
+function invoiceSpreadInputKey(lines, opIds) {
+  return lines.map(function(l) { return Number(l.n) + ':' + parseQtyMilliGs(String(l.qty)); }).sort().join(',')
+    + '|' + opIds.map(String).sort().join(',');
+}
+
+/**
+ * Item 97 ticket 07 part B. Spreads one invoice: `data` = { week, invoiceId, lines: [{ n, qty }], opIds: [OpID] }.
+ * Everything is worked out before the first write. A repeat with the same input writes nothing; changing an
+ * applied spread is admin-only. Cut-off safety: the two sheets are written first, then every «История» row
+ * with ONE setValues over its whole width, and each row's target comes from its own «Счёт недели» cell and
+ * the shares sheet — so a retry after a cut-off anywhere finishes without doubling.
+ * @returns {Object} { changedRows, journalAppended, costJournalError, newTransactions }
+ */
+function applyInvoiceSpread(data, user) {
+  const input = data || {};
+  const NOTHING = ' Ничего не записано.';
+  const week = String(input.week === undefined || input.week === null ? '' : input.week);
+  assertWeekFilesWeek(week);
+  if (week < CONTRACTOR_INVOICE_FIRST_WEEK) throw new Error('Счета считаются с недели ' + CONTRACTOR_INVOICE_FIRST_WEEK + '.' + NOTHING);
+  const invoiceId = String(input.invoiceId === undefined || input.invoiceId === null ? '' : input.invoiceId).trim();
+  const invoice = listContractorInvoices(week).filter(function(inv) { return inv.id === invoiceId; })[0];
+  if (!invoice) throw new Error('Счёт не найден среди счетов недели ' + week + '.' + NOTHING);
+
+  const selections = (Array.isArray(input.lines) ? input.lines : []).map(function(l) {
+    return { n: Number(l && l.n), qty: l && l.qty !== undefined && l.qty !== null ? String(l.qty).trim() : '' };
+  });
+  const selection = invoiceSelectionKopGs(invoice.lines, selections);
+  if (!selection.ok) throw new Error(selection.errors[0] + '.' + NOTHING);
+  const opIds = [];
+  (Array.isArray(input.opIds) ? input.opIds : []).forEach(function(id) {
+    const s = String(id === undefined || id === null ? '' : id).trim();
+    if (s !== '' && opIds.indexOf(s) === -1) opIds.push(s);
+  });
+  if (opIds.length === 0) throw new Error('Не выбрано ни одной поставки.' + NOTHING);
+
+  const weekOps = weekPackagingOperations(week);
+  const weekOpById = {};
+  weekOps.forEach(function(op) { weekOpById[op.opId] = op; });
+  opIds.forEach(function(id) {
+    if (!weekOpById[id]) throw new Error('Поставка ' + id + ' не относится к неделе ' + week + '.' + NOTHING);
+  });
+  const ticked = weekOps.filter(function(op) { return opIds.indexOf(op.opId) !== -1; });
+  const tickedSet = {};
+  ticked.forEach(function(op) {
+    if (op.weekConflict) {
+      throw new Error('Заявка ' + (op.orderNumbers.join(', ') || op.opId) + ' попала в две недели (' + op.weekConflict.join(' и ')
+        + '). Поставьте «Неделю вручную» у её отгрузки.' + NOTHING);
+    }
+    tickedSet[op.opId] = true;
+  });
+
+  // The spread itself: by boxes, from the RAW norms (a missing one refuses and names the article).
+  const targets = weekSpreadTargetsGs(selection.selectedKop, ticked.map(function(op) {
+    return { opId: op.opId, cabinet: op.cabinet, rows: op.rows };
+  }), readSkuBoxNormsRaw());
+  if (!targets.ok) {
+    throw new Error('Не задано число штук в коробе (ШТ/КОР) для артикула: ' + targets.missing.join(', ') + '.' + NOTHING);
+  }
+  if (targets.operations.every(function(o) { return o.boxes === 0; })) {
+    throw new Error('В выбранных поставках нет позиций с количеством.' + NOTHING);
+  }
+  const newShareById = {};
+  const opShareKop = {};
+  targets.operations.forEach(function(o) {
+    opShareKop[o.opId] = o.shareKop;
+    o.rows.forEach(function(r) { if (r.boxes > 0) newShareById[r.id] = r.shareKop; });
+  });
+
+  // What is stored: this invoice's shares and input, and everybody else's shares.
+  const allShares = readInvoiceSharesSheet();
+  const myShares = allShares.filter(function(s) { return s.invoiceId === invoiceId; });
+  const othersKopById = {};
+  allShares.forEach(function(s) {
+    if (s.invoiceId !== invoiceId) othersKopById[s.rowId] = (othersKopById[s.rowId] || 0) + s.shareKop;
+  });
+  const myInput = readInvoiceInputsSheet().filter(function(r) { return r.invoiceId === invoiceId; })[0] || null;
+  const newKey = invoiceSpreadInputKey(selections, opIds);
+  const sameInput = !!myInput && invoiceSpreadInputKey(myInput.lines, myInput.opIds) === newKey;
+  if (myInput && !sameInput) assertAdmin(user);
+
+  // The whole «История» is read once; the rows to write are whole rows.
+  const sheet = getTransactionSheet(getSpreadsheet());
+  const lastRow = sheet.getLastRow();
+  const width = sheet.getLastColumn();
+  const values = lastRow < 2 ? [] : sheet.getRange(1, 1, lastRow, width).getValues();
+  const headers = values.length === 0 ? [] : values[0].map(function(h) { return String(h).trim(); });
+  const col = {};
+  ['ID', 'OpID', 'Отгрузка', 'Цена', 'Сумма', 'Объект', 'ДопРасходы', 'Счёт недели'].forEach(function(name) { col[name] = headers.indexOf(name); });
+  ['ID', 'Цена', 'Сумма', 'Объект', 'Счёт недели'].forEach(function(name) {
+    if (col[name] === -1) throw new Error('В листе «История» не хватает колонки «' + name + '».' + NOTHING);
+  });
+  const describe = function(r) {
+    const row = values[r];
+    const additional = String(sheetCellText(row, headers, 'ДопРасходы')).trim();
+    return {
+      sheetRow: r + 1, values: row, id: String(row[col['ID']]).trim(),
+      opId: col['OpID'] === -1 ? '' : String(row[col['OpID']] || '').trim(),
+      shipmentId: col['Отгрузка'] === -1 ? '' : String(row[col['Отгрузка']] || '').trim(),
+      article: String(sheetCellText(row, headers, 'Артикул')),
+      quantity: parseNumber(sheetCellText(row, headers, 'Количество')),
+      price: parseNumber(sheetCellText(row, headers, 'Цена')),
+      total: parseNumber(sheetCellText(row, headers, 'Сумма')),
+      destination: String(sheetCellText(row, headers, 'Объект')),
+      date: sheetCellText(row, headers, 'Дата'),
+      deliveryDate: sheetCellText(row, headers, 'Дата поставки'),
+      storedAdditional: additional === '' ? null : parseNumber(additional),
+      weekInvoiceKop: Math.round((String(row[col['Счёт недели']]).trim() === '' ? 0 : parseNumber(row[col['Счёт недели']])) * 100),
+      isComponent: sheetCellText(row, headers, 'isComponent') === true
+        || String(sheetCellText(row, headers, 'isComponent')).toLowerCase() === 'true'
+    };
+  };
+  const rowIndexById = {};
+  for (let r = 1; r < values.length; r++) {
+    const id = String(values[r][col['ID']]).trim();
+    if (id !== '') rowIndexById[id] = r;
+  }
+  // Orders of one combined shipment are ticked together.
+  ticked.forEach(function(op) {
+    const shipmentId = op.records.length > 0 ? op.records[0].shipmentId : '';
+    if (!shipmentId || col['Отгрузка'] === -1) return;
+    for (let r = 1; r < values.length; r++) {
+      const rowShip = String(values[r][col['Отгрузка']] || '').trim();
+      const rowOp = col['OpID'] === -1 ? '' : String(values[r][col['OpID']] || '').trim();
+      if (rowShip === shipmentId && !tickedSet[rowOp]) {
+        throw new Error('Заявка ' + op.opId + ' входит в общую отгрузку вместе с заявкой, которая не отмечена или относится к другой неделе ('
+          + (rowOp || 'без номера операции') + '): общую отгрузку нужно отметить целиком.' + NOTHING);
+      }
+    }
+  });
+
+  // The rows in play: every row of the week's operations and every row this invoice booked before.
+  const universe = [];
+  const seen = {};
+  const touch = function(id) {
+    if (seen[id] || rowIndexById[id] === undefined) return;
+    seen[id] = true;
+    universe.push(describe(rowIndexById[id]));
+  };
+  weekOps.forEach(function(op) { op.records.forEach(function(rec) { touch(rec.id); }); });
+  myShares.forEach(function(s) { touch(s.rowId); });
+  const touchedOps = {};
+  ticked.forEach(function(op) { touchedOps[op.opId] = true; });
+  myShares.forEach(function(s) { touchedOps[s.opId] = true; });
+
+  // «Услуги» / «Прочее» of a ticked operation go (the invoice replaces them), «Упаковка» stays: the pencil's plan
+  // with packaging as written, other 0 and no services. One plan per shipment.
+  // Cut-off safety (ticket 07): the plan learns the OLD extras from evidence rows (the anchor's «Объект», each order's
+  // carrier «ДопРасходы»). So (a) a row whose own «Объект» no longer carries «Прочее»/«Услуги» is already done and gets
+  // no plan step, (b) the anchor is chosen among rows that still carry them, (c) evidence rows are written LAST.
+  const stepByRow = {};
+  const evidenceSheetRows = {};
+  const planned = {};
+  const packagingSourceByGroup = {};
+  const carriesExtras = function(destination) {
+    const e = parseShipmentExtrasGs(destination);
+    return e.other > 0 || e.services.length > 0;
+  };
+  ticked.forEach(function(op) {
+    if (op.records.length === 0) return;
+    const shipmentRows = shipmentRowsOfTransaction(op.records[0].id, true);
+    if (shipmentRows.length === 0) return;
+    const groupKey = shipmentRows[0].shipmentId ? 'ship:' + shipmentRows[0].shipmentId : 'op:' + op.opId;
+    if (planned[groupKey]) return;
+    // «Упаковка» is read from the shipment's first ticked op (done or not: a rewrite keeps the whole packaging in it).
+    if (!packagingSourceByGroup[groupKey]) {
+      packagingSourceByGroup[groupKey] = shipmentRows.filter(function(r) { return r.id === op.records[0].id; })[0] || shipmentRows[0];
+    }
+    const opRows = shipmentRows[0].shipmentId
+      ? shipmentRows.filter(function(r) { return r.opId === op.opId; })
+      : shipmentRows;
+    const carryingRows = opRows.filter(function(r) { return carriesExtras(r.destination); });
+    if (carryingRows.length === 0) return;
+    planned[groupKey] = true;
+    shipmentRows.forEach(function(r) {
+      if (!tickedSet[r.opId]) {
+        throw new Error('Заявка ' + op.opId + ' входит в общую отгрузку вместе с заявкой, которая не отмечена или относится к другой неделе ('
+          + (r.opId || r.article) + ').' + NOTHING);
+      }
+      if (String(r.type) !== 'Расход') {
+        throw new Error('Дополнительные расходы есть только у отгрузки: эта операция — «' + r.type + '».' + NOTHING);
+      }
+    });
+    const anchor = carryingRows[0];
+    // A combined shipment learns the old extras from the orders' carriers, so its anchor only supplies the wording and the
+    // packaging: take those from the first op (as a clean apply does). A single op learns them from the anchor's text.
+    const planAnchor = shipmentRows[0].shipmentId
+      ? Object.assign({}, anchor, { destination: packagingSourceByGroup[groupKey].destination })
+      : anchor;
+    const packaging = parseShipmentExtrasGs(planAnchor.destination).packaging;
+    const computed = planShipmentExtrasEdit(shipmentRows, planAnchor, {
+      packagingMode: 'batch', packagingValue: packaging, otherMode: 'batch', otherValue: 0, services: []
+    });
+    const rowBySheetRow = {};
+    shipmentRows.forEach(function(r) { rowBySheetRow[r.sheetRow] = r; });
+    computed.plan.forEach(function(step) {
+      if (carriesExtras(rowBySheetRow[step.sheetRow].destination)) stepByRow[step.sheetRow] = step;
+    });
+    evidenceSheetRows[anchor.sheetRow] = true;
+    resolveShipmentOrdersGs(shipmentRows, shipmentRows[0].shipmentId !== '').forEach(function(o) {
+      const carrier = o.rows.filter(function(r) { return r.isComponent !== true; })[0];
+      if (carrier) evidenceSheetRows[carrier.sheetRow] = true;
+    });
+  });
+
+  // The target of every row. Money: «Сумма» = (plan total or «Сумма») − the row's own «Счёт недели» cell + the sum
+  // of all invoices' shares (this invoice's new one). The row's money moves only when that sum or the plan says so.
+  const prefix = INVOICE_TAG_LABEL + invoice.number + ' от ' + invoice.date + ':';
+  const rowWrites = [];
+  const candidates = [];
+  universe.forEach(function(rec) {
+    const step = stepByRow[rec.sheetRow];
+    const cells = {};
+    let destination = step ? step.destination : rec.destination;
+    let finalPrice = rec.price;
+    if (rec.isComponent) {
+      destination = setInvoiceTagGs(destination, INVOICE_TAG_LABEL, null);
+    } else {
+      const tagText = tickedSet[rec.opId] ? INVOICE_TAG_LABEL + invoice.number + ' от ' + invoice.date + ': ' + formatKopecksGs(opShareKop[rec.opId]) + '₽' : null;
+      destination = setInvoiceTagGs(destination, prefix, tagText);
+    }
+    if (destination !== rec.destination) cells['Объект'] = destination;
+    if (!rec.isComponent && rec.quantity > 0) {
+      const wiNewKop = (othersKopById[rec.id] || 0) + (newShareById[rec.id] || 0);
+      if (step || wiNewKop !== rec.weekInvoiceKop) {
+        const baseKop = step && step.total !== undefined ? Math.round(step.total * 100) : Math.round(rec.total * 100);
+        const newSumKop = baseKop - rec.weekInvoiceKop + wiNewKop;
+        const newPriceKop = Math.round(newSumKop / rec.quantity);
+        if (wiNewKop !== rec.weekInvoiceKop) cells['Счёт недели'] = wiNewKop === 0 ? '' : wiNewKop / 100;
+        if (newSumKop !== Math.round(rec.total * 100)) cells['Сумма'] = newSumKop / 100;
+        if (newPriceKop !== Math.round(rec.price * 100)) cells['Цена'] = newPriceKop / 100;
+        finalPrice = newPriceKop / 100;
+      }
+      if (step && step.additional !== undefined && col['ДопРасходы'] !== -1) {
+        const sameAdditional = step.additional === ''
+          ? rec.storedAdditional === null
+          : (rec.storedAdditional !== null && Math.abs(rec.storedAdditional - step.additional) < 0.005);
+        if (!sameAdditional) cells['ДопРасходы'] = step.additional;
+      }
+      if (touchedOps[rec.opId]) {
+        candidates.push({
+          id: rec.id, opId: rec.opId, date: rec.date, kanDay: ozonCostDayFor(rec.deliveryDate, rec.date),
+          operationDay: String(rec.date || '').slice(0, 10), destination: destination, article: rec.article,
+          quantity: rec.quantity, oldUnitCost: roundToTwo(Number(rec.price) || 0), newUnitCost: finalPrice
+        });
+      }
+    }
+    if (Object.keys(cells).length > 0) rowWrites.push({ rec: rec, cells: cells });
+  });
+
+  // Formulas would be flattened by a whole-row write: refuse before anything is written.
+  rowWrites.forEach(function(w) {
+    const range = sheet.getRange(w.rec.sheetRow, 1, 1, width);
+    if (typeof range.getFormulas !== 'function') return;
+    if (range.getFormulas()[0].some(function(f) { return String(f || '') !== ''; })) {
+      throw new Error('В строке «История» ' + w.rec.sheetRow + ' есть формулы: запись целой строки их затёрла бы.' + NOTHING);
+    }
+  });
+
+  // The shares and the input to store for this invoice.
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const shareRows = [];
+  targets.operations.forEach(function(o) {
+    o.rows.forEach(function(r) { if (r.boxes > 0) shareRows.push([invoiceId, week, o.opId, r.id, r.shareKop / 100, user.username, stamp]); });
+  });
+  const shareKeyOf = function(opId, rowId, kop) { return opId + '|' + rowId + '|' + kop; };
+  const storedShareKeys = myShares.map(function(s) { return shareKeyOf(s.opId, s.rowId, s.shareKop); }).sort().join('\n');
+  const newShareKeys = shareRows.map(function(r) { return shareKeyOf(r[2], r[3], Math.round(r[4] * 100)); }).sort().join('\n');
+  const sharesChanged = storedShareKeys !== newShareKeys;
+  const inputRow = [invoiceId, week,
+    JSON.stringify(selections.map(function(s) { return { n: s.n, qty: s.qty }; })),
+    JSON.stringify(ticked.map(function(op) { return op.opId; })), user.username, stamp];
+
+  // ---- the writes: the two sheets, then the «История» rows (one setValues per row) ----
+  if (sharesChanged) {
+    const sharesSheet = getOrCreateSheet(getSpreadsheet(), INVOICE_SHARES_SHEET, INVOICE_SHARES_HEADERS);
+    myShares.slice().sort(function(a, b) { return b.sheetRow - a.sheetRow; }).forEach(function(s) { sharesSheet.deleteRow(s.sheetRow); });
+    if (shareRows.length > 0) writeInvoiceRows(sharesSheet, sharesSheet.getLastRow() + 1, shareRows, INVOICE_SHARES_TEXT_COLS);
+  }
+  if (!sameInput) {
+    const inputsSheet = getOrCreateSheet(getSpreadsheet(), INVOICE_INPUTS_SHEET, INVOICE_INPUTS_HEADERS);
+    if (myInput) inputsSheet.deleteRow(myInput.sheetRow);
+    writeInvoiceRows(inputsSheet, inputsSheet.getLastRow() + 1, [inputRow], INVOICE_INPUTS_TEXT_COLS);
+  }
+  // Evidence rows go last: a cut-off then leaves the old extras readable on every row not yet written.
+  const writeOrdered = rowWrites.filter(function(w) { return !evidenceSheetRows[w.rec.sheetRow]; })
+    .concat(rowWrites.filter(function(w) { return evidenceSheetRows[w.rec.sheetRow]; }));
+  writeOrdered.forEach(function(w) {
+    const newRow = w.rec.values.slice();
+    Object.keys(w.cells).forEach(function(name) { newRow[col[name]] = w.cells[name]; });
+    sheet.getRange(w.rec.sheetRow, 1, 1, width).setValues([newRow]);
+  });
+  if (sharesChanged || !sameInput || rowWrites.length > 0) SpreadsheetApp.flush();
+
+  // The journal agrees with «Цена» of every row this invoice touches now or touched before.
+  let appended = 0;
+  let costJournalError = '';
+  try {
+    const stale = weekPackagingStaleJournalEntries(candidates);
+    if (stale.length > 0) appended = reissueOzonCostRows(stale, user.username).appended;
+  } catch (e) {
+    Logger.log('Себестоимость Озон не переписана после счёта недели: ' + e);
+    costJournalError = 'Строки истории исправлены, но исправленная себестоимость НЕ записана в журнал '
+      + '«Себестоимость Озон» для КАН: ' + errorMessage(e);
+  }
+
+  return { changedRows: rowWrites.length, journalAppended: appended, costJournalError: costJournalError, newTransactions: getTransactions().rows };
 }
 
 /** Item 97 ticket 02 part C: admin sets (or clears with '') the manual ISO week of one posting. Writes only «Неделя вручную». */
@@ -13350,6 +13785,8 @@ function shipmentRowsOfTransaction(id, wholeShipment) {
       storedAdditional: String(sheetCellText(row, headers, 'ДопРасходы')).trim() === '' ? null : parseNumber(sheetCellText(row, headers, 'ДопРасходы')),
       // Item 97 ticket 06: the fixed roubles of the week's packaging inside «Сумма»; null when the cell is empty
       weekPackaging: String(sheetCellText(row, headers, 'Упаковка недели')).trim() === '' ? null : parseNumber(sheetCellText(row, headers, 'Упаковка недели')),
+      // Item 97 ticket 07: the fixed roubles of the contractor-invoice shares inside «Сумма»; null when the cell is empty
+      weekInvoice: String(sheetCellText(row, headers, 'Счёт недели')).trim() === '' ? null : parseNumber(sheetCellText(row, headers, 'Счёт недели')),
       opId: iOp === -1 ? '' : String(row[iOp] || '').trim(),
       shipmentId: iShip === -1 ? '' : String(row[iShip] || '').trim(),
       isComponent: sheetCellText(row, headers, 'isComponent') === true
@@ -13560,10 +13997,10 @@ function rowSharesAfterExtrasGs(orderRows, oldShare, newShare, orderPieces) {
   const shares = {};
   mainRows.forEach(function(r, i) {
     const exactKop = oldShareKop * quantities[i] / orderPieces;
-    // Item 97 ticket 06: the fixed week packaging inside «Сумма» is goods-like, not a share of the extras
+    // Item 97 tickets 06/07: the fixed week packaging and the invoice shares inside «Сумма» are goods-like, not a share of the extras
     const goods = orderRows.reduce(function(sum, c) {
       return (c.isComponent === true && r.groupId && c.groupId === r.groupId) ? sum + (Number(c.total) || 0) : sum;
-    }, (Number(r.writeOffCost) || 0) + (Number(r.weekPackaging) || 0));
+    }, (Number(r.writeOffCost) || 0) + (Number(r.weekPackaging) || 0) + (Number(r.weekInvoice) || 0));
     const carried = roundToTwo((Number(r.total) || 0) - goods);
     const carriedKop = Math.round(carried * 100);
     const oldRowShare = (carriedKop >= Math.floor(exactKop) && carriedKop <= Math.ceil(exactKop)) ? carried : oldSplit[i];

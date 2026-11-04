@@ -36,6 +36,8 @@ export interface Transaction {
   opId?: string;
   /** Column «ДопРасходы»: the additional costs the row's order carries; null/absent on old rows. */
   additionalCosts?: number | null;
+  /** Item 97 ticket 07: the fixed roubles of all contractor-invoice shares inside «Сумма»; null/absent when none. */
+  weekInvoice?: number | null;
   user?: string;
   groupId?: string;
   isComponent?: boolean;

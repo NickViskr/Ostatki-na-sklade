@@ -169,6 +169,31 @@ describe('rowMoneyAfterExtras', () => {
 });
 
 // Item 80. Wiring guards: the window, the store and the server speak about the same thing.
+describe('rowMoneyAfterExtras with the week invoice (item 97 ticket 07)', () => {
+  // One row: goods 1000 + invoice share 300 + packaging 50 + extras share 100 = 1450.
+  const row = { id: 'w', quantity: 10, total: 1450, writeOffCost: 1000, groupId: 'g' };
+
+  it('a row carrying weekInvoice keeps it out of the extras share', () => {
+    expect(rowMoneyAfterExtras([{ ...row, weekInvoice: 300, weekPackaging: 50 }], 100, 0)).toEqual([
+      { id: 'w', total: 1350, price: 135 }
+    ]);
+  });
+
+  it('the carried kopeck is recognised only when weekInvoice counts as goods (moved row carrying the leftover kopeck)', () => {
+    // Old total 1.00 over 3 rows of 1 piece: the split gives 0.34 / 0.33 / 0.33. Row 'c' sits last but carries 0.34.
+    const rows3 = [
+      { id: 'a', quantity: 1, total: 100.33, writeOffCost: 100 },
+      { id: 'b', quantity: 1, total: 100.33, writeOffCost: 100 },
+      { id: 'c', quantity: 1, total: 400.34, writeOffCost: 100, weekInvoice: 300 }
+    ];
+    expect(rowMoneyAfterExtras(rows3, 1, 0).map((m) => m.total)).toEqual([100, 100, 400]);
+  });
+
+  it('weekPackaging alone is goods-like as well', () => {
+    expect(rowMoneyAfterExtras([{ ...row, total: 1150, weekPackaging: 50 }], 100, 0)[0].total).toBe(1050);
+  });
+});
+
 describe('подключение правки доп. расходов поставки', () => {
   const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
   const pencil = read('src/components/EditTransModal.tsx');

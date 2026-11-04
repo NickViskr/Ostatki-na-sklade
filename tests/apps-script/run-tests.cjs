@@ -17574,6 +17574,594 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   });
 }
 
+// ================= Item 97 ticket 07 part B: week spread, step 2 (getInvoiceSpread / applyInvoiceSpread) =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/ticket-07-design.md, Part B. Every check is red until the actions, the
+// «История» column «Счёт недели» and the sheets «Доли счетов» / «Распределения счетов» exist. Synthetic data only. Money is compared in
+// integer kopecks. Expected shares were computed with python (largest remainder, ties to the earlier index):
+//   129900 over boxes [6,5,3] = [55671, 46393, 27836]; 139900 over [6,5,3] = [59957, 49964, 29979];
+//   129900 over [6,5] = [70855, 59045]; 50000 over [6,5,3] = [21429, 17857, 10714].
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const W44 = '2026-W44';
+  const EXT = 'Внешние отгрузки';
+  const SHARES = 'Доли счетов';
+  const INPUTS = 'Распределения счетов';
+  const WI = 'Счёт недели';
+  const far = String(Date.parse('2030-01-01T00:00:00Z'));
+  const j = (v) => JSON.stringify(v);
+  const kop = (v) => (v === '' || v === undefined || v === null) ? 0 : Math.round(Number(String(v).replace(',', '.')) * 100);
+  const call = (h, token, action, data) => h.callDoPost({ action, sessionToken: token, data });
+  const ok = (o) => !!o && o.status === 'success';
+  const msg = (o) => String((o && o.message) || '');
+
+  const INV_HEAD = ['ID счёта', 'Неделя', 'Поставщик', 'Номер', 'Дата счёта', 'Покупатель', 'Всего к оплате', 'НДС', 'Всего наименований', 'Файл ID', 'Файл', 'Загрузил', 'Загружено', 'Заменён'];
+  const LINE_HEAD = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма', 'На поставку', 'Упаковка'];
+  const SKU_ROWS = [['X', 20, '111'], ['Y', 10, '222'], ['Z', 25, '333'], ['W', 10, '444'], ['KIT', 10, '555']];
+
+  const world = (o) => {
+    const opt = o || {};
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-11-04T10:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet([
+      { article: 'X', quantity: 5000, avgCost: 10, capitalization: 50000 }, { article: 'Y', quantity: 5000, avgCost: 20, capitalization: 100000 },
+      { article: 'Z', quantity: 5000, avgCost: 30, capitalization: 150000 }, { article: 'W', quantity: 5000, avgCost: 40, capitalization: 200000 },
+      { article: 'P1', quantity: 5000, avgCost: 4, capitalization: 20000 }, { article: 'P2', quantity: 5000, avgCost: 3, capitalization: 15000 }
+    ]);
+    h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], opt.skuRows || SKU_ROWS);
+    const stocks = [];
+    ['MaxiStore', 'ShopTwo'].forEach((cab) => [['X', '111'], ['Y', '222'], ['Z', '333'], ['W', '444'], ['KIT', '555']].forEach((a) => stocks.push({ cabinet: cab, article: a[0], available: 4000, sku: a[1] })));
+    h.setOzonStocksSheet(stocks);
+    h.setKitSheet(opt.kit || []);
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'], ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+    h.setRegistrySheet(EXT, [h.context.EXTERNAL_SHIPMENTS_HEADERS.slice()]);
+    h.setRegistrySheet('Счета подрядчика', [INV_HEAD,
+      ['INV-1', W44, 'ООО Ромашка', '0045', '02.11.2026', 'ИП Тестов', 2449, 'Без НДС', 3, '', '', 'Кладовщик', '2026-11-02 10:00:00', ''],
+      ['INV-2', W44, 'ООО Ромашка', '0046', '03.11.2026', 'ИП Тестов', 500, 'Без НДС', 1, '', '', 'Кладовщик', '2026-11-03 10:00:00', ''],
+      ['INV-3', '2026-W45', 'ООО Ромашка', '0047', '09.11.2026', 'ИП Тестов', 100, 'Без НДС', 1, '', '', 'Кладовщик', '2026-11-03 10:00:00', '']]);
+    h.setRegistrySheet('Строки счетов', [LINE_HEAD,
+      ['INV-1', 1, 'Доставка на СЦ (готовый палет)', '1', 'шт', 1299, 1299, 'да', ''],
+      ['INV-1', 2, 'стикеровка', '50', 'шт', 5, 250, 'да', ''],
+      ['INV-1', 3, 'Хранение товара', '1', 'шт', 900, 900, 'нет', ''],
+      ['INV-2', 1, 'Приёмка товара', '1', 'шт', 500, 500, 'да', ''],
+      ['INV-3', 1, 'Услуга другой недели', '1', 'шт', 100, 100, 'да', '']]);
+    return h;
+  };
+  const addPosting = (h, o) => {
+    const heads = h.context.EXTERNAL_SHIPMENTS_HEADERS;
+    const line = new Array(heads.length).fill('');
+    const set = (n, v) => { line[heads.indexOf(n)] = v; };
+    set('PostingID', o.pid); set('Статус', 'processed'); set('Кабинет', o.cabinet); set('Номер заявки', o.order);
+    set('TransGroupInfo', JSON.stringify(o.ids)); set('Неделя', o.week || ''); set('Передача по', o.handover || '');
+    const sheet = h.sheetByName(EXT);
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, heads.length).setValues([line]);
+  };
+  const idsOf = (h, opId) => h.dumpTransSheet().filter((r) => r['OpID'] === opId).map((r) => String(r['ID']));
+  const addAuto = (h, o) => {
+    h.commitTransaction(o.items, 'Расход', 'Ozon (' + o.cabinet + ')', o.date, 'Автосписание', null, 'ozonAuto:' + o.pid, 0, undefined, '', '');
+    addPosting(h, { pid: o.pid, cabinet: o.cabinet, order: o.order, ids: idsOf(h, 'ozonAuto:' + o.pid), week: W44, handover: o.date + ' 12:00:00' });
+  };
+  const addManual = (h, o) => {
+    h.commitTransaction(o.items, 'Расход', 'Ozon (' + o.cabinet + ')' + (o.extras ? ' ' + o.extras : ''), o.date, 'tester', '2026-10-30T07:00:00Z', o.opId, null);
+    addPosting(h, { pid: o.pid, cabinet: o.cabinet, order: o.order, ids: idsOf(h, o.opId) });
+  };
+  const X = (n) => ({ article: 'X', quantity: n, price: 10 });
+  const Y = (n) => ({ article: 'Y', quantity: n, price: 20 });
+  const Z = (n) => ({ article: 'Z', quantity: n, price: 30 });
+  const MAN_EXTRAS = '[Упаковка: 45 шт. x 5₽ = 225₽ | Прочее: 300₽ | Услуги: Паллета x1 (1500₽)]';
+  const OPS3 = ['ozonAuto:P-1', 'man-1', 'ozonAuto:P-3'];
+  // W44: P-1 (auto, X 120 pcs = 6 boxes), man-1 (manual, Y 45 pcs = 5 boxes, with extras), P-3 (auto, Z 75 pcs = 3 boxes)
+  const base = (o) => {
+    const h = world(o);
+    addAuto(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', date: '2026-10-28', items: [X(120)] });
+    addManual(h, { opId: 'man-1', cabinet: 'ShopTwo', order: '555', pid: 'Q-1', date: '2026-10-29', items: [Y(45)], extras: MAN_EXTRAS });
+    addAuto(h, { pid: 'P-3', cabinet: 'MaxiStore', order: '3333', date: '2026-10-29', items: [Z(75)] });
+    return h;
+  };
+  const rowsOf = (h, ops) => h.dumpTransSheet().filter((r) => (ops || OPS3).indexOf(r['OpID']) !== -1 && String(r['isComponent']).toLowerCase() !== 'true');
+  const rowOf = (h, opId, art) => h.dumpTransSheet().find((r) => r['OpID'] === opId && (!art || r['Артикул'] === art)) || {};
+  const byId = (h) => { const m = {}; h.dumpTransSheet().forEach((r) => { m[String(r['ID'])] = r; }); return m; };
+  const apply = (h, token, invoiceId, lines, opIds) => call(h, token, 'applyInvoiceSpread', { week: W44, invoiceId, lines, opIds });
+  const L1 = [{ n: 1, qty: '1' }];
+  const snap = (h) => j([h.dumpTransSheet(), h.dumpOzonCostFull(), h.dumpSheetByName(SHARES), h.dumpSheetByName(INPUTS), h.dumpArchive()]);
+  const latestJournal = (h, opId, art) => {
+    const rows = h.dumpOzonCost().filter((r) => r['OpID'] === opId && r['Артикул'] === art);
+    return rows.length ? kop(rows[rows.length - 1]['Себестоимость отгрузки']) : null;
+  };
+  const sharesOf = (h, invoiceId) => h.dumpSheetByName(SHARES).filter((x) => String(x['ID счёта']) === invoiceId);
+  const t07 = (name, build) => {
+    let conds = {}; let note = '';
+    try { const r = build(); conds = r.conds; note = r.note || ''; } catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+    const failed = Object.keys(conds).filter((k) => !conds[k]);
+    check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+  };
+  const watch = (h, names) => {
+    const st = { n: 0 };
+    names.forEach((nm) => {
+      const s = h.sheetByName(nm);
+      if (!s) return;
+      const gr = s.getRange.bind(s);
+      s.getRange = function () {
+        const r = gr.apply(s, arguments);
+        ['setValue', 'setValues', 'clearContent', 'setNumberFormat'].forEach((f) => { const o = r[f]; if (o) r[f] = function () { st.n++; return o.apply(r, arguments); }; });
+        return r;
+      };
+      ['appendRow', 'deleteRow', 'clearContents', 'insertRowAfter'].forEach((f) => { const o = s[f]; if (o) s[f] = function () { st.n++; return o.apply(s, arguments); }; });
+    });
+    return st;
+  };
+  // The History write throws on its n-th multi-cell write to a DATA row (row > 1): a cut-off in the middle of the row writes.
+  const cutAt = (h, n) => {
+    const sheet = h.sheetByName('Транзакции');
+    const orig = sheet.getRange;
+    const st = { calls: 0, fired: false };
+    sheet.getRange = function () {
+      const args = arguments;
+      const r = orig.apply(sheet, args);
+      if (Number(args[0]) > 1 && r.setValues) {
+        const o = r.setValues;
+        r.setValues = function () { st.calls++; if (st.calls === n) { st.fired = true; throw new Error('simulated cut-off'); } return o.apply(r, arguments); };
+      }
+      return r;
+    };
+    st.restore = () => { sheet.getRange = orig; };
+    return st;
+  };
+
+  t07('Item 97 ticket 07 B1: 1299.00 spread over ops of 120/45/75 pcs (boxes 6/5/3): op shares 556.71/463.93/278.36, Σ column «Счёт недели» = 1299.00 to the kopeck, Сумма rose by the share (manual op also lost «Услуги» + «Прочее» 1800), Цена = round2(Сумма/qty), «Доли счетов» one row per History row, «Распределения счетов» keeps the input; a plain user may apply first', () => {
+    const h = base();
+    const before = byId(h);
+    const r = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const want = { 'ozonAuto:P-1': 55671, 'man-1': 46393, 'ozonAuto:P-3': 27836 };
+    const removed = { 'ozonAuto:P-1': 0, 'man-1': 180000, 'ozonAuto:P-3': 0 };
+    const rows = rowsOf(h);
+    const wrong = [];
+    rows.forEach((row) => {
+      const q = Number(row['Количество']);
+      const sumKop = kop(before[String(row['ID'])]['Сумма']) - removed[row['OpID']] + want[row['OpID']];
+      if (kop(row[WI]) !== want[row['OpID']] || kop(row['Сумма']) !== sumKop || kop(row['Цена']) !== Math.round(sumKop / q)) {
+        wrong.push([row['OpID'], 'WI ' + row[WI] + '/' + want[row['OpID']], 'sum ' + row['Сумма'] + '/' + sumKop, 'price ' + row['Цена']].join(' '));
+      }
+    });
+    const shares = sharesOf(h, 'INV-1');
+    const inputs = h.dumpSheetByName(INPUTS).filter((x) => String(x['ID счёта']) === 'INV-1');
+    const hdr = Object.keys(inputs[0] || {});
+    const linesKey = hdr.find((k) => k.indexOf('Строки') === 0);
+    const opsKey = hdr.find((k) => k.indexOf('Поставки') === 0);
+    let inLines = null; let inOps = null;
+    try { inLines = JSON.parse(inputs[0][linesKey]); inOps = JSON.parse(inputs[0][opsKey]); } catch (e) { /* stays null */ }
+    return {
+      conds: {
+        'apply succeeded for a non-admin (first apply)': ok(r),
+        'three rows, every one kopeck-exact': rows.length === 3 && wrong.length === 0,
+        'Σ «Счёт недели» = 1299.00': rows.reduce((a, x) => a + kop(x[WI]), 0) === 129900,
+        'shares sheet: one row per History row (3), shares 556.71/463.93/278.36, applier and week': shares.length === 3
+          && shares.every((x) => x['Неделя'] === W44 && x['Применил'] === 'Кладовщик')
+          && j(shares.map((x) => kop(x['Доля (₽)'])).sort((a, b) => a - b)) === j([27836, 46393, 55671])
+          && shares.every((x) => kop(x['Доля (₽)']) === want[(before[String(x['ID строки'])] || {})['OpID']]),
+        'shares sheet keeps the OpID of the row': shares.every((x) => OPS3.indexOf(String(x['OpID'])) !== -1),
+        'inputs sheet holds one row: lines [{n:1,qty:1}] and the three ops': inputs.length === 1 && !!inLines && inLines.length === 1 && Number(inLines[0].n) === 1 && Number(inLines[0].qty) === 1 && !!inOps && j(inOps.slice().sort()) === j(OPS3.slice().sort()),
+        'manual op ДопРасходы = 225 (packaging only)': kop(rowOf(h, 'man-1')['ДопРасходы']) === 22500,
+        'result: changedRows 3, no journal error': !!r.data && r.data.changedRows === 3 && r.data.costJournalError === ''
+      },
+      note: j({ wrong, r: r.data && { changedRows: r.data.changedRows, err: r.data.costJournalError }, msg: msg(r), shares })
+    };
+  });
+
+  t07('Item 97 ticket 07 B1b: partial quantity (line 2 «стикеровка» 20 of 50 at 5.00 = 100.00) plus line 1: the total 1399.00 is spread, shares 599.57/499.64/299.79; line 3 (900, not ticked) stays unallocated', () => {
+    const h = base();
+    const r = apply(h, 'tok-user', 'INV-1', [{ n: 1, qty: '1' }, { n: 2, qty: '20' }], OPS3);
+    const got = OPS3.map((id) => kop(rowOf(h, id)[WI]));
+    return {
+      conds: { 'apply succeeded': ok(r), 'shares 599.57/499.64/299.79': j(got) === j([59957, 49964, 29979]), 'Σ = 1399.00 (nothing books the 900.00 line)': got.reduce((a, b) => a + b, 0) === 139900 },
+      note: j({ got, msg: msg(r) })
+    };
+  });
+
+  t07('Item 97 ticket 07 B1c: inside one operation (X 120 pcs = 6 boxes, Y 45 pcs = 5 boxes) the op share is split over its rows by the rows\' boxes: 708.55 / 590.45 = 1299.00', () => {
+    const h = world();
+    addAuto(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', date: '2026-10-28', items: [X(120), Y(45)] });
+    const r = apply(h, 'tok-user', 'INV-1', L1, ['ozonAuto:P-1']);
+    const x = rowOf(h, 'ozonAuto:P-1', 'X'); const y = rowOf(h, 'ozonAuto:P-1', 'Y');
+    return {
+      conds: { 'apply succeeded': ok(r), 'X row 708.55': kop(x[WI]) === 70855, 'Y row 590.45': kop(y[WI]) === 59045, 'Σ = 1299.00': kop(x[WI]) + kop(y[WI]) === 129900 },
+      note: j({ x: x[WI], y: y[WI], msg: msg(r) })
+    };
+  });
+
+  t07('Item 97 ticket 07 B2: «Объект» of each op gets the tag [Счёт № 0045 от 02.11.2026: <share with comma>₽]; the manual op loses «Услуги» and «Прочее» but keeps its «Упаковка» text tag', () => {
+    const h = base();
+    const r = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const o1 = String(rowOf(h, 'ozonAuto:P-1')['Объект']); const o2 = String(rowOf(h, 'man-1')['Объект']); const o3 = String(rowOf(h, 'ozonAuto:P-3')['Объект']);
+    return {
+      conds: {
+        'apply succeeded': ok(r),
+        'P-1 tag with 556,71': o1.indexOf('[Счёт № 0045 от 02.11.2026: 556,71₽]') !== -1,
+        'man-1 tag with 463,93': o2.indexOf('[Счёт № 0045 от 02.11.2026: 463,93₽]') !== -1,
+        'P-3 tag with 278,36': o3.indexOf('[Счёт № 0045 от 02.11.2026: 278,36₽]') !== -1,
+        'man-1: «Услуги» and «Прочее» gone': o2.indexOf('Услуги') === -1 && o2.indexOf('Прочее') === -1 && o2.indexOf('Паллета') === -1,
+        'man-1: the «Упаковка» tag is intact': o2.indexOf('Упаковка: 45 шт. x 5₽ = 225₽') !== -1,
+        'man-1 is still an Ozon write-off of ShopTwo': o2.indexOf('Ozon (ShopTwo)') === 0
+      },
+      note: j({ o1, o2, o3, msg: msg(r) })
+    };
+  });
+
+  t07('Item 97 ticket 07 B2b: after step 1 (week packaging X 1.50 / Y 2 / Z 3) step 2 leaves «Упаковка недели» untouched on every row; Сумма = previous − (Прочее + Услуги 1800 on the manual op) + share', () => {
+    const h = base();
+    const s1 = call(h, 'tok-user', 'saveWeekPackaging', { week: W44, prices: [{ article: 'X', unit: '1,50' }, { article: 'Y', unit: '2' }, { article: 'Z', unit: '3' }], overrides: [] });
+    const before = byId(h);
+    const fixedBefore = {}; Object.keys(before).forEach((id) => { fixedBefore[id] = String(before[id]['Упаковка недели']); });
+    const r = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const want = { 'ozonAuto:P-1': 55671, 'man-1': 46393, 'ozonAuto:P-3': 27836 };
+    const rows = rowsOf(h);
+    const sumsOk = rows.every((row) => kop(row['Сумма']) === kop(before[String(row['ID'])]['Сумма']) - (row['OpID'] === 'man-1' ? 180000 : 0) + want[row['OpID']]);
+    return {
+      conds: {
+        'step 1 saved': ok(s1), 'step 2 applied': ok(r),
+        '«Упаковка недели» unchanged on every row': rows.every((row) => String(row['Упаковка недели']) === fixedBefore[String(row['ID'])]) && rows.every((row) => kop(row['Упаковка недели']) > 0),
+        'Сумма = previous − removed extras + share': sumsOk,
+        'manual op ДопРасходы is 0 or empty (nothing but the invoice is left)': kop(rowOf(h, 'man-1')['ДопРасходы']) === 0
+      },
+      note: j({ s1: msg(s1), r: msg(r), rows: rows.map((x) => [x['OpID'], x['Сумма'], x['Упаковка недели'], x[WI]]) })
+    };
+  });
+
+  const nothingWritten = (name, build) => t07(name, build);
+
+  nothingWritten('Item 97 ticket 07 B3: a missing box norm (SKU cell EMPTY — getSKUs would read 1 —, no SKU row, 0, text) refuses the spread naming the article, nothing written', () => {
+    const variants = [
+      ['empty cell', SKU_ROWS.map((r) => r[0] === 'W' ? ['W', '', '444'] : r)],
+      ['no SKU row', SKU_ROWS.filter((r) => r[0] !== 'W')],
+      ['zero', SKU_ROWS.map((r) => r[0] === 'W' ? ['W', 0, '444'] : r)],
+      ['text', SKU_ROWS.map((r) => r[0] === 'W' ? ['W', 'abc', '444'] : r)]
+    ];
+    const conds = {}; const notes = [];
+    variants.forEach((v) => {
+      const h = base({ skuRows: v[1] });
+      addManual(h, { opId: 'man-w', cabinet: 'MaxiStore', order: '666', pid: 'S-1', date: '2026-10-29', items: [{ article: 'W', quantity: 10, price: 40 }] });
+      const before = snap(h);
+      const r = apply(h, 'tok-user', 'INV-1', L1, OPS3.concat(['man-w']));
+      conds[v[0] + ': refused, article W named'] = r.status === 'error' && msg(r).indexOf('W') !== -1;
+      conds[v[0] + ': nothing written'] = snap(h) === before;
+      notes.push(v[0] + ': ' + msg(r));
+    });
+    const okWorld = base();
+    const good = apply(okWorld, 'tok-user', 'INV-1', L1, OPS3);
+    conds['control: with all norms present the same call succeeds'] = ok(good);
+    return { conds, note: notes.join(' || ') };
+  });
+
+  t07('Item 97 ticket 07 B3b: kit component rows and the rows of a kit carry nothing and need no norm: a virtual kit by the KIT card (25 pcs / 10 = 3 boxes) takes the whole share, its components P1/P2 (no SKU rows) stay empty', () => {
+    const h = world({ kit: [{ kitSku: 'KIT', componentSku: 'P1', quantity: 1, kitType: 'virtual' }, { kitSku: 'KIT', componentSku: 'P2', quantity: 2, kitType: 'virtual' }] });
+    addAuto(h, { pid: 'P-6', cabinet: 'MaxiStore', order: '6666', date: '2026-10-28', items: [{ article: 'KIT', quantity: 25, price: 0 }] });
+    const comps = h.dumpTransSheet().filter((r) => r['OpID'] === 'ozonAuto:P-6' && String(r['isComponent']).toLowerCase() === 'true');
+    const compBefore = j(comps);
+    const r = apply(h, 'tok-user', 'INV-1', L1, ['ozonAuto:P-6']);
+    const kit = rowOf(h, 'ozonAuto:P-6', 'KIT');
+    const compsAfter = h.dumpTransSheet().filter((x) => x['OpID'] === 'ozonAuto:P-6' && String(x['isComponent']).toLowerCase() === 'true');
+    return {
+      conds: { 'two component rows exist': comps.length === 2, 'apply succeeded (no norm needed for components)': ok(r), 'KIT row carries 1299.00': kop(kit[WI]) === 129900,
+        'component rows have no «Счёт недели»': compsAfter.every((x) => kop(x[WI]) === 0), 'component rows otherwise unchanged': j(compsAfter.map((x) => Object.assign({}, x, { [WI]: undefined }))) === j(JSON.parse(compBefore).map((x) => Object.assign({}, x, { [WI]: undefined }))) },
+      note: j({ msg: msg(r), kit: kit[WI] })
+    };
+  });
+
+  t07('Item 97 ticket 07 B4: invalid selections are refused and nothing is written: a line marked «На поставку = нет», qty above the line, qty 0, no lines, no ops, an invoice of another week, an unknown invoice, a week before W43', () => {
+    const h = base();
+    const before = snap(h);
+    const cases = [
+      ['line 3 not for supply', 'INV-1', [{ n: 3, qty: '1' }], OPS3],
+      ['qty above the line', 'INV-1', [{ n: 2, qty: '51' }], OPS3],
+      ['qty zero', 'INV-1', [{ n: 1, qty: '0' }], OPS3],
+      ['unknown line', 'INV-1', [{ n: 9, qty: '1' }], OPS3],
+      ['no lines', 'INV-1', [], OPS3],
+      ['no ops', 'INV-1', L1, []],
+      ['invoice of another week', 'INV-3', L1, OPS3],
+      ['unknown invoice', 'INV-NOPE', L1, OPS3],
+      ['op not of the week', 'INV-1', L1, ['man-nope']]
+    ];
+    const conds = {}; const notes = [];
+    cases.forEach((c) => {
+      const r = apply(h, 'tok-user', c[1], c[2], c[3]);
+      conds[c[0] + ': refused'] = r.status === 'error';
+      conds[c[0] + ': nothing written'] = snap(h) === before;
+      notes.push(c[0] + ': ' + msg(r));
+    });
+    const early = call(h, 'tok-user', 'applyInvoiceSpread', { week: '2026-W42', invoiceId: 'INV-1', lines: L1, opIds: OPS3 });
+    conds['week before W43: refused'] = early.status === 'error';
+    conds['week before W43: nothing written'] = snap(h) === before;
+    conds['control: a valid apply on the same world succeeds'] = ok(apply(h, 'tok-user', 'INV-1', L1, OPS3));
+    return { conds, note: notes.join(' || ') };
+  });
+
+  t07('Item 97 ticket 07 B5: a repeat apply with the same input (any user) writes NOTHING: zero write calls on «История», «Доли счетов», «Распределения счетов», the journal; no new journal row; changedRows 0', () => {
+    const h = base();
+    const first = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const before = snap(h);
+    const st = watch(h, ['Транзакции', SHARES, INPUTS, 'Себестоимость Озон']);
+    const again = apply(h, 'tok-user', 'INV-1', L1, OPS3.slice().reverse());
+    return {
+      conds: {
+        'first apply succeeded': ok(first), 'repeat succeeded for a non-admin': ok(again), 'zero write calls': st.n === 0,
+        'all sheets identical': snap(h) === before,
+        'result: no changed rows, no journal rows': !!again.data && again.data.changedRows === 0 && again.data.journalAppended === 0
+      },
+      note: j({ writes: st.n, again: again.data, msg: msg(again) })
+    };
+  });
+
+  t07('Item 97 ticket 07 B6: re-applying the same invoice with one op unticked: that op loses the share (column and Сумма back), the others re-split 708.55/590.45 (70855/59045); a non-admin is refused for a changed spread (nothing written), the admin passes', () => {
+    const h = base();
+    const orig = byId(h);
+    apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const before = snap(h);
+    const two = ['ozonAuto:P-1', 'man-1'];
+    const userOps = apply(h, 'tok-user', 'INV-1', L1, two);
+    const afterUserOps = snap(h);
+    const userLines = apply(h, 'tok-user', 'INV-1', [{ n: 1, qty: '1' }, { n: 2, qty: '20' }], OPS3);
+    const afterUserLines = snap(h);
+    const admin = apply(h, 'tok-admin', 'INV-1', L1, two);
+    const p3 = rowOf(h, 'ozonAuto:P-3');
+    const p1 = rowOf(h, 'ozonAuto:P-1'); const m1 = rowOf(h, 'man-1');
+    const o3 = String(p3['Объект']);
+    const shares = sharesOf(h, 'INV-1');
+    const inputs = h.dumpSheetByName(INPUTS).filter((x) => String(x['ID счёта']) === 'INV-1');
+    const p3Orig = orig[String(p3['ID'])];
+    return {
+      conds: {
+        'non-admin with fewer ops: refused': userOps.status === 'error' && afterUserOps === before,
+        'non-admin with other lines: refused': userLines.status === 'error' && afterUserLines === before,
+        'admin succeeded': ok(admin),
+        'unticked op: column back to empty/0, Сумма and Цена back to the original, no tag': kop(p3[WI]) === 0 && kop(p3['Сумма']) === kop(p3Orig['Сумма']) && kop(p3['Цена']) === kop(p3Orig['Цена']) && o3.indexOf('Счёт №') === -1,
+        'others re-split 708.55/590.45': kop(p1[WI]) === 70855 && kop(m1[WI]) === 59045 && kop(p1[WI]) + kop(m1[WI]) === 129900,
+        'shares sheet: no row of the unticked op, two rows of the others': shares.length === 2 && shares.every((x) => String(x['OpID']) !== 'ozonAuto:P-3'),
+        'one inputs row, now with two ops': inputs.length === 1 && String(inputs[0][Object.keys(inputs[0]).find((k) => k.indexOf('Поставки') === 0)]).indexOf('P-3') === -1,
+        'journal of the unticked op agrees with its Цена again': latestJournal(h, 'ozonAuto:P-3', 'Z') === kop(p3['Цена']) && latestJournal(h, 'ozonAuto:P-1', 'X') === kop(p1['Цена'])
+      },
+      note: j({ userOps: msg(userOps), userLines: msg(userLines), admin: msg(admin), p3: [p3[WI], p3['Сумма'], o3], shares: shares.length })
+    };
+  });
+
+  t07('Item 97 ticket 07 B7: a second invoice of the week applied on the same ops ADDS its shares («Счёт недели» = sum of both, both tags kept); re-applying the first one (same input, then changed by the admin) leaves the second\'s shares intact', () => {
+    const h = base();
+    const orig = byId(h);
+    apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const r2 = apply(h, 'tok-user', 'INV-2', [{ n: 1, qty: '1' }], OPS3);
+    const want2 = { 'ozonAuto:P-1': 21429, 'man-1': 17857, 'ozonAuto:P-3': 10714 };
+    const want1 = { 'ozonAuto:P-1': 55671, 'man-1': 46393, 'ozonAuto:P-3': 27836 };
+    const sumOk = (w) => rowsOf(h).every((row) => kop(row[WI]) === w[row['OpID']] && kop(row['Сумма']) === kop(orig[String(row['ID'])]['Сумма']) - (row['OpID'] === 'man-1' ? 180000 : 0) + w[row['OpID']]);
+    const both = {}; OPS3.forEach((id) => { both[id] = want1[id] + want2[id]; });
+    const afterBoth = sumOk(both);
+    const objOk = rowsOf(h).every((row) => String(row['Объект']).indexOf('Счёт № 0045 от 02.11.2026') !== -1 && String(row['Объект']).indexOf('Счёт № 0046 от 03.11.2026') !== -1);
+    const same = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const keptOnRepeat = sumOk(both);
+    const sharesInv2Before = j(sharesOf(h, 'INV-2'));
+    const admin = apply(h, 'tok-admin', 'INV-1', L1, ['ozonAuto:P-1', 'man-1']);
+    const w1b = { 'ozonAuto:P-1': 70855, 'man-1': 59045, 'ozonAuto:P-3': 0 };
+    const finalW = {}; OPS3.forEach((id) => { finalW[id] = w1b[id] + want2[id]; });
+    return {
+      conds: {
+        'second apply by a plain user succeeded (first apply of INV-2)': ok(r2),
+        'every row = INV-1 share + INV-2 share (kopeck-exact, Сумма follows)': afterBoth,
+        'both tags in «Объект» of every row': objOk,
+        'Σ over rows = 1299.00 + 500.00': rowsOf(h).length === 3 && rowsOf(h).reduce((a, x) => a + kop(x[WI]), 0) === 129900 + 50000,
+        'repeat of INV-1 changes nothing': ok(same) && !!same.data && same.data.changedRows === 0 && keptOnRepeat,
+        'admin re-spread of INV-1 over two ops succeeded': ok(admin),
+        'INV-2 shares sheet rows are intact': j(sharesOf(h, 'INV-2')) === sharesInv2Before && sharesOf(h, 'INV-2').length === 3,
+        'rows: INV-1 re-split + INV-2 untouched (unticked op keeps only INV-2 10.714 -> 107.14)': rowsOf(h).every((row) => kop(row[WI]) === finalW[row['OpID']]),
+        'unticked op keeps the INV-2 tag only': String(rowOf(h, 'ozonAuto:P-3')['Объект']).indexOf('Счёт № 0046') !== -1 && String(rowOf(h, 'ozonAuto:P-3')['Объект']).indexOf('Счёт № 0045') === -1
+      },
+      note: j({ r2: msg(r2), rows: rowsOf(h).map((x) => [x['OpID'], x[WI], x['Сумма']]), admin: msg(admin) })
+    };
+  });
+
+  const project = (h) => {
+    const idKey = {}; h.dumpTransSheet().forEach((r) => { idKey[String(r['ID'])] = r['OpID'] + '|' + r['Артикул']; });
+    return j([
+      h.dumpTransSheet().filter((r) => String(r['isComponent']).toLowerCase() !== 'true').map((r) => [r['OpID'], r['Артикул'], kop(r['Сумма']), kop(r['Цена']), kop(r[WI]), r['Объект'], kop(r['ДопРасходы'])]).sort(),
+      h.dumpSheetByName(SHARES).map((x) => [x['ID счёта'], x['OpID'], idKey[String(x['ID строки'])], kop(x['Доля (₽)'])]).sort(),
+      h.dumpSheetByName(INPUTS).map((x) => [x['ID счёта'], Object.keys(x).filter((k) => k.indexOf('Строки') === 0 || k.indexOf('Поставки') === 0).map((k) => String(x[k]))])
+    ]);
+  };
+
+  t07('Item 97 ticket 07 B8: a cut-off in the History writes (the 1st, 2nd and 3rd row write throws) then a retry without the fault ends in exactly the state of a clean apply: no doubled shares, no doubled Сумма, journal healed, a further repeat writes nothing', () => {
+    const clean = base();
+    const cleanR = apply(clean, 'tok-user', 'INV-1', L1, OPS3);
+    const wantState = project(clean);
+    const wantJournal = clean.dumpOzonCost().length;
+    const conds = { 'clean apply succeeded': ok(cleanR) }; const notes = [];
+    [1, 2, 3].forEach((n) => {
+      const h = base();
+      const startState = project(h);
+      const cut = cutAt(h, n);
+      const first = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+      cut.restore();
+      const midState = project(h);
+      const retry = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+      const rows = rowsOf(h);
+      const third = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+      conds['cut at write ' + n + ': the fault fired and the apply failed'] = cut.fired && first.status === 'error';
+      conds['cut at write ' + n + ': the cut-off left a different state than a clean apply'] = midState !== wantState;
+      conds['cut at write ' + n + ' (n>1: partial state differs from the start)'] = n === 1 || midState !== startState;
+      conds['cut at write ' + n + ': retry succeeded'] = ok(retry) && retry.data.costJournalError === '';
+      conds['cut at write ' + n + ': final state equals the clean apply'] = project(h) === wantState;
+      conds['cut at write ' + n + ': Σ «Счёт недели» = 1299.00 (no doubling)'] = rows.reduce((a, x) => a + kop(x[WI]), 0) === 129900;
+      conds['cut at write ' + n + ': journal healed, same length as the clean run'] = h.dumpOzonCost().length === wantJournal && rows.every((row) => latestJournal(h, row['OpID'], row['Артикул']) === kop(row['Цена']));
+      conds['cut at write ' + n + ': a further repeat writes nothing'] = ok(third) && third.data.changedRows === 0 && third.data.journalAppended === 0 && project(h) === wantState;
+      notes.push('n=' + n + ' first: ' + msg(first) + ' calls=' + cut.calls);
+    });
+    return { conds, note: notes.join(' || ') };
+  });
+
+  // B8b / B8c: cut-off inside a MULTI-ROW manual op whose «Объект» carries «Услуги»/«Прочее», and inside a combined shipment of two orders.
+  const cutSweep = (mk, ops, label, maxN) => {
+    const clean = mk();
+    const cleanR = apply(clean, 'tok-user', 'INV-1', L1, ops);
+    const wantState = project(clean);
+    const wantJournal = clean.dumpOzonCost().length;
+    const conds = { 'clean apply succeeded': ok(cleanR) }; const notes = [];
+    const wantRows = JSON.parse(wantState)[0];
+    for (let n = 1; n <= maxN; n++) {
+      const h = mk();
+      const cut = cutAt(h, n);
+      const first = apply(h, 'tok-user', 'INV-1', L1, ops);
+      cut.restore();
+      const midState = project(h);
+      const retry = apply(h, 'tok-user', 'INV-1', L1, ops);
+      const rows = rowsOf(h, ops);
+      const third = apply(h, 'tok-user', 'INV-1', L1, ops);
+      const L = label + ' cut at write ' + n;
+      conds[L + ': the fault fired and the apply failed'] = cut.fired && first.status === 'error';
+      conds[L + ': retry succeeded'] = ok(retry) && retry.data.costJournalError === '';
+      const finalState = project(h);
+      conds[L + ': final state equals the clean apply'] = finalState === wantState;
+      conds[L + ': Σ «Счёт недели» = 1299.00'] = rows.reduce((a, x) => a + kop(x[WI]), 0) === 129900;
+      conds[L + ': journal healed, same length as the clean run'] = h.dumpOzonCost().length === wantJournal && rows.every((row) => latestJournal(h, row['OpID'], row['Артикул']) === kop(row['Цена']));
+      conds[L + ': a further repeat writes nothing'] = ok(third) && third.data.changedRows === 0 && project(h) === wantState;
+      if (finalState !== wantState) {
+        const got = JSON.parse(finalState)[0];
+        const diff = got.map((g, i) => j(g) !== j(wantRows[i]) ? 'GOT ' + j(g.slice(0, 5).concat([g[6]])) + ' WANT ' + j(wantRows[i].slice(0, 5).concat([wantRows[i][6]])) : null).filter(Boolean);
+        notes.push('n=' + n + ' DIFF: ' + diff.join(' ; ') + ' retryMsg=' + msg(retry));
+      }
+      notes.push('n=' + n + ' fired=' + cut.fired + ' calls=' + cut.calls);
+    }
+    return { conds, note: notes.join(' || ') };
+  };
+
+  const MAN3_EXTRAS = '[Упаковка: 95 шт. x 5₽ = 475₽ | Прочее: 300₽ | Услуги: Паллета x1 (1500₽)]';
+  const base3 = (o) => {
+    const h = world(o);
+    addAuto(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', date: '2026-10-28', items: [X(120)] });
+    addManual(h, { opId: 'man-1', cabinet: 'ShopTwo', order: '555', pid: 'Q-1', date: '2026-10-29', items: [Y(45), X(30), Z(20)], extras: MAN3_EXTRAS });
+    addAuto(h, { pid: 'P-3', cabinet: 'MaxiStore', order: '3333', date: '2026-10-29', items: [Z(75)] });
+    return h;
+  };
+  t07('Item 97 ticket 07 B8b: a cut-off at every History row write of an apply that includes a MANUAL op of three rows (45/30/20 pcs) with «Услуги»+«Прочее»: the retry ends in exactly the state of a clean apply', () => cutSweep(base3, OPS3, 'multi-row manual op', 5));
+
+  const COMB = (labels, q, Q, share, total) => ' [Общая поставка: заявки ' + labels + '; доля этой заявки ' + q + ' из ' + Q + ' шт., ' + share + ' руб. из ' + total + ' руб.]';
+  const baseComb = (o) => {
+    const h = world(o);
+    addAuto(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', date: '2026-10-28', items: [X(120)] });
+    const ex = '[Упаковка: 100 шт. x 5₽ = 500₽ | Прочее: 300₽ | Услуги: Паллета x1 (1500₽)]';
+    const lab = '№ 555-1, № 556-1';
+    h.commitTransaction([Y(45), X(15)], 'Расход', 'Ozon (ShopTwo) ' + ex.replace('= 500₽', '= 300₽') + COMB(lab, 60, 100, '1380.00', '2300.00'), '2026-10-29', 'tester', '2026-10-30T07:00:00Z', 'S-1-1', 1380, undefined, '', 'S-1');
+    addPosting(h, { pid: 'Q-1', cabinet: 'ShopTwo', order: '555', ids: idsOf(h, 'S-1-1') });
+    h.commitTransaction([Z(40)], 'Расход', 'Ozon (ShopTwo) ' + ex.replace('= 500₽', '= 200₽') + COMB(lab, 40, 100, '920.00', '2300.00'), '2026-10-29', 'tester', '2026-10-30T07:00:00Z', 'S-1-2', 920, undefined, '', 'S-1');
+    addPosting(h, { pid: 'Q-2', cabinet: 'ShopTwo', order: '556', ids: idsOf(h, 'S-1-2') });
+    return h;
+  };
+  const OPSC = ['ozonAuto:P-1', 'S-1-1', 'S-1-2'];
+  t07('Item 97 ticket 07 B8c: a cut-off at every History row write of an apply that includes a combined shipment (two OpIDs S-1-1 / S-1-2 sharing «Отгрузка» S-1, rows 2 + 1, with «Услуги»+«Прочее»): the retry ends in exactly the state of a clean apply', () => cutSweep(baseComb, OPSC, 'combined shipment', 4));
+
+  t07('Item 97 ticket 07 B9: after the apply (and after a re-apply with fewer ops) the latest «Себестоимость Озон» cost of every touched non-component row equals its «Цена»', () => {
+    const h = base();
+    const baseLen = h.dumpOzonCost().length;
+    const r = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const rows = rowsOf(h);
+    const bad = rows.filter((row) => latestJournal(h, row['OpID'], row['Артикул']) !== kop(row['Цена'])).map((row) => row['OpID'] + ' journal ' + latestJournal(h, row['OpID'], row['Артикул']) + ' price ' + row['Цена']);
+    const lenAfterFirst = h.dumpOzonCost().length;
+    const r2 = apply(h, 'tok-admin', 'INV-1', L1, ['ozonAuto:P-1', 'man-1']);
+    const lenAfterSecond = h.dumpOzonCost().length;
+    const bad2 = rowsOf(h).filter((row) => latestJournal(h, row['OpID'], row['Артикул']) !== kop(row['Цена'])).map((row) => row['OpID']);
+    return {
+      conds: {
+        'apply succeeded, no journal error': ok(r) && !!r.data && r.data.costJournalError === '',
+        'three rows checked': rows.length === 3,
+        'latest journal cost = Цена on every row': bad.length === 0,
+        'journal grew and journalAppended matches the growth': lenAfterFirst > baseLen && r.data.journalAppended === lenAfterFirst - baseLen,
+        'the re-apply appends rows and journalAppended matches the growth': ok(r2) && r2.data.journalAppended > 0 && lenAfterSecond === lenAfterFirst + r2.data.journalAppended,
+        'after the re-apply with fewer ops the journal agrees again': ok(r2) && bad2.length === 0
+      },
+      note: j({ bad, bad2, r: r.data && { journalAppended: r.data.journalAppended, err: r.data.costJournalError } })
+    };
+  });
+
+  t07('Item 97 ticket 07 B12: editing the packaging of an op that carries a «Счёт недели» share takes off the real extras share (the invoice share is goods-like): a row that carries the leftover kopeck of the split is recognised', () => {
+    const h = world();
+    addManual(h, { opId: 'man-9', cabinet: 'ShopTwo', order: '999', pid: 'Q-9', date: '2026-10-29', items: [X(1), Y(1), Z(1)], extras: '[Упаковка: 3 шт. x 0,33₽ = 1₽]' });
+    const sheet = h.sheetByName('Транзакции');
+    const heads = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map((x) => String(x).trim());
+    const rowsNow = () => h.dumpTransSheet().filter((r) => r['OpID'] === 'man-9');
+    const rowNums = rowsNow().map((r) => 2 + h.dumpTransSheet().findIndex((x) => String(x['ID']) === String(r['ID'])));
+    const put = (rowNum, name, v) => sheet.getRange(rowNum, heads.indexOf(name) + 1).setValue(v);
+    // Old total 1.00 over 3 pieces: the split is 0.34 / 0.33 / 0.33 by position, but the LAST row carries the 0.34 (it moved) and holds a 300.00 invoice share.
+    put(rowNums[0], 'Сумма', 10.33); put(rowNums[1], 'Сумма', 20.33); put(rowNums[2], 'Сумма', 330.34);
+    put(rowNums[2], WI, 300);
+    const evidence = rowsNow().map((r) => typeof r['Себестоимость списания']);
+    const res = h.updateShipmentExtras({ id: String(rowsNow()[0]['ID']), packagingMode: 'batch', packagingValue: 0, otherMode: 'batch', otherValue: 0, services: [] }, 'tester');
+    const totals = rowsNow().map((r) => kop(r['Сумма']));
+    return {
+      conds: {
+        'rows carry write-off cost evidence': evidence.every((t) => t === 'number'),
+        'totals are the bare goods and the invoice share: 10.00 / 20.00 / 330.00': j(totals) === j([1000, 2000, 33000])
+      },
+      note: j({ evidence, totals, res: res && res.status })
+    };
+  });
+
+  t07('Item 97 ticket 07 B10: delete -> restore of a History row (restoreArchivedItem and restoreTransaction with the payload) keeps «Счёт недели»; a later repeat apply does not add it twice', () => {
+    const h = base();
+    apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const row = rowOf(h, 'ozonAuto:P-1', 'X');
+    const wi = kop(row[WI]);
+    h.deleteTransaction(String(row['ID']), 'tester');
+    const archive = h.dumpArchive()[0];
+    h.restoreArchivedItem(archive.archiveId, 'tester');
+    const back = h.dumpTransSheet().find((r) => String(r['ID']) === String(row['ID'])) || {};
+    const again = apply(h, 'tok-user', 'INV-1', L1, OPS3);
+    const after = h.dumpTransSheet().find((r) => String(r['ID']) === String(row['ID'])) || {};
+    // second route: restore with the payload of the archive
+    h.deleteTransaction(String(row['ID']), 'tester');
+    const archived = h.dumpArchive()[0].data;
+    h.restoreTransaction(Object.assign({}, archived, { weekInvoice: wi / 100 }));
+    const back2 = h.dumpTransSheet().find((r) => String(r['ID']) === String(row['ID'])) || {};
+    return {
+      conds: {
+        'row had its share 556.71': wi === 55671,
+        'restoreArchivedItem: «Счёт недели» is back': !!back['ID'] && kop(back[WI]) === wi,
+        'repeat apply after the restore: ok and Сумма unchanged': ok(again) && kop(after['Сумма']) === kop(back['Сумма']) && kop(after[WI]) === wi,
+        'restoreTransaction with the payload: «Счёт недели» is back': !!back2['ID'] && kop(back2[WI]) === wi
+      },
+      note: j({ wi, back: back[WI], back2: back2[WI], archivedKeys: Object.keys(archived) })
+    };
+  });
+
+  t07('Item 97 ticket 07 B11: doPost registers getInvoiceSpread (operations with rows and raw pcsPerBox — number or null for an EMPTY SKU cell —, services in roubles, applied list) and applyInvoiceSpread (returns changedRows/journalAppended/costJournalError)', () => {
+    const h = base({ skuRows: SKU_ROWS.map((r) => r[0] === 'Z' ? ['Z', '', '333'] : r) });
+    const g0 = call(h, 'tok-user', 'getInvoiceSpread', { week: W44 });
+    const d0 = (g0 && g0.data) || {};
+    const ops = d0.operations || [];
+    const by = (id) => ops.find((o) => o.opId === id) || {};
+    const rowOfOp = (id) => ((by(id).rows || [])[0]) || {};
+    const bad = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L1, opIds: OPS3 });
+    const fixed = h.sheetByName('Транзакции') && true;
+    const h2 = base();
+    const ap = apply(h2, 'tok-user', 'INV-1', L1, OPS3);
+    const g1 = call(h2, 'tok-user', 'getInvoiceSpread', { week: W44 });
+    const d1 = (g1 && g1.data) || {};
+    const a = (d1.applied || [])[0] || {};
+    return {
+      conds: {
+        'getInvoiceSpread answers for a plain user': ok(g0),
+        'three operations of the week': ops.length === 3 && j(ops.map((o) => o.opId).sort()) === j(OPS3.slice().sort()),
+        'auto flag, cabinet, order numbers': by('ozonAuto:P-1').auto === true && by('man-1').auto === false && by('man-1').cabinet === 'ShopTwo' && j(by('man-1').orderNumbers) === j(['555']),
+        'pcsPerBox is the raw number: X 20, Y 10; empty cell -> null (not 1)': rowOfOp('ozonAuto:P-1').pcsPerBox === 20 && rowOfOp('man-1').pcsPerBox === 10 && rowOfOp('ozonAuto:P-3').pcsPerBox === null,
+        'row has id, article, quantity, isComponent': rowOfOp('man-1').article === 'Y' && rowOfOp('man-1').quantity === 45 && rowOfOp('man-1').isComponent === false && !!rowOfOp('man-1').id,
+        'services = «Услуги» + «Прочее» of the manual op = 1800 roubles, 0 for auto ops': by('man-1').services === 1800 && by('ozonAuto:P-1').services === 0,
+        'nothing applied yet': Array.isArray(d0.applied) && d0.applied.length === 0,
+        'the spread with an empty norm cell of Z is refused through doPost': bad.status === 'error' && msg(bad).indexOf('Z') !== -1,
+        'applyInvoiceSpread through doPost succeeds and returns the counters': ok(ap) && !!ap.data && ap.data.changedRows === 3 && typeof ap.data.journalAppended === 'number' && ap.data.costJournalError === '' && Array.isArray(ap.data.newTransactions),
+        'applied block: invoice id, ops, line, applier': ok(g1) && (d1.applied || []).length === 1 && a.invoiceId === 'INV-1' && a.appliedBy === 'Кладовщик' && (a.opIds || []).length === 3 && (a.lines || []).length === 1 && Number(a.lines[0].n) === 1
+      },
+      note: j({ g0: g0 && (g0.message || g0.status), ap: msg(ap), applied: d1.applied, fixed })
+    };
+  });
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
