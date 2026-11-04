@@ -2160,6 +2160,32 @@ function repointInvoiceShares(moves) {
   return moved;
 }
 
+/**
+ * Item 97 ticket 08 B9: a pencil edit writes the row under a new id, so the «TransGroupInfo» of the «Внешние отгрузки»
+ * rows that name the old id is switched to the new one (same position, one write per changed cell).
+ */
+function repointPostingGroupIds(oldId, newId) {
+  const sheet = getExternalShipmentsSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const col = readHeaderRow(sheet).indexOf('TransGroupInfo');
+  if (col === -1) return;
+  const cells = sheet.getRange(2, col + 1, lastRow - 1, 1).getValues();
+  const from = String(oldId).trim();
+  for (let i = 0; i < cells.length; i++) {
+    let ids;
+    try { ids = JSON.parse(String(cells[i][0])); } catch (e) { continue; }
+    if (!Array.isArray(ids)) continue;
+    let changed = false;
+    const next = ids.map(function(v) {
+      if (String(v).trim() !== from) return v;
+      changed = true;
+      return String(newId);
+    });
+    if (changed) sheet.getRange(i + 2, col + 1).setValue(JSON.stringify(next));
+  }
+}
+
 function updateTransaction(id, data, username) {
   // Item 56, stage 2. The additional costs of an operation now live in their own column.
   // An edit deletes the row and writes it again, so the number has to be read BEFORE the
@@ -2260,8 +2286,9 @@ function updateTransaction(id, data, username) {
 
   // Item 97 ticket 08: both fixed cells go back (Сумма / Цена follow), and the invoice shares follow the new row id.
   // Before the journal follow-up below, which reads the final «Цена».
+  const newMain = commitResult.newTransactions.filter(function(t) { return t.isComponent !== true; })[0];
+  if (storedRow && newMain) repointPostingGroupIds(storedRow.id, newMain.id);
   if (keepsFixedSums) {
-    const newMain = commitResult.newTransactions.filter(function(t) { return t.isComponent !== true; })[0];
     if (newMain) {
       const f = rowFixedSumsKop(storedRow);
       putFixedSumsOnRows([{ id: newMain.id, p: f.p, i: f.i }]);
@@ -11044,7 +11071,8 @@ function operationServicesRoubles(destination) {
 function getInvoiceSpread(week) {
   assertWeekFilesWeek(week);
   const norms = readSkuBoxNormsRaw();
-  const operations = weekPackagingOperations(String(week)).map(function(op) {
+  const weekOps = weekPackagingOperations(String(week));
+  const operations = weekOps.map(function(op) {
     const out = {
       opId: op.opId, cabinet: op.cabinet, orderNumbers: op.orderNumbers, auto: op.auto,
       shipmentId: op.records.length > 0 ? op.records[0].shipmentId : '',
@@ -11060,7 +11088,119 @@ function getInvoiceSpread(week) {
   const applied = readInvoiceInputsSheet().filter(function(r) { return r.week === String(week); }).map(function(r) {
     return { invoiceId: r.invoiceId, lines: r.lines, opIds: r.opIds, appliedBy: r.appliedBy, appliedAt: r.appliedAt };
   });
-  return { operations: operations, applied: applied };
+  const checks = invoiceSpreadChecks(String(week), weekOps, applied, norms);
+  return { operations: operations, applied: applied, reconciliation: checks.reconciliation, stale: checks.stale, notInSpread: checks.notInSpread };
+}
+
+/**
+ * Item 97 ticket 08 part B (read only): reconciliation of every applied invoice (its allocated sum against its shares
+ * on the rows still in «История» and against the «Счёт недели» cells), what is stale (step 1, invoices) and the
+ * operations of the week that are in no applied invoice. Money in integer kopecks.
+ */
+function invoiceSpreadChecks(week, operations, applied, norms) {
+  // `operations` = weekPackagingOperations(week): rows carry the stored «Упаковка недели» (kopecks via kopOf).
+  const kopOf = function(v) { return v === '' || v === undefined || v === null ? 0 : Math.round(parseNumber(v) * 100); };
+  const shares = readInvoiceSharesSheet();
+  const invoices = listContractorInvoices(week);
+  const history = {};
+  const sheet = getTransactionSheet(getSpreadsheet());
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    const values = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+    const headers = values[0].map(function(h) { return String(h).trim(); });
+    const iId = headers.indexOf('ID');
+    for (let r = 1; r < values.length; r++) {
+      const id = String(values[r][iId]).trim();
+      if (id === '') continue;
+      history[id] = { article: String(sheetCellText(values[r], headers, 'Артикул')), cellKop: kopOf(sheetCellText(values[r], headers, 'Счёт недели')) };
+    }
+  }
+  const sharesByRow = {};
+  shares.forEach(function(s) { sharesByRow[s.rowId] = (sharesByRow[s.rowId] || 0) + s.shareKop; });
+
+  const allocatedOf = function(a) {
+    const invoice = invoices.filter(function(inv) { return inv.id === a.invoiceId; })[0];
+    const selections = a.lines.map(function(l) { return { n: Number(l && l.n), qty: l && l.qty !== undefined && l.qty !== null ? String(l.qty).trim() : '' }; });
+    return invoiceSelectionKopGs(invoice ? invoice.lines : [], selections).selectedKop;
+  };
+  const reconciliation = applied.map(function(a) {
+    const allocatedKop = allocatedOf(a);
+    let onRowsKop = 0;
+    const missingRows = [];
+    const mismatchedRows = [];
+    const rowKop = {};
+    shares.filter(function(s) { return s.invoiceId === a.invoiceId; }).forEach(function(s) { rowKop[s.rowId] = true; });
+    Object.keys(rowKop).forEach(function(rowId) {
+      const h = history[rowId];
+      if (!h) { missingRows.push(rowId); return; }
+      shares.forEach(function(s) { if (s.invoiceId === a.invoiceId && s.rowId === rowId) onRowsKop += s.shareKop; });
+      if (h.cellKop !== sharesByRow[rowId]) mismatchedRows.push({ id: rowId, article: h.article, cellKop: h.cellKop, sharesKop: sharesByRow[rowId] });
+    });
+    return { invoiceId: a.invoiceId, allocatedKop: allocatedKop, onRowsKop: onRowsKop, ok: onRowsKop === allocatedKop && missingRows.length === 0 && mismatchedRows.length === 0,
+      missingRows: missingRows, mismatchedRows: mismatchedRows };
+  });
+
+  // Step 1: «Упаковка недели» of each row against the saved unit (an override of that op+article wins) x the current quantity.
+  const savedAll = readWeekPackagingSheet().filter(function(r) { return r.week === week && r.unitKop !== null; });
+  const step1 = [];
+  if (savedAll.length > 0) {
+    operations.forEach(function(op) {
+      const articles = [];
+      op.rows.forEach(function(r) {
+        if (r.isComponent) return;
+        const pick = savedAll.filter(function(s) { return s.opId === op.opId && s.article === r.article; })[0]
+          || savedAll.filter(function(s) { return s.opId === '' && s.article === r.article; })[0];
+        // A row of the week whose article has no saved price (written off after the save, a peresort replacement) needs step 1 again.
+        if (!pick) { if (articles.indexOf(r.article) === -1) articles.push(r.article); return; }
+        const cellKop = r.weekPackaging === null || r.weekPackaging === undefined ? 0 : Math.round(r.weekPackaging * 100);
+        if (cellKop !== Math.round(pick.unitKop * r.quantity) && articles.indexOf(r.article) === -1) articles.push(r.article);
+      });
+      if (articles.length > 0) step1.push({ opId: op.opId, articles: articles });
+    });
+  }
+
+  // Invoices: the targets the applied input would give now against the stored shares, by row id.
+  const staleInvoices = [];
+  applied.forEach(function(a) {
+    const allocatedKop = allocatedOf(a);
+    const present = operations.filter(function(op) { return a.opIds.indexOf(op.opId) !== -1; });
+    const bad = {};
+    a.opIds.forEach(function(opId) { if (!operations.some(function(op) { return op.opId === opId; })) bad[opId] = true; });
+    const targets = weekSpreadTargetsGs(allocatedKop, present.map(function(op) {
+      return { opId: op.opId, cabinet: op.cabinet, rows: op.rows };
+    }), norms);
+    const mine = {};
+    const opOfRow = {};
+    shares.forEach(function(s) { if (s.invoiceId === a.invoiceId) { mine[s.rowId] = (mine[s.rowId] || 0) + s.shareKop; opOfRow[s.rowId] = s.opId; } });
+    if (!targets.ok) {
+      present.forEach(function(op) { bad[op.opId] = true; });
+    } else {
+      const wanted = {};
+      targets.operations.forEach(function(o) {
+        o.rows.forEach(function(r) {
+          if (r.boxes > 0) wanted[r.id] = r.shareKop;
+          if (r.boxes > 0 && mine[r.id] !== r.shareKop) bad[o.opId] = true;
+        });
+      });
+      Object.keys(mine).forEach(function(rowId) {
+        if (wanted[rowId] !== undefined) return;
+        // a share on a row that is not a target any more: charge it to the op it was booked on
+        bad[opOfRow[rowId]] = true;
+      });
+    }
+    const opIds = Object.keys(bad);
+    if (opIds.length > 0) staleInvoices.push({ invoiceId: a.invoiceId, opIds: opIds });
+  });
+
+  const notInSpread = [];
+  if (applied.length > 0) {
+    operations.forEach(function(op) {
+      if (!applied.some(function(a) { return a.opIds.indexOf(op.opId) !== -1; })) {
+        notInSpread.push({ opId: op.opId, cabinet: op.cabinet, orderNumbers: op.orderNumbers });
+      }
+    });
+  }
+  return { reconciliation: reconciliation, stale: { step1: step1, invoices: staleInvoices }, notInSpread: notInSpread };
 }
 
 /** «Объект» with this invoice's tag set to `tagText` (replaced in place, else appended) or dropped when `tagText` is null. */

@@ -18599,6 +18599,370 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   });
 }
 
+// ================= Item 97 ticket 08 part B: staleness and reconciliation (getInvoiceSpread, read only) =================
+// Written TEST-FIRST against ticket-08-design.md «Part B». getInvoiceSpread(week) must also return reconciliation[], stale{step1,invoices}
+// and notInSpread[]. Figures: line n1 x1 (1299.00) + n2 x20 (5.00) = 139900 kop over ONE op = the whole sum on its row.
+// Synthetic data only. Every check reads fields defensively, so a missing field fails that check, not the whole section.
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const W44 = '2026-W44';
+  const EXT = 'Внешние отгрузки';
+  const SHARES = 'Доли счетов';
+  const WP = 'Упаковка недели';
+  const WI = 'Счёт недели';
+  const OP = 'ozonAuto:P-1';
+  const OP2 = 'ozonAuto:P-2';
+  const far = String(Date.parse('2030-01-01T00:00:00Z'));
+  const j = (v) => JSON.stringify(v);
+  const kop = (v) => (v === '' || v === undefined || v === null) ? 0 : Math.round(Number(String(v).replace(',', '.')) * 100);
+  const call = (h, token, action, data) => h.callDoPost({ action, sessionToken: token, data });
+  const ok = (o) => !!o && o.status === 'success';
+  const msg = (o) => String((o && o.message) || '');
+  const INV_HEAD = ['ID счёта', 'Неделя', 'Поставщик', 'Номер', 'Дата счёта', 'Покупатель', 'Всего к оплате', 'НДС', 'Всего наименований', 'Файл ID', 'Файл', 'Загрузил', 'Загружено', 'Заменён'];
+  const LINE_HEAD = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма', 'На поставку', 'Упаковка'];
+  const L12 = [{ n: 1, qty: '1' }, { n: 2, qty: '20' }];
+  const PRICES = [{ article: 'X', unit: '1,50' }, { article: 'Y', unit: '2' }, { article: 'Z', unit: '3' }];
+  const X = (n) => ({ article: 'X', quantity: n, price: 10 });
+
+  const world = (twoInvoices) => {
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-11-04T10:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet([
+      { article: 'X', quantity: 5000, avgCost: 10, capitalization: 50000 }, { article: 'Y', quantity: 5000, avgCost: 20, capitalization: 100000 },
+      { article: 'Z', quantity: 5000, avgCost: 30, capitalization: 150000 }
+    ]);
+    h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], [['X', 20, '111'], ['Y', 10, '222'], ['Z', 25, '333']]);
+    const stocks = [];
+    ['MaxiStore', 'ShopTwo'].forEach((cab) => [['X', '111'], ['Y', '222'], ['Z', '333']].forEach((a) => stocks.push({ cabinet: cab, article: a[0], available: 4000, sku: a[1] })));
+    h.setOzonStocksSheet(stocks);
+    h.setKitSheet([]);
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'], ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+    h.setRegistrySheet(EXT, [h.context.EXTERNAL_SHIPMENTS_HEADERS.slice()]);
+    const inv = [INV_HEAD, ['INV-1', W44, 'ООО Ромашка', '0045', '02.11.2026', 'ИП Тестов', 1399, 'Без НДС', 2, '', '', 'Кладовщик', '2026-11-02 10:00:00', '']];
+    const lines = [LINE_HEAD, ['INV-1', 1, 'Доставка на СЦ (готовый палет)', '1', 'шт', 1299, 1299, 'да', ''], ['INV-1', 2, 'стикеровка', '20', 'шт', 5, 100, 'да', '']];
+    if (twoInvoices) {
+      inv.push(['INV-2', W44, 'ООО Ромашка', '0046', '03.11.2026', 'ИП Тестов', 500, 'Без НДС', 1, '', '', 'Кладовщик', '2026-11-03 10:00:00', '']);
+      lines.push(['INV-2', 1, 'Приёмка товара', '1', 'шт', 500, 500, 'да', '']);
+    }
+    h.setRegistrySheet('Счета подрядчика', inv);
+    h.setRegistrySheet('Строки счетов', lines);
+    return h;
+  };
+  const addPosting = (h, o) => {
+    const heads = h.context.EXTERNAL_SHIPMENTS_HEADERS;
+    const line = new Array(heads.length).fill('');
+    const set = (n, v) => { line[heads.indexOf(n)] = v; };
+    set('PostingID', o.pid); set('Статус', 'processed'); set('Кабинет', o.cabinet); set('Номер заявки', o.order);
+    set('TransGroupInfo', JSON.stringify(o.ids)); set('Неделя', W44); set('Передача по', '2026-10-28 12:00:00');
+    set('ПозицииJSON', JSON.stringify(o.items.map((i) => ({ offerId: i.article, quantity: i.quantity }))));
+    const sheet = h.sheetByName(EXT);
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, heads.length).setValues([line]);
+  };
+  const idsOf = (h, opId) => h.dumpTransSheet().filter((r) => r['OpID'] === opId).map((r) => String(r['ID']));
+  const addOp = (h, opId, pid, cab, order, items) => {
+    h.commitTransaction(items, 'Расход', 'Ozon (' + cab + ')', '2026-10-28', 'Автосписание', null, opId, 0, undefined, '', '');
+    addPosting(h, { pid, cabinet: cab, order, ids: idsOf(h, opId), items });
+  };
+  // Shipment P-1 (X 120 + Z 10) with step 1 saved and INV-1 (both lines) applied to P-1.
+  const build = (o) => {
+    o = o || {};
+    const h = world(o.two);
+    // two rows in the op: a pencil edit renames the id of one row, the op must stay reachable through the other (posting ids are not rewritten)
+    addOp(h, OP, 'P-1', 'MaxiStore', '1111', o.items || [X(120), { article: 'Z', quantity: 10, price: 30 }]);
+    if (o.second) addOp(h, OP2, 'P-2', 'ShopTwo', '2222', [{ article: 'Y', quantity: 45, price: 20 }]);
+    if (o.steps !== false) {
+      const s1 = call(h, 'tok-user', 'saveWeekPackaging', { week: W44, prices: PRICES, overrides: [] });
+      const s2 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L12, opIds: [OP] });
+      if (!ok(s1) || !ok(s2)) throw new Error('setup failed: step 1 ' + msg(s1) + ' / step 2 ' + msg(s2));
+      if (o.two) {
+        const s3 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-2', lines: [{ n: 1, qty: '1' }], opIds: [OP] });
+        if (!ok(s3)) throw new Error('setup failed: INV-2 ' + msg(s3));
+      }
+    }
+    return h;
+  };
+  const rowOf = (h, art) => h.dumpTransSheet().find((r) => r['OpID'] === OP && r['Артикул'] === art && String(r['isComponent']).toLowerCase() !== 'true') || {};
+  const spread = (h) => { const g = call(h, 'tok-user', 'getInvoiceSpread', { week: W44 }); const d = (g && g.data) || {}; if (!ok(g)) d.__err = msg(g); return d; };
+  const recOf = (d, id) => (Array.isArray(d.reconciliation) ? d.reconciliation : []).find((r) => r.invoiceId === id) || {};
+  const staleInv = (d) => (d.stale && Array.isArray(d.stale.invoices)) ? d.stale.invoices : null;
+  const staleS1 = (d) => (d.stale && Array.isArray(d.stale.step1)) ? d.stale.step1 : null;
+  const pencil = (h, art, over) => {
+    const r = h.getTransactions().rows.find((t) => t.opId === OP && t.article === art && t.type === 'Расход');
+    return h.updateTransaction(r.id, Object.assign({ article: r.article, quantity: r.quantity, price: r.price, type: 'Расход',
+      destination: r.destination, deliveryDate: r.deliveryDate, date: r.date }, over), 'tester');
+  };
+  // Hand edit of one cell of the transactions sheet, the way an owner would type into it.
+  const setCell = (h, rowId, header, value) => {
+    const sheet = h.sheetByName('Транзакции');
+    const data = sheet.getDataRange().getValues();
+    const col = data[0].indexOf(header); const idCol = data[0].indexOf('ID');
+    for (let i = 1; i < data.length; i++) if (String(data[i][idCol]) === String(rowId)) { sheet.getRange(i + 1, col + 1).setValue(value); return true; }
+    return false;
+  };
+  const t08b = (name, run) => {
+    let conds = {}; let note = '';
+    try { const r = run(); conds = r.conds; note = r.note || ''; } catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+    const failed = Object.keys(conds).filter((k) => !conds[k]);
+    check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+  };
+  const empty = (a) => Array.isArray(a) && a.length === 0;
+
+  t08b('Item 97 ticket 08 B1: freshly applied invoice (+ saved step 1): reconciliation ok, allocatedKop = 139900 = onRowsKop, no missing/mismatched rows, stale.step1 = [], stale.invoices = [], notInSpread = []', () => {
+    const h = build();
+    const d = spread(h);
+    const r = recOf(d, 'INV-1');
+    return {
+      conds: {
+        'one reconciliation entry for INV-1': Array.isArray(d.reconciliation) && d.reconciliation.length === 1 && r.invoiceId === 'INV-1',
+        'ok = true': r.ok === true,
+        'allocatedKop = 139900': r.allocatedKop === 139900,
+        'onRowsKop = allocatedKop': r.onRowsKop === 139900,
+        'missingRows and mismatchedRows empty': empty(r.missingRows) && empty(r.mismatchedRows),
+        'stale.step1 = []': empty(staleS1(d)),
+        'stale.invoices = []': empty(staleInv(d)),
+        'notInSpread = []': empty(d.notInSpread)
+      },
+      note: j({ err: d.__err, reconciliation: d.reconciliation, stale: d.stale, notInSpread: d.notInSpread, applied: d.applied })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B2: pencil quantity 120 -> 100: reconciliation stays ok (shares re-pointed, cell = shares), but stale.invoices lists INV-1 with the opId and stale.step1 lists the op with article X', () => {
+    const h = build();
+    pencil(h, 'X', { quantity: 100 });
+    const d = spread(h);
+    const r = recOf(d, 'INV-1');
+    const si = (staleInv(d) || []).find((x) => x.invoiceId === 'INV-1') || {};
+    const s1 = (staleS1(d) || []).find((x) => x.opId === OP) || {};
+    return {
+      conds: {
+        'reconciliation ok': r.ok === true,
+        'onRowsKop = allocatedKop = 139900': r.onRowsKop === 139900 && r.allocatedKop === 139900,
+        'stale.invoices lists INV-1 with the opId': j(si.opIds) === j([OP]),
+        'stale.step1 lists the op with article X': j(s1.articles) === j(['X'])
+      },
+      note: j({ reconciliation: d.reconciliation, stale: d.stale })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B3: single delete of the spread row: reconciliation not ok, missingRows holds the old id, onRowsKop < allocatedKop, stale.invoices lists INV-1', () => {
+    const h = build();
+    const oldId = String(rowOf(h, 'X')['ID']);
+    h.deleteTransaction(oldId, 'tester');
+    const d = spread(h);
+    const r = recOf(d, 'INV-1');
+    const si = (staleInv(d) || []).find((x) => x.invoiceId === 'INV-1') || {};
+    return {
+      conds: {
+        'ok = false': r.ok === false,
+        'missingRows holds the old id': Array.isArray(r.missingRows) && r.missingRows.map(String).indexOf(oldId) !== -1,
+        'onRowsKop < allocatedKop': typeof r.onRowsKop === 'number' && typeof r.allocatedKop === 'number' && r.onRowsKop < r.allocatedKop,
+        'stale.invoices lists INV-1': si.invoiceId === 'INV-1'
+      },
+      note: j({ oldId, reconciliation: d.reconciliation, stale: d.stale })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B4: delete then restore unchanged: reconciliation ok again, stale.step1 and stale.invoices both empty', () => {
+    const h = build();
+    const arch0 = h.dumpArchive().map((a) => a.archiveId);
+    h.deleteTransaction(String(rowOf(h, 'X')['ID']), 'tester');
+    const fresh = h.dumpArchive().map((a) => a.archiveId).filter((id) => arch0.indexOf(id) === -1);
+    h.restoreArchivedItem(fresh[fresh.length - 1], 'tester');
+    const d = spread(h);
+    const r = recOf(d, 'INV-1');
+    return {
+      conds: {
+        'reconciliation ok': r.ok === true,
+        'allocatedKop = onRowsKop = 139900': r.allocatedKop === 139900 && r.onRowsKop === 139900,
+        'stale.step1 = []': empty(staleS1(d)),
+        'stale.invoices = []': empty(staleInv(d))
+      },
+      note: j({ archived: fresh.length, reconciliation: d.reconciliation, stale: d.stale })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B5: hand edit of «Счёт недели» to +0.01: reconciliation not ok, mismatchedRows = [{ id, article X, cellKop = share + 1, sharesKop = share }]', () => {
+    const h = build();
+    const row = rowOf(h, 'X');
+    const id = String(row['ID']);
+    const cell0 = kop(row[WI]);
+    const done = setCell(h, id, WI, (cell0 + 1) / 100);
+    const d = spread(h);
+    const r = recOf(d, 'INV-1');
+    const m = (Array.isArray(r.mismatchedRows) ? r.mismatchedRows : [])[0] || {};
+    return {
+      conds: {
+        'setup: the cell was edited': done === true && kop(rowOf(h, 'X')[WI]) === cell0 + 1 && cell0 > 0,
+        'ok = false': r.ok === false,
+        'exactly one mismatched row': Array.isArray(r.mismatchedRows) && r.mismatchedRows.length === 1,
+        'mismatched row: id and article': String(m.id) === id && m.article === 'X',
+        'cellKop = share + 1, sharesKop = share': m.cellKop === cell0 + 1 && m.sharesKop === cell0
+      },
+      note: j({ reconciliation: d.reconciliation })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B6: after B2 re-apply the same input (applyInvoiceSpread) and re-save step 1: reconciliation ok, stale.step1 and stale.invoices both empty', () => {
+    const h = build();
+    pencil(h, 'X', { quantity: 100 });
+    const s2 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L12, opIds: [OP] });
+    const s1 = call(h, 'tok-user', 'saveWeekPackaging', { week: W44, prices: PRICES, overrides: [] });
+    const d = spread(h);
+    const r = recOf(d, 'INV-1');
+    return {
+      conds: {
+        'setup: re-apply and re-save succeeded': ok(s1) && ok(s2),
+        'reconciliation ok, 139900 on rows': r.ok === true && r.onRowsKop === 139900 && r.allocatedKop === 139900,
+        'stale.step1 = []': empty(staleS1(d)),
+        'stale.invoices = []': empty(staleInv(d))
+      },
+      note: j({ s1: msg(s1), s2: msg(s2), reconciliation: d.reconciliation, stale: d.stale })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B7: two operations, invoice applied to only one: notInSpread lists the other (opId, cabinet, orderNumbers); no invoice applied at all: notInSpread = [] and reconciliation = []', () => {
+    const h = build({ second: true });
+    const d = spread(h);
+    const n = (Array.isArray(d.notInSpread) ? d.notInSpread : []);
+    const o2 = n.find((x) => x.opId === OP2) || {};
+    const h0 = build({ second: true, steps: false });
+    const d0 = spread(h0);
+    return {
+      conds: {
+        'notInSpread has exactly the unticked op': n.length === 1 && o2.opId === OP2,
+        'its cabinet ShopTwo': o2.cabinet === 'ShopTwo',
+        'its order numbers [2222]': j(o2.orderNumbers) === j(['2222']),
+        'nothing applied: notInSpread = []': empty(d0.notInSpread),
+        'nothing applied: reconciliation = []': empty(d0.reconciliation)
+      },
+      note: j({ notInSpread: d.notInSpread, none: { n: d0.notInSpread, r: d0.reconciliation } })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B8: two invoices on the same row: hand-editing the cell breaks BOTH invoices (per-row mismatch, reported under each invoice with a share on it); untouched, both stay ok', () => {
+    const h = build({ two: true });
+    const d0 = spread(h);
+    const id = String(rowOf(h, 'X')['ID']);
+    const before = { a: recOf(d0, 'INV-1'), b: recOf(d0, 'INV-2') };
+    const row = rowOf(h, 'X');
+    const cell0 = kop(row[WI]);
+    setCell(h, id, WI, (cell0 + 1) / 100);
+    const d = spread(h);
+    const a = recOf(d, 'INV-1'); const b = recOf(d, 'INV-2');
+    const ma = (Array.isArray(a.mismatchedRows) ? a.mismatchedRows : [])[0] || {};
+    const mb = (Array.isArray(b.mismatchedRows) ? b.mismatchedRows : [])[0] || {};
+    return {
+      conds: {
+        'setup: two reconciliation entries, both ok before the edit': Array.isArray(d0.reconciliation) && d0.reconciliation.length === 2 && before.a.ok === true && before.b.ok === true,
+        'allocated 139900 and 50000': before.a.allocatedKop === 139900 && before.b.allocatedKop === 50000,
+        'INV-1 not ok after the edit': a.ok === false,
+        'INV-2 not ok after the edit': b.ok === false,
+        'the same row reported under both: cell = sum of both shares + 1 vs shares sum': cell0 > 0 && String(ma.id) === id && String(mb.id) === id && ma.cellKop === cell0 + 1 && ma.sharesKop === cell0 && mb.cellKop === cell0 + 1 && mb.sharesKop === cell0
+      },
+      note: j({ before: d0.reconciliation, after: d.reconciliation })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B9: pencil edit re-points the posting\'s «Внешние отгрузки» TransGroupInfo ids old -> new row id (single-row op, with and without fixed sums); the op stays in getInvoiceSpread (step 1 stale, invoice not stale) and re-applying the same input gives Σ «Счёт недели» = allocated', () => {
+    const groupIds = (h) => {
+      const dump = h.sheetByName(EXT).__dump();
+      const col = dump[0].indexOf('TransGroupInfo');
+      try { return JSON.parse(String(dump[1][col])).map(String); } catch (e) { return null; }
+    };
+    const h = build({ items: [X(120)] });
+    const oldId = String(rowOf(h, 'X')['ID']);
+    pencil(h, 'X', { quantity: 100 });
+    const newId = String(rowOf(h, 'X')['ID']);
+    const g = groupIds(h) || [];
+    const d = spread(h);
+    const si = (staleInv(d) || []).find((x) => x.invoiceId === 'INV-1') || {};
+    const listed = (Array.isArray(d.operations) ? d.operations : []).some((o) => o.opId === OP);
+    const s2 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L12, opIds: [OP] });
+    const total = h.dumpTransSheet().filter((r) => r['OpID'] === OP).reduce((a, r) => a + kop(r[WI]), 0);
+    const h2 = build({ items: [X(120)], steps: false });
+    const old2 = String(rowOf(h2, 'X')['ID']);
+    pencil(h2, 'X', { quantity: 100 });
+    const new2 = String(rowOf(h2, 'X')['ID']);
+    const g2 = groupIds(h2) || [];
+    return {
+      conds: {
+        'setup: the pencil wrote a new id': newId !== oldId && new2 !== old2,
+        'TransGroupInfo holds the new row id': g.indexOf(newId) !== -1,
+        'TransGroupInfo does not hold the old row id': g.indexOf(oldId) === -1,
+        'the op is still listed by getInvoiceSpread': listed === true,
+        'stale.invoices does NOT name INV-1 (the only row keeps the whole share)': !(staleInv(d) || []).some((x) => x.invoiceId === 'INV-1') && Array.isArray(staleInv(d)),
+        'stale.step1 names the op with article X': j(((staleS1(d) || []).find((x) => x.opId === OP) || {}).articles) === j(['X']),
+        're-apply of the same input succeeds': ok(s2),
+        'Σ «Счёт недели» over the op = 139900': total === 139900,
+        'row without fixed sums: TransGroupInfo holds the new id and not the old one': g2.indexOf(new2) !== -1 && g2.indexOf(old2) === -1
+      },
+      note: j({ oldId, newId, g, listed, stale: d.stale, s2: msg(s2), total, old2, new2, g2 })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B10: a saved per-operation override of the step 1 price (X = 2.00 on this op instead of 1.50) is honoured: stale.step1 = [] right after saving, and a quantity edit then flags X', () => {
+    const h = build({ steps: false });
+    const s1 = call(h, 'tok-user', 'saveWeekPackaging', { week: W44, prices: PRICES, overrides: [{ opId: OP, article: 'X', unit: '2' }] });
+    const s2 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L12, opIds: [OP] });
+    const cellX = kop(rowOf(h, 'X')[WP]);
+    const d = spread(h);
+    pencil(h, 'X', { quantity: 100 });
+    const d2 = spread(h);
+    const s1b = (staleS1(d2) || []).find((x) => x.opId === OP) || {};
+    return {
+      conds: {
+        'setup: saved and applied': ok(s1) && ok(s2),
+        'setup: the override price is on the row (2.00 x 120 = 240.00)': cellX === 24000,
+        'stale.step1 = [] right after saving': empty(staleS1(d)),
+        'after the quantity edit stale.step1 names X': j(s1b.articles) === j(['X'])
+      },
+      note: j({ cellX, stale: d.stale, stale2: d2.stale })
+    };
+  });
+
+  t08b('Item 97 ticket 08 B11: with a saved step 1 set, a non-component row whose article has NO saved price is step-1 stale: (a) an op written off after the save with unpriced Y, (b) peresort Y -> Z where Z is unpriced; with no saved set stale.step1 stays []', () => {
+    const P_XZ = [{ article: 'X', unit: '1,50' }, { article: 'Z', unit: '3' }];
+    const P_XY = [{ article: 'X', unit: '1,50' }, { article: 'Y', unit: '2' }];
+    const Y = (n) => ({ article: 'Y', quantity: n, price: 20 });
+    // (a) step 1 saved for X and Z only, INV-1 applied, then a second op with Y is written off
+    const ha = build({ steps: false });
+    const sa1 = call(ha, 'tok-user', 'saveWeekPackaging', { week: W44, prices: P_XZ, overrides: [] });
+    const sa2 = call(ha, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L12, opIds: [OP] });
+    addOp(ha, OP2, 'P-2', 'ShopTwo', '2222', [Y(45)]);
+    const da = spread(ha);
+    const a2 = (staleS1(da) || []).find((x) => x.opId === OP2) || {};
+    // (b) step 1 saved for X and Y, then all of Y is replaced by unpriced Z
+    const hb = build({ steps: false, items: [X(120), Y(45)] });
+    const sb1 = call(hb, 'tok-user', 'saveWeekPackaging', { week: W44, prices: P_XY, overrides: [] });
+    const sb2 = call(hb, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L12, opIds: [OP] });
+    const db0 = spread(hb);
+    const heads = hb.context.EXTERNAL_SHIPMENTS_HEADERS;
+    const sheet = hb.sheetByName(EXT);
+    sheet.getRange(2, heads.indexOf('ПересортJSON') + 1).setValue(JSON.stringify({ pairs: [{ fromArticle: 'Y', toArticle: 'Z', fromOfferId: 'Y', toOfferId: 'Z', qty: 45 }] }));
+    const res = hb.commitShipmentPeresort('P-1', 'tester');
+    const db = spread(hb);
+    const b1 = (staleS1(db) || []).find((x) => x.opId === OP) || {};
+    // no saved set at all: nothing is step-1 stale even with an op written off
+    const hc = build({ steps: false, second: true });
+    const dc = spread(hc);
+    return {
+      conds: {
+        'setup (a): saved and applied': ok(sa1) && ok(sa2),
+        '(a) stale.step1 names the later op with Y': j(a2.articles) === j(['Y']),
+        'setup (b): saved, applied, step1 clean before the peresort': ok(sb1) && ok(sb2) && empty(staleS1(db0)),
+        'setup (b): peresort committed': !!res && res.success === true && Number(rowOf(hb, 'Z')['Количество']) === 45,
+        '(b) stale.step1 names the op with Z': (b1.articles || []).indexOf('Z') !== -1,
+        'no saved set: stale.step1 = []': empty(staleS1(dc))
+      },
+      note: j({ a: da.stale, b: db.stale, b0: db0.stale, c: dc.stale, res: res && (res.message || res.success) })
+    };
+  });
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);
