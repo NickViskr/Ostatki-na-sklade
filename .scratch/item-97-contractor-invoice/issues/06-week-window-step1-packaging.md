@@ -9,10 +9,12 @@ line(s). Ask the owner where «Прочее» goes now that the write-off is aut
 
 **Blocked by:** 03, 05.
 
-**Status:** ready-for-agent
+**Status:** done (live 2026-11-04: Code.gs @217 + Cloud Run `sklad-00122-rzj`)
 
-- [ ] qty × unit per row, kopeck-exact; a repeat save writes nothing new
-- [ ] Packaging of a manual write-off is replaced, never added to
-- [ ] Journal reconciled for the touched supplies (with ticket 07's apply or on its own — decide here)
+- [x] qty × unit per row, kopeck-exact; a repeat save writes nothing new
+- [x] Packaging of a manual write-off is replaced, never added to
+- [x] Journal reconciled for the touched supplies (with ticket 07's apply or on its own — decide here)
 
 ## Comments
+
+- 2026-11-04: journal reconciled on its own at every step-1 save (owner). Contract and owner's answers: `../ticket-06-design.md`. Commits `2f2aaff`, `74ae084`, `4ed9c7c`. Gap left to ticket 08: a pencil re-commit drops «Упаковка недели».
