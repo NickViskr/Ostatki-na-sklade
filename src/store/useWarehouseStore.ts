@@ -1,7 +1,7 @@
 import { commentPayload } from '../lib/operationComment';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation, WeekFile, ContractorInvoice, ContractorInvoicePayload, WeekPackagingState, WeekPackagingPayload } from '../types';
+import { StockItem, Transaction, SKUItem, ParsedItem, User, ArchivedItem, ServiceItem, KitItem, KitComponent, ServiceRate, ExternalShipment, OzonStockRow, OzonSalesRow, OzonStockHistoryRow, FactoryOrder, PendingOperation, WeekFile, ContractorInvoice, ContractorInvoicePayload, WeekPackagingState, WeekPackagingPayload, InvoiceSpreadState, InvoiceSpreadPayload } from '../types';
 import { TurnoverData } from '../lib/turnoverData';
 import { useSettingsStore } from './useSettingsStore';
 import { useUIStore } from './useUIStore';
@@ -195,6 +195,8 @@ interface WarehouseState {
   listContractorInvoices: (week: string) => Promise<ContractorInvoice[]>;
   getWeekPackaging: (week: string) => Promise<WeekPackagingState>;
   saveWeekPackaging: (payload: WeekPackagingPayload) => Promise<{ status: string; data?: any; message?: string }>;
+  getInvoiceSpread: (week: string) => Promise<InvoiceSpreadState>;
+  applyInvoiceSpread: (payload: InvoiceSpreadPayload) => Promise<{ status: string; data?: any; message?: string }>;
   setInvoiceLinePackaging: (payload: { invoiceId: string; lineNo: number; packaging: boolean }) => Promise<{ status: string; data?: any; message?: string }>;
   deleteContractorInvoice: (id: string) => Promise<{ status: string; data?: any; message?: string }>;
   fetchStock: () => Promise<void>;
@@ -600,6 +602,18 @@ export const useWarehouseStore = create<WarehouseState>()(
   },
 
   saveWeekPackaging: async (payload) => get().fetchGas('saveWeekPackaging', { data: payload }),
+
+  getInvoiceSpread: async (week) => {
+    const res = await get().fetchGas('getInvoiceSpread', { data: { week } });
+    if (res.status !== 'success' || !res.data) throw new Error(res.message || 'Не удалось загрузить распределение счёта');
+    return res.data;
+  },
+
+  applyInvoiceSpread: async (payload) => {
+    const res = await get().fetchGas('applyInvoiceSpread', { data: payload });
+    if (res.status === 'success' && Array.isArray(res.data?.newTransactions)) set({ transactions: res.data.newTransactions });
+    return res;
+  },
 
   setInvoiceLinePackaging: async (payload) => get().fetchGas('setInvoiceLinePackaging', { data: payload }),
 

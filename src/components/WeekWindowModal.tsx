@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { useWarehouseStore } from '../store/useWarehouseStore';
-import { ContractorInvoice, WeekPackagingOperationInfo, WeekPackagingState } from '../types';
-import { formatKopecks } from '../lib/contractorInvoice';
+import { ContractorInvoice, InvoiceSpreadState, WeekPackagingOperationInfo, WeekPackagingState } from '../types';
+import { formatKopecks, parseQtyMilli } from '../lib/contractorInvoice';
+import { invoiceSelectionKop, weekSpreadTargets } from '../lib/weekSpread';
 import { invoiceWeekOptions, isoWeekLabel } from '../lib/isoWeek';
 import {
   invoiceLineIsPackaging, invoicePackagingTotalKop, step1TotalKop, weekArticleSummary, weekPackagingTargets
@@ -26,12 +27,14 @@ interface Props {
   onClose: () => void;
 }
 
-/** Item 97 ticket 06: the week window. Step 1 = packaging/stickering per article; step 2 comes in ticket 07. */
+/** Item 97 tickets 06-07: the week window. Step 1 = packaging/stickering per article; step 2 = spreading one invoice over supplies. */
 export const WeekWindowModal: React.FC<Props> = ({ initialWeek, onClose }) => {
   const getWeekPackaging = useWarehouseStore((s) => s.getWeekPackaging);
   const saveWeekPackaging = useWarehouseStore((s) => s.saveWeekPackaging);
   const setInvoiceLinePackaging = useWarehouseStore((s) => s.setInvoiceLinePackaging);
   const listContractorInvoices = useWarehouseStore((s) => s.listContractorInvoices);
+  const getInvoiceSpread = useWarehouseStore((s) => s.getInvoiceSpread);
+  const applyInvoiceSpread = useWarehouseStore((s) => s.applyInvoiceSpread);
   const role = (useWarehouseStore((s) => s.currentUser?.role) || '').toLowerCase();
   const isAdmin = role === 'admin' || role === 'администратор';
 
@@ -45,6 +48,15 @@ export const WeekWindowModal: React.FC<Props> = ({ initialWeek, onClose }) => {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [invoiceModal, setInvoiceModal] = useState<ContractorInvoice | null>(null);
+  // Step 2 state: the server data, the chosen invoice and what is ticked / typed for it.
+  const [spread, setSpread] = useState<InvoiceSpreadState | null>(null);
+  const [spreadError, setSpreadError] = useState('');
+  const [spreadInvoiceId, setSpreadInvoiceId] = useState('');
+  const [lineTicks, setLineTicks] = useState<Record<number, boolean>>({});
+  const [lineQty, setLineQty] = useState<Record<number, string>>({});
+  const [opTicks, setOpTicks] = useState<Set<string>>(new Set());
+  const [applying, setApplying] = useState(false);
+  const [spreadResult, setSpreadResult] = useState<{ text: string; error: string } | null>(null);
 
   const loadInvoices = useCallback(async () => {
     if (week) setInvoices(await listContractorInvoices(week));
@@ -72,10 +84,46 @@ export const WeekWindowModal: React.FC<Props> = ({ initialWeek, onClose }) => {
     }
   }, [getWeekPackaging, listContractorInvoices, week]);
 
+  const loadSpread = useCallback(async () => {
+    if (!week) return;
+    setSpreadError('');
+    try {
+      setSpread(await getInvoiceSpread(week));
+    } catch (e) {
+      setSpreadError((e as Error).message || 'Не удалось загрузить распределение счёта');
+    }
+  }, [getInvoiceSpread, week]);
+
   useEffect(() => {
     setState(null); setInvoices([]); setExpanded(new Set());
+    setSpread(null); setSpreadResult(null);
     loadWeek();
-  }, [loadWeek]);
+    loadSpread();
+  }, [loadWeek, loadSpread]);
+
+  const spreadInvoice = invoices.find((inv) => inv.id === spreadInvoiceId) || null;
+  const appliedSpread = spread?.applied.find((a) => a.invoiceId === spreadInvoiceId) || null;
+  const spreadOps = spread?.operations || [];
+
+  // Keep the chosen invoice valid; default = the first one.
+  useEffect(() => {
+    if (!invoices.some((inv) => inv.id === spreadInvoiceId)) setSpreadInvoiceId(invoices[0]?.id || '');
+  }, [invoices, spreadInvoiceId]);
+
+  // (Re)fill the ticks: the applied input when there is one, else the defaults.
+  useEffect(() => {
+    if (!spreadInvoice || !spread) return;
+    const ticks: Record<number, boolean> = {};
+    const qty: Record<number, string> = {};
+    for (const l of spreadInvoice.lines) {
+      const prev = appliedSpread?.lines.find((x) => x.n === l.n);
+      ticks[l.n] = appliedSpread ? !!prev : l.toSupply && !l.packaging;
+      qty[l.n] = prev ? String(prev.qty) : String(l.qty);
+    }
+    setLineTicks(ticks);
+    setLineQty(qty);
+    setOpTicks(new Set(appliedSpread ? appliedSpread.opIds : spread.operations.map((op) => op.opId)));
+  }, [spreadInvoice, spread, appliedSpread]);
 
   const operations = state?.operations || [];
   const summary = useMemo(() => weekArticleSummary(operations), [operations]);
@@ -131,6 +179,73 @@ export const WeekWindowModal: React.FC<Props> = ({ initialWeek, onClose }) => {
     const res = await setInvoiceLinePackaging({ invoiceId: inv.id, lineNo, packaging });
     if (res.status !== 'success') toast.error(res.message || 'Не удалось изменить отметку');
     await loadInvoices();
+  };
+
+  // Orders of one combined shipment tick and untick together.
+  const toggleOp = (opId: string, on: boolean) => {
+    const shipmentId = spreadOps.find((op) => op.opId === opId)?.shipmentId || '';
+    setOpTicks((prev) => {
+      const next = new Set(prev);
+      for (const op of spreadOps) {
+        if (op.opId === opId || (shipmentId !== '' && op.shipmentId === shipmentId)) {
+          if (on) next.add(op.opId); else next.delete(op.opId);
+        }
+      }
+      return next;
+    });
+  };
+
+  // The browser preview uses the same pure rules as the server, so preview = result.
+  const selections = useMemo(
+    () => (spreadInvoice?.lines || []).filter((l) => lineTicks[l.n]).map((l) => ({ n: l.n, qty: (lineQty[l.n] ?? '').trim() })),
+    [spreadInvoice, lineTicks, lineQty]
+  );
+  const selection = useMemo(() => invoiceSelectionKop(
+    (spreadInvoice?.lines || []).map((l) => ({
+      n: l.n, qty: String(l.qty), toSupply: l.toSupply,
+      price: formatKopecks(Math.round(l.price * 100)), sum: formatKopecks(Math.round(l.sum * 100))
+    })),
+    selections
+  ), [spreadInvoice, selections]);
+  const tickedOps = useMemo(() => spreadOps.filter((op) => opTicks.has(op.opId)), [spreadOps, opTicks]);
+  const spreadTargets = useMemo(() => {
+    const norms: Record<string, number | null> = {};
+    for (const op of spreadOps) for (const r of op.rows) norms[r.article] = r.pcsPerBox;
+    return weekSpreadTargets(selection.selectedKop, tickedOps, norms);
+  }, [spreadOps, tickedOps, selection.selectedKop]);
+  const shareOfOp = (opId: string): number | null => spreadTargets.operations.find((o) => o.opId === opId)?.shareKop ?? null;
+
+  // Same input as stored = anyone (writes nothing); a different one over an applied spread = admin only.
+  const inputKey = (lines: { n: number; qty: string }[], opIds: string[]) =>
+    lines.map((l) => `${l.n}:${parseQtyMilli(String(l.qty))}`).sort().join(',') + '|' + [...opIds].sort().join(',');
+  const spreadChanged = !!appliedSpread
+    && inputKey(selections, [...opTicks]) !== inputKey(appliedSpread.lines, appliedSpread.opIds);
+  const lockedSpread = spreadChanged && !isAdmin;
+  const spreadProblems: string[] = [...selection.errors];
+  if (tickedOps.length === 0) spreadProblems.push('Не выбрано ни одной поставки');
+  if (!spreadTargets.ok) spreadProblems.push(`Не задано число штук в коробе для артикула: ${spreadTargets.missing.join(', ')}`);
+  for (const op of tickedOps) {
+    if (op.weekConflict && op.weekConflict.length > 0) {
+      spreadProblems.push(`Поставка ${op.orderNumbers.join(', ') || op.opId} попала в разные недели (${op.weekConflict.join(', ')})`);
+    }
+  }
+  const canApply = !!spreadInvoice && spreadProblems.length === 0 && !applying && !lockedSpread;
+
+  const handleApply = async () => {
+    if (!canApply || !spreadInvoice) return;
+    setApplying(true);
+    try {
+      const res = await applyInvoiceSpread({ week, invoiceId: spreadInvoice.id, lines: selections, opIds: [...opTicks] });
+      if (res.status !== 'success') { toast.error(res.message || 'Не удалось применить распределение'); return; }
+      const d = res.data || {};
+      setSpreadResult({
+        text: `Применено: изменено строк ${d.changedRows || 0}, записей в журнале цен ${d.journalAppended || 0}`,
+        error: d.costJournalError ? String(d.costJournalError) : ''
+      });
+      await loadSpread();
+    } finally {
+      setApplying(false);
+    }
   };
 
   const toggleExpanded = (article: string) =>
@@ -276,9 +391,96 @@ export const WeekWindowModal: React.FC<Props> = ({ initialWeek, onClose }) => {
             </button>
           </section>
 
-          <section className="space-y-1">
+          <section className="space-y-2">
             <div className="text-sm font-bold text-slate-500">Шаг 2 — распределение счёта</div>
-            <div className="text-sm text-slate-400">будет в следующем обновлении</div>
+            {spreadError && <div className="text-sm text-red-600">{spreadError}</div>}
+            {invoices.length === 0 ? (
+              <div className="text-sm text-slate-400">Сначала добавьте счёт недели</div>
+            ) : (
+              <>
+                <label className="flex items-center gap-2 text-sm">
+                  <span className="font-bold text-slate-500">Счёт</span>
+                  <select
+                    value={spreadInvoiceId}
+                    onChange={(e) => { setSpreadInvoiceId(e.target.value); setSpreadResult(null); }}
+                    className="px-3 py-2 rounded-xl text-sm font-bold border border-slate-200 bg-white text-slate-600"
+                  >
+                    {invoices.map((inv) => <option key={inv.id} value={inv.id}>№ {inv.number} от {inv.date}</option>)}
+                  </select>
+                </label>
+                {appliedSpread && <div className="text-xs text-slate-400">Применено: {appliedSpread.appliedBy}, {appliedSpread.appliedAt}</div>}
+
+                {spreadInvoice && (
+                  <div className="space-y-1">
+                    <div className="hidden sm:grid grid-cols-[1.5rem_1fr_7rem_8rem_8rem] gap-2 text-xs font-bold text-slate-500">
+                      <span /><span>Строка счёта</span><span className="text-right">Кол-во</span><span className="text-right">Цена</span><span className="text-right">Сумма</span>
+                    </div>
+                    {spreadInvoice.lines.map((l) => (
+                      <div key={l.n} className={`grid grid-cols-[1.5rem_1fr] sm:grid-cols-[1.5rem_1fr_7rem_8rem_8rem] gap-2 items-center text-sm ${l.toSupply ? '' : 'text-slate-300'}`}>
+                        {l.toSupply ? (
+                          <input type="checkbox" checked={!!lineTicks[l.n]} onChange={(e) => setLineTicks((t) => ({ ...t, [l.n]: e.target.checked }))} />
+                        ) : <span />}
+                        <span className="break-words">
+                          {l.name}
+                          {!l.toSupply && <span className="ml-2 text-xs">не на поставку</span>}
+                          {l.toSupply && l.packaging && <span className="ml-2 text-xs text-slate-400">учтено в шаге 1</span>}
+                        </span>
+                        <input
+                          className={`${inputCls} ${l.toSupply ? '' : 'invisible'}`}
+                          value={lineQty[l.n] ?? ''}
+                          disabled={!l.toSupply}
+                          onChange={(e) => setLineQty((q) => ({ ...q, [l.n]: e.target.value }))}
+                        />
+                        <span className="text-right">{kopText(Math.round(l.price * 100))}</span>
+                        <span className="text-right font-bold">{kopText(Math.round(l.sum * 100))}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  <div className="hidden sm:grid grid-cols-[1.5rem_5rem_1fr_5rem_4rem_8rem_8rem] gap-2 text-xs font-bold text-slate-500">
+                    <span /><span>Кабинет</span><span>Заявка</span><span>Тип</span><span className="text-right">Коробов</span>
+                    <span className="text-right">Услуги сейчас</span><span className="text-right">Доля</span>
+                  </div>
+                  {spreadOps.length === 0 && <div className="text-sm text-slate-400">В этой неделе нет списанных поставок</div>}
+                  {spreadOps.map((op) => {
+                    const share = shareOfOp(op.opId);
+                    const boxes = spreadTargets.operations.find((o) => o.opId === op.opId)?.boxes;
+                    return (
+                      <div key={op.opId} className="grid grid-cols-[1.5rem_1fr] sm:grid-cols-[1.5rem_5rem_1fr_5rem_4rem_8rem_8rem] gap-2 items-center text-sm text-slate-600">
+                        <input type="checkbox" checked={opTicks.has(op.opId)} onChange={(e) => toggleOp(op.opId, e.target.checked)} />
+                        <span>{op.cabinet}</span>
+                        <span className="break-all">{op.orderNumbers.length > 0 ? op.orderNumbers.join(', ') : op.opId}</span>
+                        <span className="text-slate-400">{op.auto ? 'авто' : 'вручную'}</span>
+                        <span className="text-right">{boxes ?? '—'}</span>
+                        <span className="text-right">{op.services > 0 ? kopText(Math.round(op.services * 100)) : '—'}</span>
+                        <span className="text-right font-bold text-slate-700">{share === null ? '—' : kopText(share)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="text-sm space-y-0.5">
+                  <div className="text-slate-700">Выбрано: <span className="font-bold">{kopText(selection.selectedKop)}</span></div>
+                  <div className="text-slate-700">Не распределено: <span className="font-bold">{kopText(selection.unallocatedKop)}</span></div>
+                  {Object.entries(spreadTargets.byCabinet).map(([cab, kop]) => (
+                    <div key={cab} className="text-slate-700">{cab}: <span className="font-bold">{kopText(kop)}</span></div>
+                  ))}
+                  {spreadProblems.map((m, i) => <div key={i} className="text-red-600">{m}</div>)}
+                  {lockedSpread && <div className="text-slate-500">Изменить применённое распределение может только администратор</div>}
+                  {spreadResult && <div className="text-green-700">{spreadResult.text}</div>}
+                  {spreadResult?.error && <div className="text-red-600">{spreadResult.error}</div>}
+                </div>
+                <button
+                  onClick={handleApply}
+                  disabled={!canApply}
+                  className={`px-4 py-2 rounded-xl font-bold ${canApply ? 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer' : 'bg-slate-100 text-slate-400'}`}
+                >
+                  {applying ? 'Применяю…' : 'Применить'}
+                </button>
+              </>
+            )}
           </section>
         </div>
       </div>

@@ -861,3 +861,30 @@ export interface WeekPackagingPayload {
   prices: WeekPackagingPrice[];
   overrides: WeekPackagingOverride[];
 }
+
+/** One write-off operation as getInvoiceSpread returns it (item 97 ticket 07). */
+export interface InvoiceSpreadOperation {
+  opId: string;
+  cabinet: string;
+  orderNumbers: string[];
+  auto: boolean;
+  shipmentId: string;
+  rows: { id: number; article: string; quantity: number; isComponent: boolean; pcsPerBox: number | null }[];
+  /** Roubles of «Услуги» + «Прочее» the operation carries now (an invoice replaces them). */
+  services: number;
+  weekConflict?: string[];
+}
+
+/** The `data` of a getInvoiceSpread answer. */
+export interface InvoiceSpreadState {
+  operations: InvoiceSpreadOperation[];
+  applied: { invoiceId: string; lines: { n: number; qty: string }[]; opIds: string[]; appliedBy: string; appliedAt: string }[];
+}
+
+/** What applyInvoiceSpread sends. */
+export interface InvoiceSpreadPayload {
+  week: string;
+  invoiceId: string;
+  lines: { n: number; qty: string }[];
+  opIds: string[];
+}
