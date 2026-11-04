@@ -18162,6 +18162,443 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
   });
 }
 
+// ================= Item 97 ticket 08 part A: fixed sums survive every recompute path =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/ticket-08-design.md («Invariant» and «Part A»). The two fixed rouble sums of
+// a «Расход» row — «Упаковка недели» (step 1) and «Счёт недели» (step 2) — sit INSIDE «Сумма»; no path except saveWeekPackaging /
+// applyInvoiceSpread may change them. Every recompute path must give Сумма' = base' + fixedP + fixedI and Цена' = round2(Сумма'/qty').
+// Checks A1, A2, A3, A5, A6, A7 are red until Code.gs carries the guards; A4, A8, A9 pin behaviour that must hold before and after.
+// Synthetic data only. Money is compared in integer kopecks.
+// Figures (python): invoice lines n1 x1 (1299.00) + n2 x20 (5.00) = 1399.00 over ONE op = the whole 139900 on its row;
+//   step 1 prices X 1.50 / Y 2 / Z 3; 1299.00 over rows X 120 pcs (6 boxes) / Y 45 pcs (5 boxes) = 70855 / 59045.
+{
+  const EKB = 'Asia/Yekaterinburg';
+  const W44 = '2026-W44';
+  const EXT = 'Внешние отгрузки';
+  const SHARES = 'Доли счетов';
+  const WP = 'Упаковка недели';
+  const WI = 'Счёт недели';
+  const OP = 'ozonAuto:P-1';
+  const far = String(Date.parse('2030-01-01T00:00:00Z'));
+  const j = (v) => JSON.stringify(v);
+  const kop = (v) => (v === '' || v === undefined || v === null) ? 0 : Math.round(Number(String(v).replace(',', '.')) * 100);
+  const call = (h, token, action, data) => h.callDoPost({ action, sessionToken: token, data });
+  const ok = (o) => !!o && o.status === 'success';
+  const msg = (o) => String((o && o.message) || '');
+
+  const INV_HEAD = ['ID счёта', 'Неделя', 'Поставщик', 'Номер', 'Дата счёта', 'Покупатель', 'Всего к оплате', 'НДС', 'Всего наименований', 'Файл ID', 'Файл', 'Загрузил', 'Загружено', 'Заменён'];
+  const LINE_HEAD = ['ID счёта', '№', 'Наименование', 'Кол-во', 'Ед.', 'Цена', 'Сумма', 'На поставку', 'Упаковка'];
+  const SKU_ROWS = [['X', 20, '111'], ['Y', 10, '222'], ['Z', 25, '333']];
+  const L1 = [{ n: 1, qty: '1' }];
+  const L12 = [{ n: 1, qty: '1' }, { n: 2, qty: '20' }];
+  const PRICES = [{ article: 'X', unit: '1,50' }, { article: 'Y', unit: '2' }, { article: 'Z', unit: '3' }];
+  const X = (n) => ({ article: 'X', quantity: n, price: 10 });
+  const Y = (n) => ({ article: 'Y', quantity: n, price: 20 });
+
+  const world = () => {
+    const h = freshHarness();
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-11-04T10:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet([
+      { article: 'X', quantity: 5000, avgCost: 10, capitalization: 50000 }, { article: 'Y', quantity: 5000, avgCost: 20, capitalization: 100000 },
+      { article: 'Z', quantity: 5000, avgCost: 30, capitalization: 150000 }
+    ]);
+    h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], SKU_ROWS);
+    const stocks = [];
+    ['MaxiStore', 'ShopTwo'].forEach((cab) => [['X', '111'], ['Y', '222'], ['Z', '333']].forEach((a) => stocks.push({ cabinet: cab, article: a[0], available: 4000, sku: a[1] })));
+    h.setOzonStocksSheet(stocks);
+    h.setKitSheet([]);
+    h.setRegistrySheet('Сессии', [['Token', 'Username', 'Role', 'ExpiresAt'], ['tok-user', 'Кладовщик', 'user', far], ['tok-admin', 'boss', 'admin', far]]);
+    h.setRegistrySheet(EXT, [h.context.EXTERNAL_SHIPMENTS_HEADERS.slice()]);
+    h.setRegistrySheet('Счета подрядчика', [INV_HEAD,
+      ['INV-1', W44, 'ООО Ромашка', '0045', '02.11.2026', 'ИП Тестов', 2449, 'Без НДС', 3, '', '', 'Кладовщик', '2026-11-02 10:00:00', '']]);
+    h.setRegistrySheet('Строки счетов', [LINE_HEAD,
+      ['INV-1', 1, 'Доставка на СЦ (готовый палет)', '1', 'шт', 1299, 1299, 'да', ''],
+      ['INV-1', 2, 'стикеровка', '50', 'шт', 5, 250, 'да', ''],
+      ['INV-1', 3, 'Хранение товара', '1', 'шт', 900, 900, 'нет', '']]);
+    return h;
+  };
+  const addPosting = (h, o) => {
+    const heads = h.context.EXTERNAL_SHIPMENTS_HEADERS;
+    const line = new Array(heads.length).fill('');
+    const set = (n, v) => { line[heads.indexOf(n)] = v; };
+    set('PostingID', o.pid); set('Статус', 'processed'); set('Кабинет', o.cabinet); set('Номер заявки', o.order);
+    set('TransGroupInfo', JSON.stringify(o.ids)); set('Неделя', W44); set('Передача по', o.handover);
+    set('ПозицииJSON', JSON.stringify(o.items.map((i) => ({ offerId: i.article, quantity: i.quantity }))));
+    const sheet = h.sheetByName(EXT);
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, heads.length).setValues([line]);
+  };
+  const idsOf = (h, opId) => h.dumpTransSheet().filter((r) => r['OpID'] === opId).map((r) => String(r['ID']));
+  // The shipment of ONE posting P-1 (auto write-off at the handover), optionally with step 1 and step 2 applied.
+  const build = (o) => {
+    const h = world();
+    if (o.receipt) {
+      h.setStockSheet([{ article: 'X', quantity: 0, avgCost: 0, capitalization: 0 }]);
+      h.commitTransaction([{ article: 'X', quantity: 1000, price: 10 }], 'Приход', 'Склад', '', 'tester', '2026-10-20T09:00:00Z', 'op-in');
+    }
+    h.commitTransaction(o.items, 'Расход', 'Ozon (MaxiStore)', '2026-10-28', 'Автосписание', null, OP, 0, undefined, '', '');
+    addPosting(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', ids: idsOf(h, OP), handover: '2026-10-28 12:00:00', items: o.items });
+    if (o.steps !== false) {
+      const s1 = call(h, 'tok-user', 'saveWeekPackaging', { week: W44, prices: PRICES, overrides: [] });
+      const s2 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: o.lines, opIds: [OP] });
+      if (!ok(s1) || !ok(s2)) throw new Error('setup failed: step 1 ' + msg(s1) + ' / step 2 ' + msg(s2));
+    }
+    return h;
+  };
+  const rowOf = (h, art) => h.dumpTransSheet().find((r) => r['OpID'] === OP && r['Артикул'] === art && String(r['isComponent']).toLowerCase() !== 'true') || {};
+  const opRows = (h) => h.dumpTransSheet().filter((r) => r['OpID'] === OP && String(r['isComponent']).toLowerCase() !== 'true');
+  const latestJournal = (h, art) => {
+    const rows = h.dumpOzonCost().filter((r) => r['OpID'] === OP && r['Артикул'] === art);
+    return rows.length ? kop(rows[rows.length - 1]['Себестоимость отгрузки']) : null;
+  };
+  const sharesOf = (h) => h.dumpSheetByName(SHARES).filter((x) => String(x['ID счёта']) === 'INV-1');
+  // The pencil as the screen sends it: the row's stored quantity / price / destination / date, with the changed fields on top.
+  const pencil = (h, art, over) => {
+    const r = h.getTransactions().rows.find((t) => t.opId === OP && t.article === art && t.type === 'Расход');
+    return h.updateTransaction(r.id, Object.assign({ article: r.article, quantity: r.quantity, price: r.price, type: 'Расход',
+      destination: r.destination, deliveryDate: r.deliveryDate, date: r.date }, over), 'tester');
+  };
+  const setPeresort = (h, items, pairs) => {
+    const heads = h.context.EXTERNAL_SHIPMENTS_HEADERS;
+    const sheet = h.sheetByName(EXT);
+    sheet.getRange(2, heads.indexOf('ПозицииJSON') + 1).setValue(JSON.stringify(items.map((i) => ({ offerId: i.article, quantity: i.quantity }))));
+    sheet.getRange(2, heads.indexOf('ПересортJSON') + 1).setValue(JSON.stringify({ pairs }));
+  };
+  const pair = (from, to, qty) => ({ fromArticle: from, toArticle: to, fromOfferId: from, toOfferId: to, qty });
+  const sum = (rows, col) => rows.reduce((a, r) => a + kop(r[col]), 0);
+  const t08 = (name, run) => {
+    let conds = {}; let note = '';
+    try { const r = run(); conds = r.conds; note = r.note || ''; } catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+    const failed = Object.keys(conds).filter((k) => !conds[k]);
+    check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+  };
+  const pc = (sumKop, q) => Math.round(sumKop / q);
+
+  t08('Item 97 ticket 08 A1: pencil quantity 120 -> 100 (price as the screen sends it = stored Цена) keeps «Упаковка недели» 180.00 and «Счёт недели» 1399.00 unchanged, Сумма\' - fixed = the same edit of a row without fixed cells (1000.00), Цена\' = round2(Сумма\'/100), latest journal cost = Цена', () => {
+    const h = build({ items: [X(120)], lines: L12 });
+    const twin = build({ items: [X(120)], steps: false });
+    const b = rowOf(h, 'X');
+    const fP = kop(b[WP]); const fI = kop(b[WI]);
+    const e1 = pencil(h, 'X', { quantity: 100 });
+    const e2 = pencil(twin, 'X', { quantity: 100 });
+    const a = rowOf(h, 'X'); const t = rowOf(twin, 'X');
+    return {
+      conds: {
+        'setup: fixed cells 180.00 / 1399.00, Сумма 2779.00': fP === 18000 && fI === 139900 && kop(b['Сумма']) === 277900,
+        'twin edit gives 1000.00': kop(t['Сумма']) === 100000,
+        '«Упаковка недели» unchanged': kop(a[WP]) === fP,
+        '«Счёт недели» unchanged': kop(a[WI]) === fI,
+        'Сумма\' - fixedP - fixedI = twin Сумма\'': kop(a['Сумма']) - fP - fI === kop(t['Сумма']),
+        'Цена\' = round2(Сумма\'/100)': kop(a['Цена']) === pc(kop(a['Сумма']), 100),
+        'latest journal cost of the row = its Цена': latestJournal(h, 'X') === kop(a['Цена'])
+      },
+      note: j({ before: [b['Сумма'], b['Цена'], b[WP], b[WI]], after: [a['Сумма'], a['Цена'], a[WP], a[WI]], twin: t['Сумма'], journal: latestJournal(h, 'X'), err: [e1 && e1.costJournalError, e2 && e2.costJournalError] })
+    };
+  });
+
+  t08('Item 97 ticket 08 A2: pencil comment-only edit (quantity and price as stored) leaves Сумма 2779.00, Цена, «Упаковка недели» and «Счёт недели» unchanged to the kopeck', () => {
+    const h = build({ items: [X(120)], lines: L12 });
+    const b = rowOf(h, 'X');
+    const e = pencil(h, 'X', { comment: 'checked by phone' });
+    const a = rowOf(h, 'X');
+    return {
+      conds: {
+        'setup: fixed cells 180.00 / 1399.00': kop(b[WP]) === 18000 && kop(b[WI]) === 139900,
+        'Сумма unchanged': kop(a['Сумма']) === kop(b['Сумма']),
+        'Цена unchanged': kop(a['Цена']) === kop(b['Цена']),
+        '«Упаковка недели» unchanged': kop(a[WP]) === kop(b[WP]),
+        '«Счёт недели» unchanged': kop(a[WI]) === kop(b[WI]),
+        'the comment is stored': String(a['Комментарий']) === 'checked by phone'
+      },
+      note: j({ before: [b['Сумма'], b['Цена']], after: [a['Сумма'], a['Цена']], err: e && e.costJournalError })
+    };
+  });
+
+  t08('Item 97 ticket 08 A3: after a pencil edit the «Доли счетов» row of the invoice points at the NEW row id with the share unchanged (no row points at the old id)', () => {
+    const h = build({ items: [X(120)], lines: L12 });
+    const oldId = String(rowOf(h, 'X')['ID']);
+    const before = sharesOf(h);
+    pencil(h, 'X', { quantity: 100 });
+    const newId = String(rowOf(h, 'X')['ID']);
+    const sh = sharesOf(h);
+    return {
+      conds: {
+        'setup: one share row on the old id, 1399.00': before.length === 1 && String(before[0]['ID строки']) === oldId && kop(before[0]['Доля (₽)']) === 139900,
+        'the pencil wrote a new id': newId !== '' && newId !== oldId,
+        'one share row, pointing at the new id': sh.length === 1 && String(sh[0]['ID строки']) === newId,
+        'share unchanged 1399.00': sh.length === 1 && kop(sh[0]['Доля (₽)']) === 139900,
+        'no share row points at the old id': h.dumpSheetByName(SHARES).every((x) => String(x['ID строки']) !== oldId)
+      },
+      note: j({ oldId, newId, shares: sh })
+    };
+  });
+
+  t08('Item 97 ticket 08 A4: pencil on rows with EMPTY fixed cells behaves as today: plain X 120 -> 100 gives Сумма 1000.00 / Цена 10.00 / journal 1000, then a comment-only edit changes nothing; a manual row with extras (Y 45, extras 2025.00, price 65.00) 45 -> 30 gives 20.00 x 30 + 2025.00 = 2625.00', () => {
+    const h = build({ items: [X(120)], steps: false });
+    pencil(h, 'X', { quantity: 100 });
+    const a = rowOf(h, 'X');
+    pencil(h, 'X', { comment: 'note' });
+    const a2 = rowOf(h, 'X');
+    const m = world();
+    m.commitTransaction([Y(45)], 'Расход', 'Ozon (ShopTwo) [Упаковка: 45 шт. x 5₽ = 225₽ | Прочее: 300₽ | Услуги: Паллета x1 (1500₽)]', '2026-10-29', 'tester', '2026-10-30T07:00:00Z', 'man-1', null);
+    const mb = m.dumpTransSheet().find((r) => r['OpID'] === 'man-1');
+    const mr = m.getTransactions().rows.find((t) => t.opId === 'man-1');
+    m.updateTransaction(mr.id, { article: 'Y', quantity: 30, price: mr.price, type: 'Расход', destination: mr.destination, deliveryDate: mr.deliveryDate, date: mr.date }, 'tester');
+    const ma = m.dumpTransSheet().find((r) => r['OpID'] === 'man-1');
+    return {
+      conds: {
+        'plain: Сумма 1000.00, Цена 10.00': kop(a['Сумма']) === 100000 && kop(a['Цена']) === 1000,
+        'plain: both fixed cells stay empty': String(a[WP]) === '' && String(a[WI]) === '',
+        'plain: latest journal cost 10.00': latestJournal(h, 'X') === 1000,
+        'plain: comment-only edit changes neither Сумма nor Цена': kop(a2['Сумма']) === 100000 && kop(a2['Цена']) === 1000,
+        'manual setup: Сумма 2925.00 (Y 45 x 20 + extras 2025.00), Цена 65.00': kop(mb['Сумма']) === 292500 && kop(mb['Цена']) === 6500,
+        'manual after 45 -> 30: Сумма 2625.00, Цена 87.50, ДопРасходы 2025.00': kop(ma['Сумма']) === 262500 && kop(ma['Цена']) === 8750 && kop(ma['ДопРасходы']) === 202500
+      },
+      note: j({ plain: [a['Сумма'], a['Цена']], plain2: [a2['Сумма'], a2['Цена']], man: [mb['Сумма'], mb['Цена'], ma['Сумма'], ma['Цена'], ma['ДопРасходы']] })
+    };
+  });
+
+  const peresortWorld = (items) => build({ items, lines: L1 });
+  const idsExist = (h) => new Set(h.dumpTransSheet().map((r) => String(r['ID'])));
+
+  t08('Item 97 ticket 08 A5: peresort, kept article: X 120 + Y 45, Ozon accepted X 100 + Z 20 + Y 45 (pair X->Z 20): X\'s new row carries X\'s fixed cells whole (180.00 / 708.55), Y keeps 90.00 / 590.45, Z gets none, Σ fixedP 270.00 and Σ fixedI 1299.00 unchanged, Сумма = base + fixed, shares re-pointed', () => {
+    const items = [X(120), Y(45)];
+    const h = peresortWorld(items);
+    const bx = rowOf(h, 'X'); const by = rowOf(h, 'Y');
+    const sumP0 = sum(opRows(h), WP); const sumI0 = sum(opRows(h), WI);
+    setPeresort(h, items, [pair('X', 'Z', 20)]);
+    const res = h.commitShipmentPeresort('P-1', 'tester');
+    const ax = rowOf(h, 'X'); const ay = rowOf(h, 'Y'); const az = rowOf(h, 'Z');
+    const sh = sharesOf(h);
+    const shareOf = (id) => sh.filter((s) => String(s['ID строки']) === String(id)).map((s) => kop(s['Доля (₽)']));
+    return {
+      conds: {
+        'setup: X 180.00 / 708.55, Y 90.00 / 590.45': kop(bx[WP]) === 18000 && kop(bx[WI]) === 70855 && kop(by[WP]) === 9000 && kop(by[WI]) === 59045,
+        'peresort committed, rows X 100, Y 45, Z 20': !!res && res.success === true && Number(ax['Количество']) === 100 && Number(ay['Количество']) === 45 && Number(az['Количество']) === 20,
+        'X new row keeps «Упаковка недели» 180.00': kop(ax[WP]) === 18000,
+        'X new row keeps «Счёт недели» 708.55': kop(ax[WI]) === 70855,
+        'Y new row keeps 90.00 / 590.45': kop(ay[WP]) === 9000 && kop(ay[WI]) === 59045,
+        'Z row has no fixed cells': String(az[WP]) === '' && String(az[WI]) === '',
+        'Σ «Упаковка недели» over the order = 270.00 and Σ «Счёт недели» = 1299.00': sum(opRows(h), WP) === sumP0 && sumP0 === 27000 && sum(opRows(h), WI) === sumI0 && sumI0 === 129900,
+        'X Сумма = 100 x 10 + 180.00 + 708.55, Цена = round2(Сумма/100)': kop(ax['Сумма']) === 100000 + 18000 + 70855 && kop(ax['Цена']) === pc(kop(ax['Сумма']), 100),
+        'Y Сумма = 45 x 20 + 90.00 + 590.45': kop(ay['Сумма']) === 90000 + 9000 + 59045,
+        'shares: X new id carries 708.55, Y new id 590.45, two rows, none on a deleted id': sh.length === 2 && j(shareOf(ax['ID'])) === j([70855]) && j(shareOf(ay['ID'])) === j([59045])
+          && h.dumpSheetByName(SHARES).every((s) => idsExist(h).has(String(s['ID строки'])))
+      },
+      note: j({ rows: opRows(h).map((r) => [r['Артикул'], r['Количество'], r['Сумма'], r['Цена'], r[WP], r[WI]]), shares: sh.map((s) => [s['ID строки'], s['Доля (₽)']]), res: res && { success: res.success, err: res.costJournalError } })
+    };
+  });
+
+  t08('Item 97 ticket 08 A6: peresort, fully replaced article: all of Y (45) replaced by Z: Z\'s row carries Y\'s fixed sums (90.00 / 590.45), X keeps 180.00 / 708.55, Σ over the order unchanged, shares re-pointed (kept -> new X id, replaced -> Z row id)', () => {
+    const items = [X(120), Y(45)];
+    const h = peresortWorld(items);
+    const sumP0 = sum(opRows(h), WP); const sumI0 = sum(opRows(h), WI);
+    setPeresort(h, items, [pair('Y', 'Z', 45)]);
+    const res = h.commitShipmentPeresort('P-1', 'tester');
+    const ax = rowOf(h, 'X'); const ay = rowOf(h, 'Y'); const az = rowOf(h, 'Z');
+    const sh = sharesOf(h);
+    const shareOf = (id) => sh.filter((s) => String(s['ID строки']) === String(id)).map((s) => kop(s['Доля (₽)']));
+    return {
+      conds: {
+        'peresort committed, rows X 120 and Z 45, no Y': !!res && res.success === true && Number(ax['Количество']) === 120 && Number(az['Количество']) === 45 && !ay['ID'],
+        'X keeps 180.00 / 708.55': kop(ax[WP]) === 18000 && kop(ax[WI]) === 70855,
+        'Z carries the fixed sums of Y: 90.00 / 590.45': kop(az[WP]) === 9000 && kop(az[WI]) === 59045,
+        'Σ «Упаковка недели» 270.00 and Σ «Счёт недели» 1299.00 unchanged': sum(opRows(h), WP) === sumP0 && sumP0 === 27000 && sum(opRows(h), WI) === sumI0 && sumI0 === 129900,
+        'Z Сумма = 45 x 30 + 90.00 + 590.45, Цена = round2(Сумма/45)': kop(az['Сумма']) === 135000 + 9000 + 59045 && kop(az['Цена']) === pc(kop(az['Сумма']), 45),
+        'shares: X id 708.55, Z id 590.45, two rows, none on a deleted id': sh.length === 2 && j(shareOf(ax['ID'])) === j([70855]) && j(shareOf(az['ID'])) === j([59045])
+          && h.dumpSheetByName(SHARES).every((s) => idsExist(h).has(String(s['ID строки'])))
+      },
+      note: j({ rows: opRows(h).map((r) => [r['Артикул'], r['Количество'], r['Сумма'], r['Цена'], r[WP], r[WI]]), shares: sh.map((s) => [s['ID строки'], s['Доля (₽)']]), res: res && { success: res.success, err: res.costJournalError } })
+    };
+  });
+
+  t08('Item 97 ticket 08 A7: receipt-price replay: receipt 1000 x 10.00 -> 10.37 rewrites the shipped X 120: Сумма\' = Сумма + (1244.40 - 1200.00) = 2823.40 to the kopeck, fixed cells unchanged, Цена\' = round2(Сумма\'/120)', () => {
+    const h = build({ items: [X(120)], lines: L12, receipt: true });
+    const b = rowOf(h, 'X');
+    const rec = h.getTransactions().rows.find((t) => t.type === 'Приход');
+    const oldW = kop(b['Себестоимость списания']);
+    const e = h.updateTransaction(rec.id, { article: 'X', quantity: rec.quantity, price: 10.37, type: 'Приход', destination: rec.destination, date: rec.date }, 'tester');
+    const a = rowOf(h, 'X');
+    const newW = Math.round(10.37 * 120 * 100);
+    const want = kop(b['Сумма']) + (newW - oldW);
+    return {
+      conds: {
+        'setup: write-off 1200.00, fixed cells 180.00 / 1399.00, Сумма 2779.00': oldW === 120000 && kop(b[WP]) === 18000 && kop(b[WI]) === 139900 && kop(b['Сумма']) === 277900,
+        'the replay rewrote the row: write-off 1244.40': kop(a['Себестоимость списания']) === 124440,
+        '«Упаковка недели» unchanged': kop(a[WP]) === 18000,
+        '«Счёт недели» unchanged': kop(a[WI]) === 139900,
+        'Сумма\' = Сумма + (newWriteOff - oldWriteOff) = 2823.40': kop(a['Сумма']) === want && want === 282340,
+        'Цена\' = round2(Сумма\'/120)': kop(a['Цена']) === pc(want, 120)
+      },
+      note: j({ before: [b['Сумма'], b['Цена'], b['Себестоимость списания']], after: [a['Сумма'], a['Цена'], a['Себестоимость списания']], want, recalculated: e && e.recalculated && e.recalculated.changed && e.recalculated.changed.length, err: e && e.costJournalError })
+    };
+  });
+
+  t08('Item 97 ticket 08 A8: «Вся отгрузка» (updateShipmentExtras) adding a service 1500.00 to a supply with fixed cells: both fixed cells unchanged, Сумма\' - fixed = the Сумма\' of the same call on a supply without fixed cells, Цена\' = round2(Сумма\'/qty) — guard', () => {
+    const items = [X(120), Y(45)];
+    const h = build({ items, lines: L1 });
+    const twin = build({ items, steps: false });
+    const before = { X: rowOf(h, 'X'), Y: rowOf(h, 'Y') };
+    const extras = (id) => ({ id, packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 0, services: [{ name: 'Паллета', quantity: 1, unitCost: 1500 }] });
+    const r1 = h.updateShipmentExtras(extras(String(before.X['ID'])), 'tester');
+    const r2 = twin.updateShipmentExtras(extras(String(rowOf(twin, 'X')['ID'])), 'tester');
+    const conds = { 'both calls ran': !!r1 && !!r2 };
+    ['X', 'Y'].forEach((art) => {
+      const a = rowOf(h, art); const t = rowOf(twin, art); const q = Number(a['Количество']);
+      conds[art + ': «Упаковка недели» unchanged'] = kop(a[WP]) === kop(before[art][WP]) && kop(a[WP]) > 0;
+      conds[art + ': «Счёт недели» unchanged'] = kop(a[WI]) === kop(before[art][WI]) && kop(a[WI]) > 0;
+      conds[art + ': Сумма\' - fixed = twin Сумма\''] = kop(a['Сумма']) - kop(a[WP]) - kop(a[WI]) === kop(t['Сумма']);
+      conds[art + ': Цена\' = round2(Сумма\'/qty)'] = kop(a['Цена']) === pc(kop(a['Сумма']), q);
+    });
+    return { conds, note: j({ fixed: opRows(h).map((r) => [r['Артикул'], r['Сумма'], r['Цена'], r[WP], r[WI]]), twin: opRows(twin).map((r) => [r['Артикул'], r['Сумма'], r['Цена']]) }) };
+  });
+
+  t08('Item 97 ticket 08 A9: single delete -> restoreArchivedItem and bulk deleteMultipleTransactions -> restoreMultipleArchivedItems return both fixed cells, Сумма and Цена to the kopeck — guard', () => {
+    const h = build({ items: [X(120), Y(45)], lines: L1 });
+    const snapRow = (art) => { const r = rowOf(h, art); return j([kop(r['Сумма']), kop(r['Цена']), kop(r[WP]), kop(r[WI]), Number(r['Количество'])]); };
+    const s0 = { X: snapRow('X'), Y: snapRow('Y') };
+    const archiveIds = () => h.dumpArchive().map((a) => a.archiveId);
+    const arch0 = archiveIds();
+    h.deleteTransaction(String(rowOf(h, 'X')['ID']), 'tester');
+    const single = archiveIds().filter((id) => arch0.indexOf(id) === -1);
+    h.restoreArchivedItem(single[single.length - 1], 'tester');
+    const afterSingle = { X: snapRow('X'), Y: snapRow('Y') };
+    const arch1 = archiveIds();
+    h.deleteMultipleTransactions([String(rowOf(h, 'X')['ID']), String(rowOf(h, 'Y')['ID'])], 'tester');
+    const bulk = archiveIds().filter((id) => arch1.indexOf(id) === -1);
+    h.restoreMultipleArchivedItems(bulk, 'tester');
+    const afterBulk = { X: snapRow('X'), Y: snapRow('Y') };
+    return {
+      conds: {
+        'setup: both rows carry non-zero fixed cells': JSON.parse(s0.X)[2] > 0 && JSON.parse(s0.X)[3] > 0 && JSON.parse(s0.Y)[2] > 0 && JSON.parse(s0.Y)[3] > 0,
+        'single delete -> restore: X back to the kopeck (Сумма, Цена, both fixed cells, quantity)': afterSingle.X === s0.X && afterSingle.Y === s0.Y,
+        'bulk delete -> bulk restore: X and Y back to the kopeck': afterBulk.X === s0.X && afterBulk.Y === s0.Y
+      },
+      note: j({ s0, afterSingle, afterBulk, bulkArchived: bulk.length })
+    };
+  });
+
+  // Largest remainder with ties to the earlier index, computed independently of the production helper.
+  const lrm = (total, weights) => {
+    const W = weights.reduce((a, b) => a + b, 0);
+    const parts = weights.map((w) => Math.floor(total * w / W));
+    let left = total - parts.reduce((a, b) => a + b, 0);
+    const order = weights.map((w, k) => ({ k, r: (total * w) % W })).sort((a, b) => b.r - a.r || a.k - b.k);
+    for (let n = 0; n < left; n++) parts[order[n].k] += 1;
+    return parts;
+  };
+  const addArticleV = (h) => {
+    h.setStockSheet([{ article: 'X', quantity: 5000, avgCost: 10, capitalization: 50000 }, { article: 'Y', quantity: 5000, avgCost: 20, capitalization: 100000 },
+      { article: 'Z', quantity: 5000, avgCost: 30, capitalization: 150000 }, { article: 'V', quantity: 5000, avgCost: 40, capitalization: 200000 }]);
+  };
+
+  t08('Item 97 ticket 08 A10: peresort, one fully replaced article with TWO replacement pairs (Y 45 -> Z 30 + V 15): Y\'s fixed cells split by pair qty to the kopeck (largest remainder), Σ over the order unchanged, the «Доли счетов» split rows sum to the old share and equal the cells', () => {
+    const items = [X(120), Y(45)];
+    const h = peresortWorld(items);
+    addArticleV(h);
+    const by = rowOf(h, 'Y');
+    const yP = kop(by[WP]); const yI = kop(by[WI]);
+    const sumP0 = sum(opRows(h), WP); const sumI0 = sum(opRows(h), WI);
+    setPeresort(h, items, [pair('Y', 'Z', 30), pair('Y', 'V', 15)]);
+    const res = h.commitShipmentPeresort('P-1', 'tester');
+    const az = rowOf(h, 'Z'); const av = rowOf(h, 'V'); const ax = rowOf(h, 'X');
+    const sh = sharesOf(h);
+    const shareOf = (id) => sh.filter((s) => String(s['ID строки']) === String(id)).map((s) => kop(s['Доля (₽)'])).reduce((a, b) => a + b, 0);
+    const wantP = lrm(yP, [30, 15]); const wantI = lrm(yI, [30, 15]);
+    return {
+      conds: {
+        'setup: Y fixed cells 90.00 / 590.45': yP === 9000 && yI === 59045,
+        'peresort committed, rows X 120, Z 30, V 15, no Y': !!res && res.success === true && Number(ax['Количество']) === 120 && Number(az['Количество']) === 30 && Number(av['Количество']) === 15 && !rowOf(h, 'Y')['ID'],
+        '«Упаковка недели» split by pair qty (60.00 / 30.00)': kop(az[WP]) === wantP[0] && kop(av[WP]) === wantP[1],
+        '«Счёт недели» split by pair qty (largest remainder)': kop(az[WI]) === wantI[0] && kop(av[WI]) === wantI[1] && wantI[0] + wantI[1] === yI,
+        'X keeps 180.00 / 708.55': kop(ax[WP]) === 18000 && kop(ax[WI]) === 70855,
+        'Σ «Упаковка недели» and Σ «Счёт недели» over the order unchanged': sum(opRows(h), WP) === sumP0 && sum(opRows(h), WI) === sumI0,
+        'Z and V Сумма = base + fixed, Цена = round2(Сумма/qty)': kop(az['Сумма']) === 30 * 3000 + kop(az[WP]) + kop(az[WI]) && kop(av['Сумма']) === 15 * 4000 + kop(av[WP]) + kop(av[WI])
+          && kop(az['Цена']) === pc(kop(az['Сумма']), 30) && kop(av['Цена']) === pc(kop(av['Сумма']), 15),
+        'share rows: Z id and V id carry exactly the cells of their rows, together the old 590.45': shareOf(az['ID']) === kop(az[WI]) && shareOf(av['ID']) === kop(av[WI]) && shareOf(az['ID']) + shareOf(av['ID']) === yI,
+        'every share row points at an existing row': h.dumpSheetByName(SHARES).every((s) => idsExist(h).has(String(s['ID строки'])))
+      },
+      note: j({ rows: opRows(h).map((r) => [r['Артикул'], r['Количество'], r['Сумма'], r['Цена'], r[WP], r[WI]]), shares: sh.map((s) => [s['ID строки'], s['Доля (₽)']]), wantP, wantI, err: res && res.error })
+    };
+  });
+
+  t08('Item 97 ticket 08 A11: peresort, fully replaced article with a TIE split (Y 44 -> Z 22 + V 22): the odd kopeck goes to the EARLIER pair, the sums stay equal', () => {
+    const items = [X(120), Y(44)];
+    const h = peresortWorld(items);
+    addArticleV(h);
+    const by = rowOf(h, 'Y');
+    const yP = kop(by[WP]); const yI = kop(by[WI]);
+    const sumI0 = sum(opRows(h), WI);
+    setPeresort(h, items, [pair('Y', 'Z', 22), pair('Y', 'V', 22)]);
+    const res = h.commitShipmentPeresort('P-1', 'tester');
+    const az = rowOf(h, 'Z'); const av = rowOf(h, 'V');
+    const wantI = lrm(yI, [22, 22]); const wantP = lrm(yP, [22, 22]);
+    return {
+      conds: {
+        'setup: Y carries non-zero cells': yP > 0 && yI > 0,
+        'peresort committed': !!res && res.success === true && Number(az['Количество']) === 22 && Number(av['Количество']) === 22,
+        '«Счёт недели»: earlier pair (Z) gets the odd kopeck': kop(az[WI]) === wantI[0] && kop(av[WI]) === wantI[1] && wantI[0] >= wantI[1],
+        '«Упаковка недели» split equally': kop(az[WP]) === wantP[0] && kop(av[WP]) === wantP[1],
+        'Σ «Счёт недели» unchanged': sum(opRows(h), WI) === sumI0
+      },
+      note: j({ yP, yI, wantI, wantP, z: [az[WP], az[WI]], v: [av[WP], av[WI]] })
+    };
+  });
+
+  t08('Item 97 ticket 08 A12: a row carrying shares of TWO invoices through a pencil edit: both «Доли счетов» rows point at the new id with their shares unchanged, «Счёт недели» unchanged, Сумма\' - fixed = the twin edit', () => {
+    const h = world();
+    h.sheetByName('Счета подрядчика').appendRow(['INV-2', W44, 'ООО Ромашка', '0046', '03.11.2026', 'ИП Тестов', 500, 'Без НДС', 1, '', '', 'Кладовщик', '2026-11-03 10:00:00', '']);
+    h.sheetByName('Строки счетов').appendRow(['INV-2', 1, 'Погрузка', '1', 'шт', 500, 500, 'да', '']);
+    h.commitTransaction([X(120)], 'Расход', 'Ozon (MaxiStore)', '2026-10-28', 'Автосписание', null, OP, 0, undefined, '', '');
+    addPosting(h, { pid: 'P-1', cabinet: 'MaxiStore', order: '1111', ids: idsOf(h, OP), handover: '2026-10-28 12:00:00', items: [X(120)] });
+    const s1 = call(h, 'tok-user', 'saveWeekPackaging', { week: W44, prices: PRICES, overrides: [] });
+    const s2 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-1', lines: L12, opIds: [OP] });
+    const s3 = call(h, 'tok-user', 'applyInvoiceSpread', { week: W44, invoiceId: 'INV-2', lines: [{ n: 1, qty: '1' }], opIds: [OP] });
+    const twin = build({ items: [X(120)], steps: false });
+    const b = rowOf(h, 'X'); const oldId = String(b['ID']);
+    const sharesBefore = h.dumpSheetByName(SHARES).map((s) => [String(s['ID счёта']), String(s['ID строки']), kop(s['Доля (₽)'])]);
+    pencil(h, 'X', { quantity: 100 });
+    pencil(twin, 'X', { quantity: 100 });
+    const a = rowOf(h, 'X'); const t = rowOf(twin, 'X'); const newId = String(a['ID']);
+    const sharesAfter = h.dumpSheetByName(SHARES).map((s) => [String(s['ID счёта']), String(s['ID строки']), kop(s['Доля (₽)'])]);
+    return {
+      conds: {
+        'setup: steps ok, «Счёт недели» 1899.00 (1399.00 + 500.00)': ok(s1) && ok(s2) && ok(s3) && kop(b[WI]) === 189900,
+        'setup: two share rows (INV-1 1399.00, INV-2 500.00) on the old id': sharesBefore.length === 2 && sharesBefore.every((s) => s[1] === oldId) && sharesBefore.some((s) => s[0] === 'INV-1' && s[2] === 139900) && sharesBefore.some((s) => s[0] === 'INV-2' && s[2] === 50000),
+        'the pencil wrote a new id': newId !== oldId,
+        'both share rows point at the new id, shares unchanged': sharesAfter.length === 2 && sharesAfter.every((s) => s[1] === newId) && sharesAfter.some((s) => s[0] === 'INV-1' && s[2] === 139900) && sharesAfter.some((s) => s[0] === 'INV-2' && s[2] === 50000),
+        '«Счёт недели» and «Упаковка недели» unchanged': kop(a[WI]) === kop(b[WI]) && kop(a[WP]) === kop(b[WP]),
+        'Сумма\' - fixed = twin Сумма\'': kop(a['Сумма']) - kop(a[WP]) - kop(a[WI]) === kop(t['Сумма'])
+      },
+      note: j({ sharesBefore, sharesAfter, s: [msg(s1), msg(s2), msg(s3)], row: [b['Сумма'], a['Сумма'], a[WI]] })
+    };
+  });
+
+  t08('Item 97 ticket 08 A13: peresort, fully replaced Y 45 -> Z while Z is already in the order (Z 10 kept): Y\'s cells land on the pair\'s Z row, Z\'s own cells stay on Z, Σ unchanged, no share row on a deleted id', () => {
+    const Zq = (n) => ({ article: 'Z', quantity: n, price: 30 });
+    const items = [X(120), Y(45), Zq(10)];
+    const h = peresortWorld(items);
+    const sumP0 = sum(opRows(h), WP); const sumI0 = sum(opRows(h), WI);
+    const yP = kop(rowOf(h, 'Y')[WP]); const yI = kop(rowOf(h, 'Y')[WI]); const zP = kop(rowOf(h, 'Z')[WP]); const zI = kop(rowOf(h, 'Z')[WI]);
+    setPeresort(h, items, [pair('Y', 'Z', 45)]);
+    const res = h.commitShipmentPeresort('P-1', 'tester');
+    const zs = opRows(h).filter((r) => r['Артикул'] === 'Z');
+    const qtyZ = zs.reduce((a, r) => a + Number(r['Количество']), 0);
+    return {
+      conds: {
+        'setup: Y and Z carry cells': yP > 0 && yI > 0 && zP > 0 && zI > 0,
+        'peresort committed, Z total 55, no Y': !!res && res.success === true && qtyZ === 55 && !rowOf(h, 'Y')['ID'],
+        'Σ over Z rows = Z own + Y cells': zs.reduce((a, r) => a + kop(r[WP]), 0) === zP + yP && zs.reduce((a, r) => a + kop(r[WI]), 0) === zI + yI,
+        'Σ over the order unchanged': sum(opRows(h), WP) === sumP0 && sum(opRows(h), WI) === sumI0,
+        'every share row points at an existing row and the shares still total the cells': h.dumpSheetByName(SHARES).every((s) => idsExist(h).has(String(s['ID строки']))) && sharesOf(h).reduce((a, s) => a + kop(s['Доля (₽)']), 0) === sumI0
+      },
+      note: j({ rows: opRows(h).map((r) => [r['ID'], r['Артикул'], r['Количество'], r['Сумма'], r[WP], r[WI]]), shares: sharesOf(h).map((s) => [s['ID строки'], s['Доля (₽)']]), res: res && res.error })
+    };
+  });
+}
+
 // ================= Итог =================
 const total = results.length;
 const failed = results.filter(r => !r.ok);

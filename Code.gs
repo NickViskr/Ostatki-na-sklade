@@ -2069,6 +2069,97 @@ function stampOpIdOnTransactions(newTransactions, opId) {
   SpreadsheetApp.flush();
 }
 
+// ===== Item 97 ticket 08 part A: the fixed rouble sums of a «Расход» row survive every recompute path =====
+// «Упаковка недели» (step 1) and «Счёт недели» (step 2) sit INSIDE «Сумма». A path that rewrites a row computes
+// «Сумма» WITHOUT them and adds them back in kopecks: Сумма' = base' + fixedP + fixedI, Цена' = round2(Сумма'/qty').
+
+/** The two fixed cells of a «История» row in kopecks; null for an empty cell. */
+function rowFixedSumsKop(tx) {
+  const toKop = function(v) { return v === null || v === undefined ? null : Math.round(Number(v) * 100); };
+  return { p: toKop(tx.weekPackaging), i: toKop(tx.weekInvoice) };
+}
+
+function rowHasFixedSums(tx) {
+  const f = rowFixedSumsKop(tx);
+  return f.p !== null || f.i !== null;
+}
+
+/** The price a re-commit has to be given: the row's fixed sums per unit are taken off (they are put back after). */
+function priceWithoutFixedSums(price, tx) {
+  const f = rowFixedSumsKop(tx);
+  const fixedKop = (f.p || 0) + (f.i || 0);
+  const qty = Number(tx.quantity) || 0;
+  if (fixedKop === 0 || qty <= 0) return price;
+  return roundToTwo((Number(price) || 0) - fixedKop / 100 / qty);
+}
+
+/**
+ * Writes fixed cells back on freshly committed rows: items = [{ id, p, i }] (kopecks, null = leave the cell empty).
+ * «Сумма» becomes the committed one + both cells, «Цена» = round2(Сумма'/qty). One pass, one write per cell.
+ */
+function putFixedSumsOnRows(items) {
+  if (!items || items.length === 0) return;
+  const sheet = getTransactionSheet(getSpreadsheet());
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const headers = readHeaderRow(sheet);
+  const col = {};
+  ['ID', 'Количество', 'Цена', 'Сумма', 'Упаковка недели', 'Счёт недели'].forEach(function(name) { col[name] = headers.indexOf(name); });
+  Object.keys(col).forEach(function(name) {
+    if (col[name] === -1) throw new Error('В листе «История» нет колонки «' + name + '».');
+  });
+  const data = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+  const byId = {};
+  items.forEach(function(it) { byId[String(it.id).trim()] = it; });
+  for (let r = 0; r < data.length; r++) {
+    const it = byId[String(data[r][col['ID']]).trim()];
+    if (!it) continue;
+    const sheetRow = r + 2;
+    const qty = parseNumber(data[r][col['Количество']]);
+    const sumKop = Math.round(parseNumber(data[r][col['Сумма']]) * 100) + (it.p || 0) + (it.i || 0);
+    if (it.p !== null) sheet.getRange(sheetRow, col['Упаковка недели'] + 1).setValue(it.p / 100);
+    if (it.i !== null) sheet.getRange(sheetRow, col['Счёт недели'] + 1).setValue(it.i / 100);
+    sheet.getRange(sheetRow, col['Сумма'] + 1).setValue(sumKop / 100);
+    if (qty > 0) sheet.getRange(sheetRow, col['Цена'] + 1).setValue(roundToTwo(sumKop / 100 / qty));
+  }
+  SpreadsheetApp.flush();
+}
+
+/**
+ * Re-points the rows of «Доли счетов» from old row ids to new ones. moves = { oldId: [{ id, weight }] }: one target
+ * keeps the share whole, several split it by the weights (largest remainder). Returns { newId: kopecks } moved.
+ */
+function repointInvoiceShares(moves) {
+  const moved = {};
+  const sheet = getSpreadsheet().getSheetByName(INVOICE_SHARES_SHEET);
+  if (!sheet) return moved;
+  const extra = [];
+  readInvoiceSharesSheet().forEach(function(s) {
+    const targets = moves[s.rowId];
+    if (!targets || targets.length === 0) return;
+    const parts = targets.length === 1 ? [s.shareKop] : splitKopByWeightsGs(s.shareKop, targets.map(function(t) { return t.weight; }));
+    const full = sheet.getRange(s.sheetRow, 1, 1, INVOICE_SHARES_HEADERS.length).getValues()[0];
+    // A zero part writes no row; a share of zero is simply moved whole to the first target.
+    const kept = targets.map(function(t, k) { return { id: t.id, kop: parts[k] }; })
+      .filter(function(t) { return t.kop > 0; });
+    if (kept.length === 0) kept.push({ id: targets[0].id, kop: 0 });
+    kept.forEach(function(t, k) {
+      moved[t.id] = (moved[t.id] || 0) + t.kop;
+      if (k === 0) {
+        sheet.getRange(s.sheetRow, 4).setValue(t.id);
+        sheet.getRange(s.sheetRow, 5).setValue(t.kop / 100);
+      } else {
+        const copy = full.slice();
+        copy[3] = t.id;
+        copy[4] = t.kop / 100;
+        extra.push(copy);
+      }
+    });
+  });
+  if (extra.length > 0) writeInvoiceRows(sheet, sheet.getLastRow() + 1, extra, INVOICE_SHARES_TEXT_COLS);
+  return moved;
+}
+
 function updateTransaction(id, data, username) {
   // Item 56, stage 2. The additional costs of an operation now live in their own column.
   // An edit deletes the row and writes it again, so the number has to be read BEFORE the
@@ -2142,6 +2233,14 @@ function updateTransaction(id, data, username) {
     }
   }
 
+  // Item 97 ticket 08: the fixed sums of the row (step 1 / step 2) are inside its price; they are taken off the
+  // price here and put back on the rewritten row below, so an edit only moves the unit price.
+  const keepsFixedSums = !!storedRow && String(data.type) === 'Расход' && rowHasFixedSums(storedRow);
+  if (keepsFixedSums) {
+    if (editData === data) editData = Object.assign({}, data);
+    editData.price = priceWithoutFixedSums(editData.price, storedRow);
+  }
+
   // Item 90: an edit without a comment field keeps the stored note; an empty string clears it.
   const editedComment = (data.comment !== undefined && data.comment !== null)
     ? String(data.comment).trim()
@@ -2158,6 +2257,19 @@ function updateTransaction(id, data, username) {
   // Not passed to the commit as its opId: the order's sibling rows still carry it and the
   // idempotency guard would skip the write. Stamped on the rows the commit has just written.
   stampOpIdOnTransactions(commitResult.newTransactions, keptOpId);
+
+  // Item 97 ticket 08: both fixed cells go back (Сумма / Цена follow), and the invoice shares follow the new row id.
+  // Before the journal follow-up below, which reads the final «Цена».
+  if (keepsFixedSums) {
+    const newMain = commitResult.newTransactions.filter(function(t) { return t.isComponent !== true; })[0];
+    if (newMain) {
+      const f = rowFixedSumsKop(storedRow);
+      putFixedSumsOnRows([{ id: newMain.id, p: f.p, i: f.i }]);
+      const moves = {};
+      moves[String(storedRow.id)] = [{ id: String(newMain.id), weight: 1 }];
+      repointInvoiceShares(moves);
+    }
+  }
 
   // Item 93: an edited shipment to Ozon — the chain of its cabinet+article is rewritten from this
   // supply onwards, the corrected figure replacing the old one (never a second «отгрузка» row).
@@ -2431,12 +2543,19 @@ function applyReplayCorrections(article, fromDateMs) {
     // Разнесённые услуги сидят в цене строки поверх чистой себестоимости. Их сохраняем как
     // есть: правка прихода к услугам подрядчиков отношения не имеет.
     const extrasPerUnit = roundToTwo((Number(st.tx.price) || 0) - st.stored / q);
-    const newPrice = roundToTwo(st.computed / q + extrasPerUnit);
+    let newPrice = roundToTwo(st.computed / q + extrasPerUnit);
+    let newTotal = roundToTwo(newPrice * q);
+    if (rowHasFixedSums(st.tx)) {
+      // Item 97 ticket 08: a row with fixed sums moves by exactly the change of its write-off, to the kopeck.
+      const totalKop = Math.round((Number(st.tx.total) || 0) * 100) + Math.round(st.computed * 100) - Math.round(st.stored * 100);
+      newTotal = totalKop / 100;
+      newPrice = roundToTwo(newTotal / q);
+    }
     const sheetRow = rowById[String(st.tx.id).trim()];
     if (!sheetRow) return;
     transSheet.getRange(sheetRow, wIdx + 1).setValue(st.computed);
     transSheet.getRange(sheetRow, pIdx + 1).setValue(newPrice);
-    transSheet.getRange(sheetRow, tIdx + 1).setValue(roundToTwo(newPrice * q));
+    transSheet.getRange(sheetRow, tIdx + 1).setValue(newTotal);
     changed.push({
       id: st.tx.id,
       // Item 93: the journal link of this shipment is found by the OpID of its «История» row.
@@ -11963,6 +12082,73 @@ function computePeresortNetDeltas(mainTxItems, newComposition) {
  * @param {string} username - имя текущего пользователя
  * @returns {Object} результат операции { success: true, stock: ..., transactions: ... }
  */
+/**
+ * Item 97 ticket 08: after a peresort re-commit, the old rows' fixed cells and invoice shares move to the new rows.
+ * An article still in the composition keeps its sums whole on its first new row; an article replaced completely
+ * passes them to the new row(s) of its pairs (several: by pair qty, largest remainder, ties to the earlier pair).
+ * The sums over the order stay equal to the kopeck.
+ */
+function carryPeresortFixedSums(oldRows, newTransactions, pairs) {
+  const norm = function(a) { return String(a || '').trim().toLowerCase(); };
+  const withFixed = oldRows.filter(function(tx) { return rowHasFixedSums(tx); });
+  if (withFixed.length === 0) return;
+  const newMain = newTransactions.filter(function(t) { return t.isComponent !== true; });
+  const newRowsOf = function(article) { return newMain.filter(function(t) { return norm(t.article) === article; }); };
+
+  const byArticle = {};
+  withFixed.forEach(function(tx) {
+    const a = norm(tx.article);
+    const f = rowFixedSumsKop(tx);
+    const e = byArticle[a] || (byArticle[a] = { p: null, i: null, ids: [] });
+    if (f.p !== null) e.p = (e.p || 0) + f.p;
+    if (f.i !== null) e.i = (e.i || 0) + f.i;
+    e.ids.push(String(tx.id));
+  });
+
+  const cells = {};
+  const addCells = function(id, p, i) {
+    const e = cells[id] || (cells[id] = { id: id, p: null, i: null });
+    if (p !== null) e.p = (e.p || 0) + p;
+    if (i !== null) e.i = (e.i || 0) + i;
+  };
+  const keptMoves = {};
+  Object.keys(byArticle).forEach(function(a) {
+    const e = byArticle[a];
+    const kept = newRowsOf(a)[0];
+    if (kept) {
+      addCells(String(kept.id), e.p, e.i);
+      e.ids.forEach(function(oldId) { keptMoves[oldId] = [{ id: String(kept.id), weight: 1 }]; });
+      return;
+    }
+    // Replaced completely: the targets are the new rows of the article's pairs, merged per row in pair order.
+    const targets = [];
+    (pairs || []).forEach(function(pair) {
+      if (norm(pair.fromArticle) !== a) return;
+      const rows = newRowsOf(norm(pair.toArticle));
+      const row = rows[rows.length - 1];
+      if (!row) return;
+      const hit = targets.filter(function(t) { return t.id === String(row.id); })[0];
+      if (hit) hit.weight += Number(pair.qty) || 0;
+      else targets.push({ id: String(row.id), weight: Number(pair.qty) || 0 });
+    });
+    if (targets.length === 0) return;
+    const weights = targets.map(function(t) { return t.weight; });
+    const moves = {};
+    e.ids.forEach(function(oldId) { moves[oldId] = targets; });
+    const shareKop = repointInvoiceShares(moves);
+    const shareTotal = Object.keys(shareKop).reduce(function(sum, k) { return sum + shareKop[k]; }, 0);
+    // The invoice cell follows the split shares when they add up to it, so the two never differ by a split kopeck.
+    const splitP = e.p === null ? null : splitKopByWeightsGs(e.p, weights);
+    const splitI = e.i === null ? null : splitKopByWeightsGs(e.i, weights);
+    targets.forEach(function(t, k) {
+      const iKop = e.i === null ? null : (shareTotal === e.i ? (shareKop[t.id] || 0) : splitI[k]);
+      addCells(t.id, splitP ? splitP[k] : null, iKop);
+    });
+  });
+  putFixedSumsOnRows(Object.keys(cells).map(function(id) { return cells[id]; }));
+  repointInvoiceShares(keptMoves);
+}
+
 // True when a «TransGroupInfo» cell links at least one of the given transaction ids.
 function peresortLinksOverlap(transGroupInfoStr, ids) {
   var linked;
@@ -12084,11 +12270,13 @@ function commitShipmentPeresort(postingId, username) {
   var deliveryDate = firstTx.deliveryDate || '';
 
   // Построй mainTxItems = mainTxRows.map: {article, quantity: Number(quantity), price: Number(price)}.
+  // Item 97 ticket 08: the fixed sums of the rows (step 1 / step 2) are inside their prices; they are taken off
+  // here and put back on the new rows after the commit.
   var mainTxItems = mainTxRows.map(function(tx) {
     return {
       article: tx.article,
       quantity: Number(tx.quantity) || 0,
-      price: Number(tx.price) || 0
+      price: priceWithoutFixedSums(Number(tx.price) || 0, tx)
     };
   });
 
@@ -12140,6 +12328,10 @@ function commitShipmentPeresort(postingId, username) {
   var commitResult = commitTransaction(newComposition, 'Расход', destination, deliveryDate, username, originalDate, '', firstTx.additionalCosts, undefined, firstTx.comment, firstTx.shipmentId, true);
   // Item 90: the re-written rows keep the OpID of the rows they replace (see updateTransaction).
   stampOpIdOnTransactions(commitResult.newTransactions, firstTx.opId);
+
+  // Item 97 ticket 08: the fixed sums and invoice shares of the old rows go to the new ones (before the journal
+  // below, which reads the final «Цена»).
+  carryPeresortFixedSums(mainTxRows, commitResult.newTransactions, peresortObj.pairs);
 
   // Item 93: the journal follows «История» by OpID — the rows that were taken out (every OpID of the
   // old rows: the links of the orders that vanished drop, their pieces join the first order's link)
