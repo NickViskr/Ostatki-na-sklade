@@ -8,10 +8,12 @@ red otherwise; supplies of the week not in the spread are listed. Spec: `../spec
 
 **Blocked by:** 07.
 
-**Status:** ready-for-agent
+**Status:** done (live 2026-11-05: Code.gs @219 + Cloud Run `sklad-00124-dgf`)
 
-- [ ] One stand check per recompute path: the fixed sums survive to the kopeck
-- [ ] Mark «перераспределить» on quantity edit / delete / restore; cleared by a new apply
-- [ ] Reconciliation red on a hand-edited row, green after re-apply
+- [x] One stand check per recompute path: the fixed sums survive to the kopeck
+- [x] Mark «перераспределить» on quantity edit / delete / restore; cleared by a new apply
+- [x] Reconciliation red on a hand-edited row, green after re-apply
 
 ## Comments
+
+- 2026-11-05: contract and owner's answers in `../ticket-08-design.md` (fixed sums stay on a pencil edit; peresort keeps the supply's money; «перераспределить» computed from the facts; shown only in the week window). Commits `8936706` (A), `a9b2894` (B), `8847453` (C). Found on the way: a pencil edit left the posting's TransGroupInfo on the old row id — fixed in B. A qty edit of a single-row supply marks step 1 only (its only row keeps the whole invoice share). The first real apply on live data is still to be watched.
