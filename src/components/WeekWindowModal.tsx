@@ -8,6 +8,7 @@ import { invoiceWeekOptions, isoWeekLabel } from '../lib/isoWeek';
 import {
   invoiceLineIsPackaging, invoicePackagingTotalKop, step1TotalKop, weekArticleSummary, weekPackagingTargets
 } from '../lib/weekPackaging';
+import { weekChecksView } from '../lib/weekChecksView';
 import { ContractorInvoiceModal } from './ContractorInvoiceModal';
 
 /** Kopecks -> «1 176,00 ₽» (kopeck integers only, no floating point money). */
@@ -125,6 +126,7 @@ export const WeekWindowModal: React.FC<Props> = ({ initialWeek, onClose }) => {
     setOpTicks(new Set(appliedSpread ? appliedSpread.opIds : spread.operations.map((op) => op.opId)));
   }, [spreadInvoice, spread, appliedSpread]);
 
+  const checks = useMemo(() => weekChecksView(spread, invoices, kopText), [spread, invoices]);
   const operations = state?.operations || [];
   const summary = useMemo(() => weekArticleSummary(operations), [operations]);
 
@@ -276,6 +278,35 @@ export const WeekWindowModal: React.FC<Props> = ({ initialWeek, onClose }) => {
           </label>
 
           {loadError && <div className="text-sm text-red-600">{loadError}</div>}
+
+          {checks.staleItems.length > 0 && (
+            <div className="border border-amber-300 bg-amber-50 text-amber-800 rounded-xl p-3 text-sm space-y-1">
+              <div className="font-bold">Перераспределить:</div>
+              {checks.staleItems.map((t, i) => <div key={i}>{t}</div>)}
+            </div>
+          )}
+
+          {checks.reconciliation.length > 0 && (
+            <section className="space-y-1">
+              <div className="text-sm font-bold text-slate-500">Сверка недели</div>
+              {checks.reconciliation.map((r, i) => (
+                <div key={i} className="text-sm">
+                  <span className="text-slate-700">{r.text} </span>
+                  {r.ok
+                    ? <span className="font-bold text-green-600">✓ сходится</span>
+                    : <span className="font-bold text-red-600">✗ не сходится</span>}
+                  {r.problems.map((p, j) => <div key={j} className="pl-4 text-red-600">{p}</div>)}
+                </div>
+              ))}
+            </section>
+          )}
+
+          {checks.notInSpread.length > 0 && (
+            <section className="space-y-1">
+              <div className="text-sm font-bold text-slate-500">Не вошли в распределение</div>
+              {checks.notInSpread.map((t, i) => <div key={i} className="text-sm text-slate-700">{t}</div>)}
+            </section>
+          )}
 
           <section className="space-y-1">
             <div className="text-sm font-bold text-slate-500">Счета недели</div>

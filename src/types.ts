@@ -879,6 +879,17 @@ export interface InvoiceSpreadOperation {
 export interface InvoiceSpreadState {
   operations: InvoiceSpreadOperation[];
   applied: { invoiceId: string; lines: { n: number; qty: string }[]; opIds: string[]; appliedBy: string; appliedAt: string }[];
+  /** Part B checks (item 97 ticket 08); optional so an older server answer still renders. */
+  reconciliation?: {
+    invoiceId: string;
+    allocatedKop: number;
+    onRowsKop: number;
+    ok: boolean;
+    missingRows: string[];
+    mismatchedRows: { id: number; article: string; cellKop: number; sharesKop: number }[];
+  }[];
+  stale?: { step1: { opId: string; articles: string[] }[]; invoices: { invoiceId: string; opIds: string[] }[] };
+  notInSpread?: { opId: string; cabinet: string; orderNumbers: string[] }[];
 }
 
 /** What applyInvoiceSpread sends. */
