@@ -13,11 +13,13 @@ Spec: `../spec.md` (decisions 4–7). Money tier.
 
 **Blocked by:** 06.
 
-**Status:** ready-for-agent
+**Status:** done (live 2026-11-04: Code.gs @218 + Cloud Run `sklad-00123-cf6`)
 
-- [ ] Σ row shares = Σ ticked amounts to the kopeck (e.g. 1299 over 120/45/75 pcs in boxes)
-- [ ] Missing pcsPerBox blocks; unticked lines stay unallocated
-- [ ] Repeat = no change; replacement of an invoice; an injected cut-off then a retry completes without doubling
-- [ ] The latest journal cost of every touched supply equals its «История» row price after apply
+- [x] Σ row shares = Σ ticked amounts to the kopeck (e.g. 1299 over 120/45/75 pcs in boxes)
+- [x] Missing pcsPerBox blocks; unticked lines stay unallocated
+- [x] Repeat = no change; replacement of an invoice; an injected cut-off then a retry completes without doubling
+- [x] The latest journal cost of every touched supply equals its «История» row price after apply
 
 ## Comments
+
+- 2026-11-04: contract and owner's answers in `../ticket-07-design.md` (one invoice at a time; rights as step 1; column «Счёт недели» + tag in «Объект»; an empty «ШТ/КОР» blocks). Commits `86366c1`, `ea3d942`, `69d3a78`. A cut-off inside a multi-row manual write-off or a combined shipment healed only after the fix «evidence rows last, done rows not re-planned» (stand B8b/B8c). The first real apply on live data is still to be watched (no week had an invoice and written-off supplies at deploy time).
