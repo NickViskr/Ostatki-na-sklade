@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ITEM97_ENABLED } from '../lib/item97';
 import { 
   Settings, 
   Database, 
@@ -554,7 +555,7 @@ export const SettingsTab: React.FC = React.memo(() => {
                   <p className="text-[10px] text-sky-600 font-medium">Управлять автоопросом Ozon может только администратор.</p>
                 )}
 
-                {isAdmin && (
+                {ITEM97_ENABLED && isAdmin && (
                   <div className="space-y-4 pt-2">
                     <div className="space-y-1">
                       <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">

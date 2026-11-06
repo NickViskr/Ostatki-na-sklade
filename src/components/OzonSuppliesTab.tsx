@@ -22,6 +22,7 @@ import { orderDocsStatus } from '../lib/ozonSupplyDocs';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ContractorInvoiceModal } from './ContractorInvoiceModal';
 import { WeekWindowModal } from './WeekWindowModal';
+import { ITEM97_ENABLED } from '../lib/item97';
 import { isoWeekLabel, selectableWeeks, weekFilterOptions } from '../lib/isoWeek';
 
 
@@ -1739,6 +1740,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
   const filteredGroups = useMemo(() => {
     let list = sortedGroups;
     if (cabinetFilter !== 'all') list = list.filter(g => g.cabinet === cabinetFilter);
+    if (!ITEM97_ENABLED) return list;
     if (weekFilter === 'none') list = list.filter(g => g.items.some((i: any) => !i.effectiveWeek));
     else if (weekFilter !== 'all') list = list.filter(g => g.items.some((i: any) => i.effectiveWeek === weekFilter));
     return list;
@@ -1896,7 +1898,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
       )}
 
       {/* Item 97: фильтр по неделе передачи */}
-      {!isLoading && (
+      {ITEM97_ENABLED && !isLoading && (
         <div className="flex items-center gap-2">
           <span className="text-sm font-bold text-slate-500">Неделя</span>
           <select
@@ -1918,9 +1920,9 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
           </button>
         </div>
       )}
-      {showWeekWindow && <WeekWindowModal initialWeek={weekFilter} onClose={() => setShowWeekWindow(false)} />}
+      {ITEM97_ENABLED && showWeekWindow && <WeekWindowModal initialWeek={weekFilter} onClose={() => setShowWeekWindow(false)} />}
 
-      {!isLoading && weekFilter !== 'all' && weekFilter !== 'none' && <WeekFilesBlock week={weekFilter} />}
+      {ITEM97_ENABLED && !isLoading && weekFilter !== 'all' && weekFilter !== 'none' && <WeekFilesBlock week={weekFilter} />}
 
       {/* Показ обработанных заявок */}
       {!isLoading && processedGroupsCount > 0 && (
@@ -2271,6 +2273,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                 
                                 <div className="flex items-center gap-4 min-w-0 lg:max-w-[50%] justify-between lg:justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-50">
                                   {/* Item 97: week of the handover; admin may change it by hand */}
+                                  {ITEM97_ENABLED && (
                                   <div className="text-left lg:text-right min-w-0" onClick={(e) => e.stopPropagation()}>
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Неделя</div>
                                     <div className="flex flex-wrap items-center lg:justify-end gap-2">
@@ -2323,6 +2326,7 @@ export const OzonSuppliesTab: React.FC = React.memo(() => {
                                       )}
                                     </div>
                                   </div>
+                                  )}
                                   <div className="text-left lg:text-right min-w-0">
                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Статус Ozon</div>
                                     <div className="flex flex-wrap items-center lg:justify-end gap-2">
