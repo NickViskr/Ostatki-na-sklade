@@ -421,6 +421,10 @@ const sandbox = {
         const sheet = makeFakeSheet([], name);
         sheetRegistry[name] = sheet;
         return sheet;
+      },
+      // Item 97 rollback Task C: the one-off deletes whole sheets. Matches by identity, like the target spreadsheet's.
+      deleteSheet: (sheet) => {
+        Object.keys(sheetRegistry).forEach(k => { if (sheetRegistry[k] === sheet) delete sheetRegistry[k]; });
       }
     }),
     flush: () => { apiCallCounts.flush++; /* нет очереди отложенной записи в стенде — заглушка */ }
@@ -637,6 +641,7 @@ module.exports = {
   clearOzonSettingsSheet() { delete sheetRegistry['Настройки Ozon']; },
   clearOzonSettingsJournalSheet() { delete sheetRegistry['Журнал настроек Ozon']; },
   getRegistrySheet(name) { return sheetRegistry[name] || null; },
+  registrySheetNames() { return Object.keys(sheetRegistry); },
   dumpRegistrySheet(name) {
     const sheet = sheetRegistry[name];
     if (!sheet) return null;
