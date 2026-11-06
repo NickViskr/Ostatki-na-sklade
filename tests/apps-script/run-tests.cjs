@@ -62,7 +62,18 @@ function main() {
 function freshHarness() {
   const modPath = require.resolve('./harness.cjs');
   delete require.cache[modPath];
-  return require('./harness.cjs');
+  const h = require('./harness.cjs');
+  // Item 97 rollback (Task A, 2026-11-06): production item97Enabled_() returns false, so every item-97 path is dormant.
+  // The pre-rollback item-97 checks keep testing the dormant code, hence this default override (a global assigned after
+  // Code.gs is loaded wins over the function declaration). The dormant-state checks use freshHarnessItem97Off().
+  h.context.item97Enabled_ = () => true;
+  return h;
+}
+// The harness exactly as production runs it after the rollback: the item-97 switch is off.
+function freshHarnessItem97Off() {
+  const h = freshHarness();
+  h.context.item97Enabled_ = () => false;
+  return h;
 }
 
 // ================= Пункт 1: первый запуск дня =================
@@ -18959,6 +18970,411 @@ t0cCheck('Item 101 purgeExpiredSupplyDocsCargoIds: applyCancelledOzonOrders call
         'no saved set: stale.step1 = []': empty(staleS1(dc))
       },
       note: j({ a: da.stale, b: db.stale, b0: db0.stale, c: dc.stale, res: res && (res.message || res.success) })
+    };
+  });
+}
+
+// ================= Item 97 rollback, Task A: item 97 dormant on the server =================
+// Written TEST-FIRST against .scratch/item-97-contractor-invoice/rollback-plan.md, «Task A» (A1-A6). The switch is
+// item97Enabled_() in Code.gs (false in production); these checks run with freshHarnessItem97Off(), every older item-97
+// check runs with the switch overridden to true (see freshHarness). The refusal text is asserted literally.
+{
+  const MSG = 'Функция отключена: пункт 97 (счёт подрядчика по неделе) откатан 06.11.2026';
+  const EKB = 'Asia/Yekaterinburg';
+  const SIX = ['Счета подрядчика', 'Строки счетов', 'Упаковка недели', 'Доли счетов', 'Распределения счетов', 'Журнал статусов Ozon'];
+  const FAR = String(Date.parse('2030-01-01T00:00:00Z'));
+  const SESSIONS = [['Token', 'Username', 'Role', 'ExpiresAt'], ['tok-user', 'Кладовщик', 'user', FAR], ['tok-admin', 'boss', 'admin', FAR]];
+  const check97 = (name, build) => {
+    let conds = {}; let note = '';
+    try { const r = build(); conds = r.conds; note = r.note || ''; } catch (e) { conds = { 'ran to the end': false }; note = 'threw: ' + String((e && e.message) || e); }
+    const failed = Object.keys(conds).filter((k) => !conds[k]);
+    check(name, failed.length === 0, (failed.length ? 'FAILED: ' + failed.join(' | ') + ' -- ' : '') + note);
+  };
+  const created = (h) => SIX.filter((n) => h.getRegistrySheet(n) !== null);
+  const j = (x) => JSON.stringify(x);
+  const call = (h, name, ...a) => { const f = h.context[name]; if (typeof f !== 'function') return 'MISSING ' + name; try { return f(...a); } catch (e) { return 'THROWS: ' + e.message; } };
+  const standBase = (h) => {
+    h.setScriptTimeZone(EKB);
+    h.setNow('2026-10-27T20:00:00Z');
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setOzonCostSheet([]);
+    h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], [['A', 10, '111']]);
+    h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'A', available: 500, sku: '111' }]);
+    h.setKitSheet([]);
+    h.setExternalShipmentsSheet([]);
+    h.setRegistrySheet('Сессии', SESSIONS);
+    return h;
+  };
+
+  // ---- A1: doPost refuses every item-97 action ----
+  const ACTIONS = [
+    ['setExternalShipmentWeek', { postingId: 'P-1', week: '2026-W44' }, true],
+    ['listWeekFiles', { week: '2026-W44' }, false],
+    ['getWeekFile', { week: '2026-W44', fileId: 'f1' }, false],
+    ['uploadWeekFile', { week: '2026-W44', name: 'a.pdf', mimeType: 'application/pdf', base64: 'AAAA' }, false],
+    ['deleteWeekFile', { week: '2026-W44', fileId: 'f1' }, true],
+    ['saveContractorInvoice', { week: '2026-W44', number: '1', total: 100, lines: [] }, false],
+    ['listContractorInvoices', { week: '2026-W44' }, false],
+    ['deleteContractorInvoice', { id: 'INV-1' }, true],
+    ['getWeekPackaging', { week: '2026-W44' }, false],
+    ['saveWeekPackaging', { week: '2026-W44', prices: {}, overrides: [] }, false],
+    ['setInvoiceLinePackaging', { week: '2026-W44', invoiceId: 'INV-1', lineId: 'L1', packaging: 1 }, false],
+    ['getInvoiceSpread', { week: '2026-W44' }, false],
+    ['applyInvoiceSpread', { week: '2026-W44', invoiceId: 'INV-1', lines: [], opIds: [] }, false],
+    ['setOzonAutoWriteOff', { enabled: true }, true]
+  ];
+  check97('Item 97 rollback A1: production item97Enabled_() in Code.gs returns false (the harness override is NOT applied)', () => {
+    const modPath = require.resolve('./harness.cjs');
+    delete require.cache[modPath];
+    const raw = require('./harness.cjs');
+    const v = raw.context.item97Enabled_();
+    return { conds: { 'switch is off in production code': v === false }, note: j(v) };
+  });
+  check97('Item 97 rollback A1: every one of the 14 item-97 actions (13 + setOzonAutoWriteOff on) answers {status:error} with the disabled message, for an admin token', () => {
+    const h = standBase(freshHarnessItem97Off());
+    const outs = ACTIONS.map((a) => { const o = h.callDoPost({ action: a[0], sessionToken: 'tok-admin', data: a[1] }); return [a[0], o.status, o.message]; });
+    const bad = outs.filter((o) => o[1] !== 'error' || o[2] !== MSG);
+    return { conds: { 'all 14 refused with the exact message': bad.length === 0, 'count is 14': outs.length === 14 }, note: j(bad) };
+  });
+  check97('Item 97 rollback A1: the refusal comes BEFORE the admin check — a plain user calling an admin-only item-97 action gets the disabled message, not an admin-rights error', () => {
+    const h = standBase(freshHarnessItem97Off());
+    const outs = ACTIONS.filter((a) => a[2]).map((a) => { const o = h.callDoPost({ action: a[0], sessionToken: 'tok-user', data: a[1] }); return [a[0], o.status, o.message]; });
+    const bad = outs.filter((o) => o[1] !== 'error' || o[2] !== MSG);
+    return { conds: { 'admin-only actions refused with the disabled message for a user token': outs.length === 4 && bad.length === 0 }, note: j(bad) };
+  });
+  check97('Item 97 rollback A1: the lock-free reads listWeekFiles / getWeekFile are refused too (they were answered before the global lock) — and without a session nothing changes', () => {
+    const h = standBase(freshHarnessItem97Off());
+    const a = h.callDoPost({ action: 'listWeekFiles', sessionToken: 'tok-user', data: { week: '2026-W44' } });
+    const b = h.callDoPost({ action: 'getWeekFile', sessionToken: 'tok-user', data: { week: '2026-W44', fileId: 'f1' } });
+    const c = h.callDoPost({ action: 'listWeekFiles', sessionToken: 'nobody', data: { week: '2026-W44' } });
+    return { conds: { 'listWeekFiles refused': a.status === 'error' && a.message === MSG, 'getWeekFile refused': b.status === 'error' && b.message === MSG, 'a bad session still fails with its own error': c.status === 'error' && c.message !== MSG }, note: j([a, b, c]) };
+  });
+  check97('Item 97 rollback A1: refused calls change nothing — none of the six item-97 sheets is created, «История» / «Внешние отгрузки» / the journal are byte for byte', () => {
+    const h = standBase(freshHarnessItem97Off());
+    h.commitTransaction([{ article: 'A', quantity: 2, price: 100 }], 'Расход', 'Ozon (MaxiStore)', '2026-10-27', 'tester', null, 'op-1', 0);
+    const snap = () => j([h.dumpTransSheet(), h.dumpExternalShipments(), h.dumpOzonCost(), h.dumpStockSheet()]);
+    const before = snap();
+    const msgs = ACTIONS.map((a) => h.callDoPost({ action: a[0], sessionToken: 'tok-admin', data: a[1] }).message);
+    return { conds: { 'every call was refused (not failed on its own input)': msgs.every((m) => m === MSG), 'no item-97 sheet exists after 14 refused calls': created(h).length === 0, 'data sheets unchanged': snap() === before, 'the setup row exists': h.dumpTransSheet().length === 1 }, note: j(created(h)) };
+  });
+  check97('Item 97 rollback A1 control: with the switch ON the same read actions are not refused with the disabled message (proves the checks above test the switch, not a stray error)', () => {
+    const h = standBase(freshHarness());
+    const a = h.callDoPost({ action: 'listContractorInvoices', sessionToken: 'tok-user', data: { week: '2026-W44' } });
+    const b = h.callDoPost({ action: 'getWeekPackaging', sessionToken: 'tok-user', data: { week: '2026-W44' } });
+    return { conds: { 'listContractorInvoices is not refused': a.message !== MSG, 'getWeekPackaging is not refused': b.message !== MSG }, note: j([a, b]) };
+  });
+
+  // ---- A1: setOzonAutoWriteOff ----
+  check97('Item 97 rollback A1: setOzonAutoWriteOff {enabled:true} is refused and the property ozon_autoWriteOffSince stays absent; {enabled:false} still works and deletes an existing property', () => {
+    const h = standBase(freshHarnessItem97Off());
+    const on = h.callDoPost({ action: 'setOzonAutoWriteOff', sessionToken: 'tok-admin', data: { enabled: true } });
+    const afterOn = h.getScriptProperty('ozon_autoWriteOffSince');
+    h.setScriptProperty('ozon_autoWriteOffSince', '1790000000000');
+    const off = h.callDoPost({ action: 'setOzonAutoWriteOff', sessionToken: 'tok-admin', data: { enabled: false } });
+    const afterOff = h.getScriptProperty('ozon_autoWriteOffSince');
+    return {
+      conds: {
+        'enabling is refused with the message': on.status === 'error' && on.message === MSG,
+        'the property was not created by the refused call': afterOn === null,
+        'disabling still succeeds': off.status === 'success',
+        'disabling deleted the property': afterOff === null
+      },
+      note: j({ on, off: off.status, afterOn, afterOff })
+    };
+  });
+
+  // ---- A2 + A3: saveExternalShipments writes no handover, no status log, no stamp, no auto write-off ----
+  {
+    const SHEET = 'Внешние отгрузки';
+    const SINCE = String(Date.parse('2026-10-27T18:00:00Z'));
+    const STAMP = '1790000000000';
+    const POLL1 = '2026-10-27T18:30:00Z';
+    const POLL2 = '2026-10-27T20:00:00Z';
+    const ship = (status) => ({ postingId: 'P-1', orderId: 'O-1', orderNumber: '111', shipmentDate: '2026-10-27',
+      itemsJSON: JSON.stringify([{ offerId: 'A', quantity: 2 }]), cabinet: 'MaxiStore', ozonStatus: status, ozonStatusDate: '2026-10-27T19:00:00Z',
+      orderState: status, isDirect: false });
+    const polls = (h) => {
+      const out = [];
+      [['READY_TO_SUPPLY', POLL1], ['IN_TRANSIT', POLL2]].forEach((p) => {
+        try { out.push({ res: JSON.parse(JSON.stringify(h.context.saveExternalShipments([ship(p[0])], p[1]) || null)), err: '' }); } catch (e) { out.push({ res: null, err: String((e && e.message) || e) }); }
+      });
+      return out;
+    };
+    const stamp = (h) => h.getScriptProperty('ozon_lastStatusPollAt');
+    const rowOf = (h) => h.dumpExternalShipments().find((r) => r['PostingID'] === 'P-1') || {};
+    const cell = (h, name) => { const v = rowOf(h)[name]; return v === undefined || v === null ? '' : String(v); };
+    const mk = (off) => {
+      const h = standBase(off ? freshHarnessItem97Off() : freshHarness());
+      h.setScriptProperty('ozon_autoWriteOffSince', SINCE);
+      h.setScriptProperty('ozon_lastStatusPollAt', STAMP);
+      return h;
+    };
+    check97('Item 97 rollback A2/A3: with the switch off and ozon_autoWriteOffSince SET, two polls (pre-departure, then departed inside the window) write no «История» row, no journal row, leave «Автосписание» / «Передача с» / «Передача по» / «Неделя» empty, create no «Журнал статусов Ozon», do not touch the poll stamp; statuses and the new row are saved as before', () => {
+      const h = mk(true);
+      const before = j([h.dumpStockSheet()]);
+      const r = polls(h);
+      const ar = (r[1].res && r[1].res.autoWriteOff) || null;
+      return {
+        conds: {
+          'both saves succeeded': r[0].err === '' && r[1].err === '',
+          'the new row was saved and its status is updated to the latest poll': h.dumpExternalShipments().length === 1 && cell(h, 'Статус Ozon') === 'IN_TRANSIT' && cell(h, 'OrderID') === 'O-1',
+          'no «История» row': h.getTransactions().rows.length === 0,
+          'no journal row': h.dumpOzonCost().length === 0,
+          'stock untouched': j([h.dumpStockSheet()]) === before,
+          '«Автосписание» empty': cell(h, 'Автосписание') === '',
+          '«Передача по» empty': cell(h, 'Передача по') === '',
+          '«Передача с» empty': cell(h, 'Передача с') === '',
+          '«Неделя» empty': cell(h, 'Неделя') === '',
+          '«Журнал статусов Ozon» not created': h.getRegistrySheet('Журнал статусов Ozon') === null,
+          'the poll stamp property was not written': stamp(h) === STAMP,
+          'the result carries an empty autoWriteOff': !!ar && j(ar.written) === '[]' && j(ar.refused) === '[]' && j(ar.failed) === '[]',
+          'the posting status stays «new»': cell(h, 'Статус') === 'new'
+        },
+        note: j({ r1: r[1], row: rowOf(h) })
+      };
+    });
+    check97('Item 97 rollback A2/A3 control: the same two polls with the switch ON do write the handover, the status log, the stamp and the auto write-off (so the check above is not vacuous)', () => {
+      const h = mk(false);
+      const r = polls(h);
+      return {
+        conds: {
+          'saves succeeded': r[0].err === '' && r[1].err === '',
+          'handover filled': cell(h, 'Передача по') !== '',
+          'status log sheet exists': h.getRegistrySheet('Журнал статусов Ozon') !== null,
+          'stamp moved': stamp(h) !== STAMP,
+          'stock written off 10 -> 8': h.stockOf('A').quantity === 8
+        },
+        note: j({ r1: r[1], stamp: stamp(h), row: rowOf(h) })
+      };
+    });
+    check97('Item 97 rollback A3: runOzonAutoWriteOff_ itself returns the empty result with the switch off, even with ozon_autoWriteOffSince set', () => {
+      const h = mk(true);
+      h.setExternalShipmentsSheet([{ postingId: 'P-1', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 2 }], orderNumber: '111' }]);
+      const sh = h.getRegistrySheet('Внешние отгрузки');
+      const dump = sh.__dump();
+      dump[1][dump[0].indexOf('Передача по')] = '2026-10-28 01:00:00';
+      sh.__setData(dump);
+      const probe = freshHarness();   // the same row with the switch ON must be picked up (written or refused), so the empty result below is not vacuous
+      probe.setScriptTimeZone(EKB); probe.setNow('2026-10-27T20:00:00Z'); probe.ensureTransSheet(); probe.setOzonCostSheet([]);
+      probe.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]); probe.setSkuSheet(['SKU', 'ШТ/КОР', 'ШК Ozon'], [['A', 10, '111']]);
+      probe.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'A', available: 500, sku: '111' }]); probe.setKitSheet([]);
+      probe.setScriptProperty('ozon_autoWriteOffSince', SINCE);
+      probe.setExternalShipmentsSheet([{ postingId: 'P-1', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 2 }], orderNumber: '111' }]);
+      const psh = probe.getRegistrySheet('Внешние отгрузки'); const pd = psh.__dump(); pd[1][pd[0].indexOf('Передача по')] = '2026-10-28 01:00:00'; psh.__setData(pd);
+      const pres = call(probe, 'runOzonAutoWriteOff_');
+      const res = call(h, 'runOzonAutoWriteOff_');
+      const ok = res && typeof res === 'object' && j(res.written) === '[]' && j(res.refused) === '[]' && j(res.failed) === '[]';
+      return { conds: { 'control: with the switch ON the same row is picked up': !!pres && (pres.written.length + pres.refused.length + pres.failed.length) === 1, 'empty written/refused/failed': !!ok, 'nothing written': h.getTransactions().rows.length === 0 && h.dumpOzonCost().length === 0, 'no mail': h.sentMails().length === 0 }, note: j({ res, pres }) };
+    });
+  }
+
+  // ---- A4: triggers ----
+  {
+    const CHECK = '/api/ozon/check';
+    const ekb = (hhmm) => new Date('2026-10-21T' + hhmm + ':00+05:00').toISOString();
+    const mk = (hhmm) => {
+      const h = freshHarnessItem97Off();
+      h.setScriptTimeZone(EKB);
+      h.setNow(ekb(hhmm));
+      h.setRegistrySheet('Сессии', SESSIONS);
+      h.setFetchHandler(() => ({ body: { status: 'success', data: { found: 2, message: 'ok' } } }));
+      return h;
+    };
+    // The live picture: the hourly trigger, three evening one-offs, the two full-poll triggers, one unrelated trigger.
+    const install = (h) => {
+      const S = h.context.ScriptApp;
+      S.newTrigger('scheduledOzonStatusCheck').timeBased().everyHours(1).create();
+      ['23:00', '23:30', '23:45'].forEach((t) => S.newTrigger('runOzonStatusPollAt').timeBased().at(new Date('2026-10-21T' + t + ':00+05:00')).create());
+      S.newTrigger('scheduledOzonCheck').timeBased().everyDays(1).atHour(11).inTimezone('Europe/Moscow').create();
+      S.newTrigger('scheduledOzonCheck').timeBased().everyDays(1).atHour(20).inTimezone('Europe/Moscow').create();
+      S.newTrigger('unrelatedJob').timeBased().everyMinutes(30).create();
+      h.setScriptProperty('ozon_eveningPollsDate', '2026-10-21');
+      h.setScriptProperty('ozon_statusPollRunning', String(Date.parse(ekb('09:58'))));
+      h.setScriptProperty('ozon_statusPollHistory', JSON.stringify([{ time: 'x', reason: 'hourly', ok: true, durationMs: 1, found: 0, message: '' }]));
+    };
+    const handlers = (h) => h.triggerSpecs().map((t) => t.handler).sort().join();
+    const props = (h) => ['ozon_eveningPollsDate', 'ozon_statusPollRunning', 'ozon_statusPollHistory'].map((k) => h.getScriptProperty(k));
+    const sessionRows = (h) => h.sheetByName('Сессии').__dump().length;
+    check97('Item 97 rollback A4: scheduledOzonStatusCheck at 10:00 Ekb with the switch off deletes the hourly trigger and all three evening one-offs, deletes the three poll properties, makes no fetch and adds no session row; the two scheduledOzonCheck triggers and the unrelated one stay', () => {
+      const h = mk('10:00');
+      install(h);
+      const rowsBefore = sessionRows(h);
+      const r = call(h, 'scheduledOzonStatusCheck');
+      return {
+        conds: {
+          'no throw': typeof r !== 'string' || r.indexOf('THROWS') !== 0,
+          'only scheduledOzonCheck x2 and the unrelated trigger are left': handlers(h) === 'scheduledOzonCheck,scheduledOzonCheck,unrelatedJob',
+          'the full-poll triggers keep hours 11 and 20': h.triggerSpecs().filter((t) => t.handler === 'scheduledOzonCheck').map((t) => t.atHour).sort((a, b) => a - b).join() === '11,20',
+          'the three properties are gone': props(h).every((v) => v === null),
+          'no fetch': h.fetchLog.length === 0,
+          'no session row written': sessionRows(h) === rowsBefore
+        },
+        note: j({ handlers: handlers(h), props: props(h), urls: h.fetchLog.map((f) => f.url) })
+      };
+    });
+    check97('Item 97 rollback A4: the same cleanup also happens outside the poll hours (23:10 Ekb) — the hourly handler must remove the triggers before its hours gate', () => {
+      const h = mk('23:10');
+      install(h);
+      call(h, 'scheduledOzonStatusCheck');
+      return { conds: { 'hourly + evening triggers deleted': handlers(h) === 'scheduledOzonCheck,scheduledOzonCheck,unrelatedJob', 'properties gone': props(h).every((v) => v === null), 'no fetch': h.fetchLog.length === 0 }, note: handlers(h) };
+    });
+    check97('Item 97 rollback A4: runOzonStatusPollAt({triggerUid}) with the switch off deletes EVERY hourly and evening trigger (not only its own), the three properties, and polls nothing', () => {
+      const h = mk('23:00');
+      install(h);
+      const mid = h.triggerSpecs().filter((t) => t.handler === 'runOzonStatusPollAt')[1];
+      const rowsBefore = sessionRows(h);
+      call(h, 'runOzonStatusPollAt', { triggerUid: mid.uid });
+      return {
+        conds: {
+          'only scheduledOzonCheck x2 and the unrelated trigger are left': handlers(h) === 'scheduledOzonCheck,scheduledOzonCheck,unrelatedJob',
+          'the three properties are gone': props(h).every((v) => v === null),
+          'no fetch': h.fetchLog.length === 0 && h.fetchLog.every((f) => f.url.indexOf(CHECK) === -1),
+          'no session row': sessionRows(h) === rowsBefore
+        },
+        note: j({ handlers: handlers(h), props: props(h) })
+      };
+    });
+    check97('Item 97 rollback A4: setupOzonSyncTriggers with the switch off creates exactly two scheduledOzonCheck triggers at 11 and 20 Europe/Moscow and no scheduledOzonStatusCheck / runOzonStatusPollAt (also when run twice over old hourly + evening triggers); removeOzonSyncTriggers still removes all three handlers', () => {
+      const h = mk('12:00');
+      install(h);
+      h.context.setupOzonSyncTriggers();
+      h.context.setupOzonSyncTriggers();
+      const t = h.triggerSpecs();
+      const full = t.filter((x) => x.handler === 'scheduledOzonCheck');
+      const afterSetup = handlers(h);
+      const g = mk('12:00');
+      install(g);
+      g.context.removeOzonSyncTriggers();
+      return {
+        conds: {
+          'exactly two full-poll triggers at 11 and 20': full.length === 2 && full.map((x) => x.atHour).sort((a, b) => a - b).join() === '11,20',
+          'both in Europe/Moscow': full.every((x) => x.tz === 'Europe/Moscow'),
+          'nothing else but the unrelated trigger': afterSetup === 'scheduledOzonCheck,scheduledOzonCheck,unrelatedJob',
+          'removeOzonSyncTriggers is unchanged: leaves only the unrelated trigger': handlers(g) === 'unrelatedJob'
+        },
+        note: j({ afterSetup, tz: full.map((x) => x.tz), removeLeft: handlers(g) })
+      };
+    });
+    check97('Item 97 rollback A4 control: with the switch ON the hourly handler still polls at 10:00 Ekb (one /api/ozon/check fetch) and setupOzonSyncTriggers still creates the hourly trigger', () => {
+      const h = freshHarness();
+      h.setScriptTimeZone(EKB);
+      h.setNow(ekb('10:00'));
+      h.setRegistrySheet('Сессии', SESSIONS);
+      h.setFetchHandler(() => ({ body: { status: 'success', data: { found: 2, message: 'ok' } } }));
+      call(h, 'scheduledOzonStatusCheck');
+      const urls = h.fetchLog.map((f) => f.url.replace(/^.*?(\/api\/)/, '/api/'));
+      h.context.setupOzonSyncTriggers();
+      return { conds: { 'one check fetch': urls.length === 1 && urls[0] === CHECK, 'hourly trigger created': h.triggerSpecs().some((x) => x.handler === 'scheduledOzonStatusCheck') }, note: j(urls) };
+    });
+  }
+
+  // ---- A5: pencil and peresort with the six sheets absent ----
+  {
+    const strip = (rows) => rows.map((r) => { const c = Object.assign({}, r); delete c['ID']; delete c['Дата']; delete c['Время']; return c; });
+    check97('Item 97 rollback A5: a pencil quantity edit of an Ozon expense with the six sheets absent creates no item-97 sheet and gives the same row and journal as the same edit with the switch on (rows with empty fixed cells)', () => {
+      const run = (off) => {
+        const h = standBase(off ? freshHarnessItem97Off() : freshHarness());
+        h.setStockSheet([{ article: 'Y', quantity: 200, avgCost: 20, capitalization: 4000 }]);
+        h.setOzonStocksSheet([{ cabinet: 'ShopTwo', article: 'Y', available: 500, sku: '222' }]);
+        h.commitTransaction([{ article: 'Y', quantity: 45, price: 20 }], 'Расход', 'Ozon (ShopTwo) [Упаковка: 45 шт. x 5₽ = 225₽ | Прочее: 300₽ | Услуги: Паллета x1 (1500₽)]', '2026-10-29', 'tester', '2026-10-30T07:00:00Z', 'man-1', null);
+        const r = h.getTransactions().rows.find((t) => t.opId === 'man-1');
+        const res = h.updateTransaction(r.id, { article: 'Y', quantity: 30, price: r.price, type: 'Расход', destination: r.destination, deliveryDate: r.deliveryDate, date: r.date }, 'tester');
+        return { h, res };
+      };
+      const off = run(true); const on = run(false);
+      const row = (x) => x.h.dumpTransSheet().find((r) => r['OpID'] === 'man-1') || {};
+      return {
+        conds: {
+          'no item-97 sheet created': created(off.h).length === 0,
+          'the edit succeeded without a journal error': !off.res.costJournalError,
+          'row: Сумма 2625.00 / Цена 87.50 / ДопРасходы 2025.00': Number(row(off)['Сумма']) === 2625 && Number(row(off)['Цена']) === 87.5 && Number(row(off)['ДопРасходы']) === 2025,
+          'same row as with the switch on (without ID/date)': j(strip([row(off)])) === j(strip([row(on)])),
+          'same journal as with the switch on': j(strip(off.h.dumpOzonCost())) === j(strip(on.h.dumpOzonCost()))
+        },
+        note: j({ row: row(off), err: off.res.costJournalError })
+      };
+    });
+    check97('Item 97 rollback A5: a peresort of an Ozon expense (commitShipmentPeresort) with the six sheets absent creates no item-97 sheet, succeeds, and leaves the same stock, «История» and journal as with the switch on', () => {
+      const run = (off) => {
+        const h = t93Fixture();
+        h.context.item97Enabled_ = () => !off;
+        const idB = h.getTransactions().rows.find((t) => t.opId === 'op-B').id;
+        h.setExternalShipmentsSheet([{ postingId: 'P-93', cabinet: 'MaxiStore', status: 'processed', items: [{ offerId: 'ART-C', quantity: 200 }],
+          transGroupInfo: JSON.stringify([idB]), orderNumber: '1300' }]);
+        const sheet = h.getRegistrySheet('Внешние отгрузки');
+        const dump = sheet.__dump();
+        dump[1][dump[0].indexOf('ПересортJSON')] = JSON.stringify({ pairs: [{ fromArticle: 'ART-C', toArticle: 'ART-D', fromOfferId: 'ART-C', toOfferId: 'ART-D', qty: 50 }] });
+        sheet.__setData(dump);
+        const res = h.commitShipmentPeresort('P-93', 'tester');
+        return { h, res };
+      };
+      const off = run(true); const on = run(false);
+      return {
+        conds: {
+          'no item-97 sheet created': created(off.h).length === 0,
+          'the peresort succeeded without a journal error': off.res.success === true && !off.res.costJournalError,
+          'same stock as with the switch on': j(off.h.dumpStockSheet()) === j(on.h.dumpStockSheet()),
+          'same «История» (without ID/date) as with the switch on': j(strip(off.h.dumpTransSheet())) === j(strip(on.h.dumpTransSheet())),
+          'same journal (without ID/date) as with the switch on': j(strip(off.h.dumpOzonCost())) === j(strip(on.h.dumpOzonCost()))
+        },
+        note: j({ created: created(off.h), res: off.res })
+      };
+    });
+  }
+
+  // ---- Check 7: the owner's main flow still works with the switch off ----
+  // No single existing check runs commit(with services) -> kanCostWatch -> «Вся отгрузка» in one story. Pieces exist:
+  // '90t03: ...' (updateShipmentExtras re-issue, ≈ line 3900-4200), '93/04 A..' (kanCostWatch first-seen / send, ≈ line 11260+),
+  // 'T0-C' (browser 'commit' with postingIds, ≈ line 13040). This check joins them with the switch off.
+  check97('Item 97 rollback A7: whole path with the switch off — manual «Оформить» (doPost commit, services typed, postingIds) writes «Расход» with the services inside «Сумма», appends the journal row, links the posting; kanCostWatch stamps the first-seen «Время КАН», 5+ min later sends it and marks «принято»; «Вся отгрузка» (updateShipmentExtras) changes the services and the journal gets the re-issue', () => {
+    const h = freshHarnessItem97Off();
+    h.setScriptTimeZone('Europe/Moscow');
+    h.setNow(T03_NOW);
+    h.setScriptProperty('kan_mcpToken', T03_TOKEN);
+    h.ensureTransSheet();
+    h.ensureArchiveSheet();
+    h.setOzonCostSheet([], h.OZON_COST_HEADERS.concat(h.OZON_COST_KAN_HEADERS));
+    h.setStockSheet([{ article: 'A', quantity: 10, avgCost: 100, capitalization: 1000 }]);
+    h.setOzonStocksSheet([{ cabinet: 'MaxiStore', article: 'A', available: 500, sku: '111' }]);
+    h.setExternalShipmentsSheet([{ postingId: 'P-100', cabinet: 'MaxiStore', status: 'new', items: [{ offerId: 'A', quantity: 4 }], orderNumber: '1300' }]);
+    h.setRegistrySheet('Сессии', SESSIONS);
+    const kan = fakeKanCost({});
+    h.setFetchHandler(kan.handler);
+    const dest = 'Ozon (MaxiStore) [Услуги: Паллета x1 (1200₽)]';
+    const out = h.callDoPost({ action: 'commit', sessionToken: 'tok-user', type: 'Расход', destination: dest, deliveryDate: '2026-10-13', opId: 'op-main',
+      additionalCosts: 1200, postingIds: ['P-100'], data: [{ article: 'A', quantity: 4, price: 100 }] });
+    const expense = h.getTransactions().rows.filter((t) => t.type === 'Расход' && t.opId === 'op-main');
+    const journal0 = h.dumpOzonCostFull().filter((r) => r['OpID'] === 'op-main');
+    const posting = h.dumpExternalShipments().find((r) => r['PostingID'] === 'P-100') || {};
+    // kanCostWatch: first sight (no request), then 6 minutes later the send.
+    const w1 = h.kanCostWatch();
+    const stamped = h.dumpOzonCostFull().filter((r) => r['OpID'] === 'op-main');
+    const callsAfterFirst = kan.calls.filter((n) => n !== 'list_shops').length;
+    h.setNow(new Date(Date.parse(T03_NOW) + 6 * 60000).toISOString());
+    const w2 = h.kanCostWatch();
+    const sent = h.dumpOzonCostFull().filter((r) => r['OpID'] === 'op-main');
+    const kanHolds = kan.entries(2771).filter((e) => e.article === 'A' && e.date === '2026-10-13');
+    // «Вся отгрузка»: the services change from 1200 to 2000.
+    const res = h.updateShipmentExtras({ id: expense[0].id, packagingMode: 'unit', packagingValue: 0, otherMode: 'unit', otherValue: 0,
+      services: [{ name: 'Доставка', quantity: 1, unitCost: 2000 }] }, 'tester');
+    const after = h.dumpOzonCostFull().filter((r) => r['OpID'] === 'op-main');
+    const lastCost = after.length ? Number(after[after.length - 1]['Себестоимость после']) : null;
+    return {
+      conds: {
+        'commit answered success': out.status === 'success',
+        'one «Расход» row for the op with the services in «Сумма» (4 x 100 + 1200 = 1600)': expense.length === 1 && expense[0].total === 1600,
+        'the journal got one row for the op': journal0.length === 1,
+        'the posting is linked (status processed)': posting['Статус'] === 'processed',
+        'no item-97 sheet was created by the whole path': created(h).length === 0,
+        'first watch run: the row got a first-seen «Время КАН» and nothing was sent': stamped.length === 1 && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(String(stamped[0]['Время КАН'])) && String(stamped[0]['Статус КАН']) === '' && callsAfterFirst === 0,
+        'second watch run (6 min later): the row is «принято»': sent.length === 1 && sent[0]['Статус КАН'] === 'принято',
+        'KAN holds the figure 400 for A on 2026-10-13': kanHolds.length === 1 && kanHolds[0].cost === 400,
+        'updateShipmentExtras changed the total (1600 -> 2400) and appended a journal re-issue': res.costRowsAppended > 0 && after.length > sent.length,
+        'the latest journal cost is the new 600 per piece': lastCost === 600
+      },
+      note: j({ out: out.status === 'success' ? 'ok' : out, expense: expense.map((t) => t.total), j0: journal0.length, w1, w2: w2 && w2.idle, stamped: stamped.map((r) => r['Время КАН']), sent: sent.map((r) => [r['Статус КАН'], r['Ответ КАН']]), kanHolds, res: [res.costRowsAppended, res.newTotal], lastCost })
     };
   });
 }

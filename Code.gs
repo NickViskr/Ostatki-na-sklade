@@ -26,6 +26,14 @@ function doGet(e) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+/** Item 97 rolled back 2026-11-06 (owner): every item-97 path is dormant. Returning = make this return true + deploy. */
+function item97Enabled_() { return false; }
+const ITEM97_DISABLED_MESSAGE = 'Функция отключена: пункт 97 (счёт подрядчика по неделе) откатан 06.11.2026';
+// Item-97 doPost actions refused while dormant (setOzonAutoWriteOff is handled separately: only enabled === true).
+const ITEM97_ACTIONS = ['setExternalShipmentWeek', 'listWeekFiles', 'getWeekFile', 'uploadWeekFile', 'deleteWeekFile',
+  'saveContractorInvoice', 'listContractorInvoices', 'deleteContractorInvoice', 'getWeekPackaging', 'saveWeekPackaging',
+  'setInvoiceLinePackaging', 'getInvoiceSpread', 'applyInvoiceSpread'];
+
 function doPost(e) {
   _transHeadersCache = null;
   _devModeSpreadsheet = null;
@@ -108,6 +116,12 @@ function doPost(e) {
       if (!currentUser) {
         throw new Error('Unauthorized: Недействительная сессия. Пожалуйста, войдите снова.');
       }
+    }
+
+    // Item 97 rolled back 2026-11-06: every item-97 action (reads too — they would recreate the deleted sheets)
+    // is refused here, after the session check and before any lock-free branch or assertAdmin.
+    if (!item97Enabled_() && (ITEM97_ACTIONS.indexOf(action) !== -1 || (action === 'setOzonAutoWriteOff' && payload.data && payload.data.enabled === true))) {
+      throw new Error(ITEM97_DISABLED_MESSAGE);
     }
     
     // ── Режим разработки: маршрутизация в тестовую БД ──
@@ -9539,7 +9553,9 @@ function saveExternalShipments(shipments, polledAt) {
   const polledMs = isFinite(parsedPolledMs) ? parsedPolledMs : Date.now();
   const polledText = formatEkbText(polledMs);
   const statusLogRows = [];
+  const item97On = item97Enabled_();
   const logStatus = function(s, postingId, was) {
+    if (!item97On) return;
     statusLogRows.push([polledText, postingId, s.orderId || '', s.cabinet || '', was, s.ozonStatus || '',
       s.orderState || '', s.ozonStatusDate || '']);
   };
@@ -9653,7 +9669,7 @@ function saveExternalShipments(shipments, polledAt) {
       }
       
       if (String(s.ozonStatus || '').trim() !== storedOzonStatus) logStatus(s, postingId, storedOzonStatus);
-      if (!hasHandover) {
+      if (!hasHandover && item97On) {
         const handover = decideExternalHandover(s, storedOzonStatus, prevStampMs, polledMs);
         if (handover) {
           const texts = handoverCellTexts(handover);
@@ -9691,7 +9707,7 @@ function saveExternalShipments(shipments, polledAt) {
       if (colOriginalSupply >= 0) newRow[colOriginalSupply] = String(s.originalSupplyId || '').trim();
       
       logStatus(s, postingId, '');
-      const newHandover = decideExternalHandover(s, null, prevStampMs, polledMs);
+      const newHandover = item97On ? decideExternalHandover(s, null, prevStampMs, polledMs) : null;
       if (newHandover) {
         const texts = handoverCellTexts(newHandover);
         if (colHandoverFrom >= 0) newRow[colHandoverFrom] = texts.from;
@@ -9710,10 +9726,10 @@ function saveExternalShipments(shipments, polledAt) {
   }
   
   appendOzonStatusLog(statusLogRows);
-  props.setProperty(stampKey, String(polledMs));
+  if (item97On) props.setProperty(stampKey, String(polledMs));
   
   SpreadsheetApp.flush();
-  const autoWriteOff = runOzonAutoWriteOff_();
+  const autoWriteOff = item97On ? runOzonAutoWriteOff_() : { written: [], refused: [], failed: [] };
   return { addedCount: addedCount, updatedCount: updatedCount, unchangedCount: unchangedCount, autoWriteOff: autoWriteOff };
 }
 
@@ -9743,6 +9759,7 @@ function setOzonAutoWriteOff(enabled) {
  */
 function runOzonAutoWriteOff_() {
   const result = { written: [], refused: [], failed: [] };
+  if (!item97Enabled_()) return result;
   try {
     const since = getOzonAutoWriteOffSince();
     if (since === null) return result;
@@ -13282,8 +13299,20 @@ function runOzonStatusPoll(reason) {
   return entry;
 }
 
+// Item 97 rollback: the light-poll triggers remove themselves (every hourly and evening one-off) plus their state.
+function removeItem97PollTriggers_() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    const handler = triggers[i].getHandlerFunction();
+    if (handler === 'scheduledOzonStatusCheck' || handler === 'runOzonStatusPollAt') ScriptApp.deleteTrigger(triggers[i]);
+  }
+  const props = PropertiesService.getScriptProperties();
+  ['ozon_eveningPollsDate', 'ozon_statusPollRunning', 'ozon_statusPollHistory'].forEach(function(key) { props.deleteProperty(key); });
+}
+
 // Hourly trigger handler: polls only 09:00-22:59 Yekaterinburg time (23:00+ is covered by the evening one-offs).
 function scheduledOzonStatusCheck() {
+  if (!item97Enabled_()) { removeItem97PollTriggers_(); return; }
   // Hour taken from a full timestamp: 'yyyy-MM-dd HH:mm:ss' -> characters 11..12.
   const hour = Number(Utilities.formatDate(new Date(), 'Asia/Yekaterinburg', 'yyyy-MM-dd HH:mm:ss').slice(11, 13));
   if (hour < 9 || hour > 22) return;
@@ -13313,6 +13342,7 @@ function ensureEveningStatusPolls() {
 
 // Handler of the evening one-offs: delete only the trigger that fired, then poll.
 function runOzonStatusPollAt(e) {
+  if (!item97Enabled_()) { removeItem97PollTriggers_(); return; }
   const uid = e && e.triggerUid;
   if (uid) {
     const triggers = ScriptApp.getProjectTriggers();
@@ -13354,6 +13384,7 @@ function setupOzonSyncTriggers() {
     .atHour(20)
     .inTimezone('Europe/Moscow')
     .create();
+  if (!item97Enabled_()) return;
   ScriptApp.newTrigger('scheduledOzonStatusCheck')
     .timeBased()
     .everyHours(1)
