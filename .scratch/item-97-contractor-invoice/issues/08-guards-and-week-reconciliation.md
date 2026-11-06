@@ -8,7 +8,7 @@ red otherwise; supplies of the week not in the spread are listed. Spec: `../spec
 
 **Blocked by:** 07.
 
-**Status:** done (live 2026-11-05: Code.gs @219 + Cloud Run `sklad-00124-dgf`)
+**Status:** rolled back 2026-11-06 — dormant, see ../rollback-plan.md (was: done (live 2026-11-05: Code.gs @219 + Cloud Run `sklad-00124-dgf`))
 
 - [x] One stand check per recompute path: the fixed sums survive to the kopeck
 - [x] Mark «перераспределить» on quantity edit / delete / restore; cleared by a new apply

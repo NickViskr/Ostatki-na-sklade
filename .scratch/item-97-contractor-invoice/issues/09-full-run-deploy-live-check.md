@@ -9,7 +9,7 @@ applied, KAN figures equal to «История». Record in plan, DEVLOG, TEST_L
 
 **Blocked by:** 01–08.
 
-**Status:** ready-for-agent
+**Status:** wontfix — cancelled by the owner 2026-11-06 (item 97 rolled back)
 
 - [ ] Re-authorization done before any trigger fires on the new code
 - [ ] Trigger runtime per day measured after one day live

@@ -9,7 +9,7 @@ line(s). Ask the owner where «Прочее» goes now that the write-off is aut
 
 **Blocked by:** 03, 05.
 
-**Status:** done (live 2026-11-04: Code.gs @217 + Cloud Run `sklad-00122-rzj`)
+**Status:** rolled back 2026-11-06 — dormant, see ../rollback-plan.md (was: done (live 2026-11-04: Code.gs @217 + Cloud Run `sklad-00122-rzj`))
 
 - [x] qty × unit per row, kopeck-exact; a repeat save writes nothing new
 - [x] Packaging of a manual write-off is replaced, never added to

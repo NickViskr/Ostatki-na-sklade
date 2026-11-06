@@ -15,7 +15,7 @@ No money moves here.
 
 **Blocked by:** —
 
-**Status:** done 2026-10-31 — deployed 2026-11-01 (Code.gs @212 + Cloud Run sklad-00115-bsz; see «Result»)
+**Status:** rolled back 2026-11-06 — dormant, see ../rollback-plan.md (was: done 2026-10-31 — deployed 2026-11-01 (Code.gs @212 + Cloud Run sklad-00115-bsz; see «Result»))
 
 - [x] Exact time from `state_updated_date` only when caught in ACCEPTED_AT_SUPPLY_WAREHOUSE; window otherwise
 - [x] A posting first seen already IN_TRANSIT / later; a DIRECT supply; a virtual order (ignored)

@@ -13,7 +13,7 @@ Spec: `../spec.md` (decisions 4–7). Money tier.
 
 **Blocked by:** 06.
 
-**Status:** done (live 2026-11-04: Code.gs @218 + Cloud Run `sklad-00123-cf6`)
+**Status:** rolled back 2026-11-06 — dormant, see ../rollback-plan.md (was: done (live 2026-11-04: Code.gs @218 + Cloud Run `sklad-00123-cf6`))
 
 - [x] Σ row shares = Σ ticked amounts to the kopeck (e.g. 1299 over 120/45/75 pcs in boxes)
 - [x] Missing pcsPerBox blocks; unticked lines stay unallocated

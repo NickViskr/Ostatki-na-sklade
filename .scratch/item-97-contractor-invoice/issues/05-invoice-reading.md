@@ -11,7 +11,7 @@ again → «это замена ранее загруженного счёта?�
 
 **Blocked by:** 04.
 
-**Status:** done (live 2026-11-03, owner's live check pending)
+**Status:** rolled back 2026-11-06 — dormant, see ../rollback-plan.md (was: done (live 2026-11-03, owner's live check pending))
 
 - [x] Pure checks unit-tested on SYNTHETIC invoices (incl. a kopeck line like 9022.74, a wrong sum, a missing line)
 - [ ] (owner's live check via «Распознать») The four real invoices read correctly — checked locally only, never committed (INNs, bank accounts)

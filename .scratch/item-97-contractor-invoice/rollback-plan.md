@@ -390,3 +390,17 @@ owner does it, the assistant verifies the journal row and «принято».
   journal rows only for the five rows is wrong; check the latest cost per OpID/article instead.
 - Ozon MCP `ozon_call_method` times out from this Mac — not needed here.
 - The KAN chat connector drops for a minute after a burst — retry, never resend a write.
+
+## Rollback result (2026-11-06)
+
+- Task 0: live state matched §2 (five rows, sheet counts 1/5/4/5/1/31, «Автосписание» column empty, screen «Автосписание выключено», no item-97 action in the Cloud Run log after 09:02:39 UTC). Extra: journal rows 123–127 were already accepted by KAN at 14:11 (item 93 working).
+- Task A `d8a0f3e` + `71af05a` (Code.gs): `item97Enabled_()` = false, `ITEM97_ACTIONS` refused in doPost, `saveExternalShipments` guards, `runOzonAutoWriteOff_` guard, `removeItem97PollTriggers_`; the stand's `freshHarness()` runs older checks with the switch ON, `freshHarnessItem97Off()` the new ones. 18 new stand checks; 5 mutations, one survived (the switch itself) → check added. `71af05a`: the refusal compares `setOzonAutoWriteOff` through a list because the item-89 parser in `src/lib/gasActions.test.ts` reads any `action === '<name>'` before the lock as an early-answered action.
+- Task B `d5c759d`: `src/lib/item97.ts` `ITEM97_ENABLED` = false gating «Неделя» filter/label, «Окно недели», WeekFilesBlock, badges, and the «Статус автосписания» block of «Настройки»; `src/lib/item97.test.ts` 2 checks.
+- Task C `622f312`: `rollback-oneoff.gs` + runner `rollback-oneoff.test.cjs` (111 checks; 151 with `ROLLBACK_XLSX`), harness `deleteSheet` + `registrySheetNames`; 3 orchestrator mutations all caught.
+- Full run before deployment: stand 1873/0 (Ekb, UTC), vitest 2994 + 1 expected fail (plain, Ekb), tsc clean.
+- Deployed by the assistant on the owner's word: Code.gs @220 (154 of 200 versions; clone + cmp equal), Cloud Run `sklad-00125-gpm` (35/35 files equal by deploycheck).
+- Drive copy: «БД Склад — резервная копия перед откатом пункта 97 (2026-11-06)», same folder; all 28 readable sheets equal to the Task-0 export.
+- The owner ran the one-off: dry run 17:14 Ekb (all OK, figures as §2.4), apply 17:17 Ekb: rows changed 5, journal rows appended 5 (128–132), sheets deleted 6; then deleted the `tmp97` file. Verified on an export: only rows 363–367 changed, only Цена/Сумма/Объект/Упаковка недели/Счёт недели; Σ Сумма 105 812.48; journal «после» re-derived ((stock·cost + shipped·new)/(stock+shipped)) 806.33/792.92/769.53/698.91/708.96 = journal; KAN «принято» at 17:41 by `kanCostWatch`.
+- The owner typed «Прочее» 4 097 ₽ through «Вся отгрузка» (≈19:56 Ekb): split 807.44 (27/137) + 3 289.56 (110/137), row increments sum to 4 097.00; new Цена 786.55/786.55/901.24/715.50/725.75; journal re-issue rows 133–137 accepted by KAN at 19:56 (805.94/774.60/705.21/711.97). The KAN sender also rewrites «Ответ КАН»/«Время КАН» of the older rows of the same OpIDs with the latest answer (existing item-93 behaviour, seen at 17:41 too).
+- Light polls gone: no `/api/ozon/check` in the Cloud Run log after the deployment (they had run hourly at :50 UTC+3 until 13:50 МСК). Screen (build «2026-11-06 14:42 МСК»): «Поставки Озон» without any week text even on the 16 postings with «Неделя вручную» = 2026-W44; «Настройки» without «Автосписание»; no console errors. «Оформить» not visible (no new supplies) — its live check comes with the next real supply.
+- Owner's answers in Task D: item 97 glyph → closed as rolled back; §2.7 recorded as plan item 102.

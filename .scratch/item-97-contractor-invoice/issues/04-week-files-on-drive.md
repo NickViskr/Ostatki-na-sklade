@@ -9,7 +9,7 @@ trigger fails and mails him. Spec: `../spec.md` (decision 10). Cosmetic tier exc
 
 **Blocked by:** 02 (the week).
 
-**Status:** done (live 2026-11-03: Code.gs @214 + Cloud Run `sklad-00118-lkj`)
+**Status:** rolled back 2026-11-06 — dormant, see ../rollback-plan.md (was: done (live 2026-11-03: Code.gs @214 + Cloud Run `sklad-00118-lkj`))
 
 - [x] Downloaded file equals the uploaded one byte for byte (sha256); 11 MB refused with a clear message
 - [x] No session → refused; the folder id never appears in a committed file

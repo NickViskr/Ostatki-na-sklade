@@ -11,7 +11,7 @@ price»). Money tier.
 
 **Blocked by:** 01 (96.10 — the automatic path retries by itself), 02.
 
-**Status:** done 2026-11-01 — LIVE 2026-11-03 (Code.gs @213 + Cloud Run sklad-00116-h9w) (commits `2ae8b20`, `77c7e9b`, `a048668`; contract `../ticket-03-design.md`)
+**Status:** rolled back 2026-11-06 — dormant, see ../rollback-plan.md (was: done 2026-11-01 — LIVE 2026-11-03 (Code.gs @213 + Cloud Run sklad-00116-h9w) (commits `2ae8b20`, `77c7e9b`, `a048668`; contract `../ticket-03-design.md`))
 
 - [x] Whole path on the stand: detection → write-off → journal row; stock, «История», reserve released
 - [x] A repeat (next poll, retry after an injected failure) writes nothing twice
