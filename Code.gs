@@ -120,7 +120,7 @@ function doPost(e) {
 
     // Item 97 rolled back 2026-11-06: every item-97 action (reads too — they would recreate the deleted sheets)
     // is refused here, after the session check and before any lock-free branch or assertAdmin.
-    if (!item97Enabled_() && (ITEM97_ACTIONS.indexOf(action) !== -1 || (action === 'setOzonAutoWriteOff' && payload.data && payload.data.enabled === true))) {
+    if (!item97Enabled_() && (ITEM97_ACTIONS.indexOf(action) !== -1 || (['setOzonAutoWriteOff'].indexOf(action) !== -1 && payload.data && payload.data.enabled === true))) {
       throw new Error(ITEM97_DISABLED_MESSAGE);
     }
     
